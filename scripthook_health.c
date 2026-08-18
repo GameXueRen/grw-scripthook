@@ -148,7 +148,11 @@ static int FindComponent(uint64_t owner, uint64_t *out) {
     while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
         if (next <= scan) break;
-        if ((uint64_t)(uintptr_t)mbi.BaseAddress >= 0xF00000000ULL) break;
+        /* Same ceiling bug as the spawn scan: Windows puts the
+         * heap above 60GB, so a short scan finds nothing.
+         */
+        if ((uint64_t)(uintptr_t)mbi.BaseAddress
+            >= 0x800000000000ULL) break;
         if (mbi.State == MEM_COMMIT &&
             (mbi.Protect & PAGE_READWRITE) &&
             !(mbi.Protect & PAGE_GUARD))

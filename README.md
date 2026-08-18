@@ -16,13 +16,17 @@ Wine specific.
 
 | Capability | Notes |
 | --- | --- |
-| Vehicle spawning | 50 vehicles, catalogued and named by hand |
+| Vehicle spawning | 65 vehicles, catalogued and named by hand |
 | Entity enumeration | Kind, position, health, components |
+| Entity visibility | Hide or show anything, optionally held |
 | Teleport | Verified 9.9km cross map, lands within 3m |
 | Health | Read and write through the game's obfuscated storage |
 | Ground queries | Uses the engine's own collision world |
+| Camera | Position, orientation, roll, fov, the view matrices |
 | OnHit events | Entity, position, normal, distance, shooter |
 | OnFire events | Muzzle, direction, yaw and pitch, shooter |
+| Menu | One shared root, plugins add submenus |
+| Overlay | Slots that pack themselves, no Win32 in plugins |
 | Game state | Menu, loading, in game, transitions |
 
 Two example mods are included, each about ten lines of real logic:
@@ -87,6 +91,18 @@ player        ShGetPlayer ShGetPlayerPosition ShTeleportPlayer
 
 entities      ShFindEntities ShGetEntityKind ShKindName
               ShPlaceEntity ShGetComponents ShFindComponent
+              ShSetEntityVisible ShEntityNodeCount
+
+camera        ShGetCamera ShSetCamera ShCameraOrbit
+              ShCameraFree ShCameraAngles ShCameraApply
+              ShCameraMatrix ShCameraRelease
+
+menu          ShMenuCreate ShMenuSub ShMenuAction
+              ShMenuToggle ShMenuNumber ShMenuList
+              ShMenuStatus ShMenuSetKey ShMenuOpen
+
+overlay       ShHudCreate ShHudSet ShHudColour
+              ShHudShow ShHudDestroy
 
 vehicles      ShSpawnVehicle ShVehicleCount ShVehicleAt
               ShVehicleName
@@ -162,6 +178,21 @@ hitfling.c tpgun.c    the example mods
 
 `test_plugin.c` is large because it accumulated every experiment
 used to find the rest. It is a research tool, not an example.
+
+## Credits
+
+The camera work stands on **Firejumper93's**
+[GhostReconWildlandsVR](https://github.com/Firejumper93/GhostReconWildlandsVR),
+MIT licensed and unusually well documented. Its notes gave us the
+camera struct layout, the fact that `Camera+0x000` is the transform
+the view builder actually consumes rather than one of the derived
+matrices, and this engine's yaw and pitch convention. Their build log
+also records the write to `+0x4A0` that quietly does nothing, which
+is exactly the wrong turn we would have taken.
+
+The addresses here are our own, since this build is newer than any in
+their table, but the reverse engineering that made them meaningful is
+theirs.
 
 ## Licence
 

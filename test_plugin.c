@@ -2059,7 +2059,7 @@ static void CmdHpScan(Resp *r, const char *line) {
     while (VirtualQuery(scan, &mbi, sizeof(mbi)) && found < limit) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
         if (next <= scan) break;
-        if ((uint64_t)(uintptr_t)mbi.BaseAddress >= 0xF00000000ULL) break;
+        if ((uint64_t)(uintptr_t)mbi.BaseAddress >= 0x800000000000ULL) break;
         if (mbi.State == MEM_COMMIT &&
             (mbi.Protect & PAGE_READWRITE) &&
             !(mbi.Protect & PAGE_GUARD))
@@ -2076,7 +2076,7 @@ static void CmdHpScan(Resp *r, const char *line) {
                 memcpy(pv, b + o + 0xF8, 32);
                 for (k = 0; k < 4; k++) {
                     if (pv[k] < 0x1000000ULL ||
-                        pv[k] >= 0xF00000000ULL) bad = 1;
+                        pv[k] >= 0x800000000000ULL) bad = 1;
                     if (k && pv[k] == pv[0]) bad = 1;
                 }
                 if (bad) continue;
@@ -2452,6 +2452,153 @@ static void CmdOnFire(Resp *r, const char *line) {
                 buf[i].byPlayer ? "ME " : "   ",
                 buf[i].yaw, buf[i].pitch, buf[i].origin.x,
                 buf[i].origin.y, buf[i].origin.z, buf[i].range);
+}
+
+typedef struct {
+    float px, py, pz;
+    float rx, ry, rz;
+    float fx, fy, fz;
+    float ux, uy, uz;
+    float fov;
+    int   mode;
+    uint64_t camera;
+} ApiCamera;
+
+/* cam, cam orbit <back> <up>, cam set x y z, cam off */
+static void CmdCam(Resp *r, const char *line) {
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    int (*install)(void);
+    int (*getCam)(ApiCamera *);
+    int (*orbit)(float, float);
+    int (*setCam)(const float *);
+    void (*release)(void);
+    uint64_t (*calls)(void);
+    uint64_t (*writes)(void);
+    ApiCamera c;
+    char what[32] = {0};
+    float a = 0.0f, b = 0.0f, cz = 0.0f;
+
+    sscanf(line, "%*s %31s %f %f %f", what, &a, &b, &cz);
+    if (!m) { RAppend(r, "dinput8 missing\n"); return; }
+    *(FARPROC *)&install = GetProcAddress(m, "ShCameraHookInstall");
+    *(FARPROC *)&getCam = GetProcAddress(m, "ShGetCamera");
+    *(FARPROC *)&orbit = GetProcAddress(m, "ShCameraOrbit");
+    *(FARPROC *)&setCam = GetProcAddress(m, "ShSetCamera");
+    *(FARPROC *)&release = GetProcAddress(m, "ShCameraRelease");
+    *(FARPROC *)&calls = GetProcAddress(m, "ShCameraCalls");
+    *(FARPROC *)&writes = GetProcAddress(m, "ShCameraWrites");
+    if (!install || !getCam || !orbit || !setCam || !release) {
+        RAppend(r, "camera API missing, rebuild dinput8\n");
+        return;
+    }
+
+    if (strcmp(what, "on") == 0) {
+        if (!install()) { ApiWhy(r, "CameraHookInstall", 0); return; }
+        RAppend(r, "camera hook installed\n");
+        return;
+    }
+    if (strcmp(what, "orbit") == 0) {
+        if (!orbit(a, b)) { ApiWhy(r, "CameraOrbit", 0); return; }
+        RAppend(r, "orbit back %.1f up %.1f\n", a, b);
+        return;
+    }
+    if (strcmp(what, "set") == 0) {
+        float p[3];
+        p[0] = a; p[1] = b; p[2] = cz;
+        if (!setCam(p)) { ApiWhy(r, "SetCamera", 0); return; }
+        RAppend(r, "camera pinned to %.1f %.1f %.1f\n", a, b, cz);
+        return;
+    }
+    if (strcmp(what, "off") == 0) {
+        release();
+        RAppend(r, "camera released\n");
+        return;
+    }
+    if (strcmp(what, "free") == 0) {
+        int (*freeCam)(const float *, float, float);
+        int (*angles)(float *, float *);
+        float yaw = 0.0f, pitch = 0.0f, p[3];
+        float dx = a, dy = b, dz = cz;
+
+        *(FARPROC *)&freeCam = GetProcAddress(m, "ShCameraFree");
+        *(FARPROC *)&angles = GetProcAddress(m, "ShCameraAngles");
+        if (!freeCam || !angles) {
+            RAppend(r, "free camera missing, rebuild dinput8\n");
+            return;
+        }
+        if (!install()) { ApiWhy(r, "CameraHookInstall", 0); return; }
+        if (!getCam(&c)) { ApiWhy(r, "GetCamera", 0); return; }
+        angles(&yaw, &pitch);
+        p[0] = c.px + dx;
+        p[1] = c.py + dy;
+        p[2] = c.pz + dz;
+        if (!freeCam(p, yaw, pitch)) { ApiWhy(r, "CameraFree", 0); return; }
+        RAppend(r, "free at %.1f %.1f %.1f  yaw %.3f pitch %.3f\n",
+                p[0], p[1], p[2], yaw, pitch);
+        return;
+    }
+
+    if (!install()) { ApiWhy(r, "CameraHookInstall", 0); return; }
+    if (!getCam(&c)) { ApiWhy(r, "GetCamera", 0); return; }
+    RAppend(r, "camera %016llX  mode %d  fov %.4f\n",
+            (unsigned long long)c.camera, c.mode, c.fov);
+    RAppend(r, "  pos      %.2f %.2f %.2f\n", c.px, c.py, c.pz);
+    RAppend(r, "  right    %.3f %.3f %.3f\n", c.rx, c.ry, c.rz);
+    RAppend(r, "  forward  %.3f %.3f %.3f\n", c.fx, c.fy, c.fz);
+    RAppend(r, "  up       %.3f %.3f %.3f\n", c.ux, c.uy, c.uz);
+    if (calls && writes)
+        RAppend(r, "  calls %llu  writes %llu\n",
+                (unsigned long long)calls(),
+                (unsigned long long)writes());
+}
+
+/* vis <entityHex|player> <0|1> [persist] */
+static void CmdVis(Resp *r, const char *line) {
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    int (*setVis)(uint64_t, int, int);
+    int (*nodeCount)(uint64_t);
+    char who[32] = {0};
+    uint64_t ent = 0;
+    int visible = 1, persist = 0;
+
+    sscanf(line, "%*s %31s %d %d", who, &visible, &persist);
+    if (!m) { RAppend(r, "dinput8 missing\n"); return; }
+    *(FARPROC *)&setVis = GetProcAddress(m, "ShSetEntityVisible");
+    *(FARPROC *)&nodeCount = GetProcAddress(m, "ShEntityNodeCount");
+    if (!setVis || !nodeCount) {
+        RAppend(r, "visibility API missing, rebuild dinput8\n");
+        return;
+    }
+
+    if (!who[0] || strcmp(who, "player") == 0) {
+        int (*getPlayer)(ApiPlayer *);
+        ApiPlayer p;
+
+        /* Resolved here rather than from g_api, which is
+         * only filled in once another command has run.
+         */
+        *(FARPROC *)&getPlayer = GetProcAddress(m, "ShGetPlayer");
+        memset(&p, 0, sizeof(p));
+        if (!getPlayer || !getPlayer(&p)) {
+            RAppend(r, "no player\n");
+            return;
+        }
+        /* Nodes hang off the root, which is what the
+         * teleport work proved is the real object.
+         */
+        ent = p.root ? p.root : p.entity;
+    } else {
+        ent = strtoull(who, NULL, 16);
+    }
+
+    RAppend(r, "entity %016llX  render nodes %d\n",
+            (unsigned long long)ent, nodeCount(ent));
+    if (!setVis(ent, visible, persist)) {
+        ApiWhy(r, "SetEntityVisible", 0);
+        return;
+    }
+    RAppend(r, "%s%s\n", visible ? "visible" : "hidden",
+            (persist && !visible) ? ", held every frame" : "");
 }
 
 /* onhit on|off|<count>, the engine's own hit records. */
@@ -3616,7 +3763,7 @@ static void CmdTree(Resp *r, const char *line) {
     while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
         if (next <= scan) break;
-        if ((uint64_t)mbi.BaseAddress >= 0xF00000000ULL) break;
+        if ((uint64_t)mbi.BaseAddress >= 0x800000000000ULL) break;
         if (mbi.State == MEM_COMMIT &&
             (mbi.Protect & PAGE_READWRITE) &&
             !(mbi.Protect & PAGE_GUARD))
@@ -3951,7 +4098,7 @@ static const char *EntKind(uint64_t ent) {
 }
 
 static int EntIsEntity(uint64_t e) {
-    if (e < 0x1000000ULL || e > 0xF00000000ULL) return 0;
+    if (e < 0x1000000ULL || e > 0x800000000000ULL) return 0;
     if (!CanRead((void *)e, 8)) return 0;
     return SafeReadPtr((void *)e) == ImgAddr(RVA_VT_ENTITY);
 }
@@ -4602,6 +4749,8 @@ static void Dispatch(const char *line, Resp *r) {
     else if (strcmp(cmd, "comps") == 0)     CmdComps(r, line);
     else if (strcmp(cmd, "raylog") == 0)    CmdRayLog(r, line);
     else if (strcmp(cmd, "onhit") == 0)     CmdOnHit(r, line);
+    else if (strcmp(cmd, "cam") == 0)       CmdCam(r, line);
+    else if (strcmp(cmd, "vis") == 0)       CmdVis(r, line);
     else if (strcmp(cmd, "onfire") == 0)    CmdOnFire(r, line);
     else if (strcmp(cmd, "createcomp") == 0) CmdCreateComp(r, line);
     else if (strcmp(cmd, "writeq") == 0)    CmdWriteQ(r, line);

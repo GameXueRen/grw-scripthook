@@ -204,6 +204,131 @@ SH_API int ShGetComponents(uint64_t entity, ShComponent *out,
     return written;
 }
 
+/* Render nodes carry a visible bit at +0x54. Hiding is a
+ * data write, so no engine call and no game thread needed.
+ */
+#define RENDER_CLASS  0xEC658D29u
+#define NODE_FLAGS    0x54
+#define NODE_HIDDEN   0x0004
+
+static int SetNodesHidden(uint64_t entity, int hidden, int *seen) {
+    uint64_t arr;
+    uint16_t n = 0, i;
+    int touched = 0;
+
+    if (!entity || !ShReadableAddr(entity, 0x90)) {
+        ShSetError(SH_ERR_NOT_ENTITY);
+        return 0;
+    }
+    arr = ShReadQ(entity + OFF_ENT_COMPS);
+    if (!arr || !ShReadableAddr(entity + OFF_ENT_NCOMPS, 2)) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
+    memcpy(&n, (void *)(uintptr_t)(entity + OFF_ENT_NCOMPS), 2);
+    if (!n || n > 512) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
+
+    for (i = 0; i < n; i++) {
+        uint64_t c = ShReadQ(arr + (uint64_t)i * 8);
+        uint16_t f;
+
+        if (!c || ClassHashOf(c) != RENDER_CLASS) continue;
+        if (!ShReadableAddr(c + NODE_FLAGS, 2)) continue;
+        if (seen) (*seen)++;
+        memcpy(&f, (void *)(uintptr_t)(c + NODE_FLAGS), 2);
+        f = hidden ? (uint16_t)(f | NODE_HIDDEN)
+                   : (uint16_t)(f & ~NODE_HIDDEN);
+        memcpy((void *)(uintptr_t)(c + NODE_FLAGS), &f, 2);
+        touched++;
+    }
+    return touched;
+}
+
+/* The camera re-asserts visibility on the nodes it owns, so
+ * a persistent override has to be rewritten every frame.
+ */
+#define VIS_HELD 32
+
+static uint64_t g_visEnt[VIS_HELD];
+static int      g_visWant[VIS_HELD];
+
+static void HoldVisibility(uint64_t entity, int visible) {
+    int i, free = -1;
+
+    for (i = 0; i < VIS_HELD; i++) {
+        if (g_visEnt[i] == entity) {
+            g_visWant[i] = visible;
+            return;
+        }
+        if (!g_visEnt[i] && free < 0) free = i;
+    }
+    if (free < 0) return;
+    g_visEnt[free] = entity;
+    g_visWant[free] = visible;
+}
+
+static void ReleaseVisibility(uint64_t entity) {
+    int i;
+
+    for (i = 0; i < VIS_HELD; i++)
+        if (g_visEnt[i] == entity) g_visEnt[i] = 0;
+}
+
+/* Called from the camera detour, on the game thread, which
+ * is where the engine stamps these bits back.
+ */
+void ShVisibilityPump(void) {
+    int i, seen;
+
+    for (i = 0; i < VIS_HELD; i++) {
+        if (!g_visEnt[i]) continue;
+        seen = 0;
+        SetNodesHidden(g_visEnt[i], g_visWant[i] ? 0 : 1, &seen);
+        /* A freed entity stops having nodes, so drop it
+         * rather than writing into recycled memory.
+         */
+        if (!seen) g_visEnt[i] = 0;
+    }
+}
+
+/* persist keeps rewriting the bit until the caller sets the
+ * entity visible again, or calls with persist off.
+ */
+SH_API int ShSetEntityVisible(uint64_t entity, int visible,
+                              int persist) {
+    int seen = 0;
+    int n = SetNodesHidden(entity, visible ? 0 : 1, &seen);
+
+    if (!seen) {
+        ReleaseVisibility(entity);
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
+    if (persist && !visible) HoldVisibility(entity, visible);
+    else ReleaseVisibility(entity);
+
+    ShSetError(SH_OK);
+    return n > 0 || seen > 0;
+}
+
+/** How many render nodes an entity has, 0 if none. */
+SH_API int ShEntityNodeCount(uint64_t entity) {
+    uint64_t arr;
+    uint16_t n = 0, i;
+    int count = 0;
+
+    if (!entity || !ShReadableAddr(entity, 0x90)) return 0;
+    arr = ShReadQ(entity + OFF_ENT_COMPS);
+    if (!arr || !ShReadableAddr(entity + OFF_ENT_NCOMPS, 2)) return 0;
+    memcpy(&n, (void *)(uintptr_t)(entity + OFF_ENT_NCOMPS), 2);
+    if (!n || n > 512) return 0;
+    for (i = 0; i < n; i++) {
+        uint64_t c = ShReadQ(arr + (uint64_t)i * 8);
+        if (c && ClassHashOf(c) == RENDER_CLASS) count++;
+    }
+    return count;
+}
+
 SH_API uint64_t ShFindComponent(uint64_t entity,
                                 uint32_t classHash)
 {

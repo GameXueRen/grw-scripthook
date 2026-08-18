@@ -341,6 +341,120 @@ SH_API int  ShOffFire(ShFireFn fn);
 SH_API uint32_t ShShotCount(void);
 SH_API int  ShGetShots(ShShot *out, int max);
 
+/* Visibility. Render nodes carry a visible bit, so this is
+ * a data write with no engine call behind it.
+ */
+/** persist rewrites the bit until you show it again. */
+SH_API int  ShSetEntityVisible(uint64_t entity, int visible,
+                               int persist);
+SH_API int  ShEntityNodeCount(uint64_t entity);
+
+/* The menu. One root owned by the API: every plugin adds a
+ * submenu, so navigation and drawing are handled for you.
+ */
+typedef void (*ShMenuFn)(uint32_t menu, uint32_t item, int value,
+                         void *user);
+
+/** A top level entry for your plugin. F4 opens the root. */
+SH_API uint32_t ShMenuCreate(const char *title);
+SH_API uint32_t ShMenuSub(uint32_t parent, const char *label);
+SH_API int  ShMenuAction(uint32_t menu, const char *label,
+                         ShMenuFn fn, void *user);
+SH_API int  ShMenuToggle(uint32_t menu, const char *label,
+                         int initial, ShMenuFn fn, void *user);
+SH_API int  ShMenuNumber(uint32_t menu, const char *label,
+                         float initial, float lo, float hi,
+                         float step, ShMenuFn fn, void *user);
+/** opts must outlive the menu. String literals are fine. */
+SH_API int  ShMenuList(uint32_t menu, const char *label,
+                       const char **opts, int n, int initial,
+                       ShMenuFn fn, void *user);
+/** The line under the items. Empty text removes it. */
+SH_API int  ShMenuStatus(uint32_t menu, const char *text);
+SH_API void ShMenuSetKey(int vk);
+SH_API int  ShMenuIsOpen(void);
+SH_API void ShMenuOpen(int open);
+
+/* The overlay. One window owned by the API, so plugins
+ * never touch Win32 and slots pack with no gaps.
+ */
+enum {
+    SH_HUD_TOPLEFT = 0,
+    SH_HUD_TOPRIGHT,
+    SH_HUD_BOTTOMLEFT,
+    SH_HUD_BOTTOMRIGHT
+};
+
+/** Register a line. Lower priority sits nearer the edge. */
+SH_API uint32_t ShHudCreate(const char *name, int anchor,
+                            int priority);
+/** Text may hold newlines. Empty text hides the slot. */
+SH_API int  ShHudSet(uint32_t hud, const char *text);
+SH_API int  ShHudColour(uint32_t hud, uint32_t rgb);
+SH_API int  ShHudShow(uint32_t hud, int visible);
+SH_API void ShHudDestroy(uint32_t hud);
+
+/* The camera. Rows of the pose matrix: right, forward, up,
+ * then position. mode is 0 for the player's camera.
+ */
+typedef struct {
+    ShVec3 pos;
+    ShVec3 right;
+    ShVec3 forward;
+    ShVec3 up;
+    float  fov;
+    int    mode;
+    uint64_t camera;
+} ShCamera;
+
+/** Redirect the selector thunk. Done for you on demand. */
+SH_API int  ShCameraHookInstall(void);
+SH_API int  ShCameraReady(void);
+SH_API uint64_t ShCameraCalls(void);
+SH_API uint64_t ShCameraWrites(void);
+
+/** Where the camera is, and how it is pointed. */
+SH_API int  ShGetCamera(ShCamera *out);
+
+/* The engine rebuilds the camera every frame, so an
+ * override is reapplied until it is released.
+ */
+SH_API int  ShSetCamera(const ShVec3 *pos);
+SH_API int  ShCameraOrbit(float back, float up);
+
+/* Free camera. Radians, yaw 0 faces +y, pitch up positive.
+ * ShCameraAngles reads the current view to start from.
+ */
+SH_API int  ShCameraFree(const ShVec3 *pos, float yaw, float pitch);
+SH_API int  ShCameraAngles(float *yaw, float *pitch);
+SH_API void ShCameraRelease(void);
+
+/* Everything the camera object exposes, in one call. Set
+ * only the bits you want; the engine keeps the rest.
+ */
+#define SH_CAM_POS    0x01
+#define SH_CAM_ROT    0x02
+#define SH_CAM_FOV    0x04
+#define SH_CAM_SKEW   0x08
+#define SH_CAM_MODE   0x10
+
+typedef struct {
+    uint32_t apply;
+    ShVec3   pos;
+    float    yaw, pitch, roll;
+    float    fov;
+    float    skewX, skewY;
+    int      mode;
+} ShCameraOverride;
+
+/** Reapplied every frame until ShCameraRelease. */
+SH_API int  ShCameraApply(const ShCameraOverride *o);
+
+/* The nine derived matrices at camera+0x420, view and
+ * projection and their inverses. Index 0 to 8, 16 floats.
+ */
+SH_API int  ShCameraMatrix(int index, float *out16);
+
 /* Ground queries. The physics hook installs itself on the
  * first call that needs it, and is shared process wide.
  */

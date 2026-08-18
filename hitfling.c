@@ -75,8 +75,9 @@ static DWORD WINAPI OvlThread(LPVOID p) {
 
     g_wnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        /* Status bars stack below the spawner menu. */
         "GRWHitFling", "Fling", WS_POPUP,
-        12, 150, 380, 34,
+        12, 420, 380, 34,
         NULL, NULL, wc.hInstance, NULL);
     if (!g_wnd) return 1;
 

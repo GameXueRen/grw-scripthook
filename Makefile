@@ -3,7 +3,7 @@ CFLAGS = -O2 -Wall -Wextra -shared -static-libgcc
 # Two up from src, so builds land beside GRW.exe.
 GAMEDIR = ../..
 
-.PHONY: all roulette fling tpgun spawner clean
+.PHONY: all roulette fling tpgun spawner crazycars freecam clean
 
 all: $(GAMEDIR)/dinput8.dll $(GAMEDIR)/test_plugin.asi
 
@@ -16,10 +16,20 @@ fling: $(GAMEDIR)/hitfling.asi
 $(GAMEDIR)/hitfling.asi: hitfling.c scripthook.h
 	$(CC) $(CFLAGS) -o $@ hitfling.c -lgdi32 -luser32
 
+freecam: $(GAMEDIR)/freecam.asi
+
+$(GAMEDIR)/freecam.asi: freecam.c scripthook.h
+	$(CC) $(CFLAGS) -o $@ freecam.c -lgdi32 -luser32
+
 spawner: $(GAMEDIR)/spawner.asi
 
 $(GAMEDIR)/spawner.asi: spawner.c scripthook.h
 	$(CC) $(CFLAGS) -o $@ spawner.c -lgdi32 -luser32
+
+crazycars: $(GAMEDIR)/CrazyCars.asi
+
+$(GAMEDIR)/CrazyCars.asi: crazycars.c scripthook.h
+	$(CC) $(CFLAGS) -o $@ crazycars.c -lgdi32 -luser32
 
 tpgun: $(GAMEDIR)/tpgun.asi
 
@@ -35,12 +45,14 @@ libscripthook.a: $(GAMEDIR)/dinput8.dll
 $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
                         scripthook_health.c scripthook_state.c \
                         scripthook_entity.c scripthook_spawn.c \
-                        scripthook_hit.c guard.c scripthook.h log.h
+                        scripthook_hit.c scripthook_camera.c \
+                        scripthook_hud.c scripthook_menu.c guard.c scripthook.h log.h
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_physics.c scripthook_health.c \
 		scripthook_state.c scripthook_entity.c \
-		scripthook_spawn.c scripthook_hit.c guard.c \
-		-ldinput8 -ldxguid \
+		scripthook_spawn.c scripthook_hit.c \
+		scripthook_camera.c scripthook_hud.c scripthook_menu.c guard.c \
+		-ldinput8 -ldxguid -lgdi32 -luser32 \
 		-Wl,--out-implib,libscripthook.a
 
 $(GAMEDIR)/test_plugin.asi: test_plugin.c

@@ -84,7 +84,7 @@ static const ShVehicle g_vehicles[] = {
     { 0x40D7800E, "Fohd pickup, Unidad" },
     { 0x40D99000, "Brubeck tow truck, Los Penitentes" },
     { 0x40D994DE, "Brubeck tow truck, rebels" },
-    { 0x40DA98C4, "Killdozer, cut but driveable" },
+    { 0x40DA98C4, "Armoured ambulance, cut but driveable" },
     { 0x40DF16D3, "Dinghy, Santa Blanca" },
     { 0x40E7D196, "Scoossna 171, plane, Santa Blanca" },
     { 0x40E9BEE5, "Convoy ambulance, Santa Blanca" },
@@ -92,6 +92,25 @@ static const ShVehicle g_vehicles[] = {
     { 0x40F2361A, "Brubeck oil truck, Los Penitentes" },
     { 0x40FCBA9C, "APC, Santa Blanca" },
     { 0x40FCC288, "APC, Unidad" },
+
+    /* The 0x41 block, missed by the first scan because it
+     * filtered on a 0x40 prefix it had only assumed.
+     */
+    { 0x4102F196, "GUNSHIP, Unidad" },
+    { 0x41033AB7, "Boxcar truck, Santa Blanca" },
+    { 0x410420B6, "Barracks truck, Unidad" },
+    { 0x410654CC, "Boxcar, Santa Blanca" },
+    { 0x410654CD, "Murder disposal truck, Santa Blanca" },
+    { 0x410654CE, "Rancho Luna advert truck, Santa Blanca" },
+    { 0x410824BE, "Digger, civilian" },
+    { 0x4108BE91, "KILLDOZER, armoured" },
+    { 0x410B93B6, "Gunboat, Unidad" },
+    { 0x4126AEDF, "Gunboat, Santa Blanca" },
+    { 0x41322E4B, "Convoy comms truck, Santa Blanca" },
+    { 0x41378E20, "Yacht, honks at itself, civilian" },
+    { 0x4139EEFE, "Classic airplane, civilian" },
+    { 0x4146EAF5, "Cossna 172, civilian" },
+    { 0x4159D6C8, "UH-60, Santa Blanca" },
 };
 
 #define VEHICLE_COUNT \
@@ -135,7 +154,10 @@ static uint64_t FindSpec(uint32_t vehicleId) {
     while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
         if (next <= scan) break;
-        if ((uint64_t)(uintptr_t)mbi.BaseAddress >= 0xF00000000ULL)
+        /* Wine keeps the heap low, Windows does not. Stopping
+         * at 60GB found nothing there and every spawn failed.
+         */
+        if ((uint64_t)(uintptr_t)mbi.BaseAddress >= 0x800000000000ULL)
             break;
         if (mbi.State == MEM_COMMIT &&
             (mbi.Protect & PAGE_READWRITE) &&
