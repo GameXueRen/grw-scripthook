@@ -20,12 +20,15 @@
 #define CAM_THUNK   SH_IMG(0x13781B0)
 #define CAM_IMPL    SH_IMG(0xD7C0610)
 
-/* Verified in this build: the selector reads +0x2BC as the
- * base fov and +0x290 as the mode, 0 for the player.
- */
+/* Verified live: +0x2B0 is vertical fov in radians, planes
+ * beside it. +0x2BC is an ASPECT multiplier, which the
+ * selector scales by width over height. */
 #define CAM_POSE    0x000
 #define CAM_MODE    0x290
-#define CAM_FOV     0x2BC
+#define CAM_FOV     0x2B0
+#define CAM_NEAR    0x2B4
+#define CAM_FAR     0x2B8
+#define CAM_ASPECT  0x2BC
 #define CAM_SKEWX   0x2C4
 #define CAM_SKEWY   0x2C8
 

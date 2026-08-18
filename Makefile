@@ -3,7 +3,7 @@ CFLAGS = -O2 -Wall -Wextra -shared -static-libgcc
 # Two up from src, so builds land beside GRW.exe.
 GAMEDIR = ../..
 
-.PHONY: all roulette fling tpgun spawner crazycars freecam clean
+.PHONY: all roulette fling tpgun spawner crazycars freecam fov clean
 
 all: $(GAMEDIR)/dinput8.dll $(GAMEDIR)/test_plugin.asi
 
@@ -20,6 +20,11 @@ freecam: $(GAMEDIR)/freecam.asi
 
 $(GAMEDIR)/freecam.asi: freecam.c scripthook.h
 	$(CC) $(CFLAGS) -o $@ freecam.c -lgdi32 -luser32
+
+fov: $(GAMEDIR)/fov_changer.asi
+
+$(GAMEDIR)/fov_changer.asi: fov_changer.c scripthook.h
+	$(CC) $(CFLAGS) -o $@ fov_changer.c -lgdi32 -luser32
 
 spawner: $(GAMEDIR)/spawner.asi
 
