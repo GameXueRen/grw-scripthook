@@ -165,4 +165,10 @@ used to find the rest. It is a research tool, not an example.
 
 ## Licence
 
-None yet.
+GPL-3.0. See `LICENSE`.
+
+You are free to use, modify and redistribute this, including
+commercially. What you cannot do is take it, add features, and ship
+that as a closed product: any derivative has to be released under
+the GPL with its source available. Sell builds if you like, but the
+improvements come back to everyone.
