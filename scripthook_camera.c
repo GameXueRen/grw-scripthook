@@ -38,12 +38,14 @@
 #define CAM_MATS    0x420
 #define CAM_MAT_N   9
 
-enum { CAM_OFF = 0, CAM_ABS, CAM_ORBIT, CAM_FREE, CAM_FIELDS };
+/* Ownership is per field, so two plugins can hold different
+ * parts of the camera at once. Orbit is a private bit: it
+ * owns position, but derives it instead of storing it. */
+#define CAM_ORBIT_BIT 0x100u
 
 static volatile uint64_t g_cam = 0;
 static volatile uint64_t g_calls = 0;
 static volatile uint64_t g_writes = 0;
-static volatile int g_mode = CAM_OFF;
 
 static ShVec3 g_absPos;
 static volatile float g_back = 0.0f;
@@ -125,17 +127,13 @@ static void WriteRot(uint64_t cam) {
     m[8] = u[0]; m[9] = u[1]; m[10] = u[2];
 }
 
-static void WritePose(uint64_t cam) {
-    WriteRot(cam);
-    WritePos(cam, g_absPos.x, g_absPos.y, g_absPos.z);
-}
-
 /* Each field is written only if its bit is set, so the
  * engine keeps ownership of everything else.
  */
 static void ApplyFields(uint64_t cam) {
     if (g_apply & SH_CAM_ROT) WriteRot(cam);
-    if (g_apply & SH_CAM_POS)
+    if (g_apply & CAM_ORBIT_BIT) ApplyOrbit(cam);
+    else if (g_apply & SH_CAM_POS)
         WritePos(cam, g_absPos.x, g_absPos.y, g_absPos.z);
     if (g_apply & SH_CAM_FOV)
         *(float *)(uintptr_t)(cam + CAM_FOV) = g_fov;
@@ -162,14 +160,7 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
      */
     ShVisibilityPump();
 
-    if (g_mode == CAM_ABS)
-        WritePos(rcx, g_absPos.x, g_absPos.y, g_absPos.z);
-    else if (g_mode == CAM_ORBIT)
-        ApplyOrbit(rcx);
-    else if (g_mode == CAM_FREE)
-        WritePose(rcx);
-    else if (g_mode == CAM_FIELDS)
-        ApplyFields(rcx);
+    if (g_apply) ApplyFields(rcx);
 }
 
 static int BuildStub(void) {
@@ -336,7 +327,7 @@ SH_API int ShSetCamera(const ShVec3 *pos) {
     if (!pos) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (!ShCameraHookInstall()) return 0;
     g_absPos = *pos;
-    g_mode = CAM_ABS;
+    g_apply = (g_apply & ~CAM_ORBIT_BIT) | SH_CAM_POS;
     ShSetError(SH_OK);
     return 1;
 }
@@ -348,7 +339,7 @@ SH_API int ShCameraOrbit(float back, float up) {
     if (!ShCameraHookInstall()) return 0;
     g_back = back;
     g_up = up;
-    g_mode = CAM_ORBIT;
+    g_apply |= SH_CAM_POS | CAM_ORBIT_BIT;
     ShSetError(SH_OK);
     return 1;
 }
@@ -364,7 +355,7 @@ SH_API int ShCameraFree(const ShVec3 *pos, float yaw, float pitch) {
     g_absPos = *pos;
     g_yaw = yaw;
     g_pitch = pitch;
-    g_mode = CAM_FREE;
+    g_apply = (g_apply & ~CAM_ORBIT_BIT) | SH_CAM_POS | SH_CAM_ROT;
     ShSetError(SH_OK);
     return 1;
 }
@@ -406,8 +397,11 @@ SH_API int ShCameraApply(const ShCameraOverride *o) {
     }
     if (o->apply & SH_CAM_MODE) g_modeSet = o->mode;
 
-    g_apply = o->apply;
-    g_mode = CAM_FIELDS;
+    /* Merged, so applying fov leaves another plugin's
+     * position and rotation alone.
+     */
+    if (o->apply & SH_CAM_POS) g_apply &= ~CAM_ORBIT_BIT;
+    g_apply |= o->apply;
     ShSetError(SH_OK);
     return 1;
 }
@@ -432,6 +426,18 @@ SH_API int ShCameraMatrix(int index, float *out16) {
 }
 
 SH_API void ShCameraRelease(void) {
-    g_mode = CAM_OFF;
     g_apply = 0;
+}
+
+/* Give back only what you took, so releasing a free camera
+ * leaves another plugin's fov override running.
+ */
+SH_API void ShCameraReleaseFields(uint32_t fields) {
+    if (fields & SH_CAM_POS) fields |= CAM_ORBIT_BIT;
+    g_apply &= ~fields;
+}
+
+/** Which fields are currently overridden. */
+SH_API uint32_t ShCameraOwned(void) {
+    return g_apply & 0xFFu;
 }

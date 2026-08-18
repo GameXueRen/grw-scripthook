@@ -22,7 +22,7 @@ typedef int (*IsInGame_t)(void);
 typedef int (*GetCam_t)(ShCamera *);
 typedef int (*Angles_t)(float *, float *);
 typedef int (*Free_t)(const ShVec3 *, float, float);
-typedef void (*Release_t)(void);
+typedef void (*Release_t)(uint32_t);
 typedef uint32_t (*MenuCreate_t)(const char *);
 typedef int (*MenuToggle_t)(uint32_t, const char *, int,
                             ShMenuFn, void *);
@@ -84,7 +84,7 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
         if (g_menuOpen) g_menuOpen(0);
     } else {
         g_on = 0;
-        g_release();
+        g_release(SH_CAM_POS | SH_CAM_ROT);
         g_status(menu, "camera returned to the game");
     }
 }
@@ -156,7 +156,10 @@ static DWORD WINAPI CamThread(LPVOID p) {
     for (;;) {
         Sleep(TICK_MS);
         if (!g_inGame()) {
-            if (g_on) { g_on = 0; g_release(); }
+            if (g_on) {
+                g_on = 0;
+                g_release(SH_CAM_POS | SH_CAM_ROT);
+            }
             continue;
         }
         if (g_on) Step((float)TICK_MS / 1000.0f);
@@ -185,7 +188,8 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_getCam = GetProcAddress(m, "ShGetCamera");
     *(FARPROC *)&g_angles = GetProcAddress(m, "ShCameraAngles");
     *(FARPROC *)&g_free = GetProcAddress(m, "ShCameraFree");
-    *(FARPROC *)&g_release = GetProcAddress(m, "ShCameraRelease");
+    *(FARPROC *)&g_release =
+        GetProcAddress(m, "ShCameraReleaseFields");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuToggle = GetProcAddress(m, "ShMenuToggle");
     *(FARPROC *)&menuNumber = GetProcAddress(m, "ShMenuNumber");

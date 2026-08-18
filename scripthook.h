@@ -429,6 +429,12 @@ SH_API int  ShCameraFree(const ShVec3 *pos, float yaw, float pitch);
 SH_API int  ShCameraAngles(float *yaw, float *pitch);
 SH_API void ShCameraRelease(void);
 
+/* Ownership is per field, so plugins compose. Release only
+ * what you took and another plugin's fields keep running.
+ */
+SH_API void ShCameraReleaseFields(uint32_t fields);
+SH_API uint32_t ShCameraOwned(void);
+
 /* Everything the camera object exposes, in one call. Set
  * only the bits you want; the engine keeps the rest.
  */

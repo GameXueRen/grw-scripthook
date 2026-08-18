@@ -26,7 +26,7 @@
 typedef int (*IsInGame_t)(void);
 typedef int (*GetCam_t)(ShCamera *);
 typedef int (*Apply_t)(const ShCameraOverride *);
-typedef void (*Release_t)(void);
+typedef void (*Release_t)(uint32_t);
 typedef uint32_t (*MenuCreate_t)(const char *);
 typedef int (*MenuToggle_t)(uint32_t, const char *, int,
                             ShMenuFn, void *);
@@ -106,7 +106,7 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
         }
     } else {
         g_on = 0;
-        if (g_release) g_release();
+        if (g_release) g_release(SH_CAM_FOV);
     }
     Report();
 }
@@ -160,7 +160,8 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_inGame = GetProcAddress(m, "ShIsInGame");
     *(FARPROC *)&g_getCam = GetProcAddress(m, "ShGetCamera");
     *(FARPROC *)&g_apply = GetProcAddress(m, "ShCameraApply");
-    *(FARPROC *)&g_release = GetProcAddress(m, "ShCameraRelease");
+    *(FARPROC *)&g_release =
+        GetProcAddress(m, "ShCameraReleaseFields");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuToggle = GetProcAddress(m, "ShMenuToggle");
     *(FARPROC *)&menuNumber = GetProcAddress(m, "ShMenuNumber");
