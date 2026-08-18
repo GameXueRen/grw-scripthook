@@ -3,7 +3,7 @@ CFLAGS = -O2 -Wall -Wextra -shared -static-libgcc
 # Two up from src, so builds land beside GRW.exe.
 GAMEDIR = ../..
 
-.PHONY: all roulette fling tpgun clean
+.PHONY: all roulette fling tpgun spawner clean
 
 all: $(GAMEDIR)/dinput8.dll $(GAMEDIR)/test_plugin.asi
 
@@ -15,6 +15,11 @@ fling: $(GAMEDIR)/hitfling.asi
 # DllMain, so a static import on it deadlocks the loader.
 $(GAMEDIR)/hitfling.asi: hitfling.c scripthook.h
 	$(CC) $(CFLAGS) -o $@ hitfling.c -lgdi32 -luser32
+
+spawner: $(GAMEDIR)/spawner.asi
+
+$(GAMEDIR)/spawner.asi: spawner.c scripthook.h
+	$(CC) $(CFLAGS) -o $@ spawner.c -lgdi32 -luser32
 
 tpgun: $(GAMEDIR)/tpgun.asi
 
@@ -30,11 +35,11 @@ libscripthook.a: $(GAMEDIR)/dinput8.dll
 $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
                         scripthook_health.c scripthook_state.c \
                         scripthook_entity.c scripthook_spawn.c \
-                        scripthook_hit.c scripthook.h log.h
+                        scripthook_hit.c guard.c scripthook.h log.h
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_physics.c scripthook_health.c \
 		scripthook_state.c scripthook_entity.c \
-		scripthook_spawn.c scripthook_hit.c \
+		scripthook_spawn.c scripthook_hit.c guard.c \
 		-ldinput8 -ldxguid \
 		-Wl,--out-implib,libscripthook.a
 
