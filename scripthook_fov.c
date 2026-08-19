@@ -16,6 +16,11 @@
 #define FOV_SITE  SH_IMG(0x7E889A2)
 #define FOV_LEN   6
 
+/* Engine values under 0.5 rad are zoom optics at work:
+ * scopes and binoculars compute far below the 0.78 to
+ * 0.83 gameplay range, and they keep their own fov. */
+#define FOV_PASS_BITS 0x3F000000u
+
 extern void ShSetError(int err);
 extern void *ShAllocNear(uint64_t target);
 extern int ShReadableAddr(uint64_t addr, size_t len);
@@ -41,7 +46,15 @@ static int BuildStub(void) {
     o += 8;
     s[o++] = 0x41; s[o++] = 0x83; s[o++] = 0x3A;   /* cmp [r10],0 */
     s[o++] = 0x00;
-    s[o++] = 0x74; s[o++] = 0x04;                  /* je +4      */
+    s[o++] = 0x74; s[o++] = 0x0C;                  /* je +12     */
+
+    /* Positive floats order like unsigned ints, so one cmp
+     * passes a zooming engine value through untouched.
+     */
+    s[o++] = 0x81; s[o++] = 0xF9;                  /* cmp ecx,im */
+    *(uint32_t *)(s + o) = FOV_PASS_BITS;
+    o += 4;
+    s[o++] = 0x72; s[o++] = 0x04;                  /* jb +4      */
     s[o++] = 0x41; s[o++] = 0x8B; s[o++] = 0x4A;   /* mov ecx,   */
     s[o++] = 0x04;                                 /*   [r10+4]  */
     s[o++] = 0x41; s[o++] = 0x5A;                  /* pop r10    */
