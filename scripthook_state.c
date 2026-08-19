@@ -32,6 +32,7 @@
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
 extern void ShSetError(int err);
+extern int ShInPauseMenu(void);
 extern void ShPhysicsOnEnterPlaying(void);
 extern void ShCameraOnEnterPlaying(void);
 extern void ShHeadOnEnterPlaying(void);
@@ -123,7 +124,10 @@ SH_API int ShGetGameStateName(char *buf, int len) {
         return 0;
     }
     h = StateHash(s);
-    if (h == HASH_PLAYING) snprintf(buf, len, "Playing");
+    if (h == HASH_PLAYING) {
+        if (ShInPauseMenu()) snprintf(buf, len, "Paused");
+        else snprintf(buf, len, "Playing");
+    }
     else if (h == HASH_MENU) snprintf(buf, len, "MenuOrLobby");
     else if (h == HASH_INGAME) snprintf(buf, len, "InGame");
     else if (h == HASH_LOADING) snprintf(buf, len, "GameLoading");
@@ -162,15 +166,25 @@ SH_API int ShGetGameState(void) {
     uint32_t h = StateHash(CurrentState());
 
     TrackState(h);
-    if (h == HASH_PLAYING || h == HASH_INGAME) return SH_STATE_INGAME;
+    if (h == HASH_PLAYING || h == HASH_INGAME) {
+        /* The flow never leaves Playing for the pause
+         * menu, so the camera answers instead.
+         */
+        if (ShInPauseMenu()) return SH_STATE_PAUSED;
+        return SH_STATE_INGAME;
+    }
     if (h == HASH_MENU) return SH_STATE_MENU;
     if (h == HASH_LOADING) return SH_STATE_LOADING;
     if (h == HASH_ENDOFGAME) return SH_STATE_MENU;
     return SH_STATE_UNKNOWN;
 }
 
+/* Paused still counts: the world is loaded and every read
+ * keeps working, so callers must not tear down.
+ */
 SH_API int ShIsInGame(void) {
-    return ShGetGameState() == SH_STATE_INGAME;
+    int s = ShGetGameState();
+    return s == SH_STATE_INGAME || s == SH_STATE_PAUSED;
 }
 
 /* dinput8 watches the state itself. Plugins never have
