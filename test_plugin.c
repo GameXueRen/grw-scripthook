@@ -253,6 +253,21 @@ static LONG WINAPI CrashFreeze(EXCEPTION_POINTERS *ep) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+/* Vectored, so it fires FIRST, before the game's own SEH
+ * and any crash reporter can eat the exception. Fatal
+ * codes freeze; everything else passes through. */
+static LONG CALLBACK CrashVeh(EXCEPTION_POINTERS *ep) {
+    switch (ep->ExceptionRecord->ExceptionCode) {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_PRIV_INSTRUCTION:
+    case EXCEPTION_STACK_OVERFLOW:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        return CrashFreeze(ep);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static void CmdCrash(Resp *r) {
     /* Re-arm every query: crash reporters steal the slot. */
     SetUnhandledExceptionFilter(CrashFreeze);
@@ -5133,6 +5148,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_log = fopen("scripthook_repl.log", "w");
         PLog("REPL plugin loaded");
+        AddVectoredExceptionHandler(1, CrashVeh);
         SetUnhandledExceptionFilter(CrashFreeze);
         CreateThread(NULL, 0, ServerThread, NULL, 0, NULL);
     }
