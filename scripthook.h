@@ -521,6 +521,34 @@ SH_API int  ShGetHealthEntity(uint64_t entity, uint32_t *cur,
 SH_API int  ShSetHealthEntity(uint64_t entity, uint32_t value);
 SH_API int  ShSetGodModeEntity(uint64_t entity, int on);
 
+/* Protected ints, the general stat storage: four bit planes
+ * and an XOR key. Health, resources, skill points, XP. */
+SH_API int  ShStatRead(uint64_t stat, uint32_t *out);
+SH_API int  ShStatWrite(uint64_t stat, uint32_t value);
+
+/* The four crafting resources, by name. */
+#define SH_RES_FOOD      0
+#define SH_RES_GASOLINE  1
+#define SH_RES_MEDICINE  2
+#define SH_RES_COMMS     3
+SH_API int  ShGetResource(int which, uint32_t *out);
+SH_API int  ShSetResource(int which, uint32_t value);
+SH_API int  ShSetAllResources(uint32_t value);
+
+/* Skill points, a plain int rather than a protected one. */
+SH_API int  ShGetSkillPoints(uint32_t *out);
+SH_API int  ShSetSkillPoints(uint32_t value);
+
+/* Visibility to enemies. 1 normal, 0 invisible, 0.5 halves
+ * the detection range, above 1 is easier to spot.
+ */
+SH_API int  ShSetVisibility(float factor);
+SH_API int  ShGetVisibility(float *out);
+
+/* Ammo by weapon slot: 0 primary, 1 second, 2 sidearm. */
+SH_API int  ShGetAmmo(int slot, uint32_t *out);
+SH_API int  ShSetAmmo(int slot, uint32_t value);
+
 typedef int (*ShGetHealthPlayer_t)(uint32_t *, uint32_t *);
 typedef int (*ShSetHealthPlayer_t)(uint32_t);
 typedef int (*ShSetGodModePlayer_t)(int);

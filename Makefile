@@ -59,13 +59,16 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
                         scripthook_entity.c scripthook_spawn.c \
                         scripthook_hit.c scripthook_camera.c \
                         scripthook_head.c scripthook_fov.c \
+                        scripthook_stat.c scripthook_resource.c \
+                        scripthook_stealth.c scripthook_ammo.c \
                         scripthook_hud.c scripthook_menu.c guard.c scripthook.h log.h
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_physics.c scripthook_health.c \
 		scripthook_state.c scripthook_entity.c \
 		scripthook_spawn.c scripthook_hit.c \
 		scripthook_camera.c scripthook_head.c \
-		scripthook_fov.c \
+		scripthook_fov.c scripthook_stat.c scripthook_resource.c \
+		scripthook_stealth.c scripthook_ammo.c \
 		scripthook_hud.c scripthook_menu.c guard.c \
 		-ldinput8 -ldxguid -lgdi32 -luser32 \
 		-Wl,--out-implib,libscripthook.a

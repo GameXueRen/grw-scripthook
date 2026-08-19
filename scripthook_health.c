@@ -25,60 +25,14 @@ extern int ShRequireInGame(void);
 static uint64_t g_comp = 0;
 static uint64_t g_compOwner = 0;
 
-typedef struct {
-    uint8_t *p[4];
-    uint32_t key;
-} ProtInt;
+/* The protected int codec lives in scripthook_stat.c now,
+ * exposed as a general stat API. Health is one caller.
+ */
+extern int ShStatRead(uint64_t stat, uint32_t *out);
+extern int ShStatWrite(uint64_t stat, uint32_t value);
 
-static int ProtLoad(uint64_t addr, ProtInt *s) {
-    if (!ShReadableAddr(addr, sizeof(*s))) return 0;
-    memcpy(s, (void *)(uintptr_t)addr, sizeof(*s));
-    return 1;
-}
-
-static int ProtGet(uint64_t addr, uint32_t *out) {
-    ProtInt s;
-    uint8_t b[4];
-    uint32_t v = 0;
-    int i, bit = 0;
-
-    if (!ProtLoad(addr, &s)) return 0;
-    for (i = 0; i < 4; i++) {
-        if (!ShReadableAddr((uint64_t)(uintptr_t)s.p[i], 1)) return 0;
-        b[i] = *s.p[i];
-    }
-    while (bit < 32) {
-        for (i = 0; i < 4; i++) {
-            v |= (uint32_t)(b[i] & 1) << bit;
-            b[i] >>= 1;
-            bit++;
-        }
-    }
-    *out = v ^ s.key;
-    return 1;
-}
-
-static int ProtSet(uint64_t addr, uint32_t val) {
-    ProtInt s;
-    uint8_t b[4] = {0, 0, 0, 0};
-    uint32_t enc;
-    int i, bit = 0, round = 0;
-
-    if (!ProtLoad(addr, &s)) return 0;
-    enc = val ^ s.key;
-    while (bit < 32) {
-        for (i = 0; i < 4; i++) {
-            b[i] |= (uint8_t)((enc >> bit) & 1) << round;
-            bit++;
-        }
-        round++;
-    }
-    for (i = 0; i < 4; i++) {
-        if (!ShReadableAddr((uint64_t)(uintptr_t)s.p[i], 1)) return 0;
-        *s.p[i] = b[i];
-    }
-    return 1;
-}
+#define ProtGet ShStatRead
+#define ProtSet ShStatWrite
 
 /* A component is valid when its owner matches and the
  * protected value decodes to a sane reading.
