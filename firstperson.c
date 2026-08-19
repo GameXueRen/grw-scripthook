@@ -30,6 +30,7 @@ typedef int (*IsInGame_t)(void);
 typedef int (*GetPlayer_t)(ShPlayer *);
 typedef int (*FirstPerson_t)(float, float);
 typedef void (*Release_t)(uint32_t);
+typedef int (*SetBlur_t)(int);
 typedef int (*HeadNodes_t)(uint64_t, uint64_t *, int);
 typedef int (*SetVisible_t)(uint64_t, uint64_t, int, int);
 typedef uint32_t (*MenuCreate_t)(const char *);
@@ -46,6 +47,7 @@ static Release_t    g_release;
 static HeadNodes_t  g_headNodes;
 static SetVisible_t g_setVisible;
 static MenuStatus_t g_status;
+static SetBlur_t    g_setBlur;
 
 static uint32_t g_menu = 0;
 static volatile int   g_on = 0;
@@ -121,6 +123,7 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
 
         g_on = 1;
         PushCamera();
+        if (g_setBlur) g_setBlur(0);
         if (root && g_wantHide) {
             g_root = root;
             HideHead(root);
@@ -128,6 +131,7 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
     } else {
         g_on = 0;
         ShowHead();
+        if (g_setBlur) g_setBlur(1);
         if (g_release) g_release(SH_CAM_POS);
     }
     Report();
@@ -210,6 +214,8 @@ static DWORD WINAPI BindThread(LPVOID p) {
         GetProcAddress(m, "ShCameraReleaseFields");
     *(FARPROC *)&g_headNodes = GetProcAddress(m, "ShGetHeadNodes");
     *(FARPROC *)&g_setVisible = GetProcAddress(m, "ShSetVisible");
+    /* Optional: an older dinput8 just keeps the blur. */
+    *(FARPROC *)&g_setBlur = GetProcAddress(m, "ShSetCameraBlur");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuToggle = GetProcAddress(m, "ShMenuToggle");
     *(FARPROC *)&menuNumber = GetProcAddress(m, "ShMenuNumber");
