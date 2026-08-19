@@ -49,6 +49,17 @@ static volatile uint64_t g_cam = 0;
 static volatile uint64_t g_calls = 0;
 static volatile uint64_t g_writes = 0;
 
+/* Diagnostic only. Special views run mode 0 like the main
+ * camera (measured: the drone), so mode gates nothing.
+ */
+static volatile uint64_t g_otherAt = 0;
+static volatile int g_otherMode = 0;
+
+/* The pause menu never leaves the Playing game state, but
+ * its camera is a template: a bit exact identity basis,
+ * which no steered camera ever holds. Measured live. */
+static volatile uint64_t g_uiAt = 0;
+
 static ShVec3 g_absPos;
 static volatile float g_back = 0.0f;
 static volatile float g_up = 0.0f;
@@ -77,8 +88,15 @@ extern void *ShAllocNear(uint64_t target);
 /* Row 3 is the translation, rows 0 to 2 the basis: row 0
  * right, row 1 forward, row 2 up. Engine owns the basis.
  */
+/* The engine consumes this with no checks of its own, so a
+ * NaN or a runaway value crashes it far from here. Refuse
+ * the write and keep the engine's frame instead. */
 static void WritePos(uint64_t cam, float x, float y, float z) {
     float *m = (float *)(uintptr_t)(cam + CAM_POSE);
+
+    if (x != x || y != y || z != z) return;
+    if (fabsf(x) > 1e6f || fabsf(y) > 1e6f || fabsf(z) > 1e6f)
+        return;
     m[12] = x;
     m[13] = y;
     m[14] = z;
@@ -134,24 +152,99 @@ static void WriteRot(uint64_t cam) {
     m[8] = u[0]; m[9] = u[1]; m[10] = u[2];
 }
 
+/* Iron sight ADS pulls the engine's hidden aim camera in
+ * next to the head. Free roam keeps it metres back, which
+ * is what separates the two cases below. */
+#define CAM_ADS_NEAR 1.0f
+#define CAM_ADS_FAR  1.7f
+
+/* Iron sights run their ray through the eye. Over the
+ * shoulder aim keeps it a fist or more to the right, and
+ * that one should feel like hip fire, so it stays put. */
+#define CAM_ADS_PMIN 0.12f
+#define CAM_ADS_PMAX 0.22f
+
+/* Firejumper93's gates. An engine camera beyond a chase
+ * arm of the head is a drone or a remote view, and a
+ * zoomed one is a scope drawing its own overlay. */
+#define CAM_ARM_MAX  4.0f
+#define CAM_ZOOM_FOV 0.30f
+
+/* Vehicles run longer chase arms, so the head pump feeds
+ * this hint on its own slow cadence. The frame path must
+ * stay call free: player lookups here crashed the menu. */
+static volatile int g_vehHint = 0;
+
+void ShCameraVehicleHint(int inVehicle) {
+    g_vehHint = inVehicle;
+}
+
 /* First person. The eye is the head bone, nudged forward
  * along the engine's own view axis to clear the face.
  */
 static void ApplyHead(uint64_t cam) {
     const float *m = (const float *)(uintptr_t)(cam + CAM_POSE);
     ShVec3 h;
-    float fx = m[4], fy = m[5], len;
+    float fx = m[4], fy = m[5], fz = m[6];
+    float ex = m[12], ey = m[13], ez = m[14];
+    float gx = fx, gy = fy, gl, len;
+    float px, py, pz, d;
 
     if (!ShHeadCached(&h)) return;
+
+    /* A zoomed camera is a scope. The mask and reticle
+     * anchor to the engine's own view, so moving the eye
+     * displaces them. Skip and let it render. */
+    if (*(const float *)(uintptr_t)(cam + CAM_FOV) < CAM_ZOOM_FOV)
+        return;
+
+    d = sqrtf((ex - h.x) * (ex - h.x) + (ey - h.y) * (ey - h.y)
+              + (ez - h.z) * (ez - h.z));
+
+    /* On foot, an engine camera beyond a chase arm is not
+     * looking through the soldier: a drone, a cutscene, a
+     * tacmap. Vehicles keep longer arms, so they pass. */
+    if (d > CAM_ARM_MAX && !g_vehHint) return;
 
     /* Flattened: nudging along a downward view would drop
      * the eye to the chest.
      */
-    len = sqrtf(fx * fx + fy * fy);
-    if (len > 0.01f) { fx /= len; fy /= len; }
-    else { fx = 0.0f; fy = 1.0f; }
+    gl = sqrtf(gx * gx + gy * gy);
+    if (gl > 0.01f) { gx /= gl; gy /= gl; }
+    else { gx = 0.0f; gy = 1.0f; }
+    px = h.x + gx * g_back;
+    py = h.y + gy * g_back;
+    pz = h.z + g_up;
 
-    WritePos(cam, h.x + fx * g_back, h.y + fy * g_back, h.z + g_up);
+    /* ADS only: ease the eye the few cm onto the engine's
+     * aim ray, at head depth, so the sights and the
+     * bullets pass through screen center. */
+    len = sqrtf(fx * fx + fy * fy + fz * fz);
+    if (d < CAM_ADS_FAR && len > 0.01f) {
+        float t, w, perp;
+
+        fx /= len; fy /= len; fz /= len;
+        t = (h.x - ex) * fx + (h.y - ey) * fy + (h.z - ez) * fz;
+
+        /* How far the aim ray misses the head. Small is a
+         * sight line, large is the shoulder camera.
+         */
+        perp = d * d - t * t;
+        perp = (perp > 0.0f) ? sqrtf(perp) : 0.0f;
+
+        if (perp < CAM_ADS_PMAX) {
+            w = (CAM_ADS_FAR - d) / (CAM_ADS_FAR - CAM_ADS_NEAR);
+            if (w > 1.0f) w = 1.0f;
+            if (perp > CAM_ADS_PMIN)
+                w *= (CAM_ADS_PMAX - perp)
+                   / (CAM_ADS_PMAX - CAM_ADS_PMIN);
+            t += g_back;
+            px += (ex + fx * t - px) * w;
+            py += (ey + fy * t - py) * w;
+            pz += (ez + fz * t - pz) * w;
+        }
+    }
+    WritePos(cam, px, py, pz);
 }
 
 /* Each field is written only if its bit is set, so the
@@ -178,11 +271,25 @@ static void ApplyFields(uint64_t cam) {
  * transform is consumed, so there is no race to lose.
  */
 static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
+    const float *f;
+    int mode, ui;
+
     if (!rcx || !ShReadableAddr(rcx, CAM_FOV + 4)) return;
-    if (*(const int *)(uintptr_t)(rcx + CAM_MODE) != 0) return;
+    mode = *(const int *)(uintptr_t)(rcx + CAM_MODE);
+    if (mode != 0) {
+        g_otherMode = mode;
+        g_otherAt = g_calls;
+        return;
+    }
 
     g_cam = rcx;
     g_calls++;
+
+    f = (const float *)(uintptr_t)(rcx + CAM_POSE);
+    ui = f[0] == 1.0f && f[1] == 0.0f && f[2] == 0.0f &&
+         f[4] == 0.0f && f[5] == 1.0f && f[6] == 0.0f &&
+         f[8] == 0.0f && f[9] == 0.0f && f[10] == 1.0f;
+    if (ui) g_uiAt = g_calls;
 
     /* The engine stamps visibility back here, so a held
      * override is reapplied in the same window.
@@ -191,7 +298,7 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
     if (g_apply & CAM_HEAD_BIT) ShHeadWant();
     ShHeadPump();
 
-    if (g_apply) ApplyFields(rcx);
+    if (g_apply && !ui) ApplyFields(rcx);
 }
 
 static int BuildStub(void) {
@@ -332,6 +439,19 @@ SH_API int ShCameraReady(void) {
 SH_API uint64_t ShCameraCalls(void) { return g_calls; }
 SH_API uint64_t ShCameraWrites(void) { return g_writes; }
 
+/* The last nonzero camera mode seen, and how many mode 0
+ * frames ago, so a REPL probe can name the special views.
+ */
+SH_API int ShCameraOtherMode(uint64_t *framesAgo) {
+    if (framesAgo) *framesAgo = g_calls - g_otherAt;
+    return g_otherMode;
+}
+
+/** True while the pause menu's camera is rendering. */
+SH_API int ShInPauseMenu(void) {
+    return g_uiAt != 0 && g_calls - g_uiAt <= 4;
+}
+
 SH_API int ShGetCamera(ShCamera *out) {
     uint64_t cam = g_cam;
     const float *m;
@@ -375,9 +495,9 @@ SH_API int ShCameraOrbit(float back, float up) {
     return 1;
 }
 
-/* First person: the eye tracks the head bone every frame,
- * and the engine keeps the aim. forward clears the face.
- */
+/* First person: the eye tracks the head bone every frame
+ * and eases onto the aim ray during ADS, so sights stay
+ * centered. forward clears the face. */
 SH_API int ShCameraFirstPerson(float forward, float up) {
     if (!ShCameraHookInstall()) return 0;
     g_back = forward;

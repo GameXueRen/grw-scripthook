@@ -26,7 +26,12 @@ enum ShGameState {
     SH_STATE_LOADING,
     SH_STATE_LOBBY,
     SH_STATE_INGAME,
-    SH_STATE_RELOADING
+    SH_STATE_RELOADING,
+
+    /* In game with the pause menu up. ShIsInGame stays
+     * true: the world is loaded and reads keep working.
+     */
+    SH_STATE_PAUSED
 };
 
 enum ShError {
@@ -422,6 +427,17 @@ SH_API int  ShCameraHookInstall(void);
 SH_API int  ShCameraReady(void);
 SH_API uint64_t ShCameraCalls(void);
 SH_API uint64_t ShCameraWrites(void);
+
+/* The game flow stays in Playing while paused, so this is
+ * read off the camera: the pause menu renders through a
+ * template pose no steered camera ever holds. */
+SH_API int  ShInPauseMenu(void);
+
+/* The close range body blur, a hidden proximity fade the
+ * menu's DoF settings leave running. on=0 removes it,
+ * on=1 restores the engine default. */
+SH_API int  ShSetCameraBlur(int on);
+SH_API int  ShCameraBlurOff(void);
 
 /** Where the camera is, and how it is pointed. */
 SH_API int  ShGetCamera(ShCamera *out);

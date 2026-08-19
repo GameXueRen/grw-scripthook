@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 
 #define SH_BUILD 1
 #include "scripthook.h"
@@ -12,8 +13,8 @@
 #define SKEL_VT      SH_IMG(0x3ACBBD8)
 #define BONE_LOOKUP  SH_IMG(0xB435680)
 
-/* Bones resolve from a name hash. The Head hash comes from
- * Firejumper93's rig code.
+/* Bones resolve from a name hash. The Head hash and the
+ * pose layout come from Firejumper93's rig code.
  */
 #define HASH_HEAD    0x07C159A2u
 
@@ -24,12 +25,21 @@
 #define BONE_STRIDE  0x20
 #define BONE_NONE    0xFFFF
 
+/* The pose root quat at +0x10 maps model space to world.
+ * The base stays the skeleton origin: it moves on the
+ * render clock, so the eye is smooth while running. */
+/* Bit 26 of +0x8C marks an already world space buffer. */
+#define POSE_ROOT_Q  0x010
+#define POSE_FLAGS   0x08C
+#define POSE_WORLD   0x04000000u
+
 #define OFF_ENT_COMPS  0x78
 #define OFF_ENT_NCOMPS 0x82
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
 extern void ShSetError(int err);
+extern void ShCameraVehicleHint(int inVehicle);
 
 typedef uint16_t (__attribute__((ms_abi)) *BoneOf_t)(uint64_t,
                                                      uint32_t);
@@ -51,9 +61,12 @@ static volatile int g_want = 0;
  * directly and calls nothing.
  */
 static uint64_t g_originAt = 0;
+static uint64_t g_poseAt = 0;
 static uint64_t g_boneAt = 0;
 static int      g_ready = 0;
 static uint64_t g_lastTry = 0;
+static uint64_t g_lastCheck = 0;
+static int      g_mismatch = 0;
 
 void ShHeadWant(void) {
     g_want = HEAD_WANT_FRAMES;
@@ -114,7 +127,11 @@ static int Resolve(void) {
     g_ready = 0;
     memset(&p, 0, sizeof(p));
     if (!ShGetPlayer(&p)) return 0;
-    root = p.root ? p.root : p.entity;
+
+    /* The soldier keeps the skeleton. The root re-parents
+     * to the vehicle, so resolving from it would lose the
+     * head on every mount. */
+    root = p.entity ? p.entity : p.root;
     if (!root) return 0;
 
     g_skelEnt = root;
@@ -130,8 +147,11 @@ static int Resolve(void) {
     if (!buf) return 0;
 
     g_originAt = g_skel + SKEL_ORIGIN;
+    g_poseAt = pose;
     g_boneAt = buf + (uint64_t)g_bone * BONE_STRIDE;
     if (!ShReadableAddr(g_originAt, 12)) return 0;
+    if (!ShReadableAddr(g_poseAt, 0x20)) return 0;
+    if (!ShReadableAddr(g_poseAt + POSE_FLAGS, 4)) return 0;
     if (!ShReadableAddr(g_boneAt, 12)) return 0;
 
     g_ready = 1;
@@ -142,20 +162,65 @@ static int Resolve(void) {
  * lookups here: the addresses were validated at resolve,
  * and a bad reading sends us back to resolve. */
 void ShHeadPump(void) {
-    float org[3], b[3];
+    float b[3], org[3], rq[4];
+    float n, cx, cy, cz, dx, dy, dz;
+    uint32_t flags;
+    uint64_t now;
 
     if (g_want <= 0) { g_valid = 0; return; }
     g_want--;
 
+    now = GetTickCount64();
+
+    /* A death or a body swap frees the rig while the old
+     * memory still reads as plausible, so the identity is
+     * rechecked on a timer rather than trusted. */
+    if (g_ready && now - g_lastCheck >= HEAD_RETRY_MS) {
+        ShPlayer p;
+
+        g_lastCheck = now;
+        memset(&p, 0, sizeof(p));
+
+        /* One bad answer can be a transient, and dropping
+         * on it flashes the engine camera. Two in a row is
+         * a real body change. */
+        if (!ShGetPlayer(&p) ||
+            (p.entity ? p.entity : p.root) != g_skelEnt) {
+            if (++g_mismatch >= 2) {
+                g_mismatch = 0;
+                g_ready = 0;
+            }
+        } else {
+            g_mismatch = 0;
+
+            /* The camera's chase arm gate reads a cached
+             * hint, so it never looks the player up on
+             * the frame path. Refreshed here instead. */
+            ShCameraVehicleHint(ShIsInVehicle());
+        }
+    }
+
     if (!g_ready) {
-        uint64_t now = GetTickCount64();
-        if (now - g_lastTry < HEAD_RETRY_MS) return;
+        if (now - g_lastTry < HEAD_RETRY_MS) { g_valid = 0; return; }
         g_lastTry = now;
         if (!Resolve()) { g_valid = 0; return; }
     }
 
-    memcpy(org, (void *)(uintptr_t)g_originAt, 12);
     memcpy(b, (void *)(uintptr_t)g_boneAt, 12);
+    memcpy(&flags, (void *)(uintptr_t)(g_poseAt + POSE_FLAGS), 4);
+
+    if (flags & POSE_WORLD) {
+        if (b[0] != b[0] || b[1] != b[1] || b[2] != b[2]) {
+            g_ready = 0;
+            g_valid = 0;
+            return;
+        }
+        g_head.x = b[0];
+        g_head.y = b[1];
+        g_head.z = b[2];
+        g_valid = 1;
+        return;
+    }
 
     /* A recycled buffer reads as nonsense, which is the
      * signal to resolve again rather than to poll.
@@ -165,9 +230,40 @@ void ShHeadPump(void) {
         g_valid = 0;
         return;
     }
-    g_head.x = org[0];
-    g_head.y = org[1];
-    g_head.z = org[2] + b[2];
+
+    memcpy(org, (void *)(uintptr_t)g_originAt, 12);
+    memcpy(rq, (void *)(uintptr_t)(g_poseAt + POSE_ROOT_Q), 16);
+
+    /* The root quat's magnitude carries a uniform scale,
+     * so normalise before rotating.
+     */
+    n = sqrtf(rq[0] * rq[0] + rq[1] * rq[1] +
+              rq[2] * rq[2] + rq[3] * rq[3]);
+    if (!(n > 1e-6f)) {
+        g_ready = 0;
+        g_valid = 0;
+        return;
+    }
+    rq[0] /= n; rq[1] /= n; rq[2] /= n; rq[3] /= n;
+
+    /* v' = v + 2*qw*(q x v) + 2*(q x (q x v)) */
+    cx = rq[1] * b[2] - rq[2] * b[1];
+    cy = rq[2] * b[0] - rq[0] * b[2];
+    cz = rq[0] * b[1] - rq[1] * b[0];
+    dx = rq[1] * cz - rq[2] * cy;
+    dy = rq[2] * cx - rq[0] * cz;
+    dz = rq[0] * cy - rq[1] * cx;
+    g_head.x = b[0] + 2.0f * (rq[3] * cx + dx) + org[0];
+    g_head.y = b[1] + 2.0f * (rq[3] * cy + dy) + org[1];
+    g_head.z = b[2] + 2.0f * (rq[3] * cz + dz) + org[2];
+    if (g_head.x != g_head.x || g_head.y != g_head.y ||
+        g_head.z != g_head.z ||
+        fabsf(g_head.x) > 1e5f || fabsf(g_head.y) > 1e5f ||
+        fabsf(g_head.z) > 1e5f) {
+        g_ready = 0;
+        g_valid = 0;
+        return;
+    }
     g_valid = 1;
 }
 
