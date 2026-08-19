@@ -344,10 +344,20 @@ SH_API int  ShGetShots(ShShot *out, int max);
 /* Visibility. Render nodes carry a visible bit, so this is
  * a data write with no engine call behind it.
  */
-/** persist rewrites the bit until you show it again. */
-SH_API int  ShSetEntityVisible(uint64_t entity, int visible,
-                               int persist);
+/* node 0 means the whole entity. persist rewrites the bit
+ * each frame until you show it again.
+ */
+SH_API int  ShSetVisible(uint64_t entity, uint64_t node,
+                         int visible, int persist);
 SH_API int  ShEntityNodeCount(uint64_t entity);
+
+/* Enumerate parts, so a caller can hide any subset. The
+ * head group is what the camera hides while aiming.
+ */
+SH_API int  ShGetEntityNodes(uint64_t entity, uint64_t *out,
+                             int max);
+SH_API int  ShGetHeadNodes(uint64_t entity, uint64_t *out,
+                           int max);
 
 /* The menu. One root owned by the API: every plugin adds a
  * submenu, so navigation and drawing are handled for you.
@@ -434,6 +444,17 @@ SH_API void ShCameraRelease(void);
  */
 SH_API void ShCameraReleaseFields(uint32_t fields);
 SH_API uint32_t ShCameraOwned(void);
+
+/* First person. The eye follows the head bone every frame
+ * and the engine keeps the aim. forward clears the face.
+ */
+SH_API int  ShCameraFirstPerson(float forward, float up);
+
+/* The head in world space, from the bone named Head. This
+ * is the eye. ShGetPlayerPosition is NOT: it was measured
+ * 1.71m above the feet once and 2.72m another time. */
+SH_API int  ShGetHeadPosition(ShVec3 *out);
+SH_API int  ShHeadBone(void);
 
 /* Everything the camera object exposes, in one call. Set
  * only the bits you want; the engine keeps the rest.

@@ -8,6 +8,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "image.h"
 
 /* RVAs, so this survives a relocated image. */
 #define RVA_PLAYER_MGR   0x4BB6438
@@ -244,19 +245,124 @@ static int SetNodesHidden(uint64_t entity, int hidden, int *seen) {
     return touched;
 }
 
+/* The head is a part group the camera owns for ADS. Its
+ * controller is found by which render nodes it holds. */
+#define CTRL_VT     SH_IMG(0x3BCB3B8)
+#define CTRL_NODES  0x40
+#define CTRL_COUNT  0x4A
+
+static uint64_t g_headEnt = 0;
+static uint64_t g_headCtrl = 0;
+
+static int OwnsAnyNode(uint64_t ctrl, uint64_t entity) {
+    uint64_t arr = ShReadQ(ctrl + CTRL_NODES);
+    uint64_t comps;
+    uint16_t n = 0, cn = 0, i, j;
+
+    if (!arr || !ShReadableAddr(ctrl + CTRL_COUNT, 2)) return 0;
+    memcpy(&n, (void *)(uintptr_t)(ctrl + CTRL_COUNT), 2);
+    if (!n || n > 64) return 0;
+
+    comps = ShReadQ(entity + OFF_ENT_COMPS);
+    if (!comps || !ShReadableAddr(entity + OFF_ENT_NCOMPS, 2)) return 0;
+    memcpy(&cn, (void *)(uintptr_t)(entity + OFF_ENT_NCOMPS), 2);
+    if (!cn || cn > 512) return 0;
+
+    for (i = 0; i < n; i++) {
+        uint64_t node = ShReadQ(arr + (uint64_t)i * 8);
+        if (!node) continue;
+        for (j = 0; j < cn; j++)
+            if (ShReadQ(comps + (uint64_t)j * 8) == node) return 1;
+    }
+    return 0;
+}
+
+/* Few of these exist, so the sweep is short and the answer
+ * is cached for the entity that asked. */
+static int CtrlAlive(uint64_t ctrl, uint64_t entity) {
+    if (!ctrl || !ShReadableAddr(ctrl, 0x70)) return 0;
+    if (ShReadQ(ctrl) != CTRL_VT) return 0;
+    return OwnsAnyNode(ctrl, entity);
+}
+
+static uint64_t FindHeadGroup(uint64_t entity) {
+    MEMORY_BASIC_INFORMATION mbi;
+    uint8_t *scan = (uint8_t *)0x10000;
+
+    /* These are freed and recycled, so a cached pointer is
+     * verified before it is trusted.
+     */
+    if (g_headEnt == entity && CtrlAlive(g_headCtrl, entity))
+        return g_headCtrl;
+    g_headEnt = 0;
+    g_headCtrl = 0;
+
+    while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
+        uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
+        if (next <= scan) break;
+        if ((uint64_t)(uintptr_t)mbi.BaseAddress >= 0x800000000000ULL)
+            break;
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & PAGE_READWRITE) &&
+            !(mbi.Protect & PAGE_GUARD)) {
+            uint8_t *b = (uint8_t *)mbi.BaseAddress;
+            size_t sz = mbi.RegionSize, o;
+
+            for (o = 0; o + 0x50 <= sz; o += 8) {
+                uint64_t vt;
+                memcpy(&vt, b + o, 8);
+                if (vt != CTRL_VT) continue;
+                if (!OwnsAnyNode((uint64_t)(uintptr_t)(b + o), entity))
+                    continue;
+                g_headEnt = entity;
+                g_headCtrl = (uint64_t)(uintptr_t)(b + o);
+                return g_headCtrl;
+            }
+        }
+        scan = next;
+    }
+    return 0;
+}
+
+static int SetGroupHidden(uint64_t ctrl, int hidden, int *seen) {
+    uint64_t arr = ShReadQ(ctrl + CTRL_NODES);
+    uint16_t n = 0, i;
+    int touched = 0;
+
+    if (!arr || !ShReadableAddr(ctrl + CTRL_COUNT, 2)) return 0;
+    memcpy(&n, (void *)(uintptr_t)(ctrl + CTRL_COUNT), 2);
+    if (!n || n > 64) return 0;
+
+    for (i = 0; i < n; i++) {
+        uint64_t node = ShReadQ(arr + (uint64_t)i * 8);
+        uint16_t f;
+
+        if (!node || !ShReadableAddr(node + NODE_FLAGS, 2)) continue;
+        if (seen) (*seen)++;
+        memcpy(&f, (void *)(uintptr_t)(node + NODE_FLAGS), 2);
+        f = hidden ? (uint16_t)(f | NODE_HIDDEN)
+                   : (uint16_t)(f & ~NODE_HIDDEN);
+        memcpy((void *)(uintptr_t)(node + NODE_FLAGS), &f, 2);
+        touched++;
+    }
+    return touched;
+}
+
 /* The camera re-asserts visibility on the nodes it owns, so
  * a persistent override has to be rewritten every frame.
  */
-#define VIS_HELD 32
+#define VIS_HELD 64
 
 static uint64_t g_visEnt[VIS_HELD];
+static uint64_t g_visNode[VIS_HELD];
 static int      g_visWant[VIS_HELD];
 
-static void HoldVisibility(uint64_t entity, int visible) {
+static void HoldVisibility(uint64_t entity, uint64_t node,
+                           int visible) {
     int i, free = -1;
 
     for (i = 0; i < VIS_HELD; i++) {
-        if (g_visEnt[i] == entity) {
+        if (g_visEnt[i] == entity && g_visNode[i] == node) {
             g_visWant[i] = visible;
             return;
         }
@@ -264,14 +370,32 @@ static void HoldVisibility(uint64_t entity, int visible) {
     }
     if (free < 0) return;
     g_visEnt[free] = entity;
+    g_visNode[free] = node;
     g_visWant[free] = visible;
 }
 
-static void ReleaseVisibility(uint64_t entity) {
+/* node 0 releases every hold on the entity, so a caller can
+ * undo whatever it did without tracking the parts. */
+static void ReleaseVisibility(uint64_t entity, uint64_t node) {
     int i;
 
-    for (i = 0; i < VIS_HELD; i++)
-        if (g_visEnt[i] == entity) g_visEnt[i] = 0;
+    for (i = 0; i < VIS_HELD; i++) {
+        if (g_visEnt[i] != entity) continue;
+        if (node && g_visNode[i] != node) continue;
+        g_visEnt[i] = 0;
+        g_visNode[i] = 0;
+    }
+}
+
+static int SetOneNode(uint64_t node, int hidden) {
+    uint16_t f;
+
+    if (!node || !ShReadableAddr(node + NODE_FLAGS, 2)) return 0;
+    memcpy(&f, (void *)(uintptr_t)(node + NODE_FLAGS), 2);
+    f = hidden ? (uint16_t)(f | NODE_HIDDEN)
+               : (uint16_t)(f & ~NODE_HIDDEN);
+    memcpy((void *)(uintptr_t)(node + NODE_FLAGS), &f, 2);
+    return 1;
 }
 
 /* Called from the camera detour, on the game thread, which
@@ -283,32 +407,95 @@ void ShVisibilityPump(void) {
     for (i = 0; i < VIS_HELD; i++) {
         if (!g_visEnt[i]) continue;
         seen = 0;
-        SetNodesHidden(g_visEnt[i], g_visWant[i] ? 0 : 1, &seen);
-        /* A freed entity stops having nodes, so drop it
+        if (g_visNode[i]) {
+            seen = SetOneNode(g_visNode[i], g_visWant[i] ? 0 : 1);
+        } else {
+            SetNodesHidden(g_visEnt[i], g_visWant[i] ? 0 : 1, &seen);
+        }
+        /* A freed entity or node stops reading, so drop it
          * rather than writing into recycled memory.
          */
-        if (!seen) g_visEnt[i] = 0;
+        if (!seen) {
+            g_visEnt[i] = 0;
+            g_visNode[i] = 0;
+        }
     }
 }
 
-/* persist keeps rewriting the bit until the caller sets the
- * entity visible again, or calls with persist off.
+/* node 0 means every render node on the entity. persist
+ * rewrites the bit each frame until it is shown again.
  */
-SH_API int ShSetEntityVisible(uint64_t entity, int visible,
-                              int persist) {
-    int seen = 0;
-    int n = SetNodesHidden(entity, visible ? 0 : 1, &seen);
+SH_API int ShSetVisible(uint64_t entity, uint64_t node,
+                        int visible, int persist) {
+    int seen = 0, n;
 
+    if (!entity) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+
+    if (node) {
+        n = SetOneNode(node, visible ? 0 : 1);
+        seen = n;
+    } else {
+        n = SetNodesHidden(entity, visible ? 0 : 1, &seen);
+    }
     if (!seen) {
-        ReleaseVisibility(entity);
+        ReleaseVisibility(entity, node);
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;
     }
-    if (persist && !visible) HoldVisibility(entity, visible);
-    else ReleaseVisibility(entity);
+    if (persist && !visible) HoldVisibility(entity, node, visible);
+    else ReleaseVisibility(entity, node);
 
     ShSetError(SH_OK);
-    return n > 0 || seen > 0;
+    return n > 0;
+}
+
+/** Every render node on an entity. Returns how many. */
+SH_API int ShGetEntityNodes(uint64_t entity, uint64_t *out,
+                            int max) {
+    uint64_t arr;
+    uint16_t n = 0, i;
+    int w = 0;
+
+    if (!out || max <= 0) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    if (!entity || !ShReadableAddr(entity, 0x90)) {
+        ShSetError(SH_ERR_NOT_ENTITY);
+        return 0;
+    }
+    arr = ShReadQ(entity + OFF_ENT_COMPS);
+    if (!arr || !ShReadableAddr(entity + OFF_ENT_NCOMPS, 2)) return 0;
+    memcpy(&n, (void *)(uintptr_t)(entity + OFF_ENT_NCOMPS), 2);
+    if (!n || n > 512) return 0;
+
+    for (i = 0; i < n && w < max; i++) {
+        uint64_t c = ShReadQ(arr + (uint64_t)i * 8);
+        if (c && ClassHashOf(c) == RENDER_CLASS) out[w++] = c;
+    }
+    ShSetError(SH_OK);
+    return w;
+}
+
+/* The parts the camera hides for aiming, which on a
+ * character is the head. Discovery, not a special case.
+ */
+SH_API int ShGetHeadNodes(uint64_t entity, uint64_t *out, int max) {
+    uint64_t ctrl = FindHeadGroup(entity);
+    uint64_t arr;
+    uint16_t n = 0, i;
+    int w = 0;
+
+    if (!out || max <= 0) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    if (!ctrl) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
+    arr = ShReadQ(ctrl + CTRL_NODES);
+    if (!arr || !ShReadableAddr(ctrl + CTRL_COUNT, 2)) return 0;
+    memcpy(&n, (void *)(uintptr_t)(ctrl + CTRL_COUNT), 2);
+    if (!n || n > 64) return 0;
+
+    for (i = 0; i < n && w < max; i++) {
+        uint64_t node = ShReadQ(arr + (uint64_t)i * 8);
+        if (node) out[w++] = node;
+    }
+    ShSetError(SH_OK);
+    return w;
 }
 
 /** How many render nodes an entity has, 0 if none. */

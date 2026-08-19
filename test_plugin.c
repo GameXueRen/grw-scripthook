@@ -2514,6 +2514,30 @@ static void CmdCam(Resp *r, const char *line) {
         RAppend(r, "camera released\n");
         return;
     }
+    if (strcmp(what, "fov") == 0) {
+        struct {
+            uint32_t apply;
+            float px, py, pz;
+            float yaw, pitch, roll;
+            float fov;
+            float skewX, skewY;
+            int   mode;
+        } o;
+        int (*apply)(const void *);
+
+        *(FARPROC *)&apply = GetProcAddress(m, "ShCameraApply");
+        if (!apply) {
+            RAppend(r, "ShCameraApply missing, rebuild dinput8\n");
+            return;
+        }
+        memset(&o, 0, sizeof(o));
+        o.apply = 0x04;          /* SH_CAM_FOV */
+        o.fov = (a > 0.0f) ? a : 0.815f;
+        if (!apply(&o)) { ApiWhy(r, "CameraApply", 0); return; }
+        RAppend(r, "fov held at %.4f rad (%.1f deg)\n",
+                o.fov, o.fov * 57.2957795f);
+        return;
+    }
     if (strcmp(what, "free") == 0) {
         int (*freeCam)(const float *, float, float);
         int (*angles)(float *, float *);
@@ -2552,20 +2576,23 @@ static void CmdCam(Resp *r, const char *line) {
                 (unsigned long long)writes());
 }
 
-/* vis <entityHex|player> <0|1> [persist] */
+/* vis <who> <0|1> [persist] [head|all|<nodeHex>] */
 static void CmdVis(Resp *r, const char *line) {
     HMODULE m = GetModuleHandleA("dinput8.dll");
-    int (*setVis)(uint64_t, int, int);
+    int (*setVis)(uint64_t, uint64_t, int, int);
     int (*nodeCount)(uint64_t);
-    char who[32] = {0};
+    int (*headNodes)(uint64_t, uint64_t *, int);
+    uint64_t parts[64];
+    char who[32] = {0}, what[32] = {0};
     uint64_t ent = 0;
-    int visible = 1, persist = 0;
+    int visible = 1, persist = 0, i, n = 0;
 
-    sscanf(line, "%*s %31s %d %d", who, &visible, &persist);
+    sscanf(line, "%*s %31s %d %d %31s", who, &visible, &persist, what);
     if (!m) { RAppend(r, "dinput8 missing\n"); return; }
-    *(FARPROC *)&setVis = GetProcAddress(m, "ShSetEntityVisible");
+    *(FARPROC *)&setVis = GetProcAddress(m, "ShSetVisible");
     *(FARPROC *)&nodeCount = GetProcAddress(m, "ShEntityNodeCount");
-    if (!setVis || !nodeCount) {
+    *(FARPROC *)&headNodes = GetProcAddress(m, "ShGetHeadNodes");
+    if (!setVis || !nodeCount || !headNodes) {
         RAppend(r, "visibility API missing, rebuild dinput8\n");
         return;
     }
@@ -2593,11 +2620,34 @@ static void CmdVis(Resp *r, const char *line) {
 
     RAppend(r, "entity %016llX  render nodes %d\n",
             (unsigned long long)ent, nodeCount(ent));
-    if (!setVis(ent, visible, persist)) {
-        ApiWhy(r, "SetEntityVisible", 0);
+
+    if (strcmp(what, "head") == 0) {
+        n = headNodes(ent, parts, 64);
+        if (n <= 0) { ApiWhy(r, "GetHeadNodes", 0); return; }
+        for (i = 0; i < n; i++)
+            setVis(ent, parts[i], visible, persist);
+        RAppend(r, "head group, %d parts %s%s\n", n,
+                visible ? "visible" : "hidden",
+                (persist && !visible) ? ", held" : "");
         return;
     }
-    RAppend(r, "%s%s\n", visible ? "visible" : "hidden",
+
+    if (what[0] && strcmp(what, "all") != 0) {
+        uint64_t node = strtoull(what, NULL, 16);
+        if (!setVis(ent, node, visible, persist)) {
+            ApiWhy(r, "SetVisible", 0);
+            return;
+        }
+        RAppend(r, "node %016llX %s\n", (unsigned long long)node,
+                visible ? "visible" : "hidden");
+        return;
+    }
+
+    if (!setVis(ent, 0, visible, persist)) {
+        ApiWhy(r, "SetVisible", 0);
+        return;
+    }
+    RAppend(r, "whole entity %s%s\n", visible ? "visible" : "hidden",
             (persist && !visible) ? ", held every frame" : "");
 }
 

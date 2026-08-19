@@ -42,6 +42,8 @@
  * parts of the camera at once. Orbit is a private bit: it
  * owns position, but derives it instead of storing it. */
 #define CAM_ORBIT_BIT 0x100u
+#define CAM_HEAD_BIT  0x200u
+#define CAM_DERIVED   (CAM_ORBIT_BIT | CAM_HEAD_BIT)
 
 static volatile uint64_t g_cam = 0;
 static volatile uint64_t g_calls = 0;
@@ -64,6 +66,8 @@ static uint8_t  g_thunkOrig[5];
 
 extern void ShSetError(int err);
 extern void ShVisibilityPump(void);
+extern void ShHeadPump(void);
+extern int ShHeadCached(ShVec3 *out);
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern void *ShAllocNear(uint64_t target);
 
@@ -127,12 +131,33 @@ static void WriteRot(uint64_t cam) {
     m[8] = u[0]; m[9] = u[1]; m[10] = u[2];
 }
 
+/* First person. The eye is the head bone, nudged forward
+ * along the engine's own view axis to clear the face.
+ */
+static void ApplyHead(uint64_t cam) {
+    const float *m = (const float *)(uintptr_t)(cam + CAM_POSE);
+    ShVec3 h;
+    float fx = m[4], fy = m[5], len;
+
+    if (!ShHeadCached(&h)) return;
+
+    /* Flattened: nudging along a downward view would drop
+     * the eye to the chest.
+     */
+    len = sqrtf(fx * fx + fy * fy);
+    if (len > 0.01f) { fx /= len; fy /= len; }
+    else { fx = 0.0f; fy = 1.0f; }
+
+    WritePos(cam, h.x + fx * g_back, h.y + fy * g_back, h.z + g_up);
+}
+
 /* Each field is written only if its bit is set, so the
  * engine keeps ownership of everything else.
  */
 static void ApplyFields(uint64_t cam) {
     if (g_apply & SH_CAM_ROT) WriteRot(cam);
-    if (g_apply & CAM_ORBIT_BIT) ApplyOrbit(cam);
+    if (g_apply & CAM_HEAD_BIT) ApplyHead(cam);
+    else if (g_apply & CAM_ORBIT_BIT) ApplyOrbit(cam);
     else if (g_apply & SH_CAM_POS)
         WritePos(cam, g_absPos.x, g_absPos.y, g_absPos.z);
     if (g_apply & SH_CAM_FOV)
@@ -159,6 +184,7 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
      * override is reapplied in the same window.
      */
     ShVisibilityPump();
+    ShHeadPump();
 
     if (g_apply) ApplyFields(rcx);
 }
@@ -327,7 +353,7 @@ SH_API int ShSetCamera(const ShVec3 *pos) {
     if (!pos) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (!ShCameraHookInstall()) return 0;
     g_absPos = *pos;
-    g_apply = (g_apply & ~CAM_ORBIT_BIT) | SH_CAM_POS;
+    g_apply = (g_apply & ~CAM_DERIVED) | SH_CAM_POS;
     ShSetError(SH_OK);
     return 1;
 }
@@ -339,7 +365,19 @@ SH_API int ShCameraOrbit(float back, float up) {
     if (!ShCameraHookInstall()) return 0;
     g_back = back;
     g_up = up;
-    g_apply |= SH_CAM_POS | CAM_ORBIT_BIT;
+    g_apply = (g_apply & ~CAM_HEAD_BIT) | SH_CAM_POS | CAM_ORBIT_BIT;
+    ShSetError(SH_OK);
+    return 1;
+}
+
+/* First person: the eye tracks the head bone every frame,
+ * and the engine keeps the aim. forward clears the face.
+ */
+SH_API int ShCameraFirstPerson(float forward, float up) {
+    if (!ShCameraHookInstall()) return 0;
+    g_back = forward;
+    g_up = up;
+    g_apply = (g_apply & ~CAM_ORBIT_BIT) | SH_CAM_POS | CAM_HEAD_BIT;
     ShSetError(SH_OK);
     return 1;
 }
@@ -355,7 +393,7 @@ SH_API int ShCameraFree(const ShVec3 *pos, float yaw, float pitch) {
     g_absPos = *pos;
     g_yaw = yaw;
     g_pitch = pitch;
-    g_apply = (g_apply & ~CAM_ORBIT_BIT) | SH_CAM_POS | SH_CAM_ROT;
+    g_apply = (g_apply & ~CAM_DERIVED) | SH_CAM_POS | SH_CAM_ROT;
     ShSetError(SH_OK);
     return 1;
 }
@@ -400,7 +438,7 @@ SH_API int ShCameraApply(const ShCameraOverride *o) {
     /* Merged, so applying fov leaves another plugin's
      * position and rotation alone.
      */
-    if (o->apply & SH_CAM_POS) g_apply &= ~CAM_ORBIT_BIT;
+    if (o->apply & SH_CAM_POS) g_apply &= ~CAM_DERIVED;
     g_apply |= o->apply;
     ShSetError(SH_OK);
     return 1;
@@ -433,7 +471,7 @@ SH_API void ShCameraRelease(void) {
  * leaves another plugin's fov override running.
  */
 SH_API void ShCameraReleaseFields(uint32_t fields) {
-    if (fields & SH_CAM_POS) fields |= CAM_ORBIT_BIT;
+    if (fields & SH_CAM_POS) fields |= CAM_DERIVED;
     g_apply &= ~fields;
 }
 
