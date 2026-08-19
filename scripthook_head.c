@@ -37,6 +37,7 @@
 #define OFF_ENT_NCOMPS 0x82
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
+extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
 extern void ShSetError(int err);
 extern void ShCameraVehicleHint(int inVehicle);
@@ -56,6 +57,13 @@ static volatile int g_valid = 0;
 #define HEAD_WANT_FRAMES 600
 #define HEAD_RETRY_MS    500u
 static volatile int g_want = 0;
+
+/* The bone offset moves on the anim tick and can be read
+ * mid write, which jitters. Blend it, the origin is on the
+ * render clock and stays raw. */
+#define HEAD_SMOOTH 0.25f
+static float g_offs[3];
+static int   g_offsLive = 0;
 
 /* Resolved addresses, so the per frame path reads them
  * directly and calls nothing.
@@ -80,6 +88,7 @@ void ShHeadOnEnterPlaying(void) {
     g_skelEnt = 0;
     g_bone = BONE_NONE;
     g_lastTry = 0;
+    g_offsLive = 0;
 }
 
 static uint64_t FindSkeleton(uint64_t entity) {
@@ -88,8 +97,8 @@ static uint64_t FindSkeleton(uint64_t entity) {
 
     if (!entity || !ShReadableAddr(entity, 0x90)) return 0;
     arr = ShReadQ(entity + OFF_ENT_COMPS);
-    if (!arr || !ShReadableAddr(entity + OFF_ENT_NCOMPS, 2)) return 0;
-    memcpy(&n, (void *)(uintptr_t)(entity + OFF_ENT_NCOMPS), 2);
+    if (!arr) return 0;
+    if (!ShReadMem(entity + OFF_ENT_NCOMPS, &n, 2)) return 0;
     if (!n || n > 512) return 0;
 
     for (i = 0; i < n; i++) {
@@ -125,6 +134,7 @@ static int Resolve(void) {
     uint64_t root, pose, buf;
 
     g_ready = 0;
+    g_offsLive = 0;
     memset(&p, 0, sizeof(p));
     if (!ShGetPlayer(&p)) return 0;
 
@@ -206,8 +216,15 @@ void ShHeadPump(void) {
         if (!Resolve()) { g_valid = 0; return; }
     }
 
-    memcpy(b, (void *)(uintptr_t)g_boneAt, 12);
-    memcpy(&flags, (void *)(uintptr_t)(g_poseAt + POSE_FLAGS), 4);
+    /* Kernel reads: the rig can be freed on another thread
+     * between any check and use, and these must not fault.
+     */
+    if (!ShReadMem(g_boneAt, b, 12) ||
+        !ShReadMem(g_poseAt + POSE_FLAGS, &flags, 4)) {
+        g_ready = 0;
+        g_valid = 0;
+        return;
+    }
 
     if (flags & POSE_WORLD) {
         if (b[0] != b[0] || b[1] != b[1] || b[2] != b[2]) {
@@ -231,8 +248,12 @@ void ShHeadPump(void) {
         return;
     }
 
-    memcpy(org, (void *)(uintptr_t)g_originAt, 12);
-    memcpy(rq, (void *)(uintptr_t)(g_poseAt + POSE_ROOT_Q), 16);
+    if (!ShReadMem(g_originAt, org, 12) ||
+        !ShReadMem(g_poseAt + POSE_ROOT_Q, rq, 16)) {
+        g_ready = 0;
+        g_valid = 0;
+        return;
+    }
 
     /* The root quat's magnitude carries a uniform scale,
      * so normalise before rotating.
@@ -253,9 +274,23 @@ void ShHeadPump(void) {
     dx = rq[1] * cz - rq[2] * cy;
     dy = rq[2] * cx - rq[0] * cz;
     dz = rq[0] * cy - rq[1] * cx;
-    g_head.x = b[0] + 2.0f * (rq[3] * cx + dx) + org[0];
-    g_head.y = b[1] + 2.0f * (rq[3] * cy + dy) + org[1];
-    g_head.z = b[2] + 2.0f * (rq[3] * cz + dz) + org[2];
+    b[0] += 2.0f * (rq[3] * cx + dx);
+    b[1] += 2.0f * (rq[3] * cy + dy);
+    b[2] += 2.0f * (rq[3] * cz + dz);
+
+    if (!g_offsLive) {
+        g_offs[0] = b[0];
+        g_offs[1] = b[1];
+        g_offs[2] = b[2];
+        g_offsLive = 1;
+    } else {
+        g_offs[0] += (b[0] - g_offs[0]) * HEAD_SMOOTH;
+        g_offs[1] += (b[1] - g_offs[1]) * HEAD_SMOOTH;
+        g_offs[2] += (b[2] - g_offs[2]) * HEAD_SMOOTH;
+    }
+    g_head.x = org[0] + g_offs[0];
+    g_head.y = org[1] + g_offs[1];
+    g_head.z = org[2] + g_offs[2];
     if (g_head.x != g_head.x || g_head.y != g_head.y ||
         g_head.z != g_head.z ||
         fabsf(g_head.x) > 1e5f || fabsf(g_head.y) > 1e5f ||

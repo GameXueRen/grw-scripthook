@@ -122,10 +122,23 @@ int ShReadableAddr(uint64_t addr, size_t len) {
     return ShReadable(addr, len);
 }
 
+/* Kernel mediated, so a page freed between the check and
+ * the read fails cleanly instead of faulting. Closes the
+ * race every memcpy after VirtualQuery carried. */
+int ShReadMem(uint64_t addr, void *out, size_t len) {
+    SIZE_T got = 0;
+
+    if (addr < SH_HEAP_LO || addr >= SH_HEAP_HI) return 0;
+    if (!ReadProcessMemory(GetCurrentProcess(),
+                           (const void *)(uintptr_t)addr,
+                           out, len, &got))
+        return 0;
+    return got == len;
+}
+
 static uint64_t ShQ(uint64_t addr) {
     uint64_t v;
-    if (!ShReadable(addr, 8)) return 0;
-    memcpy(&v, (void *)(uintptr_t)addr, 8);
+    if (!ShReadMem(addr, &v, 8)) return 0;
     return v;
 }
 
@@ -167,9 +180,7 @@ void *ShAllocNear(uint64_t target) {
 }
 
 static int ShVec(uint64_t addr, ShVec3 *out) {
-    if (!ShReadable(addr, 12)) return 0;
-    memcpy(out, (void *)(uintptr_t)addr, 12);
-    return 1;
+    return ShReadMem(addr, out, 12);
 }
 
 static int ShIsEntity(uint64_t obj) {

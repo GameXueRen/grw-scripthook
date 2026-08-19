@@ -26,6 +26,7 @@
 #define OFF_NODE_LINK    0x68
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
+extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
 extern void ShSetError(int err);
 extern int ShRequireInGame(void);
@@ -212,6 +213,23 @@ SH_API int ShGetComponents(uint64_t entity, ShComponent *out,
 #define NODE_FLAGS    0x54
 #define NODE_HIDDEN   0x0004
 
+/* Kernel read modify write: a node freed on another thread
+ * fails cleanly instead of faulting or corrupting.
+ */
+static int NodeFlag(uint64_t node, int hidden) {
+    uint16_t f;
+    SIZE_T put = 0;
+
+    if (!node || !ShReadMem(node + NODE_FLAGS, &f, 2)) return 0;
+    f = hidden ? (uint16_t)(f | NODE_HIDDEN)
+               : (uint16_t)(f & ~NODE_HIDDEN);
+    if (!WriteProcessMemory(GetCurrentProcess(),
+                            (void *)(uintptr_t)(node + NODE_FLAGS),
+                            &f, 2, &put))
+        return 0;
+    return put == 2;
+}
+
 static int SetNodesHidden(uint64_t entity, int hidden, int *seen) {
     uint64_t arr;
     uint16_t n = 0, i;
@@ -222,24 +240,18 @@ static int SetNodesHidden(uint64_t entity, int hidden, int *seen) {
         return 0;
     }
     arr = ShReadQ(entity + OFF_ENT_COMPS);
-    if (!arr || !ShReadableAddr(entity + OFF_ENT_NCOMPS, 2)) {
+    if (!arr || !ShReadMem(entity + OFF_ENT_NCOMPS, &n, 2)) {
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;
     }
-    memcpy(&n, (void *)(uintptr_t)(entity + OFF_ENT_NCOMPS), 2);
     if (!n || n > 512) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
 
     for (i = 0; i < n; i++) {
         uint64_t c = ShReadQ(arr + (uint64_t)i * 8);
-        uint16_t f;
 
         if (!c || ClassHashOf(c) != RENDER_CLASS) continue;
-        if (!ShReadableAddr(c + NODE_FLAGS, 2)) continue;
+        if (!NodeFlag(c, hidden)) continue;
         if (seen) (*seen)++;
-        memcpy(&f, (void *)(uintptr_t)(c + NODE_FLAGS), 2);
-        f = hidden ? (uint16_t)(f | NODE_HIDDEN)
-                   : (uint16_t)(f & ~NODE_HIDDEN);
-        memcpy((void *)(uintptr_t)(c + NODE_FLAGS), &f, 2);
         touched++;
     }
     return touched;
@@ -254,25 +266,30 @@ static int SetNodesHidden(uint64_t entity, int hidden, int *seen) {
 static uint64_t g_headEnt = 0;
 static uint64_t g_headCtrl = 0;
 
+/* Both arrays land in two kernel reads and compare
+ * locally. A syscall per element multiplied out to tens
+ * of ms per candidate and lagged the whole frame. */
 static int OwnsAnyNode(uint64_t ctrl, uint64_t entity) {
-    uint64_t arr = ShReadQ(ctrl + CTRL_NODES);
-    uint64_t comps;
+    uint64_t nodes[64], comps[512];
+    uint64_t arr, carr;
     uint16_t n = 0, cn = 0, i, j;
 
-    if (!arr || !ShReadableAddr(ctrl + CTRL_COUNT, 2)) return 0;
-    memcpy(&n, (void *)(uintptr_t)(ctrl + CTRL_COUNT), 2);
+    arr = ShReadQ(ctrl + CTRL_NODES);
+    if (!arr || !ShReadMem(ctrl + CTRL_COUNT, &n, 2)) return 0;
     if (!n || n > 64) return 0;
 
-    comps = ShReadQ(entity + OFF_ENT_COMPS);
-    if (!comps || !ShReadableAddr(entity + OFF_ENT_NCOMPS, 2)) return 0;
-    memcpy(&cn, (void *)(uintptr_t)(entity + OFF_ENT_NCOMPS), 2);
+    carr = ShReadQ(entity + OFF_ENT_COMPS);
+    if (!carr || !ShReadMem(entity + OFF_ENT_NCOMPS, &cn, 2))
+        return 0;
     if (!cn || cn > 512) return 0;
 
+    if (!ShReadMem(arr, nodes, (size_t)n * 8)) return 0;
+    if (!ShReadMem(carr, comps, (size_t)cn * 8)) return 0;
+
     for (i = 0; i < n; i++) {
-        uint64_t node = ShReadQ(arr + (uint64_t)i * 8);
-        if (!node) continue;
+        if (!nodes[i]) continue;
         for (j = 0; j < cn; j++)
-            if (ShReadQ(comps + (uint64_t)j * 8) == node) return 1;
+            if (comps[j] == nodes[i]) return 1;
     }
     return 0;
 }
@@ -306,17 +323,32 @@ static uint64_t FindHeadGroup(uint64_t entity) {
             (mbi.Protect & PAGE_READWRITE) &&
             !(mbi.Protect & PAGE_GUARD)) {
             uint8_t *b = (uint8_t *)mbi.BaseAddress;
-            size_t sz = mbi.RegionSize, o;
+            size_t sz = mbi.RegionSize, o, k, got;
 
-            for (o = 0; o + 0x50 <= sz; o += 8) {
-                uint64_t vt;
-                memcpy(&vt, b + o, 8);
-                if (vt != CTRL_VT) continue;
-                if (!OwnsAnyNode((uint64_t)(uintptr_t)(b + o), entity))
+            /* Chunked kernel reads: a region decommitted
+             * mid scan skips instead of faulting. Chunks
+             * overlap so no candidate spans a seam. */
+            static uint8_t buf[0x10000];
+
+            for (o = 0; o + 0x50 <= sz;
+                 o += sizeof(buf) - 0x50) {
+                got = sz - o;
+                if (got > sizeof(buf)) got = sizeof(buf);
+                if (!ShReadMem((uint64_t)(uintptr_t)(b + o),
+                               buf, got))
                     continue;
-                g_headEnt = entity;
-                g_headCtrl = (uint64_t)(uintptr_t)(b + o);
-                return g_headCtrl;
+                for (k = 0; k + 0x50 <= got; k += 8) {
+                    uint64_t vt;
+                    memcpy(&vt, buf + k, 8);
+                    if (vt != CTRL_VT) continue;
+                    if (!OwnsAnyNode(
+                            (uint64_t)(uintptr_t)(b + o + k),
+                            entity))
+                        continue;
+                    g_headEnt = entity;
+                    g_headCtrl = (uint64_t)(uintptr_t)(b + o + k);
+                    return g_headCtrl;
+                }
             }
         }
         scan = next;
@@ -355,8 +387,12 @@ static int SetGroupHidden(uint64_t ctrl, int hidden, int *seen) {
 
 static uint64_t g_visEnt[VIS_HELD];
 static uint64_t g_visNode[VIS_HELD];
+static uint64_t g_visSig[VIS_HELD];
 static int      g_visWant[VIS_HELD];
 
+/* Freed node memory stays readable, so a hold rewriting it
+ * corrupts whatever lives there next. The vtable qword is
+ * the identity check: recycling never reproduces it. */
 static void HoldVisibility(uint64_t entity, uint64_t node,
                            int visible) {
     int i, free = -1;
@@ -371,6 +407,7 @@ static void HoldVisibility(uint64_t entity, uint64_t node,
     if (free < 0) return;
     g_visEnt[free] = entity;
     g_visNode[free] = node;
+    g_visSig[free] = node ? ShReadQ(node) : 0;
     g_visWant[free] = visible;
 }
 
@@ -384,18 +421,37 @@ static void ReleaseVisibility(uint64_t entity, uint64_t node) {
         if (node && g_visNode[i] != node) continue;
         g_visEnt[i] = 0;
         g_visNode[i] = 0;
+        g_visSig[i] = 0;
     }
 }
 
-static int SetOneNode(uint64_t node, int hidden) {
-    uint16_t f;
+/* One shot applications, run by the pump. Callers used to
+ * write from their own threads and raced entity teardown,
+ * caught live as the read fault at dinput8+0x63E5. */
+#define VIS_ONCE 64
 
-    if (!node || !ShReadableAddr(node + NODE_FLAGS, 2)) return 0;
-    memcpy(&f, (void *)(uintptr_t)(node + NODE_FLAGS), 2);
-    f = hidden ? (uint16_t)(f | NODE_HIDDEN)
-               : (uint16_t)(f & ~NODE_HIDDEN);
-    memcpy((void *)(uintptr_t)(node + NODE_FLAGS), &f, 2);
-    return 1;
+static uint64_t g_onceEnt[VIS_ONCE];
+static uint64_t g_onceNode[VIS_ONCE];
+static uint64_t g_onceSig[VIS_ONCE];
+static int      g_onceWant[VIS_ONCE];
+
+static void QueueVisibility(uint64_t entity, uint64_t node,
+                            int visible) {
+    int i;
+
+    for (i = 0; i < VIS_ONCE; i++) {
+        if (g_onceEnt[i]) continue;
+        g_onceNode[i] = node;
+        g_onceSig[i] = node ? ShReadQ(node) : 0;
+        g_onceWant[i] = visible;
+        g_onceEnt[i] = entity;
+        return;
+    }
+}
+
+
+static int SetOneNode(uint64_t node, int hidden) {
+    return NodeFlag(node, hidden);
 }
 
 /* Called from the camera detour, on the game thread, which
@@ -404,10 +460,34 @@ static int SetOneNode(uint64_t node, int hidden) {
 void ShVisibilityPump(void) {
     int i, seen;
 
+    for (i = 0; i < VIS_ONCE; i++) {
+        if (!g_onceEnt[i]) continue;
+        if (g_onceNode[i]) {
+            if (ShReadQ(g_onceNode[i]) == g_onceSig[i])
+                SetOneNode(g_onceNode[i], g_onceWant[i] ? 0 : 1);
+        } else {
+            seen = 0;
+            SetNodesHidden(g_onceEnt[i], g_onceWant[i] ? 0 : 1,
+                           &seen);
+        }
+        g_onceEnt[i] = 0;
+        g_onceNode[i] = 0;
+        g_onceSig[i] = 0;
+    }
+
     for (i = 0; i < VIS_HELD; i++) {
         if (!g_visEnt[i]) continue;
         seen = 0;
         if (g_visNode[i]) {
+            /* Readable is a weak test: recycled memory
+             * still reads. The vtable must match too, or
+             * the write lands in someone else's object. */
+            if (ShReadQ(g_visNode[i]) != g_visSig[i]) {
+                g_visEnt[i] = 0;
+                g_visNode[i] = 0;
+                g_visSig[i] = 0;
+                continue;
+            }
             seen = SetOneNode(g_visNode[i], g_visWant[i] ? 0 : 1);
         } else {
             SetNodesHidden(g_visEnt[i], g_visWant[i] ? 0 : 1, &seen);
@@ -418,6 +498,7 @@ void ShVisibilityPump(void) {
         if (!seen) {
             g_visEnt[i] = 0;
             g_visNode[i] = 0;
+            g_visSig[i] = 0;
         }
     }
 }
@@ -425,28 +506,21 @@ void ShVisibilityPump(void) {
 /* node 0 means every render node on the entity. persist
  * rewrites the bit each frame until it is shown again.
  */
+/* Deferred: the pump applies on the game thread, in the
+ * same window the engine stamps the bits. Writing on the
+ * caller's thread raced entity teardown and corrupted. */
 SH_API int ShSetVisible(uint64_t entity, uint64_t node,
                         int visible, int persist) {
-    int seen = 0, n;
-
     if (!entity) { ShSetError(SH_ERR_BAD_ARG); return 0; }
 
-    if (node) {
-        n = SetOneNode(node, visible ? 0 : 1);
-        seen = n;
+    if (persist && !visible) {
+        HoldVisibility(entity, node, visible);
     } else {
-        n = SetNodesHidden(entity, visible ? 0 : 1, &seen);
-    }
-    if (!seen) {
         ReleaseVisibility(entity, node);
-        ShSetError(SH_ERR_NO_CANDIDATE);
-        return 0;
+        QueueVisibility(entity, node, visible);
     }
-    if (persist && !visible) HoldVisibility(entity, node, visible);
-    else ReleaseVisibility(entity, node);
-
     ShSetError(SH_OK);
-    return n > 0;
+    return 1;
 }
 
 /** Every render node on an entity. Returns how many. */
@@ -477,23 +551,27 @@ SH_API int ShGetEntityNodes(uint64_t entity, uint64_t *out,
 /* The parts the camera hides for aiming, which on a
  * character is the head. Discovery, not a special case.
  */
+/* Safe from any thread: every access is a kernel read, so
+ * a page freed mid walk fails instead of faulting, and the
+ * scan never touches the frame budget. */
 SH_API int ShGetHeadNodes(uint64_t entity, uint64_t *out, int max) {
-    uint64_t ctrl = FindHeadGroup(entity);
-    uint64_t arr;
+    uint64_t ctrl, arr, nodes[64];
     uint16_t n = 0, i;
     int w = 0;
 
-    if (!out || max <= 0) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    if (!out || max <= 0 || !entity) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    ctrl = FindHeadGroup(entity);
     if (!ctrl) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
     arr = ShReadQ(ctrl + CTRL_NODES);
-    if (!arr || !ShReadableAddr(ctrl + CTRL_COUNT, 2)) return 0;
-    memcpy(&n, (void *)(uintptr_t)(ctrl + CTRL_COUNT), 2);
+    if (!arr || !ShReadMem(ctrl + CTRL_COUNT, &n, 2)) return 0;
     if (!n || n > 64) return 0;
+    if (!ShReadMem(arr, nodes, (size_t)n * 8)) return 0;
 
-    for (i = 0; i < n && w < max; i++) {
-        uint64_t node = ShReadQ(arr + (uint64_t)i * 8);
-        if (node) out[w++] = node;
-    }
+    for (i = 0; i < n && w < max; i++)
+        if (nodes[i]) out[w++] = nodes[i];
     ShSetError(SH_OK);
     return w;
 }

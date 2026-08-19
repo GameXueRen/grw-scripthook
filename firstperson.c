@@ -56,6 +56,7 @@ static volatile float g_fwd = FWD_DEF;
 static volatile float g_up = UP_DEF;
 
 static uint64_t g_root = 0;
+static uint64_t g_hideRoot = 0;
 static uint64_t g_parts[MAX_PARTS];
 static int      g_nparts = 0;
 
@@ -74,12 +75,14 @@ static void PushCamera(void) {
     if (g_fp) g_fp(g_fwd / 100.0f, g_up / 100.0f);
 }
 
+/* Entity wide show: releases every hold on the root and
+ * unhides all nodes in one deferred call, applied on the
+ * game thread against the live node list. */
 static void ShowHead(void) {
-    int i;
-
-    for (i = 0; i < g_nparts; i++)
-        if (g_setVisible) g_setVisible(g_root, g_parts[i], 1, 0);
+    if (g_setVisible && g_hideRoot)
+        g_setVisible(g_hideRoot, 0, 1, 0);
     g_nparts = 0;
+    g_hideRoot = 0;
 }
 
 /* The aim group that names the head parts appears the first
@@ -95,6 +98,7 @@ static int HideHead(uint64_t root) {
     for (i = 0; i < n; i++)
         g_setVisible(root, g_parts[i], 0, 1);
     g_nparts = n;
+    g_hideRoot = root;
     return n;
 }
 
