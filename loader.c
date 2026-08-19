@@ -44,22 +44,48 @@ static void LoadRealDinput8(void) {
 
 extern void ShStateStartup(void);
 
+/* Beside the exe, not the working directory: the game is
+ * free to change that, and plugins now load from a thread.
+ */
 static void LoadASIPlugins(void) {
+    char dir[MAX_PATH], pat[MAX_PATH], full[MAX_PATH];
     WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA("*.asi", &fd);
+    HANDLE h;
+    char *slash;
+
+    if (!GetModuleFileNameA(NULL, dir, MAX_PATH)) {
+        Log("cannot find the game directory");
+        return;
+    }
+    slash = strrchr(dir, '\\');
+    if (slash) slash[1] = 0;
+    else dir[0] = 0;
+
+    snprintf(pat, sizeof(pat), "%s*.asi", dir);
+    h = FindFirstFileA(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) {
-        Log("no .asi plugins found");
+        Log("no .asi plugins in %s", dir);
         return;
     }
     do {
+        snprintf(full, sizeof(full), "%s%s", dir, fd.cFileName);
         Log("loading plugin: %s", fd.cFileName);
-        HMODULE mod = LoadLibraryA(fd.cFileName);
+        HMODULE mod = LoadLibraryA(full);
         if (mod)
             Log("  loaded at %p", (void *)mod);
         else
             Log("  FAILED (error %lu)", GetLastError());
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+}
+
+/* Plugins load here, not in DllMain. LoadLibrary blocks on
+ * the loader lock until DllMain returns, so a plugin binds
+ * against a fully initialised DLL and may import it. */
+static DWORD WINAPI LoaderThread(LPVOID p) {
+    (void)p;
+    LoadASIPlugins();
+    return 0;
 }
 
 static BOOL IsGRW(void) {
@@ -82,7 +108,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
          * resolved by the time any of them ask.
          */
         ShStateStartup();
-        LoadASIPlugins();
+        CreateThread(NULL, 0, LoaderThread, NULL, 0, NULL);
     } else if (reason == DLL_PROCESS_DETACH && g_logFile) {
         Log("unloading");
         LogClose();

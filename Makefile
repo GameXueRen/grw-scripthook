@@ -11,8 +11,9 @@ roulette: $(GAMEDIR)/tp_roulette.asi
 
 fling: $(GAMEDIR)/hitfling.asi
 
-# No import lib: plugins load from inside dinput8's
-# DllMain, so a static import on it deadlocks the loader.
+# These bind with GetProcAddress. Linking libscripthook.a
+# instead works too, since the loader loads plugins from a
+# thread rather than from DllMain.
 $(GAMEDIR)/hitfling.asi: hitfling.c scripthook.h
 	$(CC) $(CFLAGS) -o $@ hitfling.c -lgdi32 -luser32
 
@@ -28,8 +29,9 @@ $(GAMEDIR)/firstperson.asi: firstperson.c scripthook.h
 
 fov: $(GAMEDIR)/fov_changer.asi
 
-$(GAMEDIR)/fov_changer.asi: fov_changer.c scripthook.h
-	$(CC) $(CFLAGS) -o $@ fov_changer.c -lgdi32 -luser32
+$(GAMEDIR)/fov_changer.asi: fov_changer.c scripthook.h libscripthook.a
+	$(CC) $(CFLAGS) -o $@ fov_changer.c \
+		-L. -lscripthook -lgdi32 -luser32
 
 spawner: $(GAMEDIR)/spawner.asi
 

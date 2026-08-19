@@ -1,9 +1,9 @@
 /* Teleport gun. Shoot anywhere, arrive there. The hit
  * carries a normal, so it lands you on the surface.
  */
-/* Plugins load from inside dinput8's DllMain, so a static
- * import on it deadlocks the loader. Bind late.
- */
+/* Binds late by choice. Plugins may import the ScriptHook
+ * directly instead, since the loader loads them from a
+ * thread rather than from DllMain. */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>

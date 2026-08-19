@@ -1,9 +1,9 @@
 /* Shoot a car, the car goes up. A test of the OnHit
  * callback, and the reason the event exists.
  */
-/* Plugins are loaded from inside dinput8's DllMain, so a
- * static import on it deadlocks the loader. Bind late.
- */
+/* Binds late by choice. Plugins may import the ScriptHook
+ * directly instead, since the loader loads them from a
+ * thread rather than from DllMain. */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
