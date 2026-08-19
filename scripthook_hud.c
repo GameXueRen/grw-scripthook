@@ -38,6 +38,15 @@ static volatile int g_started = 0;
 static HWND g_win[HUD_ANCHORS];
 static HFONT g_font = NULL;
 
+/* Re-asserting topmost every tick makes the game fight us
+ * for z-order and hangs it, so each window is touched only
+ * when its content or geometry actually changes. */
+static volatile int g_rev = 0;
+static int g_seen[HUD_ANCHORS];
+static int g_shown[HUD_ANCHORS];
+static RECT g_last[HUD_ANCHORS];
+static int g_placed[HUD_ANCHORS];
+
 extern void ShSetError(int err);
 
 static void HudLock(void) {
@@ -46,6 +55,12 @@ static void HudLock(void) {
 
 static void HudUnlock(void) {
     if (g_lockReady) LeaveCriticalSection(&g_lock);
+}
+
+/* Marks the overlay dirty, so the timer knows there is
+ * something new to draw. */
+static void HudChanged(void) {
+    g_rev++;
 }
 
 static int AnchorOf(HWND h) {
@@ -117,10 +132,10 @@ static void PaintHud(HWND h) {
     EndPaint(h, &ps);
 }
 
-/* Resized to fit, so the window is never larger than the
- * text and the repaint stays cheap.
+/* Sized to fit its text. Returns 1 when the window needs a
+ * repaint, so an idle overlay costs nothing at all.
  */
-static void FitWindow(HWND h, int anchor) {
+static int FitWindow(HWND h, int anchor) {
     HDC dc = GetDC(h);
     HFONT oldFont = (HFONT)SelectObject(dc, g_font);
     HudSlot *list[HUD_SLOTS];
@@ -150,8 +165,11 @@ static void FitWindow(HWND h, int anchor) {
     ReleaseDC(h, dc);
 
     if (n == 0 || lines == 0) {
-        ShowWindow(h, SW_HIDE);
-        return;
+        if (g_shown[anchor]) {
+            ShowWindow(h, SW_HIDE);
+            g_shown[anchor] = 0;
+        }
+        return 0;
     }
     w += HUD_PAD * 2;
     ht = lines * HUD_LINE_H + n * HUD_PAD + HUD_PAD;
@@ -161,15 +179,39 @@ static void FitWindow(HWND h, int anchor) {
     y = (anchor == SH_HUD_TOPLEFT || anchor == SH_HUD_TOPRIGHT)
         ? HUD_MARGIN : sh - HUD_MARGIN - ht;
 
-    SetWindowPos(h, HWND_TOPMOST, x, y, w, ht,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (g_shown[anchor] && g_last[anchor].left == x &&
+        g_last[anchor].top == y && g_last[anchor].right == w &&
+        g_last[anchor].bottom == ht)
+        return 0;
+
+    g_last[anchor].left = x;
+    g_last[anchor].top = y;
+    g_last[anchor].right = w;
+    g_last[anchor].bottom = ht;
+
+    /* Topmost is claimed once. Later moves keep the z-order
+     * we already have, which is what the game can live with.
+     */
+    SetWindowPos(h, g_placed[anchor] ? NULL : HWND_TOPMOST,
+                 x, y, w, ht,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW |
+                 (g_placed[anchor] ? SWP_NOZORDER : 0));
+    g_placed[anchor] = 1;
+    g_shown[anchor] = 1;
+    return 1;
 }
 
 static LRESULT CALLBACK HudProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_PAINT) { PaintHud(h); return 0; }
     if (m == WM_TIMER) {
-        FitWindow(h, AnchorOf(h));
-        InvalidateRect(h, NULL, FALSE);
+        int a = AnchorOf(h);
+        int rev = g_rev;
+        int moved = FitWindow(h, a);
+
+        if (moved || rev != g_seen[a]) {
+            g_seen[a] = rev;
+            if (g_shown[a]) InvalidateRect(h, NULL, FALSE);
+        }
         return 0;
     }
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
@@ -264,6 +306,7 @@ SH_API int ShHudSet(uint32_t hud, const char *text) {
         s->text[0] = 0;
     }
     HudUnlock();
+    HudChanged();
     ShSetError(SH_OK);
     return 1;
 }
@@ -276,6 +319,7 @@ SH_API int ShHudColour(uint32_t hud, uint32_t rgb) {
     if (!s) { HudUnlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
     s->colour = rgb;
     HudUnlock();
+    HudChanged();
     return 1;
 }
 
@@ -287,6 +331,7 @@ SH_API int ShHudShow(uint32_t hud, int visible) {
     if (!s) { HudUnlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
     s->visible = visible ? 1 : 0;
     HudUnlock();
+    HudChanged();
     return 1;
 }
 
@@ -297,4 +342,5 @@ SH_API void ShHudDestroy(uint32_t hud) {
     s = SlotOf(hud);
     if (s) memset(s, 0, sizeof(*s));
     HudUnlock();
+    HudChanged();
 }

@@ -34,6 +34,7 @@ extern uint64_t ShReadQ(uint64_t addr);
 extern void ShSetError(int err);
 extern void ShPhysicsOnEnterPlaying(void);
 extern void ShCameraOnEnterPlaying(void);
+extern void ShHeadOnEnterPlaying(void);
 extern void ShMenuOnEnterPlaying(void);
 extern void ShInvalidate(void);
 extern void ShInvalidateHealth(void);
@@ -141,6 +142,7 @@ static void OnStateChanged(uint32_t h) {
     if (h == HASH_PLAYING || h == HASH_INGAME) {
         ShPhysicsOnEnterPlaying();
         ShCameraOnEnterPlaying();
+        ShHeadOnEnterPlaying();
         ShMenuOnEnterPlaying();
     }
 }

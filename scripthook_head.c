@@ -40,6 +40,35 @@ static uint16_t g_bone = BONE_NONE;
 static ShVec3   g_head;
 static volatile int g_valid = 0;
 
+/* Resolving the skeleton walks the component list, which is
+ * a VirtualQuery each. Idle frames must not pay that, so
+ * the pump runs only while something wants the head. */
+#define HEAD_WANT_FRAMES 600
+#define HEAD_RETRY_MS    500u
+static volatile int g_want = 0;
+
+/* Resolved addresses, so the per frame path reads them
+ * directly and calls nothing.
+ */
+static uint64_t g_originAt = 0;
+static uint64_t g_boneAt = 0;
+static int      g_ready = 0;
+static uint64_t g_lastTry = 0;
+
+void ShHeadWant(void) {
+    g_want = HEAD_WANT_FRAMES;
+}
+
+/* A new session invalidates everything cached. */
+void ShHeadOnEnterPlaying(void) {
+    g_ready = 0;
+    g_valid = 0;
+    g_skel = 0;
+    g_skelEnt = 0;
+    g_bone = BONE_NONE;
+    g_lastTry = 0;
+}
+
 static uint64_t FindSkeleton(uint64_t entity) {
     uint64_t arr;
     uint16_t n = 0, i;
@@ -75,58 +104,71 @@ static uint16_t HeadBone(uint64_t skel) {
     return (idx < 512) ? idx : BONE_NONE;
 }
 
-/* Model space, but a head sits within about 0.15m of the
- * centre line, so only its height is taken and the
- * character's rotation never matters. */
-static int ReadHead(uint64_t skel, uint16_t bone, ShVec3 *out) {
-    uint64_t pose, buf, rec;
-    float org[3], b[3];
+/* Everything expensive happens here, once. After this the
+ * per frame cost is two reads of known addresses.
+ */
+static int Resolve(void) {
+    ShPlayer p;
+    uint64_t root, pose, buf;
 
-    if (bone >= 512) return 0;
-    if (!ShReadableAddr(skel + SKEL_ORIGIN, 12)) return 0;
-    memcpy(org, (void *)(uintptr_t)(skel + SKEL_ORIGIN), 12);
+    g_ready = 0;
+    memset(&p, 0, sizeof(p));
+    if (!ShGetPlayer(&p)) return 0;
+    root = p.root ? p.root : p.entity;
+    if (!root) return 0;
 
-    pose = ShReadQ(skel + SKEL_POSE);
+    g_skelEnt = root;
+    g_skel = FindSkeleton(root);
+    if (!g_skel) return 0;
+
+    g_bone = HeadBone(g_skel);
+    if (g_bone >= 512) return 0;
+
+    pose = ShReadQ(g_skel + SKEL_POSE);
     if (!pose || !ShReadableAddr(pose + POSE_BUF, 8)) return 0;
     buf = ShReadQ(pose + POSE_BUF);
     if (!buf) return 0;
 
-    rec = buf + (uint64_t)bone * BONE_STRIDE;
-    if (!ShReadableAddr(rec, 12)) return 0;
-    memcpy(b, (void *)(uintptr_t)rec, 12);
+    g_originAt = g_skel + SKEL_ORIGIN;
+    g_boneAt = buf + (uint64_t)g_bone * BONE_STRIDE;
+    if (!ShReadableAddr(g_originAt, 12)) return 0;
+    if (!ShReadableAddr(g_boneAt, 12)) return 0;
 
-    if (b[2] < 0.1f || b[2] > 2.5f) return 0;
-    out->x = org[0];
-    out->y = org[1];
-    out->z = org[2] + b[2];
+    g_ready = 1;
     return 1;
 }
 
-/* Driven from the camera detour, on the game thread. */
+/* Driven from the camera detour, on the game thread. No
+ * lookups here: the addresses were validated at resolve,
+ * and a bad reading sends us back to resolve. */
 void ShHeadPump(void) {
-    ShPlayer p;
-    uint64_t root;
-    ShVec3 v;
+    float org[3], b[3];
 
-    memset(&p, 0, sizeof(p));
-    if (!ShGetPlayer(&p)) { g_valid = 0; return; }
-    root = p.root ? p.root : p.entity;
-    if (!root) { g_valid = 0; return; }
+    if (g_want <= 0) { g_valid = 0; return; }
+    g_want--;
 
-    if (root != g_skelEnt || !g_skel || ShReadQ(g_skel) != SKEL_VT) {
-        g_skelEnt = root;
-        g_skel = FindSkeleton(root);
-        g_bone = BONE_NONE;
+    if (!g_ready) {
+        uint64_t now = GetTickCount64();
+        if (now - g_lastTry < HEAD_RETRY_MS) return;
+        g_lastTry = now;
+        if (!Resolve()) { g_valid = 0; return; }
     }
-    if (!g_skel) { g_valid = 0; return; }
-    if (g_bone == BONE_NONE) g_bone = HeadBone(g_skel);
 
-    if (ReadHead(g_skel, g_bone, &v)) {
-        g_head = v;
-        g_valid = 1;
-    } else {
+    memcpy(org, (void *)(uintptr_t)g_originAt, 12);
+    memcpy(b, (void *)(uintptr_t)g_boneAt, 12);
+
+    /* A recycled buffer reads as nonsense, which is the
+     * signal to resolve again rather than to poll.
+     */
+    if (!(b[2] > 0.1f && b[2] < 2.5f)) {
+        g_ready = 0;
         g_valid = 0;
+        return;
     }
+    g_head.x = org[0];
+    g_head.y = org[1];
+    g_head.z = org[2] + b[2];
+    g_valid = 1;
 }
 
 int ShHeadCached(ShVec3 *out) {
@@ -137,6 +179,7 @@ int ShHeadCached(ShVec3 *out) {
 
 /** The player's head in world space, at eye height. */
 SH_API int ShGetHeadPosition(ShVec3 *out) {
+    ShHeadWant();
     if (!out) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (!g_valid) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
     *out = g_head;

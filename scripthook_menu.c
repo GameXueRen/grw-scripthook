@@ -250,12 +250,19 @@ static void PaintMenu(HWND h) {
     EndPaint(h, &ps);
 }
 
-static void FitMenu(void) {
+/* Touched only on a real change. Re-asserting topmost every
+ * tick makes the game fight us for z-order and hang.
+ */
+static int FitMenu(void) {
+    static int shown = 0, placed = 0, lastHt = 0;
     Menu *m;
     int rows, ht;
 
-    if (!g_wnd) return;
-    if (!g_open) { ShowWindow(g_wnd, SW_HIDE); return; }
+    if (!g_wnd) return 0;
+    if (!g_open) {
+        if (shown) { ShowWindow(g_wnd, SW_HIDE); shown = 0; }
+        return 0;
+    }
 
     Lock();
     m = MenuOf(g_current);
@@ -265,8 +272,39 @@ static void FitMenu(void) {
     Unlock();
 
     ht = PAD * 2 + ROW_H + 2 + rows * ROW_H;
-    SetWindowPos(g_wnd, HWND_TOPMOST, MARGIN, MARGIN, 380, ht,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (shown && ht == lastHt) return 0;
+    lastHt = ht;
+
+    SetWindowPos(g_wnd, placed ? NULL : HWND_TOPMOST,
+                 MARGIN, MARGIN, 380, ht,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW |
+                 (placed ? SWP_NOZORDER : 0));
+    placed = 1;
+    shown = 1;
+    return 1;
+}
+
+/* What the menu currently looks like. Repainting only when
+ * this changes keeps an open menu idle. Caller holds the
+ * lock. */
+static unsigned MenuSig(void) {
+    Menu *m = MenuOf(g_current);
+    const char *p;
+    unsigned s = (unsigned)g_current * 2654435761u;
+    int i;
+
+    if (!m) return s;
+    s = s * 31u + (unsigned)m->sel;
+    s = s * 31u + (unsigned)m->top;
+    s = s * 31u + (unsigned)m->count;
+    for (p = m->status; *p; p++) s = s * 31u + (unsigned char)*p;
+
+    for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
+        char v[32];
+        ValueText(&m->items[i], v, sizeof(v));
+        for (p = v; *p; p++) s = s * 31u + (unsigned char)*p;
+    }
+    return s;
 }
 
 static LRESULT CALLBACK MenuProc(HWND h, UINT msg, WPARAM w,
@@ -279,6 +317,8 @@ static LRESULT CALLBACK MenuProc(HWND h, UINT msg, WPARAM w,
 static DWORD WINAPI MenuThread(LPVOID p) {
     WNDCLASSA wc;
     MSG msg;
+    unsigned sig = 0, lastSig = ~0u;
+    int moved;
     (void)p;
 
     memset(&wc, 0, sizeof(wc));
@@ -313,10 +353,14 @@ static DWORD WINAPI MenuThread(LPVOID p) {
         if (g_open) {
             Lock();
             Navigate();
+            sig = MenuSig();
             Unlock();
+        }
+        moved = FitMenu();
+        if (g_open && (moved || sig != lastSig)) {
+            lastSig = sig;
             InvalidateRect(g_wnd, NULL, FALSE);
         }
-        FitMenu();
     }
     return 0;
 }

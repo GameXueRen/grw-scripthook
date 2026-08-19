@@ -67,6 +67,9 @@ static uint8_t  g_thunkOrig[5];
 extern void ShSetError(int err);
 extern void ShVisibilityPump(void);
 extern void ShHeadPump(void);
+extern void ShHeadWant(void);
+extern int ShFovSet(float radians);
+extern void ShFovClear(void);
 extern int ShHeadCached(ShVec3 *out);
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern void *ShAllocNear(uint64_t target);
@@ -160,8 +163,9 @@ static void ApplyFields(uint64_t cam) {
     else if (g_apply & CAM_ORBIT_BIT) ApplyOrbit(cam);
     else if (g_apply & SH_CAM_POS)
         WritePos(cam, g_absPos.x, g_absPos.y, g_absPos.z);
-    if (g_apply & SH_CAM_FOV)
-        *(float *)(uintptr_t)(cam + CAM_FOV) = g_fov;
+    /* fov is not written here. It is taken at its source,
+     * ahead of culling. See scripthook_fov.c
+     */
     if (g_apply & SH_CAM_SKEW) {
         *(float *)(uintptr_t)(cam + CAM_SKEWX) = g_skewX;
         *(float *)(uintptr_t)(cam + CAM_SKEWY) = g_skewY;
@@ -184,6 +188,7 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
      * override is reapplied in the same window.
      */
     ShVisibilityPump();
+    if (g_apply & CAM_HEAD_BIT) ShHeadWant();
     ShHeadPump();
 
     if (g_apply) ApplyFields(rcx);
@@ -428,7 +433,13 @@ SH_API int ShCameraApply(const ShCameraOverride *o) {
         g_pitch = p;
         g_roll = o->roll;
     }
-    if (o->apply & SH_CAM_FOV) g_fov = o->fov;
+    if (o->apply & SH_CAM_FOV) {
+        g_fov = o->fov;
+        if (!ShFovSet(o->fov)) {
+            ShSetError(SH_ERR_NO_CANDIDATE);
+            return 0;
+        }
+    }
     if (o->apply & SH_CAM_SKEW) {
         g_skewX = o->skewX;
         g_skewY = o->skewY;
@@ -465,6 +476,7 @@ SH_API int ShCameraMatrix(int index, float *out16) {
 
 SH_API void ShCameraRelease(void) {
     g_apply = 0;
+    ShFovClear();
 }
 
 /* Give back only what you took, so releasing a free camera
@@ -472,6 +484,7 @@ SH_API void ShCameraRelease(void) {
  */
 SH_API void ShCameraReleaseFields(uint32_t fields) {
     if (fields & SH_CAM_POS) fields |= CAM_DERIVED;
+    if (fields & SH_CAM_FOV) ShFovClear();
     g_apply &= ~fields;
 }
 
