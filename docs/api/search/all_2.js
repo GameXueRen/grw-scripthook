@@ -8,5 +8,6 @@ var searchData=
   ['combat_20events_5',['Combat events',['../group__combat.html',1,'']]],
   ['component_6',['component',['../structShComponent.html#a0e334eb1797fb5ad32ceaa577d23fc6e',1,'ShComponent']]],
   ['core_7',['Core',['../group__core.html',1,'']]],
-  ['credits_8',['Credits',['../index.html#autotoc_md2',1,'']]]
+  ['crash_20reports_8',['Crash reports',['../group__crash.html',1,'']]],
+  ['credits_9',['Credits',['../index.html#autotoc_md2',1,'']]]
 ];

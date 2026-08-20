@@ -141,149 +141,51 @@ static int IsHeapPtr(uint64_t v) {
     return v >= 0x10000 && v < 0x7FF000000000ULL;
 }
 
-/* ---- freeze on crash ---- */
+/* ---- crash reports ---- */
 
-/* A fatal exception parks its thread in a sleep loop
- * instead of killing the process. The REPL thread stays
- * up, so the corpse can be inspected live. */
-static volatile LONG g_crashN = 0;
-static char g_crashInfo[4096];
+/* The handler lives in dinput8 now, so every user gets
+ * reports. This is the control surface for it.
+ */
+static void CmdCrash(Resp *r, const char *line) {
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    int (*count)(void);
+    int (*healed)(void);
+    int (*report)(char *, int);
+    int (*setFreeze)(int);
+    int (*freezeOn)(void);
+    char arg[32] = {0};
+    char buf[4096];
 
-/* Crash path: no CRT heap, no locks, kernel calls only. */
-static int CrashReadQ(uint64_t at, uint64_t *out) {
-    MEMORY_BASIC_INFORMATION mbi;
-
-    if (!VirtualQuery((void *)(uintptr_t)at, &mbi, sizeof(mbi)))
-        return 0;
-    if (mbi.State != MEM_COMMIT) return 0;
-    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
-    memcpy(out, (void *)(uintptr_t)at, 8);
-    return 1;
-}
-
-static int CrashWhere(char *dst, int cap, uint64_t at) {
-    HMODULE m = NULL;
-    char path[MAX_PATH];
-    const char *name;
-
-    if (!GetModuleHandleExA(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            (LPCSTR)(uintptr_t)at, &m) || !m)
-        return snprintf(dst, cap, "%016llX (no module)",
-                        (unsigned long long)at);
-    path[0] = 0;
-    GetModuleFileNameA(m, path, sizeof(path));
-    name = strrchr(path, '\\');
-    name = name ? name + 1 : path;
-    return snprintf(dst, cap, "%s+0x%llX", name,
-                    (unsigned long long)(at - (uint64_t)(uintptr_t)m));
-}
-
-static void CrashFile(const char *text, int len) {
-    HANDLE f = CreateFileA("scripthook_crash.log",
-                           FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
-                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    DWORD wrote;
-
-    if (f == INVALID_HANDLE_VALUE) return;
-    WriteFile(f, text, (DWORD)len, &wrote, NULL);
-    CloseHandle(f);
-}
-
-static LONG WINAPI CrashFreeze(EXCEPTION_POINTERS *ep) {
-    char buf[3072], at[128];
-    int n = 0, i;
-    EXCEPTION_RECORD *er = ep->ExceptionRecord;
-    CONTEXT *c = ep->ContextRecord;
-
-    CrashWhere(at, sizeof(at), (uint64_t)(uintptr_t)er->ExceptionAddress);
-    n += snprintf(buf + n, sizeof(buf) - n,
-                  "exception %08lX at %s, thread %lu\n",
-                  (unsigned long)er->ExceptionCode, at,
-                  (unsigned long)GetCurrentThreadId());
-    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
-        er->NumberParameters >= 2) {
-        const char *kind = er->ExceptionInformation[0] == 0 ? "read"
-                         : er->ExceptionInformation[0] == 1 ? "write"
-                         : "exec";
-        n += snprintf(buf + n, sizeof(buf) - n,
-                      "  %s of %016llX\n", kind,
-                      (unsigned long long)er->ExceptionInformation[1]);
-    }
-    n += snprintf(buf + n, sizeof(buf) - n,
-                  "  rip %016llX rsp %016llX rbp %016llX\n"
-                  "  rax %016llX rbx %016llX rcx %016llX\n"
-                  "  rdx %016llX rsi %016llX rdi %016llX\n"
-                  "  r8  %016llX r9  %016llX r10 %016llX\n"
-                  "  r11 %016llX r12 %016llX r13 %016llX\n"
-                  "  r14 %016llX r15 %016llX\n",
-                  (unsigned long long)c->Rip, (unsigned long long)c->Rsp,
-                  (unsigned long long)c->Rbp, (unsigned long long)c->Rax,
-                  (unsigned long long)c->Rbx, (unsigned long long)c->Rcx,
-                  (unsigned long long)c->Rdx, (unsigned long long)c->Rsi,
-                  (unsigned long long)c->Rdi, (unsigned long long)c->R8,
-                  (unsigned long long)c->R9,  (unsigned long long)c->R10,
-                  (unsigned long long)c->R11, (unsigned long long)c->R12,
-                  (unsigned long long)c->R13, (unsigned long long)c->R14,
-                  (unsigned long long)c->R15);
-
-    /* The raw stack, annotated per module, which is a poor
-     * man's backtrace: return addresses stand out.
-     */
-    for (i = 0; i < 24 && n < (int)sizeof(buf) - 100; i++) {
-        uint64_t v = 0;
-        if (!CrashReadQ(c->Rsp + (uint64_t)i * 8, &v)) break;
-        at[0] = 0;
-        if (v > 0x10000)
-            CrashWhere(at, sizeof(at), v);
-        n += snprintf(buf + n, sizeof(buf) - n,
-                      "  rsp+%02X %016llX %s\n", i * 8,
-                      (unsigned long long)v,
-                      (v > 0x10000 && !strstr(at, "no module")) ? at : "");
-    }
-
-    if (InterlockedIncrement(&g_crashN) == 1) {
-        memcpy(g_crashInfo, buf, (size_t)n);
-        g_crashInfo[n] = 0;
-    }
-    CrashFile(buf, n);
-
-    for (;;) Sleep(60000);
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-
-/* Vectored, so it fires FIRST, before the game's own SEH
- * and any crash reporter can eat the exception. Fatal
- * codes freeze; everything else passes through. */
-static LONG CALLBACK CrashVeh(EXCEPTION_POINTERS *ep) {
-    switch (ep->ExceptionRecord->ExceptionCode) {
-    case EXCEPTION_ACCESS_VIOLATION:
-    case EXCEPTION_ILLEGAL_INSTRUCTION:
-    case EXCEPTION_PRIV_INSTRUCTION:
-    case EXCEPTION_STACK_OVERFLOW:
-    case EXCEPTION_INT_DIVIDE_BY_ZERO:
-        return CrashFreeze(ep);
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-static void CmdCrash(Resp *r) {
-    /* Re-arm every query: crash reporters steal the slot. */
-    SetUnhandledExceptionFilter(CrashFreeze);
-    if (g_crashN == 0) {
-        RAppend(r, "no crash caught. filter armed.\n");
+    if (!m) { RAppend(r, "dinput8 not loaded\n"); return; }
+    *(FARPROC *)&count = GetProcAddress(m, "ShCrashCount");
+    *(FARPROC *)&healed = GetProcAddress(m, "ShCrashHealed");
+    *(FARPROC *)&report = GetProcAddress(m, "ShCrashReport");
+    *(FARPROC *)&setFreeze = GetProcAddress(m, "ShSetCrashFreeze");
+    *(FARPROC *)&freezeOn = GetProcAddress(m, "ShCrashFreezeOn");
+    if (!count || !report || !setFreeze) {
+        RAppend(r, "no crash API, rebuild dinput8\n");
         return;
     }
-    RAppend(r, "%ld thread(s) frozen. first:\n%s",
-            (long)g_crashN, g_crashInfo);
+
+    sscanf(line, "%*s %31s", arg);
+    if (arg[0]) {
+        setFreeze(strcmp(arg, "off") != 0);
+        RAppend(r, "freeze %s\n", freezeOn() ? "on" : "off");
+        return;
+    }
+
+    RAppend(r, "caught %d, healed %d, freeze %s\n",
+            count(), healed ? healed() : -1,
+            freezeOn && freezeOn() ? "on" : "off");
+    if (count() > 0 && report(buf, (int)sizeof(buf)))
+        RAppend(r, "first:\n%s", buf);
 }
 
 /* ---- commands ---- */
 
 static void CmdHelp(Resp *r) {
     RAppend(r, "commands:\n");
-    RAppend(r, "  crash              frozen crash report, arms filter\n");
+    RAppend(r, "  crash [on|off]     crash report, freeze toggle\n");
     RAppend(r, "  base               image base address\n");
     RAppend(r, "  sections           list PE sections\n");
     RAppend(r, "  scan <string>      find string in memory\n");
@@ -4864,7 +4766,7 @@ static void Dispatch(const char *line, Resp *r) {
     sscanf(line, "%63s %511s %63s", cmd, arg1, arg2);
 
     if (strcmp(cmd, "help") == 0)           CmdHelp(r);
-    else if (strcmp(cmd, "crash") == 0)     CmdCrash(r);
+    else if (strcmp(cmd, "crash") == 0)     CmdCrash(r, line);
     else if (strcmp(cmd, "base") == 0)      CmdBase(r);
     else if (strcmp(cmd, "sections") == 0)  CmdSections(r);
     else if (strcmp(cmd, "scan") == 0) {
@@ -5094,11 +4996,6 @@ static DWORD WINAPI ServerThread(LPVOID param) {
         if (client == INVALID_SOCKET) continue;
         PLog("client connected");
 
-        /* Crash reporters steal the filter slot, so take
-         * it back on every connection.
-         */
-        SetUnhandledExceptionFilter(CrashFreeze);
-
         const char *banner =
             "GRW ScriptHook REPL v0.1\n"
             "type 'help' for commands\n> ";
@@ -5148,8 +5045,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_log = fopen("scripthook_repl.log", "w");
         PLog("REPL plugin loaded");
-        AddVectoredExceptionHandler(1, CrashVeh);
-        SetUnhandledExceptionFilter(CrashFreeze);
         CreateThread(NULL, 0, ServerThread, NULL, 0, NULL);
     }
     return TRUE;

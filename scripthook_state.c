@@ -190,10 +190,15 @@ SH_API int ShIsInGame(void) {
 /* dinput8 watches the state itself. Plugins never have
  * to poll for the API to stay correct.
  */
+extern void ShCrashRearm(void);
+
 static DWORD WINAPI StateWatchThread(LPVOID p) {
+    int tick = 0;
+
     (void)p;
     for (;;) {
         TrackState(StateHash(CurrentState()));
+        if (++tick >= 20) { tick = 0; ShCrashRearm(); }
         Sleep(100);
     }
     return 0;

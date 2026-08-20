@@ -62,7 +62,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
                         scripthook_blur.c \
                         scripthook_stat.c scripthook_resource.c \
                         scripthook_stealth.c scripthook_ammo.c \
-                        scripthook_weather.c \
+                        scripthook_weather.c scripthook_crash.c \
                         scripthook_hud.c scripthook_menu.c guard.c scripthook.h log.h
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_physics.c scripthook_health.c \
@@ -72,7 +72,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
 		scripthook_fov.c scripthook_blur.c \
 		scripthook_stat.c scripthook_resource.c \
 		scripthook_stealth.c scripthook_ammo.c \
-		scripthook_weather.c \
+		scripthook_weather.c scripthook_crash.c \
 		scripthook_hud.c scripthook_menu.c guard.c \
 		-ldinput8 -ldxguid -lgdi32 -luser32 \
 		-Wl,--out-implib,libscripthook.a

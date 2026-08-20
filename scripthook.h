@@ -529,6 +529,34 @@ SH_API int  ShInPauseMenu(void);
 SH_API int  ShSetCameraBlur(int on);
 SH_API int  ShCameraBlurOff(void);
 
+/** @} */
+
+/** @defgroup crash Crash reports
+ *  Faults land in scripthook_crash.log, annotated.
+ *  @{ */
+
+/** How many crashes have been caught this session. */
+SH_API int  ShCrashCount(void);
+
+/** How many were resumed on the engine's own null path,
+ *  which the player never sees.
+ */
+SH_API int  ShCrashHealed(void);
+
+/** The first report of the session, as text. */
+SH_API int  ShCrashReport(char *buf, int len);
+
+/** Freeze parks the faulting thread instead of dying,
+ *  for a live post mortem. Opt in: a handled exception
+ *  hangs rather than continues. */
+SH_API int  ShSetCrashFreeze(int on);
+SH_API int  ShCrashFreezeOn(void);
+
+/** @} */
+
+/** @addtogroup camera
+ *  @{ */
+
 /** Where the camera is, and how it is pointed. */
 SH_API int  ShGetCamera(ShCamera *out);
 

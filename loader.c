@@ -43,6 +43,7 @@ static void LoadRealDinput8(void) {
 }
 
 extern void ShStateStartup(void);
+extern void ShCrashStartup(void);
 
 /* Beside the exe, not the working directory: the game is
  * free to change that, and plugins now load from a thread.
@@ -103,6 +104,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         LogInit("scripthook.log");
         Log("GRW ScriptHook loader v0.1");
         Log("built " __DATE__ " " __TIME__);
+        /* Armed first, so a crash during our own start up
+         * is reported too.
+         */
+        ShCrashStartup();
         LoadRealDinput8();
         /* Watch state before plugins, so the world is
          * resolved by the time any of them ask.
