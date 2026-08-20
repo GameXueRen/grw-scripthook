@@ -80,6 +80,12 @@ SH_API const char *ShErrorString(int err) {
         return "too far from the player: collision only streams "
                "in within about 1500m, so query nearer or move "
                "the player there first";
+    case SH_ERR_CONTROLLER:
+        return "please use the native player controller "
+               "velocity for this purpose: this entity is "
+               "driven by a character controller, so its "
+               "Havok body ignores velocity and writing it "
+               "detaches the collision body from the player";
     default:               return "unknown";
     }
 }
@@ -488,6 +494,149 @@ SH_API int ShPlaceEntity(uint64_t entity, const ShVec3 *pos,
     ((SetTransform_t)SH_SET_TRANSFORM)(entity, m, 1);
     g_lastError = SH_OK;
     return 1;
+}
+
+/* Full orientation, which ShPlaceEntity cannot express:
+ * it derives up from forward, so it can never roll a
+ * thing onto its roof. Radians, game basis. */
+SH_API int ShPlaceEntityRot(uint64_t entity, const ShVec3 *pos,
+                            float yaw, float pitch, float roll) {
+    float m[16];
+    float cy = cosf(yaw), sy = sinf(yaw);
+    float cp = cosf(pitch), sp = sinf(pitch);
+    float cr = cosf(roll), sr = sinf(roll);
+    float r[3], f[3], u[3];
+    int k;
+
+    if (!entity || !pos) return ShFail(SH_ERR_BAD_ARG);
+    if (!ShIsEntity(entity)) return ShFail(SH_ERR_NOT_ENTITY);
+    if (!ShReadable(entity + OFF_ENT_MATRIX, 64))
+        return ShFail(SH_ERR_UNWRITABLE);
+    memcpy(m, (void *)(uintptr_t)(entity + OFF_ENT_MATRIX), 64);
+
+    r[0] = cy;       r[1] = -sy;      r[2] = 0.0f;
+    f[0] = sy * cp;  f[1] = cy * cp;  f[2] = sp;
+    u[0] = -sy * sp; u[1] = -cy * sp; u[2] = cp;
+
+    /* Roll turns right and up about forward, so the body
+     * tips without changing where it points.
+     */
+    for (k = 0; k < 3; k++) {
+        float rr = r[k] * cr + u[k] * sr;
+        float uu = -r[k] * sr + u[k] * cr;
+        r[k] = rr;
+        u[k] = uu;
+    }
+
+    memcpy(m + 0, r, 12);
+    memcpy(m + 4, f, 12);
+    memcpy(m + 8, u, 12);
+    m[12] = pos->x;
+    m[13] = pos->y;
+    m[14] = pos->z;
+    m[15] = 1.0f;
+
+    ((SetTransform_t)SH_SET_TRANSFORM)(entity, m, 1);
+    g_lastError = SH_OK;
+    return 1;
+}
+
+/* The inverse of ShPlaceEntityRot, so a caller can turn a
+ * thing relative to how it already sits.
+ */
+SH_API int ShGetEntityTransform(uint64_t entity, ShVec3 *pos,
+                                float *yaw, float *pitch,
+                                float *roll) {
+    float m[16], f[3], r[3];
+    float y, p, cy, sy, cp, sp;
+    float r0[3], u0[3], s;
+
+    if (!entity) return ShFail(SH_ERR_BAD_ARG);
+    if (!ShIsEntity(entity)) return ShFail(SH_ERR_NOT_ENTITY);
+    if (!ShReadMem(entity + OFF_ENT_MATRIX, m, 64))
+        return ShFail(SH_ERR_UNWRITABLE);
+
+    r[0] = m[0]; r[1] = m[1]; r[2] = m[2];
+    f[0] = m[4]; f[1] = m[5]; f[2] = m[6];
+
+    if (pos) {
+        pos->x = m[12];
+        pos->y = m[13];
+        pos->z = m[14];
+    }
+
+    y = atan2f(f[0], f[1]);
+    s = f[2];
+    if (s > 1.0f) s = 1.0f;
+    if (s < -1.0f) s = -1.0f;
+    p = asinf(s);
+
+    /* Roll is what is left once yaw and pitch are taken
+     * out: the angle between the actual right axis and
+     * the one an unrolled basis would have. */
+    cy = cosf(y); sy = sinf(y);
+    cp = cosf(p); sp = sinf(p);
+    r0[0] = cy;       r0[1] = -sy;      r0[2] = 0.0f;
+    u0[0] = -sy * sp; u0[1] = -cy * sp; u0[2] = cp;
+
+    if (yaw) *yaw = y;
+    if (pitch) *pitch = p;
+    if (roll)
+        *roll = atan2f(r[0]*u0[0] + r[1]*u0[1] + r[2]*u0[2],
+                       r[0]*r0[0] + r[1]*r0[1] + r[2]*r0[2]);
+    g_lastError = SH_OK;
+    return 1;
+}
+
+/* SetTransform reaches engine code that takes a thread
+ * local scratch allocator. Off a game thread TlsGetValue
+ * returns null and so does its fallback, and it dies. */
+/* The physics ray callback is the wrong game thread spot:
+ * it already holds the physics lock and re-entering it
+ * deadlocks. The frame path is the window that works. */
+#define XQ_MAX 32
+
+typedef struct {
+    uint64_t ent;
+    ShVec3   pos;
+    float    yaw, pitch, roll;
+    volatile int ready;
+} ShXForm;
+
+static ShXForm g_xq[XQ_MAX];
+
+SH_API int ShQueueTransform(uint64_t entity, const ShVec3 *pos,
+                            float yaw, float pitch, float roll) {
+    int i;
+
+    if (!entity || !pos) return ShFail(SH_ERR_BAD_ARG);
+    for (i = 0; i < XQ_MAX; i++) {
+        if (g_xq[i].ready) continue;
+        g_xq[i].ent = entity;
+        g_xq[i].pos = *pos;
+        g_xq[i].yaw = yaw;
+        g_xq[i].pitch = pitch;
+        g_xq[i].roll = roll;
+        /* Published last, so the pump never sees a half
+         * filled slot.
+         */
+        g_xq[i].ready = 1;
+        g_lastError = SH_OK;
+        return 1;
+    }
+    return ShFail(SH_ERR_NO_CANDIDATE);
+}
+
+/* Drained on the frame path, on the game thread. */
+void ShTransformPump(void) {
+    int i;
+
+    for (i = 0; i < XQ_MAX; i++) {
+        if (!g_xq[i].ready) continue;
+        ShPlaceEntityRot(g_xq[i].ent, &g_xq[i].pos, g_xq[i].yaw,
+                         g_xq[i].pitch, g_xq[i].roll);
+        g_xq[i].ready = 0;
+    }
 }
 
 /* An entity link in the parent chain means the player is

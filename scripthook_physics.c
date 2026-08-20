@@ -164,12 +164,36 @@ static uint64_t g_qArg[4];
 static volatile uint64_t g_qRet = 0;
 static volatile int g_qPending = 0;
 static volatile int g_qDone = 0;
+static volatile int g_qFloat = 0;
+static volatile float g_qF[3];
+
+typedef uint64_t (__attribute__((ms_abi)) *ShQFnF_t)(uint64_t,
+                                                     uint64_t,
+                                                     float, float,
+                                                     float);
 
 SH_API int ShQueueCall(uint64_t fn, uint64_t a0, uint64_t a1,
                        uint64_t a2, uint64_t a3) {
     if (!fn || g_qPending) return 0;
     g_qArg[0] = a0; g_qArg[1] = a1;
     g_qArg[2] = a2; g_qArg[3] = a3;
+    g_qFloat = 0;
+    g_qRet = 0;
+    g_qDone = 0;
+    g_qFn = fn;
+    g_qPending = 1;
+    return 1;
+}
+
+/* Args three to five are floats, which the ABI puts in
+ * xmm2, xmm3 and the stack. The integer path cannot reach
+ * those, so the call goes through its own signature. */
+SH_API int ShQueueCallF(uint64_t fn, uint64_t a0, uint64_t a1,
+                        float f2, float f3, float f4) {
+    if (!fn || g_qPending) return 0;
+    g_qArg[0] = a0; g_qArg[1] = a1;
+    g_qF[0] = f2; g_qF[1] = f3; g_qF[2] = f4;
+    g_qFloat = 1;
     g_qRet = 0;
     g_qDone = 0;
     g_qFn = fn;
@@ -366,8 +390,12 @@ RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
         uint64_t f = g_qFn;
         uint64_t a0 = g_qArg[0], a1 = g_qArg[1];
         uint64_t a2 = g_qArg[2], a3 = g_qArg[3];
+        int isF = g_qFloat;
+        float f2 = g_qF[0], f3 = g_qF[1], f4 = g_qF[2];
+
         g_qPending = 0;
-        g_qRet = ((ShQFn_t)f)(a0, a1, a2, a3);
+        if (isF) g_qRet = ((ShQFnF_t)f)(a0, a1, f2, f3, f4);
+        else     g_qRet = ((ShQFn_t)f)(a0, a1, a2, a3);
         g_qDone = 1;
     }
     if (!g_req || g_busy || !g_B) return;
@@ -475,6 +503,16 @@ static int EnsurePhysics(void) {
 }
 
 /* Pure predicate, no side effects. */
+/* The ray callback's rcx is the hknpWorld itself, and
+ * ResolveWorld finds the game's PhysicsWorld by requiring
+ * its +0x10 to equal that. See HAVOK.md. */
+SH_API uint64_t ShPhysicsWorldObject(void) { return g_A; }
+
+SH_API uint64_t ShHavokWorldPtr(void) {
+    if (g_ctx) return g_ctx;
+    return g_A ? ShReadQ(g_A + 0x10) : 0;
+}
+
 SH_API int ShPhysicsReady(void) {
     return (g_stub != NULL && g_B != 0);
 }

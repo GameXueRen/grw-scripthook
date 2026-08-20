@@ -77,6 +77,7 @@ static uint8_t  g_thunkOrig[5];
 
 extern void ShSetError(int err);
 extern void ShVisibilityPump(void);
+extern void ShTransformPump(void);
 extern void ShHeadPump(void);
 extern void ShHeadWant(void);
 extern int ShFovSet(float radians);
@@ -295,6 +296,7 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
      * override is reapplied in the same window.
      */
     ShVisibilityPump();
+    ShTransformPump();
     if (g_apply & CAM_HEAD_BIT) ShHeadWant();
     ShHeadPump();
 

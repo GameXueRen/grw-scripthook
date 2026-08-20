@@ -65,7 +65,8 @@ enum ShError {
     SH_ERR_NO_PHYSICS,
     SH_ERR_NO_GROUND,
     SH_ERR_NOT_IN_GAME,
-    SH_ERR_NOT_STREAMED
+    SH_ERR_NOT_STREAMED,
+    SH_ERR_CONTROLLER
 };
 
 /** @} */
@@ -159,6 +160,25 @@ SH_API int  ShIsInVehicle(void);
  */
 SH_API int  ShPlaceEntity(uint64_t entity, const ShVec3 *pos,
                           const ShVec3 *orient);
+
+/** Full orientation in radians, which ShPlaceEntity
+ *  cannot express: roll puts a car on its roof.
+ */
+SH_API int  ShPlaceEntityRot(uint64_t entity, const ShVec3 *pos,
+                             float yaw, float pitch, float roll);
+
+/** Its inverse: where a thing is and how it is turned, so
+ *  a caller can rotate relative to that.
+ */
+SH_API int  ShGetEntityTransform(uint64_t entity, ShVec3 *pos,
+                                 float *yaw, float *pitch,
+                                 float *roll);
+
+/** Applied on the frame path rather than right now. Set
+ *  transform wants a game thread's scratch allocator.
+ */
+SH_API int  ShQueueTransform(uint64_t entity, const ShVec3 *pos,
+                             float yaw, float pitch, float roll);
 /** Entity kinds, from the engine's own net identity
  *  component. SH_KIND_ANY matches every typed entity.
  */
@@ -234,6 +254,12 @@ SH_API uint64_t ShFindComponent(uint64_t entity,
  */
 SH_API int  ShQueueCall(uint64_t fn, uint64_t a0, uint64_t a1,
                         uint64_t a2, uint64_t a3);
+
+/** Args three to five as floats, which the ABI passes in
+ *  xmm2, xmm3 and the stack rather than the int registers.
+ */
+SH_API int  ShQueueCallF(uint64_t fn, uint64_t a0, uint64_t a1,
+                         float f2, float f3, float f4);
 SH_API int  ShQueueResult(uint64_t *outRet);
 
 /** @} */
@@ -531,6 +557,69 @@ SH_API int  ShCameraBlurOff(void);
 
 /** @} */
 
+/** @defgroup motion Motion
+ *  Push things rather than teleporting them.
+ *  @{ */
+
+/** Pass an entity, never a body id: an entity owns several
+ *  bodies and these calls write every one of them.
+ */
+
+/** Metres a second, world axes, Z up. Clamped to 200. */
+SH_API int  ShGetVelocity(uint64_t entity, ShVec3 *out);
+SH_API int  ShSetVelocity(uint64_t entity, const ShVec3 *v);
+SH_API int  ShAddVelocity(uint64_t entity, const ShVec3 *v);
+
+/** Radians a second about each world axis. */
+SH_API int  ShGetAngularVelocity(uint64_t entity, ShVec3 *out);
+SH_API int  ShSetAngularVelocity(uint64_t entity, const ShVec3 *v);
+SH_API int  ShAddAngularVelocity(uint64_t entity, const ShVec3 *v);
+
+/** A push at a world point, shoving and spinning like a
+ *  hit on a corner. NULL point gives a pure shove.
+ */
+SH_API int  ShShove(uint64_t entity, const ShVec3 *dir,
+                    float strength, const ShVec3 *atWorldPos);
+
+/** True when velocity moves this entity. Characters run on
+ *  a controller that ignores it, resting bodies sleep.
+ */
+SH_API int  ShCanMove(uint64_t entity);
+
+/** @} */
+
+/** @defgroup havokdiag Havok diagnostics
+ *  For debugging the mapping rather than for mods.
+ *  @{ */
+
+SH_API uint64_t ShHavokWorld(void);
+SH_API uint32_t ShGetBodyId(uint64_t entity);
+SH_API int  ShHavokScan(int *bodies, int *owners, int *mapped);
+
+/** @} */
+
+/** @defgroup input Input
+ *  Blocked at the game's own import slots, since it polls.
+ *  @{ */
+
+#define SH_INPUT_KEYS  0x01  /**< every key */
+#define SH_INPUT_MOVE  0x02  /**< WASD, space, shift, ctrl */
+#define SH_INPUT_FIRE  0x04  /**< left mouse */
+#define SH_INPUT_AIM   0x08  /**< right mouse */
+#define SH_INPUT_LOOK  0x10  /**< mouse aiming */
+
+/** Alt, Tab, Esc, F4 and Win always get through. */
+SH_API int  ShBlockInput(uint32_t mask);
+SH_API uint32_t ShBlockedInput(void);
+
+/** @} */
+
+/** Watch faults first and resume ones with a null path.
+ *  Off by default: it breaks titles that fault on purpose.
+ */
+SH_API int  ShSetCrashIntercept(int on);
+SH_API int  ShCrashInterceptOn(void);
+
 /** @defgroup crash Crash reports
  *  Faults land in scripthook_crash.log, annotated.
  *  @{ */
@@ -661,6 +750,12 @@ SH_API int  ShTeleportPlayerToGround(float x, float y,
 SH_API int  ShGetHealthPlayer(uint32_t *cur, uint32_t *max);
 SH_API int  ShSetHealthPlayer(uint32_t value);
 SH_API int  ShSetGodModePlayer(int on);
+
+/** Damage through the engine's own path, so death runs
+ *  its real sequence. Queued onto the game thread.
+ */
+SH_API int  ShDamagePlayer(uint32_t amount);
+SH_API int  ShKillPlayer(void);
 /** Floors at the downed state instead of dying. */
 SH_API int  ShSetCannotDiePlayer(int on);
 SH_API void ShInvalidateHealth(void);

@@ -1421,6 +1421,158 @@ static void CmdGCall(Resp *r, const char *line) {
     }
 }
 
+/* gcallf <fn> <rcx> <rdx> <f2> <f3> <f4>, for calls whose
+ * later args are floats. The int path cannot reach xmm.
+ */
+static void CmdGCallF(Resp *r, const char *line) {
+    char fs[64] = {0}, a0[64] = {0}, a1[64] = {0};
+    double d2 = 0, d3 = 0, d4 = 0;
+    HMODULE m;
+    int (*qcall)(uint64_t, uint64_t, uint64_t, float, float, float);
+    int (*qres)(uint64_t *);
+    uint64_t ret = 0;
+    int waited;
+
+    if (sscanf(line, "%*s %63s %63s %63s %lf %lf %lf",
+               fs, a0, a1, &d2, &d3, &d4) < 3) {
+        RAppend(r, "usage: gcallf <fn> <rcx> <rdx> <f2> <f3> <f4>\n");
+        return;
+    }
+    m = GetModuleHandleA("dinput8.dll");
+    if (!m) { RAppend(r, "dinput8 not loaded\n"); return; }
+    *(FARPROC *)&qcall = GetProcAddress(m, "ShQueueCallF");
+    *(FARPROC *)&qres  = GetProcAddress(m, "ShQueueResult");
+    if (!qcall || !qres) {
+        RAppend(r, "no ShQueueCallF, rebuild dinput8\n");
+        return;
+    }
+    if (!qcall(ParseHex(fs), ParseHex(a0), ParseHex(a1),
+               (float)d2, (float)d3, (float)d4)) {
+        RAppend(r, "queue busy or bad function\n");
+        return;
+    }
+    for (waited = 0; waited < 400; waited++) {
+        if (qres(&ret)) break;
+        Sleep(10);
+    }
+    if (waited >= 400) {
+        RAppend(r, "timed out, is physics ready\n");
+        return;
+    }
+    RAppend(r, "returned %p after %dms\n", (void *)ret, waited * 10);
+}
+
+/* placerot <entity> <x> <y> <z> <yaw> <pitch> <roll>
+ * Calls the API itself, so no hand written matrix.
+ */
+static void CmdPlaceRot(Resp *r, const char *line) {
+    char es[64] = {0};
+    double x = 0, y = 0, z = 0, yaw = 0, pitch = 0, roll = 0;
+    struct { float x, y, z; } pos;
+    HMODULE m;
+    int (*place)(uint64_t, const void *, float, float, float);
+    int ok;
+
+    if (sscanf(line, "%*s %63s %lf %lf %lf %lf %lf %lf",
+               es, &x, &y, &z, &yaw, &pitch, &roll) < 4) {
+        RAppend(r, "usage: placerot <ent> <x> <y> <z> "
+                   "<yaw> <pitch> <roll>\n");
+        return;
+    }
+    m = GetModuleHandleA("dinput8.dll");
+    if (!m) { RAppend(r, "dinput8 not loaded\n"); return; }
+    *(FARPROC *)&place = GetProcAddress(m, "ShPlaceEntityRot");
+    if (!place) {
+        RAppend(r, "no ShPlaceEntityRot, rebuild dinput8\n");
+        return;
+    }
+    pos.x = (float)x;
+    pos.y = (float)y;
+    pos.z = (float)z;
+    ok = place(ParseHex(es), &pos, (float)yaw, (float)pitch,
+               (float)roll);
+    RAppend(r, "placerot %s at %.2f %.2f %.2f ypr %.2f %.2f %.2f\n",
+            ok ? "ok" : "FAILED", pos.x, pos.y, pos.z,
+            yaw, pitch, roll);
+}
+
+/* chaos [name], to fire one effect without the wheel.
+ * Bare lists them. Works with chaos switched off.
+ */
+static void CmdChaos(Resp *r, const char *line) {
+    char want[64] = {0};
+    HMODULE m = GetModuleHandleA("chaos.asi");
+    int (*count)(void);
+    const char *(*nameOf)(int);
+    int (*fire)(const char *);
+    int i, n;
+
+    if (!m) { RAppend(r, "chaos.asi not loaded\n"); return; }
+    *(FARPROC *)&count = GetProcAddress(m, "ChaosCount");
+    *(FARPROC *)&nameOf = GetProcAddress(m, "ChaosName");
+    *(FARPROC *)&fire = GetProcAddress(m, "ChaosFire");
+    if (!count || !nameOf || !fire) {
+        RAppend(r, "no chaos exports, rebuild chaos.asi\n");
+        return;
+    }
+
+    if (sscanf(line, "%*s %63[^\n]", want) != 1 || !want[0]) {
+        n = count();
+        RAppend(r, "%d effects:\n", n);
+        for (i = 0; i < n; i++)
+            RAppend(r, "  %s\n", nameOf(i));
+        return;
+    }
+    RAppend(r, fire(want) ? "fired %s\n" : "no effect matching %s\n",
+            want);
+}
+
+/* havok             report the scan
+ * havok <ent> <x> <y> <z>   add velocity to that entity
+ */
+static void CmdHavok(Resp *r, const char *line) {
+    char es[64] = {0};
+    double vx = 0, vy = 0, vz = 0;
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    uint64_t (*world)(void);
+    int (*scan)(int *, int *, int *);
+    unsigned (*bodyId)(uint64_t);
+    int (*addVel)(uint64_t, const void *);
+    int (*getVel)(uint64_t, void *);
+    struct { float x, y, z; } v;
+    int sc = 0, ow = 0, mp = 0;
+
+    if (!m) { RAppend(r, "dinput8 not loaded\n"); return; }
+    *(FARPROC *)&world = GetProcAddress(m, "ShHavokWorld");
+    *(FARPROC *)&scan = GetProcAddress(m, "ShHavokScan");
+    *(FARPROC *)&bodyId = GetProcAddress(m, "ShGetBodyId");
+    *(FARPROC *)&addVel = GetProcAddress(m, "ShAddVelocity");
+    *(FARPROC *)&getVel = GetProcAddress(m, "ShGetVelocity");
+    if (!world || !scan || !bodyId || !addVel) {
+        RAppend(r, "no havok exports, rebuild dinput8\n");
+        return;
+    }
+
+    if (sscanf(line, "%*s %63s %lf %lf %lf", es, &vx, &vy, &vz) == 4) {
+        uint64_t e = ParseHex(es);
+        unsigned id = bodyId(e);
+
+        v.x = (float)vx; v.y = (float)vy; v.z = (float)vz;
+        RAppend(r, "entity %p body id %u\n", (void *)e, id);
+        if (getVel(e, &v.x) == 0) RAppend(r, "  velocity unreadable\n");
+        v.x = (float)vx; v.y = (float)vy; v.z = (float)vz;
+        RAppend(r, "  add %.1f %.1f %.1f : %s\n", vx, vy, vz,
+                addVel(e, &v) ? "ok" : "FAILED");
+        return;
+    }
+
+    scan(&sc, &ow, &mp);
+    RAppend(r, "hknpWorld %p\n", (void *)world());
+    RAppend(r, "last lookup: fields %d, rigidbodies %d, "
+               "cached offset %d\n", sc, ow, mp);
+    RAppend(r, "usage: havok <ent> <x> <y> <z> to shove\n");
+}
+
 /* ---- arg capture hook on the teleport worker ---- */
 
 #define HK_COUNT  0x200
@@ -4862,6 +5014,10 @@ static void Dispatch(const char *line, Resp *r) {
     else if (strcmp(cmd, "tpset") == 0)     CmdTpSet(r, line);
     else if (strcmp(cmd, "tpoff") == 0)     CmdTpOff(r);
     else if (strcmp(cmd, "gcall") == 0)     CmdGCall(r, line);
+    else if (strcmp(cmd, "gcallf") == 0)    CmdGCallF(r, line);
+    else if (strcmp(cmd, "placerot") == 0)  CmdPlaceRot(r, line);
+    else if (strcmp(cmd, "chaos") == 0)     CmdChaos(r, line);
+    else if (strcmp(cmd, "havok") == 0)     CmdHavok(r, line);
     else if (strcmp(cmd, "gstat") == 0)     CmdGStat(r);
     else if (strcmp(cmd, "wndhook") == 0)   CmdWndHook(r, line);
     else if (strcmp(cmd, "wndoff") == 0)    CmdWndOff(r);
