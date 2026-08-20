@@ -565,6 +565,22 @@ SH_API int  ShGetVisibility(float *out);
 SH_API int  ShGetAmmo(int slot, uint32_t *out);
 SH_API int  ShSetAmmo(int slot, uint32_t value);
 
+/* Weather type, changed instantly. */
+enum ShWeather {
+    SH_WEATHER_SUNNY = 0,
+    SH_WEATHER_CLOUDS_LIGHT,
+    SH_WEATHER_CLOUDS_HEAVY,
+    SH_WEATHER_FOG,
+    SH_WEATHER_RAIN_LIGHT,
+    SH_WEATHER_RAIN_HEAVY
+};
+SH_API int  ShSetWeather(int type);
+SH_API int  ShGetWeather(int *out);
+
+/* Time of day in hours past midnight, 0 to 24. */
+SH_API int  ShSetTime(float hours);
+SH_API int  ShGetTime(float *out);
+
 typedef int (*ShGetHealthPlayer_t)(uint32_t *, uint32_t *);
 typedef int (*ShSetHealthPlayer_t)(uint32_t);
 typedef int (*ShSetGodModePlayer_t)(int);
