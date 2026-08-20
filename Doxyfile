@@ -21,9 +21,6 @@ SORT_BRIEF_DOCS        = NO
 
 GENERATE_TREEVIEW      = YES
 DISABLE_INDEX          = NO
-FULL_SIDEBAR           = NO
-HTML_COLORSTYLE        = LIGHT
-HTML_EXTRA_STYLESHEET  = docs/doxygen-awesome.css
 
 QUIET                  = YES
 WARN_IF_UNDOCUMENTED   = NO
