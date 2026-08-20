@@ -27,6 +27,7 @@
 #define UP_STEP     5.0f
 
 typedef int (*IsInGame_t)(void);
+typedef int (*GameState_t)(void);
 typedef int (*GetPlayer_t)(ShPlayer *);
 typedef int (*FirstPerson_t)(float, float);
 typedef void (*Release_t)(uint32_t);
@@ -41,6 +42,7 @@ typedef int (*MenuNumber_t)(uint32_t, const char *, float, float,
 typedef int (*MenuStatus_t)(uint32_t, const char *);
 
 static IsInGame_t   g_inGame;
+static GameState_t  g_state;
 static GetPlayer_t  g_getPlayer;
 static FirstPerson_t g_fp;
 static Release_t    g_release;
@@ -168,6 +170,14 @@ static void OnUp(uint32_t menu, uint32_t item, int value,
     if (g_on) PushCamera();
 }
 
+/* Paused counts as in game, but the player lookup falls
+ * back to a heap scan while a menu is up. Nothing here is
+ * urgent enough to pay for that, so the tick waits. */
+static int Playing(void) {
+    if (g_state) return g_state() == SH_STATE_INGAME;
+    return g_inGame && g_inGame();
+}
+
 /* A new body means the old parts are gone, so the hold is
  * dropped and armed again on the new one.
  */
@@ -179,7 +189,7 @@ static DWORD WINAPI TickThread(LPVOID p) {
         uint64_t root;
 
         Sleep(TICK_MS);
-        if (!g_on || !g_inGame || !g_inGame()) continue;
+        if (!g_on || !Playing()) continue;
 
         root = PlayerRoot();
         if (!root) continue;
@@ -212,6 +222,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
         if (!m) Sleep(500);
     }
     *(FARPROC *)&g_inGame = GetProcAddress(m, "ShIsInGame");
+    *(FARPROC *)&g_state = GetProcAddress(m, "ShGetGameState");
     *(FARPROC *)&g_getPlayer = GetProcAddress(m, "ShGetPlayer");
     *(FARPROC *)&g_fp = GetProcAddress(m, "ShCameraFirstPerson");
     *(FARPROC *)&g_release =

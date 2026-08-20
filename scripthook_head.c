@@ -42,6 +42,12 @@ extern uint64_t ShReadQ(uint64_t addr);
 extern void ShSetError(int err);
 extern void ShCameraVehicleHint(int inVehicle);
 
+/* ShGetPlayer falls back to a heap scan, which stalls the
+ * frame and races other threads. The pump runs inside the
+ * camera callback, so it only gets the scan free lookup. */
+extern int ShPeekPlayer(ShPlayer *out);
+extern int ShInVehicleOf(uint64_t entity);
+
 typedef uint16_t (__attribute__((ms_abi)) *BoneOf_t)(uint64_t,
                                                      uint32_t);
 
@@ -136,7 +142,7 @@ static int Resolve(void) {
     g_ready = 0;
     g_offsLive = 0;
     memset(&p, 0, sizeof(p));
-    if (!ShGetPlayer(&p)) return 0;
+    if (!ShPeekPlayer(&p)) return 0;
 
     /* The soldier keeps the skeleton. The root re-parents
      * to the vehicle, so resolving from it would lose the
@@ -182,6 +188,17 @@ void ShHeadPump(void) {
 
     now = GetTickCount64();
 
+    /* Menus hide the player from the static lookup, and
+     * the rig is still there behind the menu. Polling
+     * here only found nothing, slowly. Hold and wait. */
+    if (ShInPauseMenu()) {
+        if (!g_ready) g_valid = 0;
+        g_mismatch = 0;
+        g_lastCheck = now;
+        g_lastTry = now;
+        if (!g_ready) return;
+    }
+
     /* A death or a body swap frees the rig while the old
      * memory still reads as plausible, so the identity is
      * rechecked on a timer rather than trusted. */
@@ -194,7 +211,7 @@ void ShHeadPump(void) {
         /* One bad answer can be a transient, and dropping
          * on it flashes the engine camera. Two in a row is
          * a real body change. */
-        if (!ShGetPlayer(&p) ||
+        if (!ShPeekPlayer(&p) ||
             (p.entity ? p.entity : p.root) != g_skelEnt) {
             if (++g_mismatch >= 2) {
                 g_mismatch = 0;
@@ -206,7 +223,7 @@ void ShHeadPump(void) {
             /* The camera's chase arm gate reads a cached
              * hint, so it never looks the player up on
              * the frame path. Refreshed here instead. */
-            ShCameraVehicleHint(ShIsInVehicle());
+            ShCameraVehicleHint(ShInVehicleOf(p.entity));
         }
     }
 

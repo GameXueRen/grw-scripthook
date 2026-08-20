@@ -44,6 +44,17 @@ static int      g_resolved;
 static int      g_logReady;
 static int      g_lastError;
 
+/* The scan fallback is a VirtualQuery walk of the whole
+ * address space, and plugins call ShGetPlayer from their
+ * own threads. One scanner at a time, or they race. */
+static SRWLOCK  g_playerLock = SRWLOCK_INIT;
+
+/* A scan that found nothing will find nothing 250ms later
+ * either, and a menu keeps the player hidden for seconds.
+ */
+#define SCAN_BACKOFF_MS 2000u
+static uint64_t g_scanFailAt;
+
 static int ShFail(int err) {
     g_lastError = err;
     return 0;
@@ -414,11 +425,11 @@ SH_API void ShInvalidate(void) {
 
 extern int ShRequireInGame(void);
 
-SH_API int ShGetPlayer(ShPlayer *out) {
+/* Caller holds g_playerLock. With scan set the heap walk
+ * is allowed as a last resort, otherwise a player the
+ * static path and the cache both miss is a miss. */
+static int ShPlayerLocked(ShPlayer *out, int scan) {
     uint64_t root = 0, ent;
-
-    if (!out) return ShFail(SH_ERR_BAD_ARG);
-    if (!ShRequireInGame()) return 0;
 
     /* Cheap and always current, so no cache to go stale.
      * The scan stays only as a fallback.
@@ -430,8 +441,19 @@ SH_API int ShGetPlayer(ShPlayer *out) {
         g_player.root = ent;
         g_resolved = 1;
         g_lastError = SH_OK;
-    } else if (!ShStillValid() && !ShResolvePlayer()) {
-        return 0;
+    } else if (!ShStillValid()) {
+        uint64_t now = GetTickCount64();
+
+        if (!scan) return ShFail(SH_ERR_NO_CANDIDATE);
+        if (now - g_scanFailAt < SCAN_BACKOFF_MS)
+            return ShFail(SH_ERR_NO_CANDIDATE);
+        if (!ShResolvePlayer()) {
+            /* Parked at the origin is a load, and cheap to
+             * ask again. An empty walk is the costly miss. */
+            if (g_lastError != SH_ERR_NO_POSITION)
+                g_scanFailAt = now;
+            return 0;
+        }
     }
 
     /* Entering or leaving a vehicle re-parents the player,
@@ -442,6 +464,31 @@ SH_API int ShGetPlayer(ShPlayer *out) {
     *out = g_player;
     g_lastError = SH_OK;
     return 1;
+}
+
+SH_API int ShGetPlayer(ShPlayer *out) {
+    int ok;
+
+    if (!out) return ShFail(SH_ERR_BAD_ARG);
+    if (!ShRequireInGame()) return 0;
+
+    AcquireSRWLockExclusive(&g_playerLock);
+    ok = ShPlayerLocked(out, 1);
+    ReleaseSRWLockExclusive(&g_playerLock);
+    return ok;
+}
+
+/* For the frame path. Never scans, never blocks: a scan in
+ * flight on another thread reads as a miss, and the state
+ * machine is left alone since a camera frame implies it. */
+int ShPeekPlayer(ShPlayer *out) {
+    int ok;
+
+    if (!out) return 0;
+    if (!TryAcquireSRWLockExclusive(&g_playerLock)) return 0;
+    ok = ShPlayerLocked(out, 0);
+    ReleaseSRWLockExclusive(&g_playerLock);
+    return ok;
 }
 
 SH_API int ShGetVersion(void) {
@@ -642,13 +689,10 @@ void ShTransformPump(void) {
 /* An entity link in the parent chain means the player is
  * riding a vehicle. On foot every hop is a bone link.
  */
-SH_API int ShIsInVehicle(void) {
-    ShPlayer p;
-    uint64_t cur;
+int ShInVehicleOf(uint64_t entity) {
+    uint64_t cur = entity;
     int n;
 
-    if (!ShGetPlayer(&p)) return 0;
-    cur = p.entity;
     for (n = 0; n < 16; n++) {
         uint32_t type = 0;
         uint64_t next = ShParentOfT(cur, &type);
@@ -657,6 +701,13 @@ SH_API int ShIsInVehicle(void) {
         cur = next;
     }
     return 0;
+}
+
+SH_API int ShIsInVehicle(void) {
+    ShPlayer p;
+
+    if (!ShGetPlayer(&p)) return 0;
+    return ShInVehicleOf(p.entity);
 }
 
 /* Place an entity and confirm THAT entity moved. The

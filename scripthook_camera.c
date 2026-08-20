@@ -297,10 +297,15 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
      */
     ShVisibilityPump();
     ShTransformPump();
-    if (g_apply & CAM_HEAD_BIT) ShHeadWant();
-    ShHeadPump();
 
-    if (g_apply && !ui) ApplyFields(rcx);
+    /* The menu camera never takes the head, so its frames
+     * do no head work at all. The pump keeps its state and
+     * resumes on the first world frame. */
+    if (!ui) {
+        if (g_apply & CAM_HEAD_BIT) ShHeadWant();
+        ShHeadPump();
+        if (g_apply) ApplyFields(rcx);
+    }
 }
 
 static int BuildStub(void) {
