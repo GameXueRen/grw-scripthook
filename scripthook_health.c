@@ -17,6 +17,13 @@
 #define OFF_NODEATH    0x203
 #define COMP_SIZE      0x3A0
 
+/* The engine's own inner damage function, so a kill runs
+ * the real death path instead of a health poke. Verified
+ * live: gcall 1427CBEA0 <comp> 1E 1 0 took 100 to 70. */
+#define SH_APPLY_DAMAGE  SH_IMG(0x27CBEA0)
+
+extern int ShQueueCall(uint64_t fn, uint64_t a0, uint64_t a1,
+                       uint64_t a2, uint64_t a3);
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
 extern int ShReadMem(uint64_t addr, void *out, size_t len);
@@ -304,6 +311,30 @@ SH_API int ShSetCannotDiePlayer(int on) {
     *(uint8_t *)(uintptr_t)(comp + OFF_NODEATH) = on ? 1 : 0;
     ShSetError(SH_OK);
     return 1;
+}
+
+/* Damage through the engine's own path, on the game
+ * thread, so death runs its full sequence rather than
+ * leaving a corpse the game never registered. */
+SH_API int ShDamagePlayer(uint32_t amount) {
+    uint64_t comp = 0;
+
+    if (!ShRequireInGame()) return 0;
+    if (!PlayerComponent(&comp)) return 0;
+    if (!ShQueueCall(SH_APPLY_DAMAGE, comp, amount, 1, 0)) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
+    ShSetError(SH_OK);
+    return 1;
+}
+
+/** Kill the player properly, KIA screen and all. */
+SH_API int ShKillPlayer(void) {
+    uint32_t cur = 0, max = 0;
+
+    if (!ShGetHealthPlayer(&cur, &max)) return 0;
+    return ShDamagePlayer(max ? max * 4u : 100000u);
 }
 
 SH_API void ShInvalidateHealth(void) {
