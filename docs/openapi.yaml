@@ -1,0 +1,1948 @@
+openapi: 3.0.3
+info:
+  title: GRW ScriptHook
+  version: 0.6.0
+  license:
+    name: GPL-3.0
+    url: https://github.com/PhialsBasement/grw-scripthook/blob/main/LICENSE
+  description: |
+    A loader plus a documented C API for Ghost Recon Wildlands, exported by
+    `dinput8.dll`. Plugins are ordinary DLLs renamed `.asi`, dropped beside
+    `GRW.exe`.
+
+    ## How to read this spec
+
+    Every operation here is a C export, not an HTTP endpoint. `POST /ShFoo`
+    means calling `ShFoo(...)`; the request body holds the arguments and the
+    200 response holds the out parameters. Every `int` function returns 1 on
+    success and 0 on failure; on failure `ShLastError()` gives the reason
+    (the `ShError` schema) and `ShErrorString()` names it.
+
+    ## Writing a plugin
+
+    The loader loads plugins from a worker thread rather than from inside
+    `DllMain`, so link `libscripthook.a`, include `scripthook.h`, and call
+    the API directly:
+
+    ```c
+    #include <windows.h>
+    #include "scripthook.h"
+
+    static void OnNoon(uint32_t m, uint32_t i, int v, void *u) {
+        if (v) ShSetTime(12.0f);
+    }
+
+    static DWORD WINAPI Init(LPVOID p) {
+        uint32_t menu = ShMenuCreate("High noon");
+        ShMenuToggle(menu, "Always noon", 0, OnNoon, NULL);
+        return 0;
+    }
+
+    BOOL WINAPI DllMain(HINSTANCE inst, DWORD why, LPVOID res) {
+        if (why == DLL_PROCESS_ATTACH) {
+            DisableThreadLibraryCalls(inst);
+            CreateThread(NULL, 0, Init, NULL, 0, NULL);
+        }
+        return TRUE;
+    }
+    ```
+
+    ```
+    x86_64-w64-mingw32-gcc -O2 -shared -o myplugin.asi myplugin.c -L. -lscripthook
+    ```
+
+    `GetProcAddress` binding remains useful for one thing: optional features.
+    Bind a newer export by name and skip the feature when it comes back NULL,
+    so the plugin still loads on an older ScriptHook that lacks the import.
+
+    ## Rules that hold everywhere
+
+    - **Threads.** Any API call is safe from any thread. Every engine memory
+      access inside the API is kernel mediated, so a pointer freed mid call
+      fails cleanly instead of crashing. Event and menu callbacks run on
+      threads the API owns; calling back into the API from one is fine.
+    - **Engine calls.** Raw engine functions must run on the game thread: use
+      `ShQueueCall`, never call an engine address from your own thread.
+    - **Handles.** Entity and component handles come from the API's own
+      enumerators and can go stale at any time; the API revalidates, so a
+      stale handle costs a failed call, never a crash.
+    - **Overrides.** The engine rebuilds the camera and stamps visibility
+      every frame, so overrides are reapplied per frame until released.
+      Camera ownership is per field: release only what you took and another
+      plugin's fields keep running.
+    - **Units.** Metres, seconds, radians for camera angles, degrees where a
+      schema says so. World axes: x east, y north, z up.
+
+    If a plugin fails to load, `scripthook.log` in the game folder says why.
+
+    Source and reverse engineering notes:
+    [github.com/PhialsBasement/grw-scripthook](https://github.com/PhialsBasement/grw-scripthook).
+    Credits: Firejumper93 (GhostReconWildlandsVR, MIT) for the camera
+    structure, rig transforms and the no-blur byte; AngelSoleil and
+    ClowdPanini's Last Rites table for head identification; the GRW
+    Environment table for weather; neburas for the Windows spawn fix.
+
+tags:
+  - name: Core
+    description: Errors and versioning.
+  - name: State
+    description: The engine's GameFlow state, tracked by the hook.
+  - name: Player
+    description: The local player, resolved through the engine's own player component.
+  - name: Ground
+    description: Height queries through the engine's physics. Collision exists only within 1500m of the player.
+  - name: Entities
+    description: Enumeration by kind, typed through the engine's net identity component.
+  - name: Vehicles
+    description: The spawn catalogue. Ids are stable across sessions, addresses are not.
+  - name: Camera
+    description: Per-field ownership so plugins compose. Overrides reapply every frame until released.
+  - name: Visibility
+    description: Render node visible bits. Applied on the game thread within a frame.
+  - name: Menu
+    description: One root menu owned by the API; F4 opens it. Every plugin adds a submenu.
+  - name: HUD
+    description: One overlay window owned by the API. Draws in windowed and borderless modes.
+  - name: Combat
+    description: Shots and bullet impacts from the projectile hook.
+  - name: Rays
+    description: Raw physics traces. The engine casts about 100k rays a second, so recording is filtered and off by default.
+  - name: Stats
+    description: Health, resources, skill points, stealth and ammo, all stored as protected ints.
+  - name: Weather
+    description: The environment object, changed through the engine's own transition. Since 0.6.0.
+  - name: Engine
+    description: Queueing your own reverse engineered calls onto the game thread.
+
+paths:
+  /ShLastError:
+    post:
+      tags: [Core]
+      operationId: ShLastError
+      summary: The error slot for the calling context
+      description: Returns the last `ShError` recorded for the caller.
+      responses:
+        '200':
+          description: The error code.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShError' }
+  /ShErrorString:
+    post:
+      tags: [Core]
+      operationId: ShErrorString
+      summary: Readable name of an error code
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                err: { $ref: '#/components/schemas/ShError' }
+      responses:
+        '200':
+          description: The name.
+          content:
+            application/json:
+              schema: { type: string, example: no candidate }
+  /ShGetVersion:
+    post:
+      tags: [Core]
+      operationId: ShGetVersion
+      summary: SH_API_VERSION, for compatibility checks
+      responses:
+        '200':
+          description: The version.
+          content:
+            application/json:
+              schema: { type: integer, example: 1 }
+
+  /ShGetGameState:
+    post:
+      tags: [State]
+      operationId: ShGetGameState
+      summary: The current game state
+      description: |
+        `SH_STATE_PAUSED` is derived from the camera, because the game flow
+        never leaves Playing for the pause menu.
+      responses:
+        '200':
+          description: The state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShGameState' }
+  /ShIsInGame:
+    post:
+      tags: [State]
+      operationId: ShIsInGame
+      summary: True while the world is loaded
+      description: |
+        Stays true while paused: the world is loaded and reads keep working,
+        so callers must keep their state on Esc. Check `SH_STATE_PAUSED`
+        explicitly to idle in the pause menu.
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShGetGameStateName:
+    post:
+      tags: [State]
+      operationId: ShGetGameStateName
+      summary: The state as text, into a caller buffer
+      responses:
+        '200':
+          description: The name.
+          content:
+            application/json:
+              schema: { type: string, example: Playing }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShInPauseMenu:
+    post:
+      tags: [State]
+      operationId: ShInPauseMenu
+      summary: True while the pause menu's camera renders
+      description: |
+        The pause menu renders through a template camera pose (a bit exact
+        identity basis) that no steered camera ever holds. Since 0.5.0.
+      x-since: 0.5.0
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+
+  /ShGetPlayer:
+    post:
+      tags: [Player]
+      operationId: ShGetPlayer
+      summary: The local player's entity, node and root
+      description: |
+        The root is the top of the parent chain and the only position that
+        survives a direct write. Riding a vehicle re-parents the player, so
+        the root becomes the vehicle.
+      responses:
+        '200':
+          description: The player.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShPlayer' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGetPlayerPosition:
+    post:
+      tags: [Player]
+      operationId: ShGetPlayerPosition
+      summary: The player's position
+      description: |
+        NOT the eye. It measured 1.71m above the feet in one session and
+        2.72m in another. For the eye, use `ShGetHeadPosition`.
+      responses:
+        '200': { $ref: '#/components/responses/Vec3' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShTeleportPlayer:
+    post:
+      tags: [Player]
+      operationId: ShTeleportPlayer
+      summary: Teleport, at any range
+      description: |
+        Verified 9.9km cross map, landing within 3m. In a vehicle it carries
+        the car and the camera. `orient` may be null to keep the facing.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pos]
+              properties:
+                pos: { $ref: '#/components/schemas/ShVec3' }
+                orient: { $ref: '#/components/schemas/ShVec3' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShTeleportPlayerHops:
+    post:
+      tags: [Player]
+      operationId: ShTeleportPlayerHops
+      summary: Teleport in hops, for routes where one jump misbehaves
+      description: |
+        `hopMetres` 0 gives 300m steps. `delayMs` is a real pause per hop;
+        300 is the value proven over long routes, 0 has crashed the game.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pos]
+              properties:
+                pos: { $ref: '#/components/schemas/ShVec3' }
+                orient: { $ref: '#/components/schemas/ShVec3' }
+                hopMetres: { type: number, example: 300 }
+                delayMs: { type: integer, example: 300 }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShIsInVehicle:
+    post:
+      tags: [Player]
+      operationId: ShIsInVehicle
+      summary: True while riding a vehicle
+      description: Read from the entity link in the parent chain. Verified both ways.
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShWalkToRoot:
+    post:
+      tags: [Player]
+      operationId: ShWalkToRoot
+      summary: Walk an entity's parent chain to its root
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entity]
+              properties:
+                entity: { $ref: '#/components/schemas/Handle' }
+      responses:
+        '200':
+          description: The root handle.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Handle' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShInvalidate:
+    post:
+      tags: [Player]
+      operationId: ShInvalidate
+      summary: Drop the cached player so the next call re-resolves
+      description: The API also does this itself on state transitions.
+      responses:
+        '200': { description: Done. }
+
+  /ShPhysicsReady:
+    post:
+      tags: [Ground]
+      operationId: ShPhysicsReady
+      summary: Whether the physics world is ready
+      description: Predicate only, never installs anything.
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShGroundHeight:
+    post:
+      tags: [Ground]
+      operationId: ShGroundHeight
+      summary: Ground height at a point
+      description: |
+        Through the engine's own physics, so it agrees with what the player
+        can stand on. Fails with `SH_ERR_NOT_STREAMED` beyond 1500m of the
+        player, where collision is unloaded.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [x, y]
+              properties:
+                x: { type: number }
+                y: { type: number }
+      responses:
+        '200':
+          description: The height.
+          content:
+            application/json:
+              schema: { type: number, example: 1033.4 }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGroundHeightFrom:
+    post:
+      tags: [Ground]
+      operationId: ShGroundHeightFrom
+      summary: Ground height, probing from a given height
+      description: For stacked geometry like bridges and caves.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [x, y, nearZ]
+              properties:
+                x: { type: number }
+                y: { type: number }
+                nearZ: { type: number }
+      responses:
+        '200':
+          description: The height.
+          content:
+            application/json:
+              schema: { type: number }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShTeleportPlayerToGround:
+    post:
+      tags: [Ground]
+      operationId: ShTeleportPlayerToGround
+      summary: Teleport onto the ground at x, y
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [x, y]
+              properties:
+                x: { type: number }
+                y: { type: number }
+                clearance: { type: number, description: Metres above the found ground. }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /ShFindEntities:
+    post:
+      tags: [Entities]
+      operationId: ShFindEntities
+      summary: Entities within a radius of the player, nearest first
+      description: |
+        Untyped entries are scenery logic and markers, hidden unless
+        `SH_FIND_UNNAMED` (0x1) is passed in flags.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, radius]
+              properties:
+                kind: { $ref: '#/components/schemas/ShEntityKind' }
+                radius: { type: number, example: 100 }
+                flags: { type: integer, example: 0 }
+                max: { type: integer, example: 32 }
+      responses:
+        '200':
+          description: The entities written.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShEntity' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGetEntityKind:
+    post:
+      tags: [Entities]
+      operationId: ShGetEntityKind
+      summary: The kind of one entity
+      requestBody: { $ref: '#/components/requestBodies/EntityArg' }
+      responses:
+        '200':
+          description: The kind.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShEntityKind' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShKindName:
+    post:
+      tags: [Entities]
+      operationId: ShKindName
+      summary: The readable name of a kind
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind: { $ref: '#/components/schemas/ShEntityKind' }
+      responses:
+        '200':
+          description: The name.
+          content:
+            application/json:
+              schema: { type: string, example: vehicle }
+  /ShPlaceEntity:
+    post:
+      tags: [Entities]
+      operationId: ShPlaceEntity
+      summary: Place any entity through the engine's set transform
+      description: Children follow, which is how vehicles carry riders.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entity, pos]
+              properties:
+                entity: { $ref: '#/components/schemas/Handle' }
+                pos: { $ref: '#/components/schemas/ShVec3' }
+                orient: { $ref: '#/components/schemas/ShVec3' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGetComponents:
+    post:
+      tags: [Entities]
+      operationId: ShGetComponents
+      summary: An entity's components, typed by class hash
+      description: |
+        The class hash IS the component type, read through the reflection
+        descriptor, so no guessing. A vehicle carries about fifty.
+      requestBody: { $ref: '#/components/requestBodies/EntityArg' }
+      responses:
+        '200':
+          description: The components written.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShComponent' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShFindComponent:
+    post:
+      tags: [Entities]
+      operationId: ShFindComponent
+      summary: The component of a given class, or 0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entity, classHash]
+              properties:
+                entity: { $ref: '#/components/schemas/Handle' }
+                classHash: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: The component handle.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Handle' }
+
+  /ShVehicleCount:
+    post:
+      tags: [Vehicles]
+      operationId: ShVehicleCount
+      summary: Size of the spawn catalogue
+      responses:
+        '200':
+          description: The count.
+          content:
+            application/json:
+              schema: { type: integer, example: 65 }
+  /ShVehicleAt:
+    post:
+      tags: [Vehicles]
+      operationId: ShVehicleAt
+      summary: A catalogue entry by index
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [index]
+              properties:
+                index: { type: integer }
+      responses:
+        '200':
+          description: The entry.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShVehicle' }
+  /ShVehicleName:
+    post:
+      tags: [Vehicles]
+      operationId: ShVehicleName
+      summary: A vehicle's name by id
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vehicleId]
+              properties:
+                vehicleId: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: The name.
+          content:
+            application/json:
+              schema: { type: string }
+  /ShSpawnVehicle:
+    post:
+      tags: [Vehicles]
+      operationId: ShSpawnVehicle
+      summary: Spawn a vehicle, returning its entity
+      description: |
+        Blocks until the vehicle exists, usually a frame or two. Returns 0 on
+        failure.
+
+        **Freeze warning:** two catalogue entries freeze the game if entered:
+        the alpaca `0x40081214` and the unused monster truck `0x40BA6E9D`.
+        Safe to spawn, unsafe to ride.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vehicleId, pos]
+              properties:
+                vehicleId: { type: integer, format: int64 }
+                pos: { $ref: '#/components/schemas/ShVec3' }
+      responses:
+        '200':
+          description: The spawned entity, or 0.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Handle' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSpawnInvalidate:
+    post:
+      tags: [Vehicles]
+      operationId: ShSpawnInvalidate
+      summary: Drop the cached spawner so the next spawn re-resolves
+      responses:
+        '200': { description: Done. }
+
+  /ShGetCamera:
+    post:
+      tags: [Camera]
+      operationId: ShGetCamera
+      summary: Where the camera is and how it is pointed
+      description: Mode 0 is the player's camera.
+      responses:
+        '200':
+          description: The camera.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShCamera' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetCamera:
+    post:
+      tags: [Camera]
+      operationId: ShSetCamera
+      summary: Hold the camera at an absolute position
+      description: Takes `SH_CAM_POS`. The engine keeps the aim.
+      requestBody: { $ref: '#/components/requestBodies/PosArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShCameraOrbit:
+    post:
+      tags: [Camera]
+      operationId: ShCameraOrbit
+      summary: Follow the player at a distance
+      description: |
+        Metres behind the player along the camera's forward axis, and height
+        above. It follows because the engine still owns the basis.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                back: { type: number, example: 6 }
+                up: { type: number, example: 2 }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShCameraFree:
+    post:
+      tags: [Camera]
+      operationId: ShCameraFree
+      summary: Free camera, position and aim both yours
+      description: Radians. Yaw 0 faces +y, pitch positive looking up.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pos]
+              properties:
+                pos: { $ref: '#/components/schemas/ShVec3' }
+                yaw: { type: number }
+                pitch: { type: number }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShCameraAngles:
+    post:
+      tags: [Camera]
+      operationId: ShCameraAngles
+      summary: The current view angles, to start a free camera from
+      responses:
+        '200':
+          description: Yaw and pitch, radians.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  yaw: { type: number }
+                  pitch: { type: number }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShCameraFirstPerson:
+    post:
+      tags: [Camera]
+      operationId: ShCameraFirstPerson
+      summary: The eye on the head bone, engine keeps the aim
+      description: |
+        Tracks the head on all three axes and eases onto the aim ray during
+        iron sight ADS, so sights and bullets pass through screen center.
+        Scopes, the drone, the tacmap and the pause menu are left to the
+        engine, and first person resumes when they end. Takes `SH_CAM_POS`.
+      x-since: 0.3.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                forward: { type: number, description: Metres, clears the face., example: 0.15 }
+                up: { type: number, example: 0 }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShCameraApply:
+    post:
+      tags: [Camera]
+      operationId: ShCameraApply
+      summary: Everything the camera exposes, in one call
+      description: |
+        Set only the bits you want in `apply`; the engine keeps the rest.
+        Fov is taken at its source, ahead of culling, so raising it never
+        pops geometry at the edges, and zoomed optics pass through a held
+        fov untouched.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ShCameraOverride' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShCameraRelease:
+    post:
+      tags: [Camera]
+      operationId: ShCameraRelease
+      summary: Release every held field
+      responses:
+        '200': { description: Done. }
+  /ShCameraReleaseFields:
+    post:
+      tags: [Camera]
+      operationId: ShCameraReleaseFields
+      summary: Give back only what you took
+      description: Another plugin's fields keep running.
+      x-since: 0.3.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fields]
+              properties:
+                fields: { $ref: '#/components/schemas/ShCamFields' }
+      responses:
+        '200': { description: Done. }
+  /ShCameraOwned:
+    post:
+      tags: [Camera]
+      operationId: ShCameraOwned
+      summary: Which fields are currently overridden
+      x-since: 0.3.0
+      responses:
+        '200':
+          description: The held field bits.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShCamFields' }
+  /ShGetHeadPosition:
+    post:
+      tags: [Camera]
+      operationId: ShGetHeadPosition
+      summary: The head in world space. This is the eye.
+      description: |
+        From the bone named Head, tracked on all three axes and smoothed
+        against animation tick jitter.
+      x-since: 0.3.0
+      responses:
+        '200': { $ref: '#/components/responses/Vec3' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShHeadBone:
+    post:
+      tags: [Camera]
+      operationId: ShHeadBone
+      summary: Which bone the Head name resolved to, or -1
+      x-since: 0.3.0
+      responses:
+        '200':
+          description: The bone index.
+          content:
+            application/json:
+              schema: { type: integer }
+  /ShSetCameraBlur:
+    post:
+      tags: [Camera]
+      operationId: ShSetCameraBlur
+      summary: The hidden close range blur, off or back on
+      description: |
+        A proximity fade the menu's DoF settings leave running, which blurs
+        anything nearly touching the camera. A first person eye lives inside
+        it. `on=0` removes it, `on=1` restores the engine default. One
+        verified byte, from the community FP mod's cheat table by way of
+        Firejumper93.
+      x-since: 0.5.0
+      requestBody: { $ref: '#/components/requestBodies/OnArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShCameraBlurOff:
+    post:
+      tags: [Camera]
+      operationId: ShCameraBlurOff
+      summary: Whether the blur byte is currently forced off
+      x-since: 0.5.0
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShCameraMatrix:
+    post:
+      tags: [Camera]
+      operationId: ShCameraMatrix
+      summary: One of the nine derived matrices
+      description: View, projection and their inverses. Index 0 to 8, 16 floats.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [index]
+              properties:
+                index: { type: integer, minimum: 0, maximum: 8 }
+      responses:
+        '200':
+          description: The matrix, 16 floats.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: number }
+                minItems: 16
+                maxItems: 16
+        '400': { $ref: '#/components/responses/Error' }
+  /ShCameraHookInstall:
+    post:
+      tags: [Camera]
+      operationId: ShCameraHookInstall
+      summary: Install the camera hook
+      description: Done for you on demand by every camera call; exposed for eager installs.
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShCameraReady:
+    post:
+      tags: [Camera]
+      operationId: ShCameraReady
+      summary: Whether the hook is installed and a camera has been seen
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+
+  /ShSetVisible:
+    post:
+      tags: [Visibility]
+      operationId: ShSetVisible
+      summary: Hide or show an entity, or one node of it
+      description: |
+        `node` 0 means every render node on the entity. `persist` rewrites
+        the bit each frame until you show it again; the engine stamps
+        visibility back per frame, so a lasting hide needs the hold. Applied
+        by the API on the game thread within a frame of the call. Held nodes
+        carry an identity fingerprint and release themselves if the engine
+        frees the node.
+      x-since: 0.3.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entity, visible]
+              properties:
+                entity: { $ref: '#/components/schemas/Handle' }
+                node: { $ref: '#/components/schemas/Handle' }
+                visible: { type: integer, enum: [0, 1] }
+                persist: { type: integer, enum: [0, 1] }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGetEntityNodes:
+    post:
+      tags: [Visibility]
+      operationId: ShGetEntityNodes
+      summary: Every render node on an entity
+      requestBody: { $ref: '#/components/requestBodies/EntityArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Handles' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShEntityNodeCount:
+    post:
+      tags: [Visibility]
+      operationId: ShEntityNodeCount
+      summary: How many render nodes an entity has
+      requestBody: { $ref: '#/components/requestBodies/EntityArg' }
+      responses:
+        '200':
+          description: The count, 0 if none.
+          content:
+            application/json:
+              schema: { type: integer }
+  /ShGetHeadNodes:
+    post:
+      tags: [Visibility]
+      operationId: ShGetHeadNodes
+      summary: The parts the game hides while aiming
+      description: |
+        On a character this is the head. The engine builds the group the
+        first time the player aims down sights, so this legitimately returns
+        0 until then: retry on a timer, as First Person does.
+      x-since: 0.3.0
+      requestBody: { $ref: '#/components/requestBodies/EntityArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Handles' }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /ShMenuCreate:
+    post:
+      tags: [Menu]
+      operationId: ShMenuCreate
+      summary: A top level entry for your plugin
+      description: F4 opens the root. Callbacks arrive on an API-owned thread; any API call is safe inside one.
+      requestBody: { $ref: '#/components/requestBodies/TitleArg' }
+      responses:
+        '200': { $ref: '#/components/responses/MenuId' }
+  /ShMenuSub:
+    post:
+      tags: [Menu]
+      operationId: ShMenuSub
+      summary: A nested submenu
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parent, label]
+              properties:
+                parent: { type: integer }
+                label: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/MenuId' }
+  /ShMenuAction:
+    post:
+      tags: [Menu]
+      operationId: ShMenuAction
+      summary: A row that fires a callback
+      requestBody: { $ref: '#/components/requestBodies/MenuItemArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShMenuToggle:
+    post:
+      tags: [Menu]
+      operationId: ShMenuToggle
+      summary: An on/off row
+      description: The callback receives the new value.
+      requestBody: { $ref: '#/components/requestBodies/MenuItemArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShMenuNumber:
+    post:
+      tags: [Menu]
+      operationId: ShMenuNumber
+      summary: A number row with lo, hi and step
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [menu, label]
+              properties:
+                menu: { type: integer }
+                label: { type: string }
+                initial: { type: number }
+                lo: { type: number }
+                hi: { type: number }
+                step: { type: number }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShMenuList:
+    post:
+      tags: [Menu]
+      operationId: ShMenuList
+      summary: A row cycling through options
+      description: The options array must outlive the menu. String literals are fine.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [menu, label, opts]
+              properties:
+                menu: { type: integer }
+                label: { type: string }
+                opts: { type: array, items: { type: string } }
+                initial: { type: integer }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShMenuStatus:
+    post:
+      tags: [Menu]
+      operationId: ShMenuStatus
+      summary: The line under your items
+      description: Empty text removes it.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [menu]
+              properties:
+                menu: { type: integer }
+                text: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShMenuSetKey:
+    post:
+      tags: [Menu]
+      operationId: ShMenuSetKey
+      summary: Change the open key
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vk]
+              properties:
+                vk: { type: integer, description: A Win32 virtual key code., example: 115 }
+      responses:
+        '200': { description: Done. }
+  /ShMenuIsOpen:
+    post:
+      tags: [Menu]
+      operationId: ShMenuIsOpen
+      summary: Whether the menu is open
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShMenuOpen:
+    post:
+      tags: [Menu]
+      operationId: ShMenuOpen
+      summary: Open or close the menu programmatically
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [open]
+              properties:
+                open: { type: integer, enum: [0, 1] }
+      responses:
+        '200': { description: Done. }
+
+  /ShHudCreate:
+    post:
+      tags: [HUD]
+      operationId: ShHudCreate
+      summary: Register an overlay slot
+      description: |
+        Anchors: 0 top left, 1 top right, 2 bottom left, 3 bottom right.
+        Lower priority sits nearer the edge; slots pack with no gaps.
+        Overlays are topmost windows: they draw in windowed and borderless
+        modes, exclusive fullscreen may drop them.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, anchor]
+              properties:
+                name: { type: string }
+                anchor: { type: integer, enum: [0, 1, 2, 3] }
+                priority: { type: integer }
+      responses:
+        '200':
+          description: The slot handle.
+          content:
+            application/json:
+              schema: { type: integer }
+  /ShHudSet:
+    post:
+      tags: [HUD]
+      operationId: ShHudSet
+      summary: Set a slot's text
+      description: Text may hold newlines. Empty text hides the slot.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hud, text]
+              properties:
+                hud: { type: integer }
+                text: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShHudColour:
+    post:
+      tags: [HUD]
+      operationId: ShHudColour
+      summary: Set a slot's colour
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hud, rgb]
+              properties:
+                hud: { type: integer }
+                rgb: { type: integer, description: 0xRRGGBB., example: 8912896 }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShHudShow:
+    post:
+      tags: [HUD]
+      operationId: ShHudShow
+      summary: Show or hide a slot
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hud, visible]
+              properties:
+                hud: { type: integer }
+                visible: { type: integer, enum: [0, 1] }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShHudDestroy:
+    post:
+      tags: [HUD]
+      operationId: ShHudDestroy
+      summary: Remove a slot
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hud]
+              properties:
+                hud: { type: integer }
+      responses:
+        '200': { description: Done. }
+
+  /ShHitHookInstall:
+    post:
+      tags: [Combat]
+      operationId: ShHitHookInstall
+      summary: Install the projectile hook
+      description: Needed before any hit or shot is reported. One hook feeds both.
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShHitHookReady:
+    post:
+      tags: [Combat]
+      operationId: ShHitHookReady
+      summary: Whether the hook is live
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShOnHit:
+    post:
+      tags: [Combat]
+      operationId: ShOnHit
+      summary: Register a hit receiver, up to eight
+      description: |
+        Receivers run on a worker thread the API owns, so any API call is
+        safe inside one. Flags: `SH_EVT_NO_SELF` (0x2) drops your own hits;
+        `SH_EVT_MINE_ONLY` (0x1) delivers only the local player's, but
+        depends on the shooter field, which some projectiles omit, so it is
+        opt in. The callback receives an `ShHit`.
+      requestBody: { $ref: '#/components/requestBodies/ReceiverArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShOffHit:
+    post:
+      tags: [Combat]
+      operationId: ShOffHit
+      summary: Remove one receiver, or all when fn is NULL
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShHitCount:
+    post:
+      tags: [Combat]
+      operationId: ShHitCount
+      summary: Total hits recorded
+      responses:
+        '200':
+          description: The count.
+          content:
+            application/json:
+              schema: { type: integer }
+  /ShGetHits:
+    post:
+      tags: [Combat]
+      operationId: ShGetHits
+      summary: The ring, for callers that would rather poll
+      responses:
+        '200':
+          description: Recent hits, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShHit' }
+  /ShOnFire:
+    post:
+      tags: [Combat]
+      operationId: ShOnFire
+      summary: Register a shot receiver, up to eight
+      description: |
+        A shot is reported on the projectile's first step. The callback
+        receives an `ShShot`.
+      requestBody: { $ref: '#/components/requestBodies/ReceiverArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShOffFire:
+    post:
+      tags: [Combat]
+      operationId: ShOffFire
+      summary: Remove one shot receiver, or all when fn is NULL
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShShotCount:
+    post:
+      tags: [Combat]
+      operationId: ShShotCount
+      summary: Total shots recorded
+      responses:
+        '200':
+          description: The count.
+          content:
+            application/json:
+              schema: { type: integer }
+  /ShGetShots:
+    post:
+      tags: [Combat]
+      operationId: ShGetShots
+      summary: Recent shots, newest first
+      responses:
+        '200':
+          description: The shots.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShShot' }
+
+  /ShRayLog:
+    post:
+      tags: [Rays]
+      operationId: ShRayLog
+      summary: Turn ray recording on or off
+      description: |
+        Off by default: it costs a copy on every cast, and the engine casts
+        about 100k rays a second. Modes: 0 off, 1 all,
+        2 directed (skips the straight down ground probes). Filter first.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: { type: integer, enum: [0, 1, 2] }
+      responses:
+        '200': { description: Done. }
+  /ShRayFilter:
+    post:
+      tags: [Rays]
+      operationId: ShRayFilter
+      summary: Record only traces near a point
+      description: Radius 0 records all. `minLength` drops short probes.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from: { $ref: '#/components/schemas/ShVec3' }
+                radius: { type: number }
+                minLength: { type: number }
+      responses:
+        '200': { description: Done. }
+  /ShRayFilterPlayer:
+    post:
+      tags: [Rays]
+      operationId: ShRayFilterPlayer
+      summary: Track the player instead of a fixed point
+      description: Radius 0 turns it off.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                radius: { type: number }
+                minLength: { type: number }
+      responses:
+        '200': { description: Done. }
+  /ShRayCount:
+    post:
+      tags: [Rays]
+      operationId: ShRayCount
+      summary: Total rays recorded
+      responses:
+        '200':
+          description: The count.
+          content:
+            application/json:
+              schema: { type: integer }
+  /ShGetRays:
+    post:
+      tags: [Rays]
+      operationId: ShGetRays
+      summary: The most recent rays, newest first
+      responses:
+        '200':
+          description: The rays.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShRay' }
+  /ShQueryRays:
+    post:
+      tags: [Rays]
+      operationId: ShQueryRays
+      summary: Query the recorded rays
+      description: Zeroed query fields match all, so set only what you care about.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ShRayQuery' }
+      responses:
+        '200':
+          description: Matching rays, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShRay' }
+
+  /ShGetHealthPlayer:
+    post:
+      tags: [Stats]
+      operationId: ShGetHealthPlayer
+      summary: The local player's health
+      responses:
+        '200':
+          description: Current and max.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cur: { type: integer, example: 100 }
+                  max: { type: integer, example: 100 }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetHealthPlayer:
+    post:
+      tags: [Stats]
+      operationId: ShSetHealthPlayer
+      summary: Set the local player's health
+      requestBody: { $ref: '#/components/requestBodies/ValueArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetGodModePlayer:
+    post:
+      tags: [Stats]
+      operationId: ShSetGodModePlayer
+      summary: Ignore damage
+      requestBody: { $ref: '#/components/requestBodies/OnArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShSetCannotDiePlayer:
+    post:
+      tags: [Stats]
+      operationId: ShSetCannotDiePlayer
+      summary: Floor at the downed state instead of dying
+      requestBody: { $ref: '#/components/requestBodies/OnArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShGetHealthEntity:
+    post:
+      tags: [Stats]
+      operationId: ShGetHealthEntity
+      summary: Any entity's health
+      description: The entity comes from the enumerator, never from a raw pointer a plugin invented.
+      requestBody: { $ref: '#/components/requestBodies/EntityArg' }
+      responses:
+        '200':
+          description: Current and max.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cur: { type: integer }
+                  max: { type: integer }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetHealthEntity:
+    post:
+      tags: [Stats]
+      operationId: ShSetHealthEntity
+      summary: Set any entity's health
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entity, value]
+              properties:
+                entity: { $ref: '#/components/schemas/Handle' }
+                value: { type: integer }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetGodModeEntity:
+    post:
+      tags: [Stats]
+      operationId: ShSetGodModeEntity
+      summary: God mode for any entity
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entity, on]
+              properties:
+                entity: { $ref: '#/components/schemas/Handle' }
+                on: { type: integer, enum: [0, 1] }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShStatRead:
+    post:
+      tags: [Stats]
+      operationId: ShStatRead
+      summary: Read a protected int you found yourself
+      description: |
+        The general stat storage: four bit planes and an XOR key. Health,
+        resources, skill points and XP all live in it.
+      x-since: 0.4.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stat]
+              properties:
+                stat: { $ref: '#/components/schemas/Handle' }
+      responses:
+        '200':
+          description: The value.
+          content:
+            application/json:
+              schema: { type: integer }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShStatWrite:
+    post:
+      tags: [Stats]
+      operationId: ShStatWrite
+      summary: Write a protected int
+      x-since: 0.4.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stat, value]
+              properties:
+                stat: { $ref: '#/components/schemas/Handle' }
+                value: { type: integer }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGetResource:
+    post:
+      tags: [Stats]
+      operationId: ShGetResource
+      summary: A crafting resource
+      description: 0 food, 1 gasoline, 2 medicine, 3 comms.
+      x-since: 0.4.0
+      requestBody: { $ref: '#/components/requestBodies/WhichArg' }
+      responses:
+        '200':
+          description: The amount.
+          content:
+            application/json:
+              schema: { type: integer }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetResource:
+    post:
+      tags: [Stats]
+      operationId: ShSetResource
+      summary: Set a crafting resource
+      x-since: 0.4.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [which, value]
+              properties:
+                which: { type: integer, enum: [0, 1, 2, 3] }
+                value: { type: integer }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetAllResources:
+    post:
+      tags: [Stats]
+      operationId: ShSetAllResources
+      summary: Set all four resources at once
+      x-since: 0.4.0
+      requestBody: { $ref: '#/components/requestBodies/ValueArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShGetSkillPoints:
+    post:
+      tags: [Stats]
+      operationId: ShGetSkillPoints
+      summary: Skill points
+      x-since: 0.4.0
+      responses:
+        '200':
+          description: The amount.
+          content:
+            application/json:
+              schema: { type: integer }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetSkillPoints:
+    post:
+      tags: [Stats]
+      operationId: ShSetSkillPoints
+      summary: Set skill points
+      x-since: 0.4.0
+      requestBody: { $ref: '#/components/requestBodies/ValueArg' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShSetVisibility:
+    post:
+      tags: [Stats]
+      operationId: ShSetVisibility
+      summary: How visible you are to enemies
+      description: 1 normal, 0 invisible, 0.5 halves the detection range, above 1 is easier to spot.
+      x-since: 0.4.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [factor]
+              properties:
+                factor: { type: number, example: 0.5 }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGetVisibility:
+    post:
+      tags: [Stats]
+      operationId: ShGetVisibility
+      summary: The current visibility factor
+      x-since: 0.4.0
+      responses:
+        '200':
+          description: The factor.
+          content:
+            application/json:
+              schema: { type: number }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGetAmmo:
+    post:
+      tags: [Stats]
+      operationId: ShGetAmmo
+      summary: Ammo by weapon slot
+      description: 0 primary, 1 secondary, 2 sidearm.
+      x-since: 0.4.0
+      requestBody: { $ref: '#/components/requestBodies/SlotArg' }
+      responses:
+        '200':
+          description: The count.
+          content:
+            application/json:
+              schema: { type: integer }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetAmmo:
+    post:
+      tags: [Stats]
+      operationId: ShSetAmmo
+      summary: Set ammo by weapon slot
+      x-since: 0.4.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slot, value]
+              properties:
+                slot: { type: integer, enum: [0, 1, 2] }
+                value: { type: integer }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /ShSetWeather:
+    post:
+      tags: [Weather]
+      operationId: ShSetWeather
+      summary: Change the weather, completing at once
+      description: |
+        Through the engine's own transition function, so the sky blends
+        properly. **Holds until restart:** the first set freezes the ambient
+        weather system so your sky stays put; natural weather returns when
+        the game restarts. Exotic mission weather outside the six known
+        types reads as failure from `ShGetWeather`.
+      x-since: 0.6.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { $ref: '#/components/schemas/ShWeather' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGetWeather:
+    post:
+      tags: [Weather]
+      operationId: ShGetWeather
+      summary: Which of the six known types is active
+      x-since: 0.6.0
+      responses:
+        '200':
+          description: The type.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShWeather' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShSetTime:
+    post:
+      tags: [Weather]
+      operationId: ShSetTime
+      summary: Set the time of day
+      description: |
+        Hours past midnight, 0 to 24. The first set stops the day/night
+        clock so the chosen hour holds, until the game restarts.
+      x-since: 0.6.0
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hours]
+              properties:
+                hours: { type: number, minimum: 0, maximum: 24, example: 12 }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+        '400': { $ref: '#/components/responses/Error' }
+  /ShGetTime:
+    post:
+      tags: [Weather]
+      operationId: ShGetTime
+      summary: The current clock
+      x-since: 0.6.0
+      responses:
+        '200':
+          description: Hours past midnight.
+          content:
+            application/json:
+              schema: { type: number, example: 14.4 }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /ShQueueCall:
+    post:
+      tags: [Engine]
+      operationId: ShQueueCall
+      summary: Run an engine call on the GAME THREAD
+      description: |
+        Calls that take engine locks deadlock from any other thread, so
+        never call an engine address directly. Returns 1 when accepted;
+        poll `ShQueueResult` until it returns 1, usually the next frame.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fn]
+              properties:
+                fn: { $ref: '#/components/schemas/Handle' }
+                a0: { $ref: '#/components/schemas/Handle' }
+                a1: { $ref: '#/components/schemas/Handle' }
+                a2: { $ref: '#/components/schemas/Handle' }
+                a3: { $ref: '#/components/schemas/Handle' }
+      responses:
+        '200': { $ref: '#/components/responses/Bool' }
+  /ShQueueResult:
+    post:
+      tags: [Engine]
+      operationId: ShQueueResult
+      summary: The queued call's return value, once it has run
+      responses:
+        '200':
+          description: The function's RAX.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Handle' }
+
+components:
+  requestBodies:
+    EntityArg:
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [entity]
+            properties:
+              entity: { $ref: '#/components/schemas/Handle' }
+    PosArg:
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [pos]
+            properties:
+              pos: { $ref: '#/components/schemas/ShVec3' }
+    OnArg:
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [on]
+            properties:
+              on: { type: integer, enum: [0, 1] }
+    ValueArg:
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [value]
+            properties:
+              value: { type: integer }
+    WhichArg:
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [which]
+            properties:
+              which: { type: integer, enum: [0, 1, 2, 3] }
+    SlotArg:
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [slot]
+            properties:
+              slot: { type: integer, enum: [0, 1, 2] }
+    TitleArg:
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [title]
+            properties:
+              title: { type: string, example: First person }
+    MenuItemArg:
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [menu, label]
+            properties:
+              menu: { type: integer }
+              label: { type: string }
+              initial: { type: integer }
+    ReceiverArg:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              flags:
+                type: integer
+                description: SH_EVT_MINE_ONLY 0x1, SH_EVT_NO_SELF 0x2. 0 delivers every event.
+
+  responses:
+    Bool:
+      description: 1 on success or true, 0 otherwise.
+      content:
+        application/json:
+          schema: { type: integer, enum: [0, 1] }
+    Vec3:
+      description: A world position.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ShVec3' }
+    Handles:
+      description: Handles written to the caller's array.
+      content:
+        application/json:
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/Handle' }
+    MenuId:
+      description: The menu handle.
+      content:
+        application/json:
+          schema: { type: integer }
+    Error:
+      description: Returned 0. ShLastError() carries the reason.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ShError' }
+
+  schemas:
+    Handle:
+      type: integer
+      format: int64
+      description: A 64 bit engine pointer, opaque to plugins.
+      example: 1881539008
+    ShVec3:
+      type: object
+      description: Metres. x east, y north, z up.
+      properties:
+        x: { type: number }
+        y: { type: number }
+        z: { type: number }
+    ShPlayer:
+      type: object
+      description: root is the top of the parent chain and the only position that survives a direct write.
+      properties:
+        entity: { $ref: '#/components/schemas/Handle' }
+        node: { $ref: '#/components/schemas/Handle' }
+        root: { $ref: '#/components/schemas/Handle' }
+    ShEntityKind:
+      type: integer
+      description: |
+        0 any, 1 player, 2 npc, 3 vehicle, 4 drone, 5 teammate, 6 turret,
+        7 mine, 8 door, 9 lootchest, 10 other.
+      enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    ShEntity:
+      type: object
+      properties:
+        entity: { $ref: '#/components/schemas/Handle' }
+        pos: { $ref: '#/components/schemas/ShVec3' }
+        distance: { type: number }
+        kind: { $ref: '#/components/schemas/ShEntityKind' }
+        maxHealth: { type: integer }
+        name: { type: string, example: bravo_convoy_truck }
+    ShComponent:
+      type: object
+      description: The class hash IS the component type; name is set when the class is known.
+      properties:
+        component: { $ref: '#/components/schemas/Handle' }
+        dataBlock: { $ref: '#/components/schemas/Handle' }
+        classHash: { type: integer, format: int64 }
+        name: { type: string }
+    ShVehicle:
+      type: object
+      properties:
+        id: { type: integer, format: int64, example: 1074166690 }
+        name: { type: string, example: amphibious boat }
+    ShCamera:
+      type: object
+      description: Rows of the pose matrix. Mode 0 is the player's camera.
+      properties:
+        pos: { $ref: '#/components/schemas/ShVec3' }
+        right: { $ref: '#/components/schemas/ShVec3' }
+        forward: { $ref: '#/components/schemas/ShVec3' }
+        up: { $ref: '#/components/schemas/ShVec3' }
+        fov: { type: number, description: Vertical, radians., example: 0.82 }
+        mode: { type: integer }
+        camera: { $ref: '#/components/schemas/Handle' }
+    ShCamFields:
+      type: integer
+      description: Bit set. SH_CAM_POS 0x01, ROT 0x02, FOV 0x04, SKEW 0x08, MODE 0x10.
+    ShCameraOverride:
+      type: object
+      description: Set only the bits named in apply; the engine keeps the rest.
+      required: [apply]
+      properties:
+        apply: { $ref: '#/components/schemas/ShCamFields' }
+        pos: { $ref: '#/components/schemas/ShVec3' }
+        yaw: { type: number, description: Radians. 0 faces +y. }
+        pitch: { type: number, description: Radians, positive up. Clamped to ±1.55. }
+        roll: { type: number, description: Radians, about the forward axis. }
+        fov: { type: number, description: Vertical, radians, 0.05 to 3.0. }
+        skewX: { type: number }
+        skewY: { type: number }
+        mode: { type: integer }
+    ShHit:
+      type: object
+      description: Bullets often strike a child part, so root is resolved for you and is the one worth acting on.
+      properties:
+        entity: { $ref: '#/components/schemas/Handle' }
+        root: { $ref: '#/components/schemas/Handle' }
+        kind: { $ref: '#/components/schemas/ShEntityKind' }
+        id: { type: integer, format: int64 }
+        pos: { $ref: '#/components/schemas/ShVec3' }
+        normal: { $ref: '#/components/schemas/ShVec3' }
+        distance: { type: number, description: Along the bullet's flight. }
+        shooter: { $ref: '#/components/schemas/Handle' }
+        byPlayer: { type: integer, enum: [0, 1] }
+        projectile: { $ref: '#/components/schemas/Handle' }
+        index: { type: integer }
+    ShShot:
+      type: object
+      properties:
+        shooter: { $ref: '#/components/schemas/Handle' }
+        kind: { $ref: '#/components/schemas/ShEntityKind' }
+        byPlayer: { type: integer, enum: [0, 1] }
+        origin:
+          allOf: [{ $ref: '#/components/schemas/ShVec3' }]
+          description: The muzzle.
+        dir:
+          allOf: [{ $ref: '#/components/schemas/ShVec3' }]
+          description: Unit vector of travel.
+        yaw: { type: number, description: Degrees, 0 along +X. }
+        pitch: { type: number, description: Degrees, positive up. }
+        range: { type: number, description: The weapon's max range. }
+        projectile: { $ref: '#/components/schemas/Handle' }
+    ShRay:
+      type: object
+      description: dir is a full length vector, so origin + dir is the end of the trace.
+      properties:
+        origin: { $ref: '#/components/schemas/ShVec3' }
+        dir: { $ref: '#/components/schemas/ShVec3' }
+        hitPos: { $ref: '#/components/schemas/ShVec3' }
+        hits: { type: integer }
+        projectile:
+          allOf: [{ $ref: '#/components/schemas/Handle' }]
+          description: 0 when this is not a bullet.
+        projHits: { type: integer }
+        hitObject: { $ref: '#/components/schemas/Handle' }
+        hitDist: { type: number }
+    ShRayQuery:
+      type: object
+      description: Zeroed fields match all.
+      properties:
+        minLength: { type: number }
+        maxLength: { type: number, description: 0 means no upper bound. }
+        hitsOnly: { type: integer, enum: [0, 1] }
+        from: { $ref: '#/components/schemas/ShVec3' }
+        fromRadius: { type: number, description: 0 disables the origin test. }
+        through: { $ref: '#/components/schemas/ShVec3' }
+        throughRadius: { type: number, description: 0 disables the through test. }
+    ShGameState:
+      type: integer
+      description: |
+        0 unknown, 1 menu, 2 loading, 3 lobby, 4 in game, 5 reloading,
+        6 paused (in game with the pause menu up; ShIsInGame stays true).
+      enum: [0, 1, 2, 3, 4, 5, 6]
+    ShWeather:
+      type: integer
+      description: |
+        0 sunny, 1 light clouds, 2 heavy clouds, 3 fog, 4 light rain,
+        5 heavy rain.
+      enum: [0, 1, 2, 3, 4, 5]
+    ShError:
+      type: integer
+      description: |
+        0 ok, 1 bad arg, 2 no global, 3 no position, 4 no candidate (gone,
+        yet to be created, or unknown: the usual retry later), 5 no root,
+        6 unwritable, 7 the handle is no entity, 8 hook failed (unexpected
+        bytes, usually a game version mismatch), 9 no physics, 10 no ground,
+        11 called outside the Playing state, 12 beyond 1500m, where
+        collision is unloaded.
+      enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
