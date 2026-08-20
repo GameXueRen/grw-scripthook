@@ -1,4 +1,0 @@
-var searchData=
-[
-  ['writing_20a_20plugin_0',['Writing a plugin',['../index.html',1,'']]]
-];

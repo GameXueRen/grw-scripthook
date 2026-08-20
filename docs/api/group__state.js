@@ -1,7 +1,7 @@
 var group__state =
 [
-    [ "ShGetGameState_t", "group__state.html#gad416e2d3e2dce7fa962adaa67d4317e7", null ],
-    [ "ShIsInGame_t", "group__state.html#ga5094f7e1853834912f404164b63ae8eb", null ],
+    [ "ShGetGameState_t", "group__state.html#ga01e8bf01402e743cae92b2d445d8f719", null ],
+    [ "ShIsInGame_t", "group__state.html#gadec5fc8c920aa5660d39cbbb96f3bea7", null ],
     [ "ShGameState", "group__state.html#ga9f4fd702cc8aa619d7d6e85a9a2479d6", [
       [ "SH_STATE_UNKNOWN", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6a6133786c30917426092a7cbf48c6c438", null ],
       [ "SH_STATE_MENU", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6a91d1535b84b3405e7699179bfa437c6e", null ],

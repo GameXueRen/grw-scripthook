@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['credits_0',['Credits',['../index.html#autotoc_md2',1,'']]]
+  ['writing_20a_20plugin_0',['Writing a plugin',['../index.html',1,'']]]
 ];

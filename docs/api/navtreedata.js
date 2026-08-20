@@ -55,6 +55,5 @@ var NAVTREEINDEX =
 "structShEntity.html#a6926efe29d5f430ef577b265ccc641bc"
 ];
 
-const SYNCONMSG = 'click to disable panel synchronization';
-const SYNCOFFMSG = 'click to enable panel synchronization';
-const LISTOFALLMEMBERS = 'List of all members';
+var SYNCONMSG = 'click to disable panel synchronisation';
+var SYNCOFFMSG = 'click to enable panel synchronisation';
