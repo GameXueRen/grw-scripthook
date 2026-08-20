@@ -1,10 +1,11 @@
 var searchData=
 [
-  ['hitdist_0',['hitDist',['../structShRay.html#a7a101fdbd4d6d2b6e45c3a00e765e0a9',1,'ShRay']]],
-  ['hitobject_1',['hitObject',['../structShRay.html#a4cd86155c4a0712114cde5a88f31f312',1,'ShRay']]],
-  ['hitpos_2',['hitPos',['../structShRay.html#a1709eeccd63df4823bd26b251667c073',1,'ShRay']]],
-  ['hits_3',['hits',['../structShRay.html#a803cdd14f70f2b3fde1c19bc1dd724d6',1,'ShRay']]],
-  ['hitsonly_4',['hitsOnly',['../structShRayQuery.html#a76b7908f923086317ed5124b9f966c12',1,'ShRayQuery']]],
-  ['hold_20across_20the_20api_5',['Rules that hold across the API',['../index.html#autotoc_md1',1,'']]],
-  ['hud_6',['HUD',['../group__hud.html',1,'']]]
+  ['havok_20diagnostics_0',['Havok diagnostics',['../group__havokdiag.html',1,'']]],
+  ['hitdist_1',['hitDist',['../structShRay.html#a7a101fdbd4d6d2b6e45c3a00e765e0a9',1,'ShRay']]],
+  ['hitobject_2',['hitObject',['../structShRay.html#a4cd86155c4a0712114cde5a88f31f312',1,'ShRay']]],
+  ['hitpos_3',['hitPos',['../structShRay.html#a1709eeccd63df4823bd26b251667c073',1,'ShRay']]],
+  ['hits_4',['hits',['../structShRay.html#a803cdd14f70f2b3fde1c19bc1dd724d6',1,'ShRay']]],
+  ['hitsonly_5',['hitsOnly',['../structShRayQuery.html#a76b7908f923086317ed5124b9f966c12',1,'ShRayQuery']]],
+  ['hold_20across_20the_20api_6',['Rules that hold across the API',['../index.html#autotoc_md1',1,'']]],
+  ['hud_7',['HUD',['../group__hud.html',1,'']]]
 ];

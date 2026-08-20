@@ -1,4 +1,5 @@
 var searchData=
 [
-  ['menu_0',['Menu',['../group__menu.html',1,'']]]
+  ['havok_20diagnostics_0',['Havok diagnostics',['../group__havokdiag.html',1,'']]],
+  ['hud_1',['HUD',['../group__hud.html',1,'']]]
 ];

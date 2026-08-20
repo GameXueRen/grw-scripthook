@@ -124,6 +124,11 @@ Functions</h2></td></tr>
 <tr class="separator:gaee7b058c57fe806af8a8d6559fcabf94"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:ga5c7babd264ef109c718b13d0881fe624" id="r_ga5c7babd264ef109c718b13d0881fe624"><td class="memItemLeft" align="right" valign="top"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ga5c7babd264ef109c718b13d0881fe624">ShSetGodModePlayer</a> (int on)</td></tr>
 <tr class="separator:ga5c7babd264ef109c718b13d0881fe624"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:gabdbaea33cc6ea7965e737dc0b6db5fdf" id="r_gabdbaea33cc6ea7965e737dc0b6db5fdf"><td class="memItemLeft" align="right" valign="top"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#gabdbaea33cc6ea7965e737dc0b6db5fdf">ShDamagePlayer</a> (uint32_t amount)</td></tr>
+<tr class="memdesc:gabdbaea33cc6ea7965e737dc0b6db5fdf"><td class="mdescLeft">&#160;</td><td class="mdescRight">Damage through the engine's own path, so death runs its real sequence.  <br /></td></tr>
+<tr class="separator:gabdbaea33cc6ea7965e737dc0b6db5fdf"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:ga4da1dbf46bce259c9828cb9105bb2470" id="r_ga4da1dbf46bce259c9828cb9105bb2470"><td class="memItemLeft" align="right" valign="top"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ga4da1dbf46bce259c9828cb9105bb2470">ShKillPlayer</a> (void)</td></tr>
+<tr class="separator:ga4da1dbf46bce259c9828cb9105bb2470"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:ga823f9bbb16d0150bb9561b3252aa5f8c" id="r_ga823f9bbb16d0150bb9561b3252aa5f8c"><td class="memItemLeft" align="right" valign="top"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ga823f9bbb16d0150bb9561b3252aa5f8c">ShSetCannotDiePlayer</a> (int on)</td></tr>
 <tr class="memdesc:ga823f9bbb16d0150bb9561b3252aa5f8c"><td class="mdescLeft">&#160;</td><td class="mdescRight">Floors at the downed state instead of dying.  <br /></td></tr>
 <tr class="separator:ga823f9bbb16d0150bb9561b3252aa5f8c"><td class="memSeparator" colspan="2">&#160;</td></tr>
@@ -276,6 +281,43 @@ Functions</h2></td></tr>
           <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShSetGodModePlayer </td>
           <td>(</td>
           <td class="paramtype">int</td>          <td class="paramname"><span class="paramname"><em>on</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="gabdbaea33cc6ea7965e737dc0b6db5fdf" name="gabdbaea33cc6ea7965e737dc0b6db5fdf"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#gabdbaea33cc6ea7965e737dc0b6db5fdf">&#9670;&#160;</a></span>ShDamagePlayer()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShDamagePlayer </td>
+          <td>(</td>
+          <td class="paramtype">uint32_t</td>          <td class="paramname"><span class="paramname"><em>amount</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Damage through the engine's own path, so death runs its real sequence. </p>
+<p>Queued onto the game thread. </p>
+
+</div>
+</div>
+<a id="ga4da1dbf46bce259c9828cb9105bb2470" name="ga4da1dbf46bce259c9828cb9105bb2470"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga4da1dbf46bce259c9828cb9105bb2470">&#9670;&#160;</a></span>ShKillPlayer()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShKillPlayer </td>
+          <td>(</td>
+          <td class="paramtype">void</td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
           <td></td>
         </tr>
       </table>

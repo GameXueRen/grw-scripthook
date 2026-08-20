@@ -1,5 +1,5 @@
 var searchData=
 [
-  ['state_0',['Game state',['../group__state.html',1,'']]],
-  ['stats_20and_20ammo_1',['Stats and ammo',['../group__stats.html',1,'']]]
+  ['physics_20rays_0',['Physics rays',['../group__rays.html',1,'']]],
+  ['player_1',['Player',['../group__player.html',1,'']]]
 ];

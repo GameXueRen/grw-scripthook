@@ -29,6 +29,9 @@ var group__entities =
       [ "SH_KIND_OTHER", "group__entities.html#ggaf36cb48868c9094b790c45e98ea60212a4c94b5fc14618bddea7ffc3f34380b59", null ]
     ] ],
     [ "ShPlaceEntity", "group__entities.html#ga4995b437edef83dc35d7a18d21a98568", null ],
+    [ "ShPlaceEntityRot", "group__entities.html#ga68bdf590356b290c10b3e5ad33d666f5", null ],
+    [ "ShGetEntityTransform", "group__entities.html#ga646982365e52cecad71b1b78cc880abe", null ],
+    [ "ShQueueTransform", "group__entities.html#gad1b2313163a835c319947b84243d5abf", null ],
     [ "ShFindEntities", "group__entities.html#ga70170169196e3b4df9fc3e984c42ff48", null ],
     [ "ShGetEntityKind", "group__entities.html#ga611c5269fdc7d901eb017be012739f25", null ],
     [ "ShKindName", "group__entities.html#gaf8db9909aed736ad2d18e277efafef37", null ],

@@ -13,6 +13,9 @@ var topics =
     [ "Menu", "group__menu.html", "group__menu" ],
     [ "HUD", "group__hud.html", "group__hud" ],
     [ "Camera", "group__camera.html", "group__camera" ],
+    [ "Motion", "group__motion.html", "group__motion" ],
+    [ "Havok diagnostics", "group__havokdiag.html", "group__havokdiag" ],
+    [ "Input", "group__input.html", "group__input" ],
     [ "Crash reports", "group__crash.html", "group__crash" ],
     [ "Stats and ammo", "group__stats.html", "group__stats" ],
     [ "Weather and time", "group__weather.html", "group__weather" ]

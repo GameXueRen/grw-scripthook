@@ -7,6 +7,8 @@ var group__stats =
     [ "ShGetHealthPlayer", "group__stats.html#gaef8fc002cc1f55478a5f7c01cd2222e4", null ],
     [ "ShSetHealthPlayer", "group__stats.html#gaee7b058c57fe806af8a8d6559fcabf94", null ],
     [ "ShSetGodModePlayer", "group__stats.html#ga5c7babd264ef109c718b13d0881fe624", null ],
+    [ "ShDamagePlayer", "group__stats.html#gabdbaea33cc6ea7965e737dc0b6db5fdf", null ],
+    [ "ShKillPlayer", "group__stats.html#ga4da1dbf46bce259c9828cb9105bb2470", null ],
     [ "ShSetCannotDiePlayer", "group__stats.html#ga823f9bbb16d0150bb9561b3252aa5f8c", null ],
     [ "ShInvalidateHealth", "group__stats.html#ga1042cbdbf509b67a60762737eae26f7f", null ],
     [ "ShGetHealthEntity", "group__stats.html#ga8ed17bc7b6f29ff6c7e922b0cf149b53", null ],

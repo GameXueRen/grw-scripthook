@@ -26,7 +26,8 @@ var group__core =
       [ "SH_ERR_NO_PHYSICS", "group__core.html#ggadde25b0f1a1193e012570c5bb2223395afeb18a0a4dc47d04d5b45ef25e982c09", null ],
       [ "SH_ERR_NO_GROUND", "group__core.html#ggadde25b0f1a1193e012570c5bb2223395a1da79693a90878f71c555132f46fc21d", null ],
       [ "SH_ERR_NOT_IN_GAME", "group__core.html#ggadde25b0f1a1193e012570c5bb2223395aa59bd8f355055d94aa088605dea4ae2a", null ],
-      [ "SH_ERR_NOT_STREAMED", "group__core.html#ggadde25b0f1a1193e012570c5bb2223395a2bdbb563e1a46492627cebe401d74d3f", null ]
+      [ "SH_ERR_NOT_STREAMED", "group__core.html#ggadde25b0f1a1193e012570c5bb2223395a2bdbb563e1a46492627cebe401d74d3f", null ],
+      [ "SH_ERR_CONTROLLER", "group__core.html#ggadde25b0f1a1193e012570c5bb2223395a86874c4fd2bb3902b803cc8b51ee0553", null ]
     ] ],
     [ "ShLastError", "group__core.html#ga8d2cc1fdff752654f5e3392a01405242", null ],
     [ "ShErrorString", "group__core.html#gaaeb52751cce0254a8712a61ac105cb06", null ],

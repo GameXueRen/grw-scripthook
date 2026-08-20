@@ -107,6 +107,9 @@ Functions</h2></td></tr>
 <tr class="memitem:ga917b757c075f7e1671b2a705fef6b1e6" id="r_ga917b757c075f7e1671b2a705fef6b1e6"><td class="memItemLeft" align="right" valign="top"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ga917b757c075f7e1671b2a705fef6b1e6">ShQueueCall</a> (uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)</td></tr>
 <tr class="memdesc:ga917b757c075f7e1671b2a705fef6b1e6"><td class="mdescLeft">&#160;</td><td class="mdescRight">Run an engine call on the GAME THREAD.  <br /></td></tr>
 <tr class="separator:ga917b757c075f7e1671b2a705fef6b1e6"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:ga7fbbaa8988adc48d0fa83f0f51bb37ff" id="r_ga7fbbaa8988adc48d0fa83f0f51bb37ff"><td class="memItemLeft" align="right" valign="top"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ga7fbbaa8988adc48d0fa83f0f51bb37ff">ShQueueCallF</a> (uint64_t fn, uint64_t a0, uint64_t a1, float f2, float f3, float f4)</td></tr>
+<tr class="memdesc:ga7fbbaa8988adc48d0fa83f0f51bb37ff"><td class="mdescLeft">&#160;</td><td class="mdescRight">Args three to five as floats, which the ABI passes in xmm2, xmm3 and the stack rather than the int registers.  <br /></td></tr>
+<tr class="separator:ga7fbbaa8988adc48d0fa83f0f51bb37ff"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:ga826bb490c381048bd9093963a00ae804" id="r_ga826bb490c381048bd9093963a00ae804"><td class="memItemLeft" align="right" valign="top"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ga826bb490c381048bd9093963a00ae804">ShQueueResult</a> (uint64_t *outRet)</td></tr>
 <tr class="separator:ga826bb490c381048bd9093963a00ae804"><td class="memSeparator" colspan="2">&#160;</td></tr>
 </table>
@@ -149,6 +152,49 @@ Functions</h2></td></tr>
 
 <p>Run an engine call on the GAME THREAD. </p>
 <p>Calls that take engine locks deadlock from any other thread. Queue returns 1 when accepted. Poll ShQueueResult until it returns 1, which is usually the next frame. </p>
+
+</div>
+</div>
+<a id="ga7fbbaa8988adc48d0fa83f0f51bb37ff" name="ga7fbbaa8988adc48d0fa83f0f51bb37ff"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga7fbbaa8988adc48d0fa83f0f51bb37ff">&#9670;&#160;</a></span>ShQueueCallF()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShQueueCallF </td>
+          <td>(</td>
+          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>fn</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>a0</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>a1</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>f2</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>f3</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>f4</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Args three to five as floats, which the ABI passes in xmm2, xmm3 and the stack rather than the int registers. </p>
 
 </div>
 </div>
