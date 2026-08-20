@@ -297,9 +297,35 @@ static LONG WINAPI CrashUef(EXCEPTION_POINTERS *ep) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+/* Reporting only by default. A first chance handler sees
+ * every fault before the game does, including the ones it
+ * throws on purpose, and healing those breaks it. */
+static int g_intercept = 0;
+static void *g_veh = NULL;
+
 void ShCrashStartup(void) {
-    AddVectoredExceptionHandler(1, CrashVeh);
     SetUnhandledExceptionFilter(CrashUef);
+}
+
+/** Watch faults first and resume ones with a null path.
+ *  Off by default: it breaks titles that fault on purpose.
+ */
+SH_API int ShSetCrashIntercept(int on) {
+    if (on && !g_veh) {
+        g_veh = AddVectoredExceptionHandler(1, CrashVeh);
+        g_intercept = g_veh ? 1 : 0;
+        return g_intercept;
+    }
+    if (!on && g_veh) {
+        RemoveVectoredExceptionHandler(g_veh);
+        g_veh = NULL;
+        g_intercept = 0;
+    }
+    return 1;
+}
+
+SH_API int ShCrashInterceptOn(void) {
+    return g_intercept;
 }
 
 /* Crash reporters install their own filter, so the slot
