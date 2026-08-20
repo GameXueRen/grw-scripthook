@@ -67,6 +67,7 @@ static uint8_t  g_orig[16];
 static int      g_origLen = 0;
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
+extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
 
 static volatile uint64_t g_A = 0;
@@ -96,19 +97,31 @@ static void ResolveWorld(uint64_t ctx) {
             !(mbi.Protect & PAGE_GUARD))
         {
             uint8_t *b = (uint8_t *)mbi.BaseAddress;
-            size_t sz = mbi.RegionSize, o;
-            for (o = 0; o + 0x18 <= sz; o += 8) {
-                uint64_t v, A, Bv;
-                memcpy(&v, b + o, 8);
-                if (v != ctx) continue;
-                if (o < 0x10) continue;
-                A = (uint64_t)(uintptr_t)(b + o - 0x10);
-                Bv = ShReadQ(A);
-                if (!Bv) continue;
-                if (ShReadQ(Bv + 0xD08) != A) continue;
-                g_A = A;
-                g_B = Bv;
-                return;
+            size_t sz = mbi.RegionSize, o, k, got;
+
+            /* Chunked kernel reads: a page freed mid scan
+             * skips instead of faulting. Chunks overlap so
+             * no candidate spans a seam. */
+            static uint8_t buf[0x10000];
+
+            for (o = 0; o + 0x18 <= sz; o += sizeof(buf) - 0x18) {
+                got = sz - o;
+                if (got > sizeof(buf)) got = sizeof(buf);
+                if (!ShReadMem((uint64_t)(uintptr_t)(b + o), buf, got))
+                    continue;
+                for (k = 0; k + 0x18 <= got; k += 8) {
+                    uint64_t v, A, Bv;
+                    memcpy(&v, buf + k, 8);
+                    if (v != ctx) continue;
+                    if (o + k < 0x10) continue;
+                    A = (uint64_t)(uintptr_t)(b + o + k - 0x10);
+                    Bv = ShReadQ(A);
+                    if (!Bv) continue;
+                    if (ShReadQ(Bv + 0xD08) != A) continue;
+                    g_A = A;
+                    g_B = Bv;
+                    return;
+                }
             }
         }
         scan = next;

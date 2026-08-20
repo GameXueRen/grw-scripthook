@@ -26,6 +26,7 @@
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
+extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern void ShSetError(int err);
 extern int ShRequireInGame(void);
 extern int ShGetPlayer(ShPlayer *out);
@@ -164,15 +165,28 @@ static uint64_t FindSpec(uint32_t vehicleId) {
             !(mbi.Protect & PAGE_GUARD))
         {
             uint8_t *b = (uint8_t *)mbi.BaseAddress;
-            size_t sz = mbi.RegionSize, o;
-            for (o = 0; o + 8 <= sz; o += 8) {
-                uint64_t v;
-                memcpy(&v, b + o, 8);
-                if (v != want) continue;
-                {
-                    uint64_t base = (uint64_t)(uintptr_t)(b + o)
-                                  - SPEC_HANDLE_OFF;
-                    if (ShReadQ(base) == SPEC_VTABLE) return base;
+            size_t sz = mbi.RegionSize, o, k, got;
+
+            /* Chunked kernel reads: a page freed mid scan
+             * skips instead of faulting. Chunks overlap so
+             * no candidate spans a seam. */
+            static uint8_t buf[0x10000];
+
+            for (o = 0; o + 8 <= sz; o += sizeof(buf) - 8) {
+                got = sz - o;
+                if (got > sizeof(buf)) got = sizeof(buf);
+                if (!ShReadMem((uint64_t)(uintptr_t)(b + o), buf, got))
+                    continue;
+                for (k = 0; k + 8 <= got; k += 8) {
+                    uint64_t v;
+                    memcpy(&v, buf + k, 8);
+                    if (v != want) continue;
+                    {
+                        uint64_t base =
+                            (uint64_t)(uintptr_t)(b + o + k)
+                            - SPEC_HANDLE_OFF;
+                        if (ShReadQ(base) == SPEC_VTABLE) return base;
+                    }
                 }
             }
         }

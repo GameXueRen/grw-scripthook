@@ -341,19 +341,34 @@ static int ShResolvePlayer(void) {
             !(mbi.Protect & PAGE_GUARD))
         {
             uint8_t *b = (uint8_t *)mbi.BaseAddress;
-            size_t sz = mbi.RegionSize, o;
-            for (o = 0; o + 0x60 <= sz; o += 8) {
-                uint64_t vt, obj = (uint64_t)(uintptr_t)(b + o);
-                memcpy(&vt, b + o, 8);
-                if (vt != SH_VT_ENTITY) continue;
-                memcpy(&got, b + o + OFF_ENT_POS, 12);
-                /* In a vehicle the mirror sits metres off,
-                 * so the bone attachment disambiguates.
-                 */
-                if (!ShNear(&got, &want, 12.0f)) continue;
-                if (!ShIsBoneAttached(obj)) continue;
-                if (!ShWalkToRoot(obj, &root)) continue;
-                if (root && root != obj) { best = obj; goto found; }
+            size_t sz = mbi.RegionSize, o, k, chunk;
+
+            /* Chunked kernel reads: a page freed mid scan
+             * skips instead of faulting. Chunks overlap so
+             * no candidate spans a seam. */
+            static uint8_t buf[0x10000];
+
+            for (o = 0; o + 0x60 <= sz; o += sizeof(buf) - 0x60) {
+                chunk = sz - o;
+                if (chunk > sizeof(buf)) chunk = sizeof(buf);
+                if (!ShReadMem((uint64_t)(uintptr_t)(b + o), buf,
+                               chunk))
+                    continue;
+                for (k = 0; k + 0x60 <= chunk; k += 8) {
+                    uint64_t vt;
+                    uint64_t obj = (uint64_t)(uintptr_t)(b + o + k);
+
+                    memcpy(&vt, buf + k, 8);
+                    if (vt != SH_VT_ENTITY) continue;
+                    memcpy(&got, buf + k + OFF_ENT_POS, 12);
+                    /* In a vehicle the mirror sits metres
+                     * off, so bone attachment disambiguates.
+                     */
+                    if (!ShNear(&got, &want, 12.0f)) continue;
+                    if (!ShIsBoneAttached(obj)) continue;
+                    if (!ShWalkToRoot(obj, &root)) continue;
+                    if (root && root != obj) { best = obj; goto found; }
+                }
             }
         }
         scan = next;
