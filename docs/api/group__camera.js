@@ -1,0 +1,47 @@
+var group__camera =
+[
+    [ "ShCamera", "structShCamera.html", [
+      [ "pos", "structShCamera.html#a9e2a1b5b3e4c8dc61b45c96078d7f028", null ],
+      [ "right", "structShCamera.html#a757079414708a973ccca056f58d98035", null ],
+      [ "forward", "structShCamera.html#a0a8bbddddb222d07093b5b69b7c5ce6d", null ],
+      [ "up", "structShCamera.html#aa00fbca40f56fe70809e25b0ec14490b", null ],
+      [ "fov", "structShCamera.html#ab52c6eca57e333879254ce700ba38e1e", null ],
+      [ "mode", "structShCamera.html#ad4525145f79d0dc5645c32494c6c7238", null ],
+      [ "camera", "structShCamera.html#a5eda4df94f87b385ad27956a47540548", null ]
+    ] ],
+    [ "ShCameraOverride", "structShCameraOverride.html", [
+      [ "apply", "structShCameraOverride.html#a41e0c4722a02fb0ecb22c04bfa8365d9", null ],
+      [ "pos", "structShCameraOverride.html#a928f4b646d30bdbab5e79b0508ac511a", null ],
+      [ "yaw", "structShCameraOverride.html#a6f7b7cf962be4b2d13d0f594ed3955b5", null ],
+      [ "pitch", "structShCameraOverride.html#a078cd15578d5b36ba1e52533703fc4fa", null ],
+      [ "roll", "structShCameraOverride.html#aaca9c1dd56288d52a0ebfb54798f939b", null ],
+      [ "fov", "structShCameraOverride.html#aefcd51f591dadc034235a697874e536d", null ],
+      [ "skewX", "structShCameraOverride.html#a7a3c2dc6ac7d54b021f5a948b86aa473", null ],
+      [ "skewY", "structShCameraOverride.html#a0cb0e72f6dcb29dbd48488e1e7ed2305", null ],
+      [ "mode", "structShCameraOverride.html#a49d647312940f4581f632a2e5c61886d", null ]
+    ] ],
+    [ "SH_CAM_POS", "group__camera.html#ga52506e535706656ab6c325257d358c85", null ],
+    [ "SH_CAM_ROT", "group__camera.html#ga37d1b6defa902ee08a08bc570d869546", null ],
+    [ "SH_CAM_FOV", "group__camera.html#ga8c7d1fb687301c05f55d91d4a65aef26", null ],
+    [ "SH_CAM_SKEW", "group__camera.html#gaf32fb87e1cd2f7930ee5476faa7731a6", null ],
+    [ "SH_CAM_MODE", "group__camera.html#gaab52a53a49df40d2adaa188860111f86", null ],
+    [ "ShCameraHookInstall", "group__camera.html#ga1c7c30eff4257acf07c1cb2d91965751", null ],
+    [ "ShCameraReady", "group__camera.html#ga0d321f0a1f679e208f5dac237ea29768", null ],
+    [ "ShCameraCalls", "group__camera.html#gaad3d7996bc6343032e055642b1877ecc", null ],
+    [ "ShCameraWrites", "group__camera.html#gac7dce7fb6b9e3e600959a887b9106e0f", null ],
+    [ "ShSetCameraBlur", "group__camera.html#gaf1176c98040212157f2ccdaf028260dc", null ],
+    [ "ShCameraBlurOff", "group__camera.html#gac596964f4a21395ce42e8ae3aa87adaa", null ],
+    [ "ShGetCamera", "group__camera.html#gaf4f400653636d7840feac951ec3fadb6", null ],
+    [ "ShSetCamera", "group__camera.html#ga72cc035b426caf23ca36b723bb5bb659", null ],
+    [ "ShCameraOrbit", "group__camera.html#ga93cfebb26f160d325ad50354ff4a544c", null ],
+    [ "ShCameraFree", "group__camera.html#ga97b9f9b8f31f368c1a8378937fdbd437", null ],
+    [ "ShCameraAngles", "group__camera.html#ga777ec761072af69fd203479c9ea6486b", null ],
+    [ "ShCameraRelease", "group__camera.html#gab9d9fba20f23dba93a14964b00409c05", null ],
+    [ "ShCameraReleaseFields", "group__camera.html#gafc2084410023e221a7bddb27e01f3df9", null ],
+    [ "ShCameraOwned", "group__camera.html#ga2c6963a4c5938cfecdd596c8ff2ce44a", null ],
+    [ "ShCameraFirstPerson", "group__camera.html#gade0ed4a2676e6dca888f9482718f8f9b", null ],
+    [ "ShGetHeadPosition", "group__camera.html#ga4a0aa9b26304d43fc06483066115330a", null ],
+    [ "ShHeadBone", "group__camera.html#ga5768d6af90301a5f27de4001ed9e6a15", null ],
+    [ "ShCameraApply", "group__camera.html#ga1802fe0d42fa1a0ae74f33065e2b276d", null ],
+    [ "ShCameraMatrix", "group__camera.html#ga2b7e73cb6b3553aaa7d0e91b9164c128", null ]
+];

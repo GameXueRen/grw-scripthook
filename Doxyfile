@@ -1,0 +1,29 @@
+# Doxygen configuration for the ScriptHook plugin API.
+# Run `doxygen` in src/; output lands in docs/api/.
+# Non-default options only.
+
+PROJECT_NAME           = "GRW ScriptHook"
+PROJECT_NUMBER         = 0.6.0
+PROJECT_BRIEF          = "Plugin API for Ghost Recon Wildlands"
+
+INPUT                  = scripthook.h docs/plugins.md
+USE_MDFILE_AS_MAINPAGE = docs/plugins.md
+
+OUTPUT_DIRECTORY       = docs
+HTML_OUTPUT            = api
+GENERATE_LATEX         = NO
+
+OPTIMIZE_OUTPUT_FOR_C  = YES
+EXTRACT_ALL            = YES
+JAVADOC_AUTOBRIEF      = YES
+SORT_MEMBER_DOCS       = NO
+SORT_BRIEF_DOCS        = NO
+
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+HTML_COLORSTYLE        = LIGHT
+HTML_EXTRA_STYLESHEET  = docs/doxygen-awesome.css
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
