@@ -12,6 +12,16 @@ located and verified in a running game.
 Developed and tested under Proton on Linux, though nothing in it is
 Wine specific.
 
+## Documentation
+
+The full API reference, generated from `scripthook.h`, lives at
+<https://phialsbasement.github.io/grw-scripthook/api/>. It covers
+every call, grouped the way the header is.
+
+[docs/plugins.md](docs/plugins.md) is the plugin author's guide:
+how loading works, which threads call you, and the rules that keep
+a plugin from crashing the game.
+
 ## What works
 
 | Capability | Notes |
@@ -56,10 +66,11 @@ so the game behaves normally with or without plugins present.
 
 ## Writing a mod
 
-A plugin is a DLL named `.asi`. Resolve the API through
-`GetProcAddress`, never by linking against the import library:
-plugins are loaded from inside `dinput8`'s own `DllMain`, so a
-static import on it deadlocks the Windows loader.
+A plugin is a DLL named `.asi`. The loader runs plugins from a
+worker thread rather than from `DllMain`, so a plugin can link
+`libscripthook.a` and call the API directly, or resolve it through
+`GetProcAddress` to also run on older loaders. The guide in
+[docs/plugins.md](docs/plugins.md) walks through both.
 
 The whole of the falling cars mod:
 
@@ -165,12 +176,24 @@ made pinned addresses easy to get away with and easy to get wrong.
 ```
 loader.c              dinput8 proxy, loads the real DLL and the .asi files
 scripthook_api.c      player, teleport, entity placement, errors
-scripthook_entity.c   enumeration, components, kinds
+scripthook_entity.c   enumeration, components, kinds, visibility
 scripthook_health.c   the obfuscated health storage
-scripthook_state.c    game flow state
+scripthook_state.c    game flow state, pause detection
 scripthook_physics.c  ray hook, ground queries, game thread queue
 scripthook_spawn.c    vehicle catalogue and spawning
 scripthook_hit.c      OnHit and OnFire
+scripthook_camera.c   the camera hook, per field ownership
+scripthook_head.c     the head bone, position and orientation
+scripthook_fov.c      field of view, taken at its source
+scripthook_blur.c     the hidden close range blur, one byte
+scripthook_stat.c     the obfuscated stat storage
+scripthook_resource.c resources and skill points
+scripthook_stealth.c  detection visibility scale
+scripthook_ammo.c     ammo by weapon slot
+scripthook_weather.c  weather type and time of day
+scripthook_hud.c      overlay slots
+scripthook_menu.c     the shared F4 menu
+guard.c               landing pad for the spawn trampoline
 
 test_plugin.c         a REPL on port 9999, every debugging command
 hitfling.c tpgun.c    the example mods
