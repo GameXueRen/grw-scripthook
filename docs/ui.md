@@ -152,6 +152,18 @@ The `SH_SCENE_` constants name the common ones; any name
 drawn (the drone HUD is loaded while you walk), so only the
 drawn set is used.
 
+The same information feeds the game state calls:
+`ShGetUiState()` returns `SH_UI_` flags (drone, binocular,
+vehicle HUD, pause menu, loadout, map, skills, com wheel,
+game over, loading, cinematic, popup), `ShInDrone()`,
+`ShInLoadout()`, `ShInMap()` and `ShInBinocular()` are the
+one-liners. `ShGetGameState()` uses it too: the pause menu,
+loadout, map and skills screens are `SH_STATE_PAUSED`, a
+loading screen drawn while the flow still says Playing is
+`SH_STATE_RELOADING`, the game over screen is
+`SH_STATE_GAMEOVER`, and `ShGetGameStateName()` appends the
+sub state ("Playing (drone)", "Paused (loadout)").
+
 ## Fonts and textures
 
 New labels use the HUD font and new plates the white 16x16

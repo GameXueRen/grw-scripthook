@@ -133,11 +133,35 @@ Enumerations</h2></td></tr>
 &#160;&#160;<a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6acea0857e20450a4a45147ba60096debe">SH_STATE_INGAME</a>
 , <a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6aa9b1f895ac3c2b1e40f28ef6d35be37f">SH_STATE_RELOADING</a>
 , <a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6aad417f90cadf98933428e1825fb1cb52">SH_STATE_PAUSED</a>
+, <a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263">SH_STATE_GAMEOVER</a>
 <br />
  }</td></tr>
+<tr class="memitem:gad09ea399101d05a6198c72b8226f8b5d" id="r_gad09ea399101d05a6198c72b8226f8b5d"><td class="memItemLeft">enum &#160;</td><td class="memItemRight"><a class="el" href="#gad09ea399101d05a6198c72b8226f8b5d">ShUiState</a> { <br />
+&#160;&#160;<a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5dacc8a2db1a2dc470b1baba9c153e52d71">SH_UI_DRONE</a> = 0x0001
+, <a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5da3b3ad51e99a4882ed5da3e3251866c85">SH_UI_BINOCULAR</a> = 0x0002
+, <a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5daa6707aee529915ac2fdc353bb21ad818">SH_UI_VEHICLE</a> = 0x0004
+, <a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5da40fd92751cbd6bbca205bd9b9f2eb7be">SH_UI_PAUSE</a> = 0x0008
+, <br />
+&#160;&#160;<a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5dadee22250dc3044f256bd4d6636804eba">SH_UI_LOADOUT</a> = 0x0010
+, <a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5da60de4a569b59fcc6c901a53764320cb9">SH_UI_MAP</a> = 0x0020
+, <a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5da1b1291c117a54dfccbc2fa5a9f087c4e">SH_UI_SKILLS</a> = 0x0040
+, <a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5da6bce14d45f50c7a189b8466f1a1b025d">SH_UI_COMWHEEL</a> = 0x0080
+, <br />
+&#160;&#160;<a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5da5b570dedc08396b2d962c274d6017e59">SH_UI_GAMEOVER</a> = 0x0100
+, <a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5da98325e0405642bfac146d38e251ce32f">SH_UI_LOADING</a> = 0x0200
+, <a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5da3d1bdbd9c47168f4e8a53707236b31e9">SH_UI_CINEMATIC</a> = 0x0400
+, <a class="el" href="#ggad09ea399101d05a6198c72b8226f8b5da8d17f4a018d2b448eb84e7b1e8ea6b5f">SH_UI_POPUP</a> = 0x0800
+<br />
+ }</td></tr>
+<tr class="memdesc:gad09ea399101d05a6198c72b8226f8b5d"><td class="mdescLeft">&#160;</td><td class="mdescRight">What the game's UI is showing, from the scenes it drew last frame.  <a href="#gad09ea399101d05a6198c72b8226f8b5d">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
+<tr class="memitem:ga80c0d8a3a89723cf516de16da18bd29d" id="r_ga80c0d8a3a89723cf516de16da18bd29d"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> uint32_t&#160;</td><td class="memItemRight"><a class="el" href="#ga80c0d8a3a89723cf516de16da18bd29d">ShGetUiState</a> (void)</td></tr>
+<tr class="memitem:gae99c608bd9f8a64c2723297a6d8a163d" id="r_gae99c608bd9f8a64c2723297a6d8a163d"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gae99c608bd9f8a64c2723297a6d8a163d">ShInDrone</a> (void)</td></tr>
+<tr class="memitem:ga8654235029cdd3cea18e3420821eeedd" id="r_ga8654235029cdd3cea18e3420821eeedd"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga8654235029cdd3cea18e3420821eeedd">ShInLoadout</a> (void)</td></tr>
+<tr class="memitem:ga163e8eb04849d0de3ddac3b21b9a67f2" id="r_ga163e8eb04849d0de3ddac3b21b9a67f2"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga163e8eb04849d0de3ddac3b21b9a67f2">ShInMap</a> (void)</td></tr>
+<tr class="memitem:gab265b2aed2d592e02625cafe08311b6f" id="r_gab265b2aed2d592e02625cafe08311b6f"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gab265b2aed2d592e02625cafe08311b6f">ShInBinocular</a> (void)</td></tr>
 <tr class="memitem:gaef7417643134cb5dd85bdc1fd45ae589" id="r_gaef7417643134cb5dd85bdc1fd45ae589"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gaef7417643134cb5dd85bdc1fd45ae589">ShInPauseMenu</a> (void)</td></tr>
 <tr class="memdesc:gaef7417643134cb5dd85bdc1fd45ae589"><td class="mdescLeft">&#160;</td><td class="mdescRight">The game flow stays in Playing while paused, so this is read off the camera: the pause menu renders through a template pose no steered camera ever holds.  <br /></td></tr>
 <tr class="memitem:gaa26669d8d11c933d6c4d889a829fb3df" id="r_gaa26669d8d11c933d6c4d889a829fb3df"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gaa26669d8d11c933d6c4d889a829fb3df">ShGetGameState</a> (void)</td></tr>
@@ -196,14 +220,136 @@ Functions</h2></td></tr>
 <tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6aa43d0e8ad28b61667bea7198b3b2b413" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6aa43d0e8ad28b61667bea7198b3b2b413"></a>SH_STATE_LOBBY&#160;</td><td class="fielddoc"></td></tr>
 <tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6acea0857e20450a4a45147ba60096debe" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6acea0857e20450a4a45147ba60096debe"></a>SH_STATE_INGAME&#160;</td><td class="fielddoc"></td></tr>
 <tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6aa9b1f895ac3c2b1e40f28ef6d35be37f" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6aa9b1f895ac3c2b1e40f28ef6d35be37f"></a>SH_STATE_RELOADING&#160;</td><td class="fielddoc"></td></tr>
-<tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6aad417f90cadf98933428e1825fb1cb52" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6aad417f90cadf98933428e1825fb1cb52"></a>SH_STATE_PAUSED&#160;</td><td class="fielddoc"><p>In game with the pause menu up. </p>
-<p>ShIsInGame stays true: the world is loaded and reads keep working. </p>
+<tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6aad417f90cadf98933428e1825fb1cb52" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6aad417f90cadf98933428e1825fb1cb52"></a>SH_STATE_PAUSED&#160;</td><td class="fielddoc"><p>In game with the pause menu, loadout, map or skills up. </p>
+<p>ShIsInGame stays true: the world is loaded. </p>
+</td></tr>
+<tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263"></a>SH_STATE_GAMEOVER&#160;</td><td class="fielddoc"><p>The game over screen is drawn. </p>
+</td></tr>
+</table>
+
+</div>
+</div>
+<a id="gad09ea399101d05a6198c72b8226f8b5d" name="gad09ea399101d05a6198c72b8226f8b5d"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#gad09ea399101d05a6198c72b8226f8b5d">&#9670;&#160;</a></span>ShUiState</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">enum <a class="el" href="#gad09ea399101d05a6198c72b8226f8b5d">ShUiState</a></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>What the game's UI is showing, from the scenes it drew last frame. </p>
+<p>Several can be up at once. </p>
+<table class="fieldtable">
+<tr><th colspan="2">Enumerator</th></tr><tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5dacc8a2db1a2dc470b1baba9c153e52d71" name="ggad09ea399101d05a6198c72b8226f8b5dacc8a2db1a2dc470b1baba9c153e52d71"></a>SH_UI_DRONE&#160;</td><td class="fielddoc"><p>flying the drone </p>
+</td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5da3b3ad51e99a4882ed5da3e3251866c85" name="ggad09ea399101d05a6198c72b8226f8b5da3b3ad51e99a4882ed5da3e3251866c85"></a>SH_UI_BINOCULAR&#160;</td><td class="fielddoc"></td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5daa6707aee529915ac2fdc353bb21ad818" name="ggad09ea399101d05a6198c72b8226f8b5daa6707aee529915ac2fdc353bb21ad818"></a>SH_UI_VEHICLE&#160;</td><td class="fielddoc"><p>vehicle HUD </p>
+</td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5da40fd92751cbd6bbca205bd9b9f2eb7be" name="ggad09ea399101d05a6198c72b8226f8b5da40fd92751cbd6bbca205bd9b9f2eb7be"></a>SH_UI_PAUSE&#160;</td><td class="fielddoc"><p>the pause menu (tabs) </p>
+</td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5dadee22250dc3044f256bd4d6636804eba" name="ggad09ea399101d05a6198c72b8226f8b5dadee22250dc3044f256bd4d6636804eba"></a>SH_UI_LOADOUT&#160;</td><td class="fielddoc"></td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5da60de4a569b59fcc6c901a53764320cb9" name="ggad09ea399101d05a6198c72b8226f8b5da60de4a569b59fcc6c901a53764320cb9"></a>SH_UI_MAP&#160;</td><td class="fielddoc"></td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5da1b1291c117a54dfccbc2fa5a9f087c4e" name="ggad09ea399101d05a6198c72b8226f8b5da1b1291c117a54dfccbc2fa5a9f087c4e"></a>SH_UI_SKILLS&#160;</td><td class="fielddoc"></td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5da6bce14d45f50c7a189b8466f1a1b025d" name="ggad09ea399101d05a6198c72b8226f8b5da6bce14d45f50c7a189b8466f1a1b025d"></a>SH_UI_COMWHEEL&#160;</td><td class="fielddoc"></td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5da5b570dedc08396b2d962c274d6017e59" name="ggad09ea399101d05a6198c72b8226f8b5da5b570dedc08396b2d962c274d6017e59"></a>SH_UI_GAMEOVER&#160;</td><td class="fielddoc"></td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5da98325e0405642bfac146d38e251ce32f" name="ggad09ea399101d05a6198c72b8226f8b5da98325e0405642bfac146d38e251ce32f"></a>SH_UI_LOADING&#160;</td><td class="fielddoc"></td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5da3d1bdbd9c47168f4e8a53707236b31e9" name="ggad09ea399101d05a6198c72b8226f8b5da3d1bdbd9c47168f4e8a53707236b31e9"></a>SH_UI_CINEMATIC&#160;</td><td class="fielddoc"></td></tr>
+<tr><td class="fieldname"><a id="ggad09ea399101d05a6198c72b8226f8b5da8d17f4a018d2b448eb84e7b1e8ea6b5f" name="ggad09ea399101d05a6198c72b8226f8b5da8d17f4a018d2b448eb84e7b1e8ea6b5f"></a>SH_UI_POPUP&#160;</td><td class="fielddoc"><p>a modal popup </p>
 </td></tr>
 </table>
 
 </div>
 </div>
 <a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Function Documentation</h2>
+<a id="ga80c0d8a3a89723cf516de16da18bd29d" name="ga80c0d8a3a89723cf516de16da18bd29d"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga80c0d8a3a89723cf516de16da18bd29d">&#9670;&#160;</a></span>ShGetUiState()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> uint32_t ShGetUiState </td>
+          <td>(</td>
+          <td class="paramtype">void</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="gae99c608bd9f8a64c2723297a6d8a163d" name="gae99c608bd9f8a64c2723297a6d8a163d"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#gae99c608bd9f8a64c2723297a6d8a163d">&#9670;&#160;</a></span>ShInDrone()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShInDrone </td>
+          <td>(</td>
+          <td class="paramtype">void</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="ga8654235029cdd3cea18e3420821eeedd" name="ga8654235029cdd3cea18e3420821eeedd"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga8654235029cdd3cea18e3420821eeedd">&#9670;&#160;</a></span>ShInLoadout()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShInLoadout </td>
+          <td>(</td>
+          <td class="paramtype">void</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="ga163e8eb04849d0de3ddac3b21b9a67f2" name="ga163e8eb04849d0de3ddac3b21b9a67f2"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga163e8eb04849d0de3ddac3b21b9a67f2">&#9670;&#160;</a></span>ShInMap()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShInMap </td>
+          <td>(</td>
+          <td class="paramtype">void</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="gab265b2aed2d592e02625cafe08311b6f" name="gab265b2aed2d592e02625cafe08311b6f"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#gab265b2aed2d592e02625cafe08311b6f">&#9670;&#160;</a></span>ShInBinocular()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShInBinocular </td>
+          <td>(</td>
+          <td class="paramtype">void</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
 <a id="gaef7417643134cb5dd85bdc1fd45ae589" name="gaef7417643134cb5dd85bdc1fd45ae589"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#gaef7417643134cb5dd85bdc1fd45ae589">&#9670;&#160;</a></span>ShInPauseMenu()</h2>
 

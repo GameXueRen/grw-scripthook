@@ -39,11 +39,34 @@ enum ShGameState {
     SH_STATE_INGAME,
     SH_STATE_RELOADING,
 
-    /** In game with the pause menu up. ShIsInGame stays
-     *  true: the world is loaded and reads keep working.
-     */
-    SH_STATE_PAUSED
+    /** In game with the pause menu, loadout, map or skills
+     *  up. ShIsInGame stays true: the world is loaded. */
+    SH_STATE_PAUSED,
+    /** The game over screen is drawn. */
+    SH_STATE_GAMEOVER
 };
+
+/** What the game's UI is showing, from the scenes it drew
+ *  last frame. Several can be up at once. */
+enum ShUiState {
+    SH_UI_DRONE      = 0x0001,  /**< flying the drone */
+    SH_UI_BINOCULAR  = 0x0002,
+    SH_UI_VEHICLE    = 0x0004,  /**< vehicle HUD */
+    SH_UI_PAUSE      = 0x0008,  /**< the pause menu (tabs) */
+    SH_UI_LOADOUT    = 0x0010,
+    SH_UI_MAP        = 0x0020,
+    SH_UI_SKILLS     = 0x0040,
+    SH_UI_COMWHEEL   = 0x0080,
+    SH_UI_GAMEOVER   = 0x0100,
+    SH_UI_LOADING    = 0x0200,
+    SH_UI_CINEMATIC  = 0x0400,
+    SH_UI_POPUP      = 0x0800   /**< a modal popup */
+};
+SH_API uint32_t ShGetUiState(void);
+SH_API int      ShInDrone(void);
+SH_API int      ShInLoadout(void);
+SH_API int      ShInMap(void);
+SH_API int      ShInBinocular(void);
 
 /** @} */
 /** @addtogroup core

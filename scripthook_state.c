@@ -113,6 +113,45 @@ SH_API uint32_t ShGetGameStateHash(void) {
     return StateHash(CurrentState());
 }
 
+/* UI state: the named scenes the game drew last frame */
+extern int ShGameSceneActive(const char *name);
+
+static const struct { const char *scene; uint32_t bit; } g_uiBits[] = {
+    { "HUD_Drone",          SH_UI_DRONE },
+    { "HUD_Binocular",      SH_UI_BINOCULAR },
+    { "HUD_Vehicle",        SH_UI_VEHICLE },
+    { "Menu_TabbedPage",    SH_UI_PAUSE },
+    { "MENU_LoadoutV2",     SH_UI_LOADOUT },
+    { "MENU_Map_Cursor",    SH_UI_MAP },
+    { "MENU_Skills",        SH_UI_SKILLS },
+    { "HUD_ComWheel",       SH_UI_COMWHEEL },
+    { "MENU_GameOver",      SH_UI_GAMEOVER },
+    { "MENU_LoadingScreen", SH_UI_LOADING },
+    { "HUD_Cinematic",      SH_UI_CINEMATIC },
+    { "Menu_Popup",         SH_UI_POPUP },
+};
+
+SH_API uint32_t ShGetUiState(void) {
+    uint32_t bits = 0;
+    size_t i;
+    for (i = 0; i < sizeof(g_uiBits) / sizeof(g_uiBits[0]); i++)
+        if (ShGameSceneActive(g_uiBits[i].scene)) bits |= g_uiBits[i].bit;
+    return bits;
+}
+
+SH_API int ShInDrone(void)     { return (ShGetUiState() & SH_UI_DRONE) != 0; }
+SH_API int ShInLoadout(void)   { return (ShGetUiState() & SH_UI_LOADOUT) != 0; }
+SH_API int ShInMap(void)       { return (ShGetUiState() & SH_UI_MAP) != 0; }
+SH_API int ShInBinocular(void) { return (ShGetUiState() & SH_UI_BINOCULAR) != 0; }
+
+/* the pause family: tabs, loadout, map, skills */
+static int Paused(void) {
+    uint32_t ui = ShGetUiState();
+    if (ui & (SH_UI_PAUSE | SH_UI_LOADOUT | SH_UI_MAP | SH_UI_SKILLS))
+        return 1;
+    return ShInPauseMenu();
+}
+
 SH_API int ShGetGameStateName(char *buf, int len) {
     uint64_t s;
     uint32_t h;
@@ -126,8 +165,18 @@ SH_API int ShGetGameStateName(char *buf, int len) {
     }
     h = StateHash(s);
     if (h == HASH_PLAYING) {
-        if (ShInPauseMenu()) snprintf(buf, len, "Paused");
-        else snprintf(buf, len, "Playing");
+        uint32_t ui = ShGetUiState();
+        const char *sub = "";
+        if (ui & SH_UI_DRONE) sub = " (drone)";
+        else if (ui & SH_UI_BINOCULAR) sub = " (binocular)";
+        else if (ui & SH_UI_LOADOUT) sub = " (loadout)";
+        else if (ui & SH_UI_MAP) sub = " (map)";
+        else if (ui & SH_UI_SKILLS) sub = " (skills)";
+        else if (ui & SH_UI_VEHICLE) sub = " (vehicle)";
+        if (ui & SH_UI_LOADING) snprintf(buf, len, "Reloading");
+        else if (ui & SH_UI_GAMEOVER) snprintf(buf, len, "GameOver");
+        else if (Paused()) snprintf(buf, len, "Paused%s", sub);
+        else snprintf(buf, len, "Playing%s", sub);
     }
     else if (h == HASH_MENU) snprintf(buf, len, "MenuOrLobby");
     else if (h == HASH_INGAME) snprintf(buf, len, "InGame");
@@ -169,10 +218,11 @@ SH_API int ShGetGameState(void) {
 
     TrackState(h);
     if (h == HASH_PLAYING || h == HASH_INGAME) {
-        /* The flow never leaves Playing for the pause
-         * menu, so the camera answers instead.
-         */
-        if (ShInPauseMenu()) return SH_STATE_PAUSED;
+        /* the flow stays Playing through all of these */
+        uint32_t ui = ShGetUiState();
+        if (ui & SH_UI_LOADING) return SH_STATE_RELOADING;
+        if (ui & SH_UI_GAMEOVER) return SH_STATE_GAMEOVER;
+        if (Paused()) return SH_STATE_PAUSED;
         return SH_STATE_INGAME;
     }
     if (h == HASH_MENU) return SH_STATE_MENU;
