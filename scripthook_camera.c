@@ -78,6 +78,7 @@ static uint8_t  g_thunkOrig[5];
 extern void ShSetError(int err);
 extern void ShVisibilityPump(void);
 extern void ShTransformPump(void);
+extern void ShDominoPump(void);
 extern void ShHeadPump(void);
 extern void ShHeadWant(void);
 extern int ShFovSet(float radians);
@@ -297,6 +298,7 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
      */
     ShVisibilityPump();
     ShTransformPump();
+    ShDominoPump();
 
     /* The menu camera never takes the head, so its frames
      * do no head work at all. The pump keeps its state and

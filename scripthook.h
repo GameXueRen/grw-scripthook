@@ -331,6 +331,34 @@ SH_API int  ShRegisterFrameCallback(ShFrameFn_t fn, void *user);
 SH_API void ShUnregisterFrameCallback(ShFrameFn_t fn);
 
 /** @} */
+/** @defgroup domino World and entity calls from Domino
+ *  Recovered from the mission script operators; see the
+ *  map-domino files in scripthook/spawnmaps. @{ */
+
+/** One lightning strike, queued in the weather system. */
+SH_API int   ShTriggerLightning(void);
+/** The live ground wetness. Writing it does nothing: the
+ *  request slot is ignored, so there is no setter. */
+SH_API float ShGetWetness(void);
+/** Override the lightning rate, or 0 to hand it back. */
+SH_API int   ShSetLightningFrequency(int enable, float value);
+
+/** The player's own god and ghost bytes. */
+SH_API int   ShSetGodMode(int on);
+SH_API int   ShSetGhostMode(int on);
+SH_API int   ShGetGodMode(void);
+
+/** A sphere explosions ignore. NULL clears it. */
+SH_API int   ShExplosionShield(const ShVec3 *at, float radius);
+
+/** Physics bodies on or off for one entity. */
+SH_API int   ShSetEntityPhysics(uint64_t entity, int on);
+/** The child follows the parent at an offset. */
+SH_API int   ShAttachEntity(uint64_t child, uint64_t parent,
+                            const ShVec3 *offset);
+SH_API int   ShDetachEntity(uint64_t child);
+
+/** @} */
 /** @defgroup npcs NPCs
  *  Standalone NPCs by archetype, built like the engine's
  *  spawn director does (FINDINGS "NPC SPAWN WORKS"). @{ */
@@ -350,6 +378,11 @@ SH_API const ShNpcArchetype *ShNpcAt(int index);
 /** The NPC joins the population manager with the current
  *  Camp and Job, so its AI runs like a native spawn. */
 SH_API uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos);
+
+/** Retire a spawned entity, NPC or vehicle, through the
+ *  spawn manager. Entities built outside the spawn system
+ *  have no spec and refuse. */
+SH_API int ShDespawn(uint64_t entity);
 
 /** @} */
 /** @addtogroup player

@@ -199,6 +199,7 @@ static void CmdHelp(Resp *r) {
     RAppend(r, "  hwbpfilter [idx] [hex]  keep hits with chain[idx]==hex\n");
     RAppend(r, "  npclist [kind]     archetypes via ShNpcCount/ShNpcAt\n");
     RAppend(r, "  spawnnpc <i|0xid> [x y z]  ShSpawnNpc\n");
+    RAppend(r, "  shcall <ShName> <sig> [args]  any export\n");
     RAppend(r, "  dis <hex> [len]    raw bytes for disasm (default 64)\n");
     RAppend(r, "  strings <hex> <len> printable strings in range\n");
     RAppend(r, "  silexlist          list SilexNetMessage names\n");
@@ -3804,6 +3805,63 @@ static void CmdSpawnVeh(Resp *r, const char *line) {
             pos.x, pos.y, pos.z);
 }
 
+/* shcall <name> <sig> [args]: call any dinput8 export.
+ * sig letters: i integer, f float, F float return. */
+static void CmdShCall(Resp *r, const char *line) {
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    char name[64] = {0}, sig[8] = {0}, a[4][32];
+    uint64_t iv[4] = {0, 0, 0, 0};
+    float fv[4] = {0, 0, 0, 0};
+    FARPROC fn;
+    int n, i, nf = 0, ni = 0;
+
+    memset(a, 0, sizeof(a));
+    n = sscanf(line, "%*s %63s %7s %31s %31s %31s %31s", name, sig,
+               a[0], a[1], a[2], a[3]);
+    if (n < 2) {
+        RAppend(r, "usage: shcall <ShName> <sig> [args]\n"
+                   "  sig: i int, f float, F float return\n"
+                   "  example: shcall ShSetWetness f 1.0\n");
+        return;
+    }
+    if (!m) { RAppend(r, "dinput8 missing\n"); return; }
+    fn = GetProcAddress(m, name);
+    if (!fn) { RAppend(r, "no export %s\n", name); return; }
+
+    for (i = 0; i < 4 && sig[i]; i++) {
+        const char *s = a[i];
+        if (sig[i] == 'F') break;
+        if (sig[i] == 'f') { fv[i] = (float)atof(s); nf++; }
+        else { iv[i] = ParseHex(s); ni++; }
+    }
+
+    /* One prototype per shape we actually need. */
+    if (!strcmp(sig, "")) {
+        RAppend(r, "%s() = %d\n", name, ((int (*)(void))fn)());
+    } else if (!strcmp(sig, "F")) {
+        RAppend(r, "%s() = %.4f\n", name, ((float (*)(void))fn)());
+    } else if (!strcmp(sig, "i")) {
+        RAppend(r, "%s(%#llx) = %d\n", name,
+                (unsigned long long)iv[0],
+                ((int (*)(uint64_t))fn)(iv[0]));
+    } else if (!strcmp(sig, "f")) {
+        RAppend(r, "%s(%.3f) = %d\n", name, fv[0],
+                ((int (*)(float))fn)(fv[0]));
+    } else if (!strcmp(sig, "ii")) {
+        RAppend(r, "%s = %d\n", name,
+                ((int (*)(uint64_t, uint64_t))fn)(iv[0], iv[1]));
+    } else if (!strcmp(sig, "if")) {
+        RAppend(r, "%s = %d\n", name,
+                ((int (*)(uint64_t, float))fn)(iv[0], fv[1]));
+    } else if (!strcmp(sig, "iii")) {
+        RAppend(r, "%s = %d\n", name,
+                ((int (*)(uint64_t, uint64_t, uint64_t))fn)
+                    (iv[0], iv[1], iv[2]));
+    } else {
+        RAppend(r, "unsupported sig '%s'\n", sig);
+    }
+}
+
 typedef struct { uint64_t id; int kind; } ApiNpc;
 
 /* npclist [kind]: the archetype registry via the API. */
@@ -5798,6 +5856,7 @@ static void Dispatch(const char *line, Resp *r) {
     else if (strcmp(cmd, "spawnveh") == 0)  CmdSpawnVeh(r, line);
     else if (strcmp(cmd, "spawnnpc") == 0)  CmdSpawnNpc(r, line);
     else if (strcmp(cmd, "npclist") == 0)   CmdNpcList(r, line);
+    else if (strcmp(cmd, "shcall") == 0)    CmdShCall(r, line);
     else if (strcmp(cmd, "vehlist") == 0)   CmdVehList(r, line);
     else if (strcmp(cmd, "comps") == 0)     CmdComps(r, line);
     else if (strcmp(cmd, "raylog") == 0)    CmdRayLog(r, line);

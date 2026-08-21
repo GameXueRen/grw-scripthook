@@ -20,6 +20,11 @@
 #define RVA_KIND         0x83B1390
 #define RVA_POOL_FIND    0xDF4EE30
 
+/* Despawn, from the Domino UnspawnFromEntity node: the
+ * entity's spawning spec, then retire it. Verified live. */
+#define RVA_SPEC_OF      0xA604700
+#define RVA_RETIRE       0x921A2F0
+
 #define RVA_POOL         0x4D89000
 #define RVA_POPMGR       0x4B98F18
 #define RVA_CONTEXT      0x4B90208
@@ -170,9 +175,37 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
     g_pendErr = 0;
 }
 
+/* ---- despawn ---- */
+
+typedef uint64_t (__attribute__((ms_abi)) *SpecOf_t)(uint64_t);
+typedef int (__attribute__((ms_abi)) *Retire_t)(uint64_t);
+
+static volatile uint64_t g_killEnt = 0;
+static volatile int g_killDone = 0;
+static volatile int g_killOk = 0;
+
+static void DespawnOnGameThread(uint64_t entity) {
+    uint64_t spec;
+
+    g_killOk = 0;
+    spec = ((SpecOf_t)ImgAddr(RVA_SPEC_OF))(entity);
+    if (!spec) return;
+    if (!ShReadableAddr(spec, 0x180)) return;
+    ((Retire_t)ImgAddr(RVA_RETIRE))(spec);
+    g_killOk = 1;
+}
+
 /* Called from the physics hook, next to ShSpawnPump. */
 void ShNpcPump(void) {
     int did = 0;
+
+    if (g_killEnt) {
+        uint64_t e = g_killEnt;
+        g_killEnt = 0;
+        DespawnOnGameThread(e);
+        g_killDone = 1;
+        did = 1;
+    }
 
     if (g_listWanted) {
         g_listWanted = 0;
@@ -239,6 +272,23 @@ static uint64_t SpecEntity(uint64_t spec) {
     blk = ShReadQ(spec + 0xA8);
     if (blk == ImgAddr(RVA_NULL_BLOCK)) return 0;
     return BlockObj(blk);
+}
+
+/* Any spawn system entity, NPC or vehicle. Entities built
+ * outside that road have no spec and refuse. */
+int ShDespawn(uint64_t entity) {
+    if (!entity) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    if (!ShRequireInGame()) return 0;
+
+    g_killDone = 0;
+    g_killEnt = entity;
+    if (!WaitFlag(&g_killDone, 3000)) {
+        g_killEnt = 0;
+        ShSetError(SH_ERR_NO_PHYSICS);
+        return 0;
+    }
+    if (!g_killOk) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
+    return 1;
 }
 
 uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos) {
