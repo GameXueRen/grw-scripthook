@@ -191,6 +191,9 @@ static void CmdHelp(Resp *r) {
     RAppend(r, "  scan <string>      find string in memory\n");
     RAppend(r, "  xref <hex_addr>    find LEA refs to address\n");
     RAppend(r, "  read <hex> [len]   hex dump (default 128)\n");
+    RAppend(r, "  readhex <hex> <len> raw hex, up to 512K, one line\n");
+    RAppend(r, "  findq <start> <len> <val> <mask> [stride] [max]\n");
+    RAppend(r, "                     qwords where (q & mask) == val\n");
     RAppend(r, "  readstr <hex>      read null-terminated string\n");
     RAppend(r, "  dis <hex> [len]    raw bytes for disasm (default 64)\n");
     RAppend(r, "  strings <hex> <len> printable strings in range\n");
@@ -5472,6 +5475,86 @@ static void CmdOverlayOff(Resp *r) {
 
 /* ---- dispatch ---- */
 
+/* Bulk read, raw hex. One command instead of 128 reads. */
+#define READHEX_MAX (512 * 1024)
+
+static void CmdReadHex(Resp *r, const char *line) {
+    char as[64] = {0}, ls[64] = {0};
+    static const char hx[] = "0123456789abcdef";
+    uint8_t *buf;
+    uint64_t addr;
+    size_t len, i;
+    SIZE_T got = 0;
+
+    if (sscanf(line, "%*s %63s %63s", as, ls) != 2) {
+        RAppend(r, "usage: readhex <hex> <len>\n");
+        return;
+    }
+    addr = ParseHex(as);
+    len = (size_t)ParseHex(ls);
+    if (len > READHEX_MAX) len = READHEX_MAX;
+    buf = (uint8_t *)VirtualAlloc(NULL, len, MEM_COMMIT | MEM_RESERVE,
+                                  PAGE_READWRITE);
+    if (!buf) { RAppend(r, "no memory\n"); return; }
+    if (!CanRead((void *)(uintptr_t)addr, len) ||
+        !ReadProcessMemory(GetCurrentProcess(),
+                           (void *)(uintptr_t)addr, buf, len, &got)) {
+        got = 0;
+    }
+    RAppend(r, "hex %p %u\n", (void *)(uintptr_t)addr, (unsigned)got);
+    if (got && r->len + got * 2 + 2 < (size_t)r->cap) {
+        char *out = r->buf + r->len;
+        for (i = 0; i < got; i++) {
+            out[i * 2] = hx[buf[i] >> 4];
+            out[i * 2 + 1] = hx[buf[i] & 15];
+        }
+        out[got * 2] = '\n';
+        r->len += (int)(got * 2 + 1);
+    }
+    VirtualFree(buf, 0, MEM_RELEASE);
+}
+
+/* Masked qword search over a range, in process. */
+static void CmdFindQ(Resp *r, const char *line) {
+    char ss[64] = {0}, ls[64] = {0}, vs[64] = {0}, ms[64] = {0};
+    char st[64] = {0}, mx[64] = {0};
+    uint64_t start, len, val, mask, stride = 8, maxhits = 2000;
+    uint64_t a, end, found = 0;
+    uint8_t page[4096];
+    SIZE_T got;
+
+    if (sscanf(line, "%*s %63s %63s %63s %63s %63s %63s",
+               ss, ls, vs, ms, st, mx) < 4) {
+        RAppend(r, "usage: findq <start> <len> <val> <mask> "
+                   "[stride] [max]\n");
+        return;
+    }
+    start = ParseHex(ss); len = ParseHex(ls);
+    val = ParseHex(vs); mask = ParseHex(ms);
+    if (st[0]) stride = ParseHex(st);
+    if (mx[0]) maxhits = ParseHex(mx);
+    if (!stride || stride > 4096) stride = 8;
+    end = start + len;
+    for (a = start; a + 8 <= end && found < maxhits; a += sizeof(page)) {
+        size_t n = sizeof(page), o;
+        if (a + n > end) n = (size_t)(end - a);
+        if (!ReadProcessMemory(GetCurrentProcess(),
+                               (void *)(uintptr_t)a, page, n, &got) ||
+            got < 8)
+            continue;
+        for (o = 0; o + 8 <= got && found < maxhits; o += stride) {
+            uint64_t q;
+            memcpy(&q, page + o, 8);
+            if ((q & mask) == val) {
+                RAppend(r, "  %p %016llx\n", (void *)(uintptr_t)(a + o),
+                        (unsigned long long)q);
+                found++;
+            }
+        }
+    }
+    RAppend(r, "found %llu\n", (unsigned long long)found);
+}
+
 static void Dispatch(const char *line, Resp *r) {
     RefreshRanges();
     while (*line == ' ') line++;
@@ -5497,6 +5580,8 @@ static void Dispatch(const char *line, Resp *r) {
         int len = arg2[0] ? (int)ParseHex(arg2) : 128;
         CmdRead(r, (uint8_t *)ParseHex(arg1), len);
     }
+    else if (strcmp(cmd, "readhex") == 0)   CmdReadHex(r, line);
+    else if (strcmp(cmd, "findq") == 0)     CmdFindQ(r, line);
     else if (strcmp(cmd, "readstr") == 0)   CmdReadStr(r, (uint8_t *)ParseHex(arg1));
     else if (strcmp(cmd, "dis") == 0) {
         int len = arg2[0] ? (int)ParseHex(arg2) : 64;
