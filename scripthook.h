@@ -887,12 +887,11 @@ SH_API int  ShTriggerGameOver(int reason);
 
 /** @} */
 /** @defgroup ui Native UI
- *  Widgets in the engine's own HUD tree, drawn by the game.
+ *  Engine widgets in scenes of our own; see docs/ui.md.
  *  @{ */
 
-/** HUD pixels; a panel's children are relative to it.
- *  Colours are 0xRRGGBB. Ids die when the scene reloads.
- */
+/** 1 once the world is up; poll before building. It also
+ *  fires the reset callbacks after a world reload. */
 SH_API int      ShUiReady(void);
 /** Kill switch, on by default. */
 SH_API void     ShUiEnable(int on);

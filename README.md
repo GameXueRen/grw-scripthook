@@ -20,7 +20,8 @@ every call, grouped the way the header is.
 
 [docs/plugins.md](docs/plugins.md) is the plugin author's guide:
 how loading works, which threads call you, and the rules that keep
-a plugin from crashing the game.
+a plugin from crashing the game. [docs/ui.md](docs/ui.md) covers
+the native UI: scenes, widgets, properties, input and reloads.
 
 ## What works
 
@@ -35,14 +36,18 @@ a plugin from crashing the game.
 | Camera | Position, orientation, roll, fov, the view matrices |
 | OnHit events | Entity, position, normal, distance, shooter |
 | OnFire events | Muzzle, direction, yaw and pitch, shooter |
+| Native UI | The engine's own widgets, scenes per plugin, keys with focus |
 | Menu | One shared root, plugins add submenus |
-| Overlay | Slots that pack themselves, no Win32 in plugins |
+| Overlay | Slots that pack themselves, drawn by the game |
 | Game state | Menu, loading, in game, transitions |
 
-Two example mods are included, each about ten lines of real logic:
+Three example mods are included:
 
 - **hitfling** shoot a car, it launches into the air
 - **tpgun** shoot anywhere, you arrive there
+- **ui_sample** a window from the UI ABI alone: its own scene,
+  rows, a highlight bar, keys through the input callback, a
+  rebuild after a world reload (F7 toggles it)
 
 ## Building
 
@@ -53,6 +58,9 @@ Requires a MinGW cross compiler. On Arch that is
 make            # dinput8.dll and test_plugin.asi
 make fling      # hitfling.asi
 make tpgun      # tpgun.asi
+make sample     # ui_sample.asi
+make QUIET=1    # same, without the four benign warning families
+make docs       # the API reference into docs/api (doxygen)
 ```
 
 Output goes to `GAMEDIR`, set at the top of the Makefile, which
@@ -129,6 +137,15 @@ physics       ShPhysicsReady ShGroundHeight ShGroundHeightFrom
               ShRayLog ShQueryRays ShRayFilterPlayer
 
 engine        ShQueueCall ShQueueResult ShGetGameState ShIsInGame
+
+ui            ShUiSceneCreate ShUiSceneSetOrder ShUiSceneShow
+              ShUiSceneDestroy ShUiCreateIn ShUiReparent
+              ShUiChildCount ShUiChildAt ShUiDestroy
+              ShUiSetF ShUiSetU ShUiSetV ShUiSetS ShUiGetF
+              ShUiGetU ShUiGetV ShUiGetS ShUiMeasure
+              ShUiSetAutoSize ShUiBegin ShUiCommit
+              ShUiCommitAsync ShUiSetReset ShUiSetInput
+              ShUiFocus ShUiTextureCreate ShUiSetDefaultFont
 ```
 
 ### Events
@@ -195,12 +212,16 @@ scripthook_reflect.c  method tables by name, scenes, GameFlow objects
 scripthook_ui.c       native widgets, panels, labels, quads
 scripthook_scene.c    the phoenix scene of our own that hosts them
 scripthook_uiprop.c   widget properties by id from the engine's tables
+scripthook_uiinput.c  keys and pointer for the focused scene
+scripthook_dinput.c   the DirectInput keyboard wrapper, blocked keys
+scripthook_input.c    cursor freeze and the modifier poll stub
 scripthook_hud.c      overlay slots
 scripthook_menu.c     the shared F4 menu
 guard.c               landing pad for the spawn trampoline
 
 test_plugin.c         a REPL on port 9999, every debugging command
 hitfling.c tpgun.c    the example mods
+ui_sample.c           the native UI example
 ```
 
 `test_plugin.c` is large because it accumulated every experiment

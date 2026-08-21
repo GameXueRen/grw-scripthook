@@ -11,7 +11,15 @@ endif
 GAMEDIR = ../..
 
 .PHONY: all roulette fling tpgun spawner crazycars freecam fov fps \
-        chaos clean
+        chaos sample docs clean
+
+sample: $(GAMEDIR)/ui_sample.asi
+
+$(GAMEDIR)/ui_sample.asi: ui_sample.c scripthook.h libscripthook.a
+	$(CC) $(CFLAGS) -o $@ ui_sample.c -L. -lscripthook -luser32
+
+docs:
+	doxygen Doxyfile
 
 all: $(GAMEDIR)/dinput8.dll $(GAMEDIR)/test_plugin.asi
 
