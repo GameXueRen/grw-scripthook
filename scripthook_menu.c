@@ -359,6 +359,7 @@ static void Sync(const View *v) {
 /* Keys are polled here, the engine draws the result. */
 static DWORD WINAPI MenuThread(LPVOID p) {
     View v;
+    int captured = -1;
     (void)p;
 
     for (;;) {
@@ -367,6 +368,11 @@ static DWORD WINAPI MenuThread(LPVOID p) {
         if (Pressed(g_key)) {
             g_open = !g_open;
             if (g_open) g_current = g_root;
+        }
+        /* an open menu owns the keyboard, however it opened */
+        if (g_open != captured) {
+            captured = g_open;
+            ShCaptureKeys(captured);
         }
         if (g_ui.built && g_ui.gen != ShUiGen()) DropWidgets();
         if (!g_open) {
