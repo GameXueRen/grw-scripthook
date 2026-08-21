@@ -316,6 +316,27 @@ SH_API uint64_t ShSpawnVehicle(uint32_t vehicleId,
 SH_API void ShSpawnInvalidate(void);
 
 /** @} */
+/** @defgroup npcs NPCs
+ *  Standalone NPCs by archetype, built like the engine's
+ *  spawn director does (FINDINGS "NPC SPAWN WORKS"). @{ */
+
+typedef struct {
+    uint64_t id;     /**< archetype id, stable across sessions */
+    int      kind;   /**< 1 = spawnable NPC, 10 = none */
+} ShNpcArchetype;
+
+/** The archetype registry, read once per session on first
+ *  use. About 530 entries, about 150 of them kind 1. */
+SH_API int ShNpcCount(void);
+SH_API const ShNpcArchetype *ShNpcAt(int index);
+
+/** Spawn an NPC and return its ENTITY, or 0 on failure.
+ *  Blocks until it exists, usually a frame or two. */
+/** The NPC joins the population manager with the current
+ *  Camp and Job, so its AI runs like a native spawn. */
+SH_API uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos);
+
+/** @} */
 /** @addtogroup player
  *  @{ */
 

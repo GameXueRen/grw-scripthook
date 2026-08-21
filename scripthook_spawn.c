@@ -212,10 +212,10 @@ void ShSpawnInvalidate(void) {
     memset(g_specCache, 0, sizeof(g_specCache));
 }
 
-/* Build a transform from the player's own, so the basis is
- * whatever the engine considers upright here.
+/* Transform from the player's own, so the basis is what
+ * the engine calls upright. Shared with the NPC spawner.
  */
-static const void *BuildMatrix(const ShVec3 *pos) {
+const void *ShSpawnBuildMatrix(const ShVec3 *pos) {
     ShPlayer p;
     uint8_t *slot;
     float t[4];
@@ -290,7 +290,7 @@ uint64_t ShSpawnVehicle(uint32_t vehicleId, const ShVec3 *pos) {
     spec = SpecFor(vehicleId);
     if (!spec) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
 
-    mtx = BuildMatrix(pos);
+    mtx = ShSpawnBuildMatrix(pos);
     if (!mtx) { ShSetError(SH_ERR_NO_ROOT); return 0; }
 
     g_pendDone = 0;

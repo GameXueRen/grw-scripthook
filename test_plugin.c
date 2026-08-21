@@ -197,6 +197,8 @@ static void CmdHelp(Resp *r) {
     RAppend(r, "  readstr <hex>      read null-terminated string\n");
     RAppend(r, "  hwbpchain [rcx|rdx|r8] [off..] deref chain at hit\n");
     RAppend(r, "  hwbpfilter [idx] [hex]  keep hits with chain[idx]==hex\n");
+    RAppend(r, "  npclist [kind]     archetypes via ShNpcCount/ShNpcAt\n");
+    RAppend(r, "  spawnnpc <i|0xid> [x y z]  ShSpawnNpc\n");
     RAppend(r, "  dis <hex> [len]    raw bytes for disasm (default 64)\n");
     RAppend(r, "  strings <hex> <len> printable strings in range\n");
     RAppend(r, "  silexlist          list SilexNetMessage names\n");
@@ -3802,6 +3804,81 @@ static void CmdSpawnVeh(Resp *r, const char *line) {
             pos.x, pos.y, pos.z);
 }
 
+typedef struct { uint64_t id; int kind; } ApiNpc;
+
+/* npclist [kind]: the archetype registry via the API. */
+static void CmdNpcList(Resp *r, const char *line) {
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    int (*count)(void);
+    const ApiNpc *(*at)(int);
+    int want = -1, i, n, shown = 0;
+
+    sscanf(line, "%*s %d", &want);
+    if (!m) { RAppend(r, "dinput8 missing\n"); return; }
+    *(FARPROC *)&count = GetProcAddress(m, "ShNpcCount");
+    *(FARPROC *)&at = GetProcAddress(m, "ShNpcAt");
+    if (!count || !at) {
+        RAppend(r, "NPC API missing, rebuild dinput8\n");
+        return;
+    }
+    n = count();
+    RAppend(r, "%d archetypes\n", n);
+    for (i = 0; i < n; i++) {
+        const ApiNpc *a = at(i);
+        if (!a || (want >= 0 && a->kind != want)) continue;
+        RAppend(r, "  %3d %016llx kind %d\n", i,
+                (unsigned long long)a->id, a->kind);
+        if (++shown >= 160) { RAppend(r, "  ...\n"); break; }
+    }
+}
+
+/* spawnnpc <index|0xid> [x y z], through ShSpawnNpc. */
+static void CmdSpawnNpc(Resp *r, const char *line) {
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    const ApiNpc *(*at)(int);
+    uint64_t (*spawn)(uint64_t, const ApiVec3 *);
+    char who[64] = {0};
+    ApiVec3 pos;
+    uint64_t id, ent;
+    int got;
+
+    got = sscanf(line, "%*s %63s %f %f %f", who, &pos.x, &pos.y,
+                 &pos.z);
+    if (got < 1) {
+        RAppend(r, "usage: spawnnpc <index|0xid> [x y z]\n");
+        return;
+    }
+    if (!m) { RAppend(r, "dinput8 missing\n"); return; }
+    *(FARPROC *)&at = GetProcAddress(m, "ShNpcAt");
+    *(FARPROC *)&spawn = GetProcAddress(m, "ShSpawnNpc");
+    if (!spawn || !at) {
+        RAppend(r, "NPC API missing, rebuild dinput8\n");
+        return;
+    }
+    if (who[0] == '0' && (who[1] == 'x' || who[1] == 'X')) {
+        id = ParseHex(who);
+    } else {
+        const ApiNpc *a = at(atoi(who));
+        if (!a) { RAppend(r, "index out of range\n"); return; }
+        id = a->id;
+    }
+    if (got < 4) {
+        if (!ApiInit(r) || !g_api.GetPlayerPosition) return;
+        if (!g_api.GetPlayerPosition(&pos)) {
+            ApiWhy(r, "GetPlayerPosition", 0);
+            return;
+        }
+        pos.x += 6.0f;
+    }
+    ent = spawn(id, &pos);
+    if (!ent) {
+        ApiWhy(r, "SpawnNpc", 0);
+        return;
+    }
+    RAppend(r, "%016llx\n  entity %p at %.0f %.0f %.0f\n",
+            (unsigned long long)id, (void *)ent, pos.x, pos.y, pos.z);
+}
+
 /* apifind [radius] [kind] [all], for ShFindEntities. */
 static void CmdApiFind(Resp *r, const char *line) {
     static const char *KINDS[] = {
@@ -5719,6 +5796,8 @@ static void Dispatch(const char *line, Resp *r) {
     else if (strcmp(cmd, "castray") == 0)   CmdCastRay(r, line);
     else if (strcmp(cmd, "spawn") == 0)     CmdSpawn(r, line);
     else if (strcmp(cmd, "spawnveh") == 0)  CmdSpawnVeh(r, line);
+    else if (strcmp(cmd, "spawnnpc") == 0)  CmdSpawnNpc(r, line);
+    else if (strcmp(cmd, "npclist") == 0)   CmdNpcList(r, line);
     else if (strcmp(cmd, "vehlist") == 0)   CmdVehList(r, line);
     else if (strcmp(cmd, "comps") == 0)     CmdComps(r, line);
     else if (strcmp(cmd, "raylog") == 0)    CmdRayLog(r, line);

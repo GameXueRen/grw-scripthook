@@ -158,6 +158,7 @@ typedef uint64_t (__attribute__((ms_abi)) *ShQFn_t)(uint64_t,
                                                     uint64_t,
                                                     uint64_t);
 extern void ShSpawnPump(void);
+extern void ShNpcPump(void);
 extern void ShSceneTick(void);
 
 static volatile uint64_t g_qFn = 0;
@@ -410,6 +411,7 @@ RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
     RecordRay(rdx, r8);
 
     ShSpawnPump();
+    ShNpcPump();
     ShSceneTick();
 
     if (g_qPending && g_qFn) {

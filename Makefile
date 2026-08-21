@@ -79,6 +79,7 @@ libscripthook.a: $(GAMEDIR)/dinput8.dll
 $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
                         scripthook_health.c scripthook_state.c \
                         scripthook_entity.c scripthook_spawn.c \
+                        scripthook_npc.c \
                         scripthook_hit.c scripthook_camera.c \
                         scripthook_head.c scripthook_fov.c \
                         scripthook_blur.c \
@@ -93,7 +94,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_physics.c scripthook_health.c \
 		scripthook_state.c scripthook_entity.c \
-		scripthook_spawn.c scripthook_hit.c \
+		scripthook_spawn.c scripthook_npc.c scripthook_hit.c \
 		scripthook_camera.c scripthook_head.c \
 		scripthook_fov.c scripthook_blur.c \
 		scripthook_stat.c scripthook_resource.c \
