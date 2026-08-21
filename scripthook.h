@@ -315,6 +315,12 @@ SH_API uint64_t ShSpawnVehicle(uint32_t vehicleId,
                                const ShVec3 *pos);
 SH_API void ShSpawnInvalidate(void);
 
+/** A per frame hook on the game thread. Keep it fast: the
+ *  frame waits for it. Registration fails past 16 slots. */
+typedef void (*ShFrameFn_t)(void *user);
+SH_API int  ShRegisterFrameCallback(ShFrameFn_t fn, void *user);
+SH_API void ShUnregisterFrameCallback(ShFrameFn_t fn);
+
 /** @} */
 /** @defgroup npcs NPCs
  *  Standalone NPCs by archetype, built like the engine's

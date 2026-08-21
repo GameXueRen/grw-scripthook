@@ -403,6 +403,39 @@ static void FinishPrevious(void) {
         memcpy(&r->hitPos, (const void *)(uintptr_t)recs, 12);
 }
 
+/* Plugin frame callbacks, on the game thread each frame.
+ * A cleared slot never runs again, so unregistering is
+ * setting it to NULL. */
+#define FRAME_CB_MAX 16
+static ShFrameFn_t volatile g_frameCb[FRAME_CB_MAX];
+static void *g_frameCbUser[FRAME_CB_MAX];
+
+int ShRegisterFrameCallback(ShFrameFn_t fn, void *user) {
+    int i;
+    if (!fn) return 0;
+    for (i = 0; i < FRAME_CB_MAX; i++) {
+        if (g_frameCb[i]) continue;
+        g_frameCbUser[i] = user;
+        g_frameCb[i] = fn;
+        return 1;
+    }
+    return 0;
+}
+
+void ShUnregisterFrameCallback(ShFrameFn_t fn) {
+    int i;
+    for (i = 0; i < FRAME_CB_MAX; i++)
+        if (g_frameCb[i] == fn) g_frameCb[i] = NULL;
+}
+
+static void RunFrameCallbacks(void) {
+    int i;
+    for (i = 0; i < FRAME_CB_MAX; i++) {
+        ShFrameFn_t fn = g_frameCb[i];
+        if (fn) fn(g_frameCbUser[i]);
+    }
+}
+
 /* Runs on the game thread inside a live physics call. */
 static void __attribute__((ms_abi))
 RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
@@ -413,6 +446,7 @@ RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
     ShSpawnPump();
     ShNpcPump();
     ShSceneTick();
+    RunFrameCallbacks();
 
     if (g_qPending && g_qFn) {
         uint64_t f = g_qFn;
