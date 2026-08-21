@@ -828,8 +828,8 @@ SH_API int  ShSetAmmo(int slot, uint32_t value);
  *  The environment object, via the engine's transition.
  *  @{ */
 
-/** Weather type, changed instantly. The first set freezes
- *  ambient weather until the game restarts.
+/** Weather type, blended by the engine over its default
+ *  ten seconds. Ambient stays off until ShReleaseWeather.
  */
 enum ShWeather {
     SH_WEATHER_SUNNY = 0,
@@ -840,13 +840,23 @@ enum ShWeather {
     SH_WEATHER_RAIN_HEAVY
 };
 SH_API int  ShSetWeather(int type);
+/** The same, blended over seconds. 0 changes at once. */
+SH_API int  ShSetWeatherBlend(int type, float seconds);
+/** Hand the weather back to the ambient system. */
+SH_API int  ShReleaseWeather(void);
 SH_API int  ShGetWeather(int *out);
 
-/** Time of day in hours past midnight, 0 to 24. The first
- *  set stops the clock until the game restarts.
+/** Time of day in hours past midnight, 0 to 24. The clock
+ *  keeps running from the new hour.
  */
 SH_API int  ShSetTime(float hours);
 SH_API int  ShGetTime(float *out);
+
+/** Clock rate. 1 is normal, 0 stops it, 100 runs a day in
+ *  about fifteen minutes. Holds until set again.
+ */
+SH_API int  ShSetTimeSpeed(float multiplier);
+SH_API int  ShGetTimeSpeed(float *out);
 
 /** @} */
 /** @defgroup reflect Reflected objects
