@@ -1025,9 +1025,9 @@ SH_API int      ShUiReparent(uint32_t id, uint32_t parent, int index);
 SH_API int      ShUiChildCount(uint32_t id);
 SH_API uint32_t ShUiChildAt(uint32_t id, int index);
 
-/** Input: the focused scene gets keys and pointer moves.
- *  Return 1 from the callback to hide that key from the
- *  game while it is held. Coordinates are 1920 x 1080. */
+/** Input: the focused scene gets keys and pointer moves and
+ *  captures the keyboard (only Esc, Alt, Tab, F4 and the
+ *  Windows keys reach the game). Coordinates 1920 x 1080. */
 #define SH_UI_EV_DOWN 1
 #define SH_UI_EV_UP   2
 #define SH_UI_EV_MOVE 3
@@ -1039,6 +1039,8 @@ SH_API int      ShUiFocus(uint32_t scene, int take);
 SH_API uint32_t ShUiFocused(void);
 /** One virtual key hidden from the game until released. */
 SH_API int      ShBlockKey(int vk, int on);
+/** Every key but the escapes hidden, focus uses this. */
+SH_API int      ShCaptureKeys(int on);
 
 /** @} */
 /** @addtogroup core

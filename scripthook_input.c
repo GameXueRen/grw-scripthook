@@ -37,11 +37,15 @@ static int Escapes(int vk) {
            vk == VK_LWIN || vk == VK_RWIN;
 }
 
-/* one rule for the poll stub and the message hook */
+static volatile int g_capture;
+static int Install(void);
+
+/* one rule for the poll stub and the DirectInput wrapper */
 static int Suppressed(int vk) {
     uint32_t b = g_block;
 
     if (vk <= 0 || vk >= 256 || Escapes(vk)) return 0;
+    if (g_capture) return 1;
     if (g_anyKeyBlock && g_keyBlock[vk]) return 1;
     if (!b) return 0;
     if (b & SH_INPUT_KEYS) return 1;
@@ -62,6 +66,13 @@ static SHORT WINAPI KeyStub(int vk) {
 /* for the DirectInput proxy in scripthook_dinput.c */
 int ShKeySuppressedVk(int vk) {
     return Suppressed(vk);
+}
+
+/* keyboard capture: every key but the escapes hidden */
+SH_API int ShCaptureKeys(int on) {
+    if (on && !Install()) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
+    g_capture = on ? 1 : 0;
+    return 1;
 }
 
 

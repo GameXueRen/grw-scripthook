@@ -323,5 +323,6 @@ var scripthook_8h =
     [ "ShUiSetInput", "group__ui.html#gacf1ba3c14d66b8a5b3a144357d0a0cb9", null ],
     [ "ShUiFocus", "group__ui.html#ga8ec5b8dc4cb58d512d454d494ab1afbb", null ],
     [ "ShUiFocused", "group__ui.html#gaf151e0b8f9988264e01ca917eb36e1a8", null ],
-    [ "ShBlockKey", "group__ui.html#ga0d9eb1a4872d98c36120b3b0fef9f356", null ]
+    [ "ShBlockKey", "group__ui.html#ga0d9eb1a4872d98c36120b3b0fef9f356", null ],
+    [ "ShCaptureKeys", "group__ui.html#gaa728cb49614a808048942c79fb7c1fa4", null ]
 ];

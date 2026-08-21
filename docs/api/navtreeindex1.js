@@ -46,6 +46,7 @@ var NAVTREEINDEX1 =
 "group__ui.html#ga9b5be02ce0be50d2a94a2db2caba0018":[2,20,29],
 "group__ui.html#gaa3efa3156d8fb807f330e2e37ff086ec":[2,20,8],
 "group__ui.html#gaa56be9957720f29f98ac5ac1a59f93bf":[2,20,73],
+"group__ui.html#gaa728cb49614a808048942c79fb7c1fa4":[2,20,81],
 "group__ui.html#gaa7fd62e73bf9d97cd21888d9f235dab8":[2,20,3],
 "group__ui.html#gaa9ad6415adb4f42709c633ebd7df5e6e":[2,20,68],
 "group__ui.html#gaad16402170c72ea4ca941ed8f7442252":[2,20,12],

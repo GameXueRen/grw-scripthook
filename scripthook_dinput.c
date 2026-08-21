@@ -27,11 +27,32 @@ static GetState_t g_origState[MAX_VT];
 static GetData_t  g_origData[MAX_VT];
 static int g_nDev;
 
-static int Suppressed(DWORD dik) {
+/* DIK codes above 0x7f are the E0 prefixed scancodes */
+static int DikToVk(DWORD dik) {
     UINT vk;
+    switch (dik) {
+    case 0xC8: return VK_UP;      case 0xD0: return VK_DOWN;
+    case 0xCB: return VK_LEFT;    case 0xCD: return VK_RIGHT;
+    case 0x9C: return VK_RETURN;  case 0xC7: return VK_HOME;
+    case 0xCF: return VK_END;     case 0xC9: return VK_PRIOR;
+    case 0xD1: return VK_NEXT;    case 0xD2: return VK_INSERT;
+    case 0xD3: return VK_DELETE;  case 0x9D: return VK_RCONTROL;
+    case 0xB8: return VK_RMENU;   case 0xB5: return VK_DIVIDE;
+    case 0xDB: return VK_LWIN;    case 0xDC: return VK_RWIN;
+    default: break;
+    }
+    if (dik & 0x80)
+        vk = MapVirtualKeyA(0xE000u | (dik & 0x7Fu), MAPVK_VSC_TO_VK_EX);
+    else
+        vk = MapVirtualKeyA(dik, MAPVK_VSC_TO_VK_EX);
+    return (int)vk;
+}
+
+static int Suppressed(DWORD dik) {
+    int vk;
     if (dik == 0 || dik > 255) return 0;
-    vk = MapVirtualKeyA(dik, MAPVK_VSC_TO_VK_EX);
-    return vk ? ShKeySuppressedVk((int)vk) : 0;
+    vk = DikToVk(dik);
+    return vk ? ShKeySuppressedVk(vk) : 0;
 }
 
 static int Patch(void **vt, int slot, void *fn, void **orig) {

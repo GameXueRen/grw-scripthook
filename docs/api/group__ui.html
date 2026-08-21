@@ -170,7 +170,7 @@ Macros</h2></td></tr>
 <tr class="memitem:ga48529d460035936d4432bb1fe34df95e" id="r_ga48529d460035936d4432bb1fe34df95e"><td class="memItemLeft">#define&#160;</td><td class="memItemRight"><a class="el" href="#ga48529d460035936d4432bb1fe34df95e">SH_W_IMAGE</a>&#160;&#160;&#160;3</td></tr>
 <tr class="memitem:gafae069c7f8b10bfcf8f1d2d0f6337978" id="r_gafae069c7f8b10bfcf8f1d2d0f6337978"><td class="memItemLeft">#define&#160;</td><td class="memItemRight"><a class="el" href="#gafae069c7f8b10bfcf8f1d2d0f6337978">SH_W_PANEL</a>&#160;&#160;&#160;4</td></tr>
 <tr class="memitem:ga82762216bdd31a767349366c90e5b4be" id="r_ga82762216bdd31a767349366c90e5b4be"><td class="memItemLeft">#define&#160;</td><td class="memItemRight"><a class="el" href="#ga82762216bdd31a767349366c90e5b4be">SH_UI_EV_DOWN</a>&#160;&#160;&#160;1</td></tr>
-<tr class="memdesc:ga82762216bdd31a767349366c90e5b4be"><td class="mdescLeft">&#160;</td><td class="mdescRight">Input: the focused scene gets keys and pointer moves.  <br /></td></tr>
+<tr class="memdesc:ga82762216bdd31a767349366c90e5b4be"><td class="mdescLeft">&#160;</td><td class="mdescRight">Input: the focused scene gets keys and pointer moves and captures the keyboard (only Esc, Alt, Tab, F4 and the Windows keys reach the game).  <br /></td></tr>
 <tr class="memitem:ga9b5be02ce0be50d2a94a2db2caba0018" id="r_ga9b5be02ce0be50d2a94a2db2caba0018"><td class="memItemLeft">#define&#160;</td><td class="memItemRight"><a class="el" href="#ga9b5be02ce0be50d2a94a2db2caba0018">SH_UI_EV_UP</a>&#160;&#160;&#160;2</td></tr>
 <tr class="memitem:ga7a944fa043f3b8528228994c4d55a6fe" id="r_ga7a944fa043f3b8528228994c4d55a6fe"><td class="memItemLeft">#define&#160;</td><td class="memItemRight"><a class="el" href="#ga7a944fa043f3b8528228994c4d55a6fe">SH_UI_EV_MOVE</a>&#160;&#160;&#160;3</td></tr>
 </table><table class="memberdecls">
@@ -254,6 +254,8 @@ Functions</h2></td></tr>
 <tr class="memitem:gaf151e0b8f9988264e01ca917eb36e1a8" id="r_gaf151e0b8f9988264e01ca917eb36e1a8"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> uint32_t&#160;</td><td class="memItemRight"><a class="el" href="#gaf151e0b8f9988264e01ca917eb36e1a8">ShUiFocused</a> (void)</td></tr>
 <tr class="memitem:ga0d9eb1a4872d98c36120b3b0fef9f356" id="r_ga0d9eb1a4872d98c36120b3b0fef9f356"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga0d9eb1a4872d98c36120b3b0fef9f356">ShBlockKey</a> (int vk, int on)</td></tr>
 <tr class="memdesc:ga0d9eb1a4872d98c36120b3b0fef9f356"><td class="mdescLeft">&#160;</td><td class="mdescRight">One virtual key hidden from the game until released.  <br /></td></tr>
+<tr class="memitem:gaa728cb49614a808048942c79fb7c1fa4" id="r_gaa728cb49614a808048942c79fb7c1fa4"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gaa728cb49614a808048942c79fb7c1fa4">ShCaptureKeys</a> (int on)</td></tr>
+<tr class="memdesc:gaa728cb49614a808048942c79fb7c1fa4"><td class="mdescLeft">&#160;</td><td class="mdescRight">Every key but the escapes hidden, focus uses this.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
 <div class="textblock"><p>Engine widgets in scenes of our own; see <a class="el" href="ui_8md.html">docs/ui.md</a>. </p>
@@ -688,8 +690,8 @@ Functions</h2></td></tr>
       </table>
 </div><div class="memdoc">
 
-<p>Input: the focused scene gets keys and pointer moves. </p>
-<p>Return 1 from the callback to hide that key from the game while it is held. Coordinates are 1920 x 1080. </p>
+<p>Input: the focused scene gets keys and pointer moves and captures the keyboard (only Esc, Alt, Tab, F4 and the Windows keys reach the game). </p>
+<p>Coordinates 1920 x 1080. </p>
 
 </div>
 </div>
@@ -1994,6 +1996,25 @@ Functions</h2></td></tr>
 </div><div class="memdoc">
 
 <p>One virtual key hidden from the game until released. </p>
+
+</div>
+</div>
+<a id="gaa728cb49614a808048942c79fb7c1fa4" name="gaa728cb49614a808048942c79fb7c1fa4"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#gaa728cb49614a808048942c79fb7c1fa4">&#9670;&#160;</a></span>ShCaptureKeys()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShCaptureKeys </td>
+          <td>(</td>
+          <td class="paramtype">int</td>          <td class="paramname"><span class="paramname"><em>on</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Every key but the escapes hidden, focus uses this. </p>
 
 </div>
 </div>

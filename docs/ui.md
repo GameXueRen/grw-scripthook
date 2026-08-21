@@ -105,13 +105,15 @@ ShUiFocus(scene, 1);
 ```
 
 The focused scene receives key down, key up and pointer moves
-(`e->x`, `e->y` in the 1920 by 1080 space). Returning 1 from
-a key down hides that key from the game until it is released:
-the block goes into the game's DirectInput keyboard device,
-which is where it reads WASD and the rest. Escape, Alt, Tab,
-F4 and the Windows keys are never hidden, so the player can
-always reach the game's menu. `ShBlockKey(vk, on)` is the
-same block without the callback.
+(`e->x`, `e->y` in the 1920 by 1080 space), and while it
+holds focus the keyboard is captured: the game's DirectInput
+keyboard device, which is where it reads WASD and the rest,
+reports nothing pressed. Escape, Alt, Tab, F4 and the Windows
+keys are never hidden, so the player can always reach the
+game's menu. Release focus when your window closes. The
+callback's return value still marks a key as consumed.
+`ShBlockKey(vk, on)` hides one key without focus, and
+`ShCaptureKeys(on)` is the capture without a scene.
 
 If you poll a hotkey yourself, test the held bit
 (`GetAsyncKeyState(vk) & 0x8000`) and detect the edge; the

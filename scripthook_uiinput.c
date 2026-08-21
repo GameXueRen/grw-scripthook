@@ -11,6 +11,7 @@
 
 extern void ShSetError(int err);
 extern int  ShBlockKey(int vk, int on);
+extern int  ShCaptureKeys(int on);
 
 static ShUiInputFn g_fn[MAX_SCENES + 1];
 static void       *g_user[MAX_SCENES + 1];
@@ -90,11 +91,12 @@ SH_API int ShUiSetInput(uint32_t scene, ShUiInputFn fn, void *user) {
     return 1;
 }
 
-/* one scene holds focus; taking it over is allowed */
+/* one scene holds focus and captures the keyboard */
 SH_API int ShUiFocus(uint32_t scene, int take) {
     if (scene == 0 || scene > MAX_SCENES) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (take) g_focus = scene;
     else if (g_focus == scene) g_focus = 0;
+    ShCaptureKeys(g_focus != 0);
     return 1;
 }
 
