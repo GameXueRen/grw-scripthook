@@ -6,7 +6,8 @@ PROJECT_NAME           = "GRW ScriptHook"
 PROJECT_NUMBER         = 0.10.0
 PROJECT_BRIEF          = "Plugin API for Ghost Recon Wildlands"
 
-INPUT                  = scripthook.h docs/plugins.md docs/ui.md
+INPUT                  = scripthook.h docs/plugins.md docs/python.md \
+                         docs/ui.md
 USE_MDFILE_AS_MAINPAGE = docs/plugins.md
 
 OUTPUT_DIRECTORY       = docs

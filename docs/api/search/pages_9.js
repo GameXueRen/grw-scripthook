@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['native_20ui_0',['Native UI',['../ui.html',1,'']]]
+  ['menus_0',['Menus',['../python.html#autotoc_md6',1,'']]]
 ];

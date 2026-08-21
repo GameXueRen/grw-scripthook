@@ -1,5 +1,5 @@
 var searchData=
 [
-  ['plugin_0',['Writing a plugin',['../index.html',1,'']]],
-  ['properties_1',['Properties',['../ui.html#autotoc_md5',1,'']]]
+  ['names_0',['Names',['../python.html#autotoc_md5',1,'']]],
+  ['native_20ui_1',['Native UI',['../ui.html',1,'']]]
 ];

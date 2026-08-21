@@ -9,7 +9,7 @@ var searchData=
   ['combat_20events_6',['Combat events',['../group__combat.html',1,'']]],
   ['component_7',['component',['../structShComponent.html#a0e334eb1797fb5ad32ceaa577d23fc6e',1,'ShComponent']]],
   ['core_8',['Core',['../group__core.html',1,'']]],
-  ['costs_9',['What it costs',['../ui.html#autotoc_md12',1,'']]],
+  ['costs_9',['What it costs',['../ui.html#autotoc_md18',1,'']]],
   ['crash_20reports_10',['Crash reports',['../group__crash.html',1,'']]],
   ['credits_11',['Credits',['../index.html#autotoc_md2',1,'']]]
 ];
