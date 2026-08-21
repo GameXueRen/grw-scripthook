@@ -195,6 +195,7 @@ static void CmdHelp(Resp *r) {
     RAppend(r, "  findq <start> <len> <val> <mask> [stride] [max]\n");
     RAppend(r, "                     qwords where (q & mask) == val\n");
     RAppend(r, "  readstr <hex>      read null-terminated string\n");
+    RAppend(r, "  hwbpchain [rcx|rdx|r8] [off..] deref chain at hit\n");
     RAppend(r, "  dis <hex> [len]    raw bytes for disasm (default 64)\n");
     RAppend(r, "  strings <hex> <len> printable strings in range\n");
     RAppend(r, "  silexlist          list SilexNetMessage names\n");
@@ -1552,6 +1553,32 @@ static uint64_t g_bpRdx[4];
 /* RCX is the this pointer under the MS x64 ABI. */
 static uint64_t g_bpRcx[4];
 
+/* Generic hit time capture: the last 8 hits' registers and
+ * a deref chain walked from one register at the break. */
+#define CHAIN_MAX 4
+static int      g_bpChainReg = 0;       /* 0 rcx 1 rdx 2 r8 */
+static int      g_bpChainN = 0;
+static uint32_t g_bpChainOff[CHAIN_MAX];
+static volatile int g_bpRing = 0;
+static uint64_t g_bpRingReg[8][3];
+static uint64_t g_bpRingVal[8][CHAIN_MAX + 1];
+
+static void BpCaptureChain(PCONTEXT c) {
+    int k = g_bpRing++ % 8, i;
+    uint64_t v;
+
+    g_bpRingReg[k][0] = c->Rcx;
+    g_bpRingReg[k][1] = c->Rdx;
+    g_bpRingReg[k][2] = c->R8;
+    v = g_bpRingReg[k][g_bpChainReg];
+    g_bpRingVal[k][0] = v;
+    for (i = 0; i < g_bpChainN; i++) {
+        v = CanRead((void *)(v + g_bpChainOff[i]), 8)
+            ? SafeReadPtr((void *)(v + g_bpChainOff[i])) : 0;
+        g_bpRingVal[k][i + 1] = v;
+    }
+}
+
 /* A projectile keeps its hits at +0xA60, count at +0xA6A,
  * records of 0x80 with the object at +0x38, dist at +0x48.
  */
@@ -1639,6 +1666,7 @@ static LONG CALLBACK BpHandler(PEXCEPTION_POINTERS ei) {
             g_bpRsp[k] = rsp;
             g_bpRdx[k] = ei->ContextRecord->Rdx;
             g_bpRcx[k] = ei->ContextRecord->Rcx;
+            BpCaptureChain(ei->ContextRecord);
             {
                 uint64_t p = ei->ContextRecord->Rcx;
                 uint16_t n = 0;
@@ -1772,16 +1800,50 @@ static void CmdHwbp(Resp *r, const char *line) {
     g_bpRW = (ms[0] == 'x') ? 2
            : (ms[0] == 'r' || ms[0] == '3') ? 1 : 0;
     if (!g_veh) g_veh = AddVectoredExceptionHandler(1, BpHandler);
-    g_bpHits = 0; g_bpN = 0; g_bpS = 0; g_bpAddr = a;
+    g_bpHits = 0; g_bpN = 0; g_bpS = 0; g_bpRing = 0; g_bpAddr = a;
     int n = SetDrAllThreads(a, 1);
     RAppend(r, "watching %s of %p on %d threads\n",
             g_bpRW == 2 ? "execution" :
             g_bpRW ? "reads+writes" : "writes", (void *)a, n);
 }
 
+/* hwbpchain [rcx|rdx|r8] [off ...]   no args clears */
+static void CmdHwbpChain(Resp *r, const char *line) {
+    char rs[16] = {0}, os[CHAIN_MAX][32];
+    int n, i;
+
+    memset(os, 0, sizeof(os));
+    n = sscanf(line, "%*s %15s %31s %31s %31s %31s",
+               rs, os[0], os[1], os[2], os[3]);
+    g_bpChainN = 0;
+    if (n < 1) {
+        g_bpChainReg = 0;
+        RAppend(r, "chain cleared\n");
+        return;
+    }
+    g_bpChainReg = (rs[0] == 'r' && rs[1] == 'd') ? 1
+                 : (rs[0] == 'r' && rs[1] == '8') ? 2 : 0;
+    for (i = 0; i + 1 < n && i < CHAIN_MAX; i++)
+        g_bpChainOff[g_bpChainN++] = (uint32_t)ParseHex(os[i]);
+    g_bpRing = 0;
+    RAppend(r, "chain from %s with %d derefs\n",
+            g_bpChainReg == 1 ? "rdx" : g_bpChainReg == 2 ? "r8" : "rcx",
+            g_bpChainN);
+}
+
 static void CmdHwbpInfo(Resp *r) {
+    int k, i, n = g_bpRing < 8 ? g_bpRing : 8;
+
     RAppend(r, "watch %p  hits=%llu\n",
             (void *)g_bpAddr, (unsigned long long)g_bpHits);
+    for (k = 0; k < n; k++) {
+        RAppend(r, "  hit %d rcx=%p rdx=%p r8=%p chain", k,
+                (void *)g_bpRingReg[k][0], (void *)g_bpRingReg[k][1],
+                (void *)g_bpRingReg[k][2]);
+        for (i = 0; i <= g_bpChainN; i++)
+            RAppend(r, " %p", (void *)g_bpRingVal[k][i]);
+        RAppend(r, "\n");
+    }
     for (int i = 0; i < (g_bpN < 8 ? g_bpN : 8); i++)
         RAppend(r, "  writer rip = %p\n", (void *)g_bpRip[i]);
     for (int k = 0; k < (g_bpS < 4 ? g_bpS : 4); k++) {
@@ -5689,6 +5751,7 @@ static void Dispatch(const char *line, Resp *r) {
     else if (strcmp(cmd, "fsload") == 0)    CmdFsLoad(r, line);
     else if (strcmp(cmd, "hwbp") == 0)      CmdHwbp(r, line);
     else if (strcmp(cmd, "hwbpinfo") == 0)  CmdHwbpInfo(r);
+    else if (strcmp(cmd, "hwbpchain") == 0) CmdHwbpChain(r, line);
     else if (strcmp(cmd, "hwbpoff") == 0)   CmdHwbpOff(r);
     else if (strcmp(cmd, "pos") == 0)       CmdPos(r);
     else if (strcmp(cmd, "tp") == 0)        CmdTp(r, line);
