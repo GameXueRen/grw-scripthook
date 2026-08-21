@@ -57,6 +57,17 @@ var scripthook_8h =
     [ "SH_UI_EV_DOWN", "group__ui.html#ga82762216bdd31a767349366c90e5b4be", null ],
     [ "SH_UI_EV_UP", "group__ui.html#ga9b5be02ce0be50d2a94a2db2caba0018", null ],
     [ "SH_UI_EV_MOVE", "group__ui.html#ga7a944fa043f3b8528228994c4d55a6fe", null ],
+    [ "SH_SCENE_DRONE", "group__ui.html#ga5653c572e26452da0d5daa3b1f6d3b22", null ],
+    [ "SH_SCENE_BINOCULAR", "group__ui.html#ga2a457e55223a3760e14508dcb6a4675b", null ],
+    [ "SH_SCENE_VEHICLE", "group__ui.html#gafd42fd142e9ae29a486a0fb740391a45", null ],
+    [ "SH_SCENE_PAUSE", "group__ui.html#ga586d9789d8921d7088f4bc99e737064f", null ],
+    [ "SH_SCENE_LOADOUT", "group__ui.html#gab65f19922b84afc5e6da5b85581331ab", null ],
+    [ "SH_SCENE_MAP", "group__ui.html#gafeb7570da2a16c02a1f388514933266e", null ],
+    [ "SH_SCENE_SKILLS", "group__ui.html#gabffc588d25551515bfc422f4e9f83e36", null ],
+    [ "SH_SCENE_COMWHEEL", "group__ui.html#ga946459d0fbed6e5bdaadc7313cc2660b", null ],
+    [ "SH_SCENE_GAMEOVER", "group__ui.html#ga25e7cf02e691aaf206a609c9cf3df90b", null ],
+    [ "SH_SCENE_LOADING", "group__ui.html#ga6ba85228f7767364493c9c847866d8ac", null ],
+    [ "SH_SCENE_CINEMATIC", "group__ui.html#ga2f79a10b71867908741ee9d107e9270e", null ],
     [ "ShLastError_t", "group__player.html#ga183aa4ed8875177e38f055168d127680", null ],
     [ "ShErrorString_t", "group__player.html#ga30ce1a0f6181a6ee608536486902dd0b", null ],
     [ "ShGetVersion_t", "group__player.html#ga3ac72520632d0e21045ff4e842b4efbc", null ],
@@ -324,5 +335,7 @@ var scripthook_8h =
     [ "ShUiFocus", "group__ui.html#ga8ec5b8dc4cb58d512d454d494ab1afbb", null ],
     [ "ShUiFocused", "group__ui.html#gaf151e0b8f9988264e01ca917eb36e1a8", null ],
     [ "ShBlockKey", "group__ui.html#ga0d9eb1a4872d98c36120b3b0fef9f356", null ],
-    [ "ShCaptureKeys", "group__ui.html#gaa728cb49614a808048942c79fb7c1fa4", null ]
+    [ "ShCaptureKeys", "group__ui.html#gaa728cb49614a808048942c79fb7c1fa4", null ],
+    [ "ShGameSceneActive", "group__ui.html#ga2f52535bd2c8a9f8a507edb66761649e", null ],
+    [ "ShGameScenes", "group__ui.html#ga50ff4ad361557f624d96e822db643645", null ]
 ];

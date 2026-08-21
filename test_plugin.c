@@ -945,6 +945,18 @@ static void CmdUi(Resp *r, const char *line) {
         RAppend(r, "createin id %u err %d\n", id, lastErr ? lastErr() : -1);
         return;
     }
+    if (strcmp(sub, "scenes") == 0) {
+        int (*scenes)(char *, int);
+        int (*active)(const char *);
+        char list[1024] = {0}, name[64] = {0};
+        *(FARPROC *)&scenes = GetProcAddress(m, "ShGameScenes");
+        *(FARPROC *)&active = GetProcAddress(m, "ShGameSceneActive");
+        if (!scenes || !active) { RAppend(r, "scene exports missing\n"); return; }
+        if (sscanf(line, "%*s %*s %63s", name) == 1)
+            RAppend(r, "%s active %d\n", name, active(name));
+        RAppend(r, "%d drawn last frame: %s\n", scenes(list, sizeof(list)), list);
+        return;
+    }
     if (strcmp(sub, "reparent") == 0) {
         int (*rep)(uint32_t, uint32_t, int);
         unsigned parent = 0; int at = -1;

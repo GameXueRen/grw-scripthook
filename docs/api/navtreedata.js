@@ -33,9 +33,10 @@ var NAVTREE =
       [ "Batches", "ui.html#autotoc_md6", null ],
       [ "Input", "ui.html#autotoc_md7", null ],
       [ "Lifecycle", "ui.html#autotoc_md8", null ],
-      [ "Fonts and textures", "ui.html#autotoc_md9", null ],
-      [ "Errors", "ui.html#autotoc_md10", null ],
-      [ "What it costs", "ui.html#autotoc_md11", null ]
+      [ "What the game is showing", "ui.html#autotoc_md9", null ],
+      [ "Fonts and textures", "ui.html#autotoc_md10", null ],
+      [ "Errors", "ui.html#autotoc_md11", null ],
+      [ "What it costs", "ui.html#autotoc_md12", null ]
     ] ],
     [ "Topics", "topics.html", "topics" ],
     [ "Data Structures", "annotated.html", [

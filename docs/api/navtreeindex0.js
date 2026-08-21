@@ -249,5 +249,5 @@ var NAVTREEINDEX0 =
 "group__stats.html#gafe9ecb83c38fb9a4f87d92248ab12db9":[2,17,19],
 "group__ui.html":[2,20],
 "group__ui.html#ga01eece1bd80b5b4b0ba24e2917579b39":[2,20,14],
-"group__ui.html#ga06b7a770cf4d434e3693effa9b4bb3fa":[2,20,75]
+"group__ui.html#ga06b7a770cf4d434e3693effa9b4bb3fa":[2,20,86]
 };

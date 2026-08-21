@@ -8,7 +8,7 @@ var searchData=
   ['combat_20events_5',['Combat events',['../group__combat.html',1,'']]],
   ['component_6',['component',['../structShComponent.html#a0e334eb1797fb5ad32ceaa577d23fc6e',1,'ShComponent']]],
   ['core_7',['Core',['../group__core.html',1,'']]],
-  ['costs_8',['What it costs',['../ui.html#autotoc_md11',1,'']]],
+  ['costs_8',['What it costs',['../ui.html#autotoc_md12',1,'']]],
   ['crash_20reports_9',['Crash reports',['../group__crash.html',1,'']]],
   ['credits_10',['Credits',['../index.html#autotoc_md2',1,'']]]
 ];

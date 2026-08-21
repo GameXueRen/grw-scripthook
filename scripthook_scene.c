@@ -251,6 +251,72 @@ static int InList(const uint64_t *l, int n, uint64_t v) {
     return 0;
 }
 
+/* the game scenes rendered last frame: the UI state */
+#define MAX_ACTIVE 64
+static uint64_t g_activeCur[MAX_ACTIVE], g_activePrev[MAX_ACTIVE];
+static int g_nActiveCur, g_nActivePrev;
+
+static void NoteActive(uint64_t scene) {
+    if (g_nActiveCur < MAX_ACTIVE && !InList(g_activeCur, g_nActiveCur, scene))
+        g_activeCur[g_nActiveCur++] = scene;
+}
+
+/* name: root widget's template instance, string at +0x10 */
+#define NAME_CACHE 128
+static struct { uint64_t scene; char name[48]; } g_names[NAME_CACHE];
+static int g_nNames;
+
+static const char *SceneName(uint64_t scene) {
+    uint64_t priv, root, rootP, inst, blk;
+    uint32_t len = 0;
+    int i;
+    for (i = 0; i < g_nNames; i++)
+        if (g_names[i].scene == scene) return g_names[i].name;
+    if (g_nNames >= NAME_CACHE) return "";
+    priv = RQ(scene + 8);
+    root = priv ? RQ(priv + SP_ROOT) : 0;
+    rootP = root ? RQ(root + 0x20) : 0;
+    inst = rootP ? RQ(rootP + 0x150) : 0;
+    blk = inst ? RQ(inst + 0x10) : 0;
+    g_names[g_nNames].scene = scene;
+    g_names[g_nNames].name[0] = 0;
+    if (blk && ShReadableAddr(blk, 12)) {
+        memcpy(&len, (void *)(uintptr_t)blk, 4);
+        if (len > 0 && len < sizeof(g_names[0].name) &&
+            ShReadableAddr(blk + 12, len)) {
+            memcpy(g_names[g_nNames].name, (void *)(uintptr_t)(blk + 12), len);
+            g_names[g_nNames].name[len] = 0;
+        }
+    }
+    return g_names[g_nNames++].name;
+}
+
+SH_API int ShGameSceneActive(const char *name) {
+    int i;
+    if (!name) return 0;
+    for (i = 0; i < g_nActivePrev; i++)
+        if (strcmp(SceneName(g_activePrev[i]), name) == 0) return 1;
+    return 0;
+}
+
+SH_API int ShGameScenes(char *buf, int n) {
+    int i, used = 0, count = 0;
+    if (!buf || n < 1) return 0;
+    buf[0] = 0;
+    for (i = 0; i < g_nActivePrev; i++) {
+        const char *nm = SceneName(g_activePrev[i]);
+        int l = (int)strlen(nm);
+        if (!l) continue;
+        if (used + l + 2 > n) break;
+        if (used) buf[used++] = ',';
+        memcpy(buf + used, nm, l);
+        used += l;
+        buf[used] = 0;
+        count++;
+    }
+    return count;
+}
+
 static void PassEnded(uint64_t last) {
     if (last && g_nEndsNext < MAX_PASS && !InList(g_endsNext, g_nEndsNext, last))
         g_endsNext[g_nEndsNext++] = last;
@@ -273,6 +339,9 @@ static int32_t *__attribute__((ms_abi)) RenderHook(uint64_t scene,
         memcpy(g_ends, g_endsNext, sizeof(g_ends));
         g_nEnds = g_nEndsNext;
         g_nEndsNext = 0;
+        memcpy(g_activePrev, g_activeCur, sizeof(g_activePrev));
+        g_nActivePrev = g_nActiveCur;
+        g_nActiveCur = 0;
         g_doneThisFrame = 0;
         InterlockedIncrement(&g_frame);
         TickAll();
@@ -282,6 +351,7 @@ static int32_t *__attribute__((ms_abi)) RenderHook(uint64_t scene,
         passStart = 1;
     }
     if (g_nSeen < MAX_SEEN) g_seen[g_nSeen++] = scene;
+    NoteActive(scene);
     /* under the game: before each pass's first scene */
     if (passStart && renderer) RenderOurs(renderer, 1);
     r = ((Scene3)F_SCENE_RENDER)(scene, res, renderer);

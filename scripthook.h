@@ -1042,6 +1042,24 @@ SH_API int      ShBlockKey(int vk, int on);
 /** Every key but the escapes hidden, focus uses this. */
 SH_API int      ShCaptureKeys(int on);
 
+/** The game's UI state, from the scenes it drew last frame.
+ *  Names are the scene's own; the common ones below. */
+#define SH_SCENE_DRONE      "HUD_Drone"
+#define SH_SCENE_BINOCULAR  "HUD_Binocular"
+#define SH_SCENE_VEHICLE    "HUD_Vehicle"
+#define SH_SCENE_PAUSE      "Menu_TabbedPage"
+#define SH_SCENE_LOADOUT    "MENU_LoadoutV2"
+#define SH_SCENE_MAP        "MENU_Map_Cursor"
+#define SH_SCENE_SKILLS     "MENU_Skills"
+#define SH_SCENE_COMWHEEL   "HUD_ComWheel"
+#define SH_SCENE_GAMEOVER   "MENU_GameOver"
+#define SH_SCENE_LOADING    "MENU_LoadingScreen"
+#define SH_SCENE_CINEMATIC  "HUD_Cinematic"
+/** 1 when a scene of that name was drawn last frame. */
+SH_API int      ShGameSceneActive(const char *name);
+/** Comma separated names drawn last frame; the count. */
+SH_API int      ShGameScenes(char *buf, int n);
+
 /** @} */
 /** @addtogroup core
  *  @{ */

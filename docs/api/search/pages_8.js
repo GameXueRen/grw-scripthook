@@ -1,4 +1,5 @@
 var searchData=
 [
-  ['native_20ui_0',['Native UI',['../ui.html',1,'']]]
+  ['lifecycle_0',['Lifecycle',['../ui.html#autotoc_md8',1,'']]],
+  ['link_1',['Build and link',['../index.html#autotoc_md0',1,'']]]
 ];

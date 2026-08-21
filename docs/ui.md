@@ -134,6 +134,24 @@ It fires from the thread that polls `ShUiReady()` once the
 world is back. Widget ids from before the reload are dead and
 every call on them fails with `SH_ERR_NO_CANDIDATE`.
 
+## What the game is showing
+
+The game's own UI is made of named scenes, and which of them
+it drew in the last frame is its UI state:
+
+```c
+if (ShGameSceneActive(SH_SCENE_DRONE))   /* flying the drone */
+if (ShGameSceneActive(SH_SCENE_PAUSE))   /* the pause menu */
+if (ShGameSceneActive(SH_SCENE_LOADOUT)) /* the loadout screen */
+char list[512];
+ShGameScenes(list, sizeof(list));        /* "HUD_Minimap,CrossHair,..." */
+```
+
+The `SH_SCENE_` constants name the common ones; any name
+`ShGameScenes` lists works. A scene can exist without being
+drawn (the drone HUD is loaded while you walk), so only the
+drawn set is used.
+
 ## Fonts and textures
 
 New labels use the HUD font and new plates the white 16x16

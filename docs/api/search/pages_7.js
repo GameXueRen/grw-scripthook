@@ -1,5 +1,6 @@
 var searchData=
 [
-  ['lifecycle_0',['Lifecycle',['../ui.html#autotoc_md8',1,'']]],
-  ['link_1',['Build and link',['../index.html#autotoc_md0',1,'']]]
+  ['input_0',['Input',['../ui.html#autotoc_md7',1,'']]],
+  ['is_20showing_1',['What the game is showing',['../ui.html#autotoc_md9',1,'']]],
+  ['it_20costs_2',['What it costs',['../ui.html#autotoc_md12',1,'']]]
 ];
