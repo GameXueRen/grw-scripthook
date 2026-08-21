@@ -426,11 +426,12 @@ def off_jojo():
 
 
 def on_blur():
-    sh.SetCameraBlur(1)
+    """Kill the close range body blur; 0 removes it."""
+    sh.SetCameraBlur(0)
 
 
 def off_blur():
-    sh.SetCameraBlur(0)
+    sh.SetCameraBlur(1)
 
 
 def on_stare():
@@ -676,7 +677,7 @@ EFFECTS = [
     ('Thick Fog', 1, on_fog, None, off_fog, 0),
     ('Night Shift', 1, on_night, None, off_night, 0),
     ('Jojo Moment', 1, on_jojo, None, off_jojo, 0),
-    ('Soft Focus', 1, on_blur, None, off_blur, 0),
+    ('Crystal Clear', 1, on_blur, None, off_blur, 0),
     ('Suicide', 0, fx_suicide, None, None, 0),
     ('Flatline', 1, on_flatline, None, off_flatline, 8),
     ('Stop and Stare', 1, on_stare, None, off_stare, 6),
