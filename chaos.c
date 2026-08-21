@@ -694,6 +694,60 @@ static void FxParking(void) {
     }
 }
 
+/* Witness Protection: twelve NPCs in a ring, spun around
+ * the player on the frame path, z pinned to the player's.
+ */
+#define WP_N     12
+#define WP_R     3.5f
+#define WP_RATE  1.2f
+static uint64_t g_wpEnt[WP_N];
+static int      g_wpN = 0;
+static uint64_t g_wpT0 = 0;
+
+/* A few kind 1 archetypes never produce an entity, so keep
+ * drawing until the ring is full or the list runs out. */
+static void OnWitness(void) {
+    ShVec3 p;
+    int i, n;
+
+    g_wpN = 0;
+    if (!PlayerPos(&p)) return;
+    n = ShNpcCount();
+    for (i = 0; i < n && g_wpN < WP_N; i++) {
+        const ShNpcArchetype *a = ShNpcAt(i);
+        float ang = (float)g_wpN * (6.2832f / WP_N);
+        ShVec3 at = p;
+        uint64_t e;
+
+        if (!a || a->kind != 1) continue;
+        at.x += (float)cos(ang) * WP_R;
+        at.y += (float)sin(ang) * WP_R;
+        e = ShSpawnNpc(a->id, &at);
+        if (e) g_wpEnt[g_wpN++] = e;
+    }
+    g_wpT0 = GetTickCount64();
+}
+
+static void TickWitness(void) {
+    float t = (float)(GetTickCount64() - g_wpT0) / 1000.0f;
+    ShVec3 p;
+    int i;
+
+    if (!g_wpN || !PlayerPos(&p)) return;
+    for (i = 0; i < g_wpN; i++) {
+        float a = (float)i * (6.2832f / WP_N) + t * WP_RATE;
+        ShVec3 at = p;
+
+        at.x += (float)cos(a) * WP_R;
+        at.y += (float)sin(a) * WP_R;
+        /* Face the player. Measured: the engine's yaw runs
+         * clockwise, so the spoke angle is negated. */
+        ShQueueTransform(g_wpEnt[i], &at, -(a + 3.14159f), 0.0f, 0.0f);
+    }
+}
+
+static void OffWitness(void) { g_wpN = 0; }
+
 /* ---- the table ---- */
 
 /* secs is last so the rows that leave it out get 0, which
@@ -764,7 +818,8 @@ static const Effect g_fx[] = {
     { "Can't Park There Mate", 0, FxParking, NULL, NULL, 0 },
     { "180",                0, Fx180,    NULL, NULL, 0 },
     { "Balkan Parking",     0, FxBalkan, NULL, NULL, 0 },
-    { "Fidget Spinner",     1, OnFidget, TickFidget, NULL, 10 }
+    { "Fidget Spinner",     1, OnFidget, TickFidget, NULL, 10 },
+    { "Witness Protection", 1, OnWitness, TickWitness, OffWitness, 20 }
 };
 
 #define FX_COUNT ((int)(sizeof(g_fx) / sizeof(g_fx[0])))
