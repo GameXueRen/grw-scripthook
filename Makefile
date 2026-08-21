@@ -21,7 +21,12 @@ $(GAMEDIR)/ui_sample.asi: ui_sample.c scripthook.h libscripthook.a
 docs:
 	doxygen Doxyfile
 
-pyhost: $(GAMEDIR)/pyhost.asi $(GAMEDIR)/python/sh.py
+pyhost: $(GAMEDIR)/pyhost.asi $(GAMEDIR)/python/sh.py \
+        $(GAMEDIR)/python/_pyhost.py
+
+$(GAMEDIR)/python/_pyhost.py: _pyhost.py
+	mkdir -p $(GAMEDIR)/python
+	cp _pyhost.py $@
 
 $(GAMEDIR)/pyhost.asi: pyhost.c scripthook.h libscripthook.a
 	$(CC) $(CFLAGS) -o $@ pyhost.c -L. -lscripthook
