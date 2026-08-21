@@ -103,6 +103,38 @@ static LRESULT CALLBACK MsProc(int code, WPARAM w, LPARAM l) {
 static HWND g_black;
 static volatile int g_wantBlack = 0;
 
+/* Shape of the blackout, applied as a window region. */
+enum { BLK_FULL, BLK_PORTRAIT, BLK_LETTERBOX, BLK_PEEPHOLE };
+static volatile int g_blackMode = BLK_FULL;
+
+static void ShapeBlack(int w, int h) {
+    static int lastMode = -1, lastW, lastH;
+    HRGN rgn = NULL, cut;
+    int mode = g_blackMode;
+
+    if (mode == lastMode && w == lastW && h == lastH) return;
+    lastMode = mode; lastW = w; lastH = h;
+    if (mode == BLK_PORTRAIT) {
+        int bw = h * 9 / 16;
+        rgn = CreateRectRgn((w - bw) / 2, 0, (w + bw) / 2, h);
+    } else if (mode == BLK_LETTERBOX) {
+        int band = w * 9 / 21;
+        rgn = CreateRectRgn(0, 0, w, h);
+        cut = CreateRectRgn(0, (h - band) / 2, w, (h + band) / 2);
+        CombineRgn(rgn, rgn, cut, RGN_DIFF);
+        DeleteObject(cut);
+    } else if (mode == BLK_PEEPHOLE) {
+        int r = h / 4;
+        rgn = CreateRectRgn(0, 0, w, h);
+        cut = CreateEllipticRgn(w / 2 - r, h / 2 - r,
+                                w / 2 + r, h / 2 + r);
+        CombineRgn(rgn, rgn, cut, RGN_DIFF);
+        DeleteObject(cut);
+    }
+    /* The window owns rgn after this call. */
+    SetWindowRgn(g_black, rgn, TRUE);
+}
+
 static BOOL CALLBACK PickWindow(HWND h, LPARAM l) {
     DWORD pid = 0;
     RECT rc;
@@ -157,6 +189,7 @@ static void ShowBlack(int on) {
     SetWindowPos(g_black, HWND_TOPMOST, tl.x, tl.y,
                  rc.right - rc.left, rc.bottom - rc.top,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    ShapeBlack(rc.right - rc.left, rc.bottom - rc.top);
 }
 
 static DWORD WINAPI HookThread(LPVOID p) {
@@ -493,8 +526,15 @@ static void OffFlatline(void) {
     if (s) ShSceneExit(s);
 }
 
-static void OnBlind(void)  { g_wantBlack = 1; }
+static void OnBlind(void)  { g_blackMode = BLK_FULL; g_wantBlack = 1; }
 static void OffBlind(void) { g_wantBlack = 0; }
+
+/* A 9:16 phone screen worth of nothing, dead centre. */
+static void OnPortrait(void) { g_blackMode = BLK_PORTRAIT; g_wantBlack = 1; }
+/* 21:9 bars, for the cinema feel. */
+static void OnCinema(void)   { g_blackMode = BLK_LETTERBOX; g_wantBlack = 1; }
+/* Everything gone but a circle in the middle. */
+static void OnPeephole(void) { g_blackMode = BLK_PEEPHOLE; g_wantBlack = 1; }
 
 /* Slamming the clock between noon and midnight makes the
  * eye adaptation chase itself, which is the joke.
@@ -717,6 +757,9 @@ static const Effect g_fx[] = {
     { "Worm's Eye",         1, OnWorm,   NULL,      OffCam, 20 },
     { "Bird's Eye",         1, OnBird,   NULL,      OffCam, 20 },
     { "Blinded",            1, OnBlind,  NULL,      OffBlind, 8 },
+    { "Anti-Portrait Mode", 1, OnPortrait, NULL,    OffBlind, 0 },
+    { "Cinematic",          1, OnCinema, NULL,      OffBlind, 0 },
+    { "Peephole",           1, OnPeephole, NULL,    OffBlind, 0 },
     { "MY EYES!",           1, OnEyes,   TickEyes,  NULL, 3 },
     { "Can't Park There Mate", 0, FxParking, NULL, NULL, 0 },
     { "180",                0, Fx180,    NULL, NULL, 0 },
