@@ -47,7 +47,7 @@ chaos: $(GAMEDIR)/chaos.asi
 
 $(GAMEDIR)/chaos.asi: chaos.c scripthook.h libscripthook.a
 	$(CC) $(CFLAGS) -o $@ chaos.c \
-		-L. -lscripthook -lgdi32 -luser32
+		-L. -lscripthook -lgdi32 -luser32 -lwinmm
 
 fov: $(GAMEDIR)/fov_changer.asi
 
