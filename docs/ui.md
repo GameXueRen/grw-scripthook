@@ -134,7 +134,7 @@ texture, both found by asset GUID, never by name.
 `ShUiSetDefaultFont(guid)` and `ShUiSetDefaultImage(guid)`
 change that for widgets made afterwards. `ShUiTextureCreate`
 uploads RGBA pixels of your own into an engine texture and
-`ShUiSetTexture` puts it on an image widget.
+`ShUiImageSet` puts it on an image widget or a panel's plate.
 
 ## Errors
 

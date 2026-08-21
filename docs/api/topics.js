@@ -18,5 +18,7 @@ var topics =
     [ "Input", "group__input.html", "group__input" ],
     [ "Crash reports", "group__crash.html", "group__crash" ],
     [ "Stats and ammo", "group__stats.html", "group__stats" ],
-    [ "Weather and time", "group__weather.html", "group__weather" ]
+    [ "Weather and time", "group__weather.html", "group__weather" ],
+    [ "Reflected objects", "group__reflect.html", "group__reflect" ],
+    [ "Native UI", "group__ui.html", "group__ui" ]
 ];

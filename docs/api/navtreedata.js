@@ -26,6 +26,17 @@ var NAVTREE =
 [
   [ "GRW ScriptHook", "index.html", [
     [ "Writing a plugin", "index.html", "index" ],
+    [ "Native UI", "ui.html", [
+      [ "Scenes", "ui.html#autotoc_md3", null ],
+      [ "Widgets", "ui.html#autotoc_md4", null ],
+      [ "Properties", "ui.html#autotoc_md5", null ],
+      [ "Batches", "ui.html#autotoc_md6", null ],
+      [ "Input", "ui.html#autotoc_md7", null ],
+      [ "Lifecycle", "ui.html#autotoc_md8", null ],
+      [ "Fonts and textures", "ui.html#autotoc_md9", null ],
+      [ "Errors", "ui.html#autotoc_md10", null ],
+      [ "What it costs", "ui.html#autotoc_md11", null ]
+    ] ],
     [ "Topics", "topics.html", "topics" ],
     [ "Data Structures", "annotated.html", [
       [ "Data Structures", "annotated.html", "annotated_dup" ],
@@ -52,8 +63,9 @@ var NAVTREE =
 var NAVTREEINDEX =
 [
 "annotated.html",
-"index.html"
+"group__ui.html#ga0719456154a54ae1646407c471d016d2"
 ];
 
-var SYNCONMSG = 'click to disable panel synchronisation';
-var SYNCOFFMSG = 'click to enable panel synchronisation';
+const SYNCONMSG = 'click to disable panel synchronization';
+const SYNCOFFMSG = 'click to enable panel synchronization';
+const LISTOFALLMEMBERS = 'List of all members';
