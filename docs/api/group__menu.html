@@ -26,7 +26,7 @@
  <tbody>
  <tr id="projectrow">
   <td id="projectalign">
-   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.8.0</span>
+   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.9.0</span>
    </div>
    <div id="projectbrief">Plugin API for Ghost Recon Wildlands</div>
   </td>
@@ -131,6 +131,10 @@ Functions</h2></td></tr>
 <tr class="memitem:gaf2481b668303ff3333756a8b724d454e" id="r_gaf2481b668303ff3333756a8b724d454e"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gaf2481b668303ff3333756a8b724d454e">ShMenuNumber</a> (uint32_t menu, const char *label, float initial, float lo, float hi, float step, <a class="el" href="#ga8fd0828ddf2e212f1287ec624ab96f1c">ShMenuFn</a> fn, void *user)</td></tr>
 <tr class="memitem:gae0d30affc54cce7c3b04616e6d6d1646" id="r_gae0d30affc54cce7c3b04616e6d6d1646"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gae0d30affc54cce7c3b04616e6d6d1646">ShMenuList</a> (uint32_t menu, const char *label, const char **opts, int n, int initial, <a class="el" href="#ga8fd0828ddf2e212f1287ec624ab96f1c">ShMenuFn</a> fn, void *user)</td></tr>
 <tr class="memdesc:gae0d30affc54cce7c3b04616e6d6d1646"><td class="mdescLeft">&#160;</td><td class="mdescRight">opts must outlive the menu.  <br /></td></tr>
+<tr class="memitem:gaacd52ee1813fb776310d25aa40b18840" id="r_gaacd52ee1813fb776310d25aa40b18840"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gaacd52ee1813fb776310d25aa40b18840">ShMenuClear</a> (uint32_t menu)</td></tr>
+<tr class="memdesc:gaacd52ee1813fb776310d25aa40b18840"><td class="mdescLeft">&#160;</td><td class="mdescRight">Drop a menu's items, keeping the row, so a plugin can rebuild its own menu without stacking duplicates.  <br /></td></tr>
+<tr class="memitem:gaff367b78609751ed712872c3e4649068" id="r_gaff367b78609751ed712872c3e4649068"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gaff367b78609751ed712872c3e4649068">ShMenuDestroy</a> (uint32_t menu)</td></tr>
+<tr class="memdesc:gaff367b78609751ed712872c3e4649068"><td class="mdescLeft">&#160;</td><td class="mdescRight">Remove the row and its subtree.  <br /></td></tr>
 <tr class="memitem:gace57cafffffaac4bd6fcc04d26a8d318" id="r_gace57cafffffaac4bd6fcc04d26a8d318"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gace57cafffffaac4bd6fcc04d26a8d318">ShMenuStatus</a> (uint32_t menu, const char *text)</td></tr>
 <tr class="memdesc:gace57cafffffaac4bd6fcc04d26a8d318"><td class="mdescLeft">&#160;</td><td class="mdescRight">The line under the items.  <br /></td></tr>
 <tr class="memitem:ga0054a407c931e8c7994a3738fd724a47" id="r_ga0054a407c931e8c7994a3738fd724a47"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> void&#160;</td><td class="memItemRight"><a class="el" href="#ga0054a407c931e8c7994a3738fd724a47">ShMenuSetKey</a> (int vk)</td></tr>
@@ -360,6 +364,44 @@ Functions</h2></td></tr>
 
 <p>opts must outlive the menu. </p>
 <p>String literals are fine. </p>
+
+</div>
+</div>
+<a id="gaacd52ee1813fb776310d25aa40b18840" name="gaacd52ee1813fb776310d25aa40b18840"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#gaacd52ee1813fb776310d25aa40b18840">&#9670;&#160;</a></span>ShMenuClear()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShMenuClear </td>
+          <td>(</td>
+          <td class="paramtype">uint32_t</td>          <td class="paramname"><span class="paramname"><em>menu</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Drop a menu's items, keeping the row, so a plugin can rebuild its own menu without stacking duplicates. </p>
+
+</div>
+</div>
+<a id="gaff367b78609751ed712872c3e4649068" name="gaff367b78609751ed712872c3e4649068"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#gaff367b78609751ed712872c3e4649068">&#9670;&#160;</a></span>ShMenuDestroy()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShMenuDestroy </td>
+          <td>(</td>
+          <td class="paramtype">uint32_t</td>          <td class="paramname"><span class="paramname"><em>menu</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Remove the row and its subtree. </p>
 
 </div>
 </div>

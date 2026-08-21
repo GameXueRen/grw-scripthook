@@ -26,7 +26,7 @@
  <tbody>
  <tr id="projectrow">
   <td id="projectalign">
-   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.8.0</span>
+   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.9.0</span>
    </div>
    <div id="projectbrief">Plugin API for Ghost Recon Wildlands</div>
   </td>
@@ -138,7 +138,9 @@ Functions</h2></td></tr>
 <tr class="memitem:ga64356e0564073a015c7ecba6f2e1baec" id="r_ga64356e0564073a015c7ecba6f2e1baec"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga64356e0564073a015c7ecba6f2e1baec">ShGetPlayer</a> (<a class="el" href="structShPlayer.html">ShPlayer</a> *out)</td></tr>
 <tr class="memdesc:ga64356e0564073a015c7ecba6f2e1baec"><td class="mdescLeft">&#160;</td><td class="mdescRight">The local player.  <br /></td></tr>
 <tr class="memitem:ga7272d881be2a967b7122cc1f8458e7cb" id="r_ga7272d881be2a967b7122cc1f8458e7cb"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga7272d881be2a967b7122cc1f8458e7cb">ShGetPlayerPosition</a> (<a class="el" href="structShVec3.html">ShVec3</a> *out)</td></tr>
-<tr class="memdesc:ga7272d881be2a967b7122cc1f8458e7cb"><td class="mdescLeft">&#160;</td><td class="mdescRight">NOT the eye: measured 1.71m above the feet once and 2.72m another time.  <br /></td></tr>
+<tr class="memdesc:ga7272d881be2a967b7122cc1f8458e7cb"><td class="mdescLeft">&#160;</td><td class="mdescRight">The soldier's own position, from its matrix.  <br /></td></tr>
+<tr class="memitem:ga655dcf71944a7a4cbfbcef291fc28f4d" id="r_ga655dcf71944a7a4cbfbcef291fc28f4d"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga655dcf71944a7a4cbfbcef291fc28f4d">ShGetCameraEyePosition</a> (<a class="el" href="structShVec3.html">ShVec3</a> *out)</td></tr>
+<tr class="memdesc:ga655dcf71944a7a4cbfbcef291fc28f4d"><td class="mdescLeft">&#160;</td><td class="mdescRight">Where the player global says the view sits, about 1.9m behind and 1.6m above the body in third person.  <br /></td></tr>
 <tr class="memitem:ga5fb9432f1a44c76813a143294446e988" id="r_ga5fb9432f1a44c76813a143294446e988"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga5fb9432f1a44c76813a143294446e988">ShTeleportPlayer</a> (const <a class="el" href="structShVec3.html">ShVec3</a> *pos, const <a class="el" href="structShVec3.html">ShVec3</a> *orient)</td></tr>
 <tr class="memdesc:ga5fb9432f1a44c76813a143294446e988"><td class="mdescLeft">&#160;</td><td class="mdescRight">Teleport the player, at any range.  <br /></td></tr>
 <tr class="memitem:gae2b6aaafd6736f136b6da2ea8bfd58eb" id="r_gae2b6aaafd6736f136b6da2ea8bfd58eb"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gae2b6aaafd6736f136b6da2ea8bfd58eb">ShTeleportPlayerHops</a> (const <a class="el" href="structShVec3.html">ShVec3</a> *pos, const <a class="el" href="structShVec3.html">ShVec3</a> *orient, float hopMetres, int delayMs)</td></tr>
@@ -301,8 +303,27 @@ Functions</h2></td></tr>
       </table>
 </div><div class="memdoc">
 
-<p>NOT the eye: measured 1.71m above the feet once and 2.72m another time. </p>
-<p>The eye is ShGetHeadPosition. </p>
+<p>The soldier's own position, from its matrix. </p>
+<p>Use this for anything placed in the world. </p>
+
+</div>
+</div>
+<a id="ga655dcf71944a7a4cbfbcef291fc28f4d" name="ga655dcf71944a7a4cbfbcef291fc28f4d"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga655dcf71944a7a4cbfbcef291fc28f4d">&#9670;&#160;</a></span>ShGetCameraEyePosition()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShGetCameraEyePosition </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="structShVec3.html">ShVec3</a> *</td>          <td class="paramname"><span class="paramname"><em>out</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Where the player global says the view sits, about 1.9m behind and 1.6m above the body in third person. </p>
 
 </div>
 </div>
