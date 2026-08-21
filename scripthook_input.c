@@ -1,9 +1,6 @@
-/* Input blocking, at the only place the game reads it.
- * GRW polls GetAsyncKeyState for keys and GetCursorPos for
- * look, and imports no DirectInput and no raw input. */
-/* So low level hooks miss it entirely. These are its own
- * import slots, redirected to stubs that answer as though
- * nothing is pressed and the mouse never moved. */
+/* Input blocking. Keys: the game reads DirectInput through
+ * our proxy (scripthook_dinput.c). Look: GetCursorPos, via
+ * its import slot. GetAsyncKeyState: the modifiers only. */
 #include <windows.h>
 #include <string.h>
 #include <stdint.h>
@@ -28,6 +25,8 @@ static int g_hooked = 0;
 static volatile uint32_t g_block = 0;
 static POINT g_frozen;
 static volatile int g_haveFrozen = 0;
+static volatile uint8_t g_keyBlock[256];
+static volatile int g_anyKeyBlock = 0;
 
 /* Never swallowed, so a player can always pause, alt tab
  * or reach the menu whatever a mod is doing.
@@ -38,20 +37,33 @@ static int Escapes(int vk) {
            vk == VK_LWIN || vk == VK_RWIN;
 }
 
-static SHORT WINAPI KeyStub(int vk) {
+/* one rule for the poll stub and the message hook */
+static int Suppressed(int vk) {
     uint32_t b = g_block;
 
-    if (b && !Escapes(vk)) {
-        if (b & SH_INPUT_KEYS) return 0;
-        if ((b & SH_INPUT_MOVE) &&
-            (vk == 'W' || vk == 'A' || vk == 'S' || vk == 'D' ||
-             vk == VK_SPACE || vk == VK_SHIFT || vk == VK_CONTROL))
-            return 0;
-        if ((b & SH_INPUT_FIRE) && vk == VK_LBUTTON) return 0;
-        if ((b & SH_INPUT_AIM) && vk == VK_RBUTTON) return 0;
-    }
+    if (vk <= 0 || vk >= 256 || Escapes(vk)) return 0;
+    if (g_anyKeyBlock && g_keyBlock[vk]) return 1;
+    if (!b) return 0;
+    if (b & SH_INPUT_KEYS) return 1;
+    if ((b & SH_INPUT_MOVE) &&
+        (vk == 'W' || vk == 'A' || vk == 'S' || vk == 'D' ||
+         vk == VK_SPACE || vk == VK_SHIFT || vk == VK_CONTROL))
+        return 1;
+    if ((b & SH_INPUT_FIRE) && vk == VK_LBUTTON) return 1;
+    if ((b & SH_INPUT_AIM) && vk == VK_RBUTTON) return 1;
+    return 0;
+}
+
+static SHORT WINAPI KeyStub(int vk) {
+    if (Suppressed(vk)) return 0;
     return g_realKey ? g_realKey(vk) : 0;
 }
+
+/* for the DirectInput proxy in scripthook_dinput.c */
+int ShKeySuppressedVk(int vk) {
+    return Suppressed(vk);
+}
+
 
 /* The game turns by the change between polls, so handing
  * back the same point every time means it never turns.
@@ -118,4 +130,15 @@ SH_API int ShBlockInput(uint32_t mask) {
 
 SH_API uint32_t ShBlockedInput(void) {
     return g_block;
+}
+
+/* one key hidden from the game, for UI that consumed it */
+SH_API int ShBlockKey(int vk, int on) {
+    int i, any = 0;
+    if (vk <= 0 || vk >= 256) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    if (on && !Install()) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
+    g_keyBlock[vk] = on ? 1 : 0;
+    for (i = 1; i < 256; i++) if (g_keyBlock[i]) any = 1;
+    g_anyKeyBlock = any;
+    return 1;
 }

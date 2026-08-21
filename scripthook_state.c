@@ -37,6 +37,7 @@ extern void ShPhysicsOnEnterPlaying(void);
 extern void ShCameraOnEnterPlaying(void);
 extern void ShHeadOnEnterPlaying(void);
 extern void ShMenuOnEnterPlaying(void);
+extern void ShUiOnEnterPlaying(void);
 extern void ShInvalidate(void);
 extern void ShInvalidateHealth(void);
 
@@ -143,6 +144,7 @@ SH_API int ShGetGameStateName(char *buf, int len) {
 static void OnStateChanged(uint32_t h) {
     ShInvalidate();
     ShInvalidateHealth();
+    ShUiOnEnterPlaying();
     if (h == HASH_PLAYING || h == HASH_INGAME) {
         ShPhysicsOnEnterPlaying();
         ShCameraOnEnterPlaying();

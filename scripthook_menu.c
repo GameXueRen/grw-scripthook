@@ -1,6 +1,6 @@
 /* A shared menu, one root owned by the API. Every plugin
  * registers a submenu, so sixteen addons cost sixteen rows.
- */
+ * Drawn by the engine itself through the native UI. */
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
@@ -13,11 +13,26 @@
 #define ITEMS       96
 #define LABEL       48
 #define VISIBLE     12
-#define ROW_H       18
-#define PAD         8
-#define MARGIN      12
 #define TICK_MS     40
 #define OPTS        12
+
+/* Geometry in HUD pixels. */
+#define MENU_X      16.0f
+#define MENU_Y      16.0f
+#define MENU_W      400.0f
+#define PAD         16.0f
+#define TITLE_H     34.0f
+#define ROW_H       28.0f
+#define BAR_DY      -4.0f
+#define BAR_H       22.0f
+#define VALUE_W     150.0f
+
+#define C_TITLE     0xFFD25Au
+#define C_ROW       0xD2D2D2u
+#define C_SEL       0x8CF0FFu
+#define C_FOOT      0x8C8C8Cu
+#define C_STATUS    0xA0E6A0u
+#define C_BAR       0x28465Au
 
 enum { IT_ACTION = 0, IT_SUB, IT_TOGGLE, IT_NUMBER, IT_LIST };
 
@@ -45,6 +60,23 @@ typedef struct {
     Item     items[ITEMS];
 } Menu;
 
+/* What is on screen, so only differences are pushed. */
+typedef struct {
+    char name[LABEL];
+    char value[32];
+    int  shown;
+    int  selected;
+} RowView;
+
+typedef struct {
+    char    title[LABEL];
+    char    status[96];
+    char    footer[32];
+    int     rows;
+    int     sel;
+    RowView row[VISIBLE];
+} View;
+
 static Menu g_menus[MENUS];
 static uint32_t g_root = 0;
 static volatile uint32_t g_current = 0;
@@ -54,8 +86,14 @@ static volatile int g_greeted = 0;
 static volatile int g_started = 0;
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
-static HWND g_wnd = NULL;
-static HFONT g_font = NULL;
+
+/* Native widget ids, valid for one UI generation. */
+static struct {
+    int      built, gen, shown;
+    uint32_t panel, title, bar, footer, status;
+    uint32_t name[VISIBLE], value[VISIBLE];
+    View     drawn;
+} g_ui;
 
 extern void ShSetError(int err);
 
@@ -187,179 +225,168 @@ static void Navigate(void) {
     }
 }
 
-static void PaintMenu(HWND h) {
-    PAINTSTRUCT ps;
-    HDC dc = BeginPaint(h, &ps);
-    RECT rc, row;
-    HFONT oldFont;
-    Menu *m;
-    int i, y = PAD, w;
-    char val[32], line[128];
+/* Snapshot of the current menu. Caller holds the lock. */
+static void Capture(View *v) {
+    Menu *m = MenuOf(g_current);
+    int i;
 
-    GetClientRect(h, &rc);
-    w = rc.right - rc.left;
-    FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-    oldFont = (HFONT)SelectObject(dc, g_font);
-    SetBkMode(dc, TRANSPARENT);
-
-    Lock();
-    m = MenuOf(g_current);
-    if (m) {
-        SetTextColor(dc, RGB(255, 210, 90));
-        TextOutA(dc, PAD, y, m->title, (int)strlen(m->title));
-        y += ROW_H + 2;
-
-        for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
-            Item *it = &m->items[i];
-            int cur = (i == m->sel);
-
-            if (cur) {
-                HBRUSH b = CreateSolidBrush(RGB(40, 70, 90));
-                row.left = 2; row.right = w - 2;
-                row.top = y - 1; row.bottom = y + ROW_H - 2;
-                FillRect(dc, &row, b);
-                DeleteObject(b);
-            }
-            SetTextColor(dc, cur ? RGB(140, 240, 255)
-                                 : RGB(210, 210, 210));
-            TextOutA(dc, PAD + 4, y, it->label, (int)strlen(it->label));
-            ValueText(it, val, sizeof(val));
-            if (val[0]) {
-                SIZE sz;
-                GetTextExtentPoint32A(dc, val, (int)strlen(val), &sz);
-                TextOutA(dc, w - PAD - sz.cx, y, val, (int)strlen(val));
-            }
-            y += ROW_H;
-        }
-        if (m->count > VISIBLE) {
-            SetTextColor(dc, RGB(140, 140, 140));
-            snprintf(line, sizeof(line), "%d of %d", m->sel + 1,
-                     m->count);
-            TextOutA(dc, PAD, y + 2, line, (int)strlen(line));
-            y += ROW_H;
-        }
-        if (m->status[0]) {
-            SetTextColor(dc, RGB(160, 230, 160));
-            TextOutA(dc, PAD, y + 2, m->status,
-                     (int)strlen(m->status));
-        }
+    memset(v, 0, sizeof(*v));
+    if (!m) return;
+    strncpy(v->title, m->title, LABEL - 1);
+    strncpy(v->status, m->status, sizeof(v->status) - 1);
+    for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
+        RowView *r = &v->row[v->rows];
+        strncpy(r->name, m->items[i].label, LABEL - 1);
+        ValueText(&m->items[i], r->value, sizeof(r->value));
+        r->shown = 1;
+        r->selected = (i == m->sel);
+        if (r->selected) v->sel = v->rows;
+        v->rows++;
     }
-    Unlock();
-
-    SelectObject(dc, oldFont);
-    EndPaint(h, &ps);
+    if (m->count > VISIBLE)
+        snprintf(v->footer, sizeof(v->footer), "%d of %d",
+                 m->sel + 1, m->count);
 }
 
-/* Touched only on a real change. Re-asserting topmost every
- * tick makes the game fight us for z-order and hang.
- */
-static int FitMenu(void) {
-    static int shown = 0, placed = 0, lastHt = 0;
-    Menu *m;
-    int rows, ht;
+static float RowY(int i) {
+    return PAD + TITLE_H + ROW_H * (float)i;
+}
 
-    if (!g_wnd) return 0;
-    if (!g_open) {
-        if (shown) { ShowWindow(g_wnd, SW_HIDE); shown = 0; }
-        return 0;
+static float PanelHeight(const View *v) {
+    float h = PAD + TITLE_H + ROW_H * (float)v->rows + PAD;
+    if (v->footer[0]) h += ROW_H;
+    if (v->status[0]) h += ROW_H;
+    return h;
+}
+
+static void DropWidgets(void) {
+    if (g_ui.built && g_ui.gen == ShUiGen() && g_ui.panel)
+        ShUiDestroy(g_ui.panel);
+    memset(&g_ui, 0, sizeof(g_ui));
+}
+
+/* One creation per widget, hidden rows included, so later
+ * updates are text and position only. */
+static int BuildWidgets(void) {
+    int i;
+
+    memset(&g_ui, 0, sizeof(g_ui));
+    if (!ShUiReady()) return 0;
+    g_ui.gen = ShUiGen();
+    g_ui.panel = ShUiPanel(MENU_X, MENU_Y, MENU_W, 200.0f, 0x000000, 0.8f);
+    if (!g_ui.panel) return 0;
+    g_ui.bar = ShUiImage(g_ui.panel, PAD / 2, RowY(0) + BAR_DY,
+                         MENU_W - PAD, BAR_H, C_BAR, 0.9f);
+    g_ui.title = ShUiLabel(g_ui.panel, PAD, PAD, MENU_W - 2 * PAD,
+                           TITLE_H, " ", C_TITLE);
+    for (i = 0; i < VISIBLE; i++) {
+        g_ui.name[i] = ShUiLabel(g_ui.panel, PAD + 8.0f, RowY(i),
+                                 MENU_W - VALUE_W - PAD, ROW_H, " ",
+                                 C_ROW);
+        g_ui.value[i] = ShUiLabel(g_ui.panel, MENU_W - PAD - VALUE_W,
+                                  RowY(i), VALUE_W, ROW_H, " ", C_ROW);
+        ShUiShow(g_ui.name[i], 0);
+        ShUiShow(g_ui.value[i], 0);
     }
-
-    Lock();
-    m = MenuOf(g_current);
-    rows = m ? m->count : 0;
-    if (rows > VISIBLE) rows = VISIBLE + 1;
-    if (m && m->status[0]) rows++;
-    Unlock();
-
-    ht = PAD * 2 + ROW_H + 2 + rows * ROW_H;
-    if (shown && ht == lastHt) return 0;
-    lastHt = ht;
-
-    SetWindowPos(g_wnd, placed ? NULL : HWND_TOPMOST,
-                 MARGIN, MARGIN, 380, ht,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW |
-                 (placed ? SWP_NOZORDER : 0));
-    placed = 1;
-    shown = 1;
+    g_ui.footer = ShUiLabel(g_ui.panel, PAD, RowY(0), MENU_W - 2 * PAD,
+                            ROW_H, " ", C_FOOT);
+    g_ui.status = ShUiLabel(g_ui.panel, PAD, RowY(0), MENU_W - 2 * PAD,
+                            ROW_H, " ", C_STATUS);
+    ShUiShow(g_ui.footer, 0);
+    ShUiShow(g_ui.status, 0);
+    ShUiShow(g_ui.panel, 0);
+    g_ui.built = 1;
+    g_ui.shown = 0;
     return 1;
 }
 
-/* What the menu currently looks like. Repainting only when
- * this changes keeps an open menu idle. Caller holds the
- * lock. */
-static unsigned MenuSig(void) {
-    Menu *m = MenuOf(g_current);
-    const char *p;
-    unsigned s = (unsigned)g_current * 2654435761u;
+static void SetTextIf(uint32_t id, char *have, int cap,
+                      const char *want) {
+    if (strcmp(have, want) == 0) return;
+    strncpy(have, want, cap - 1);
+    have[cap - 1] = 0;
+    ShUiSetText(id, want[0] ? want : " ");
+}
+
+/* Push the differences between the drawn view and v. */
+static void Sync(const View *v) {
+    View *d = &g_ui.drawn;
+    float y;
     int i;
 
-    if (!m) return s;
-    s = s * 31u + (unsigned)m->sel;
-    s = s * 31u + (unsigned)m->top;
-    s = s * 31u + (unsigned)m->count;
-    for (p = m->status; *p; p++) s = s * 31u + (unsigned char)*p;
+    SetTextIf(g_ui.title, d->title, LABEL, v->title);
+    for (i = 0; i < VISIBLE; i++) {
+        const RowView *r = &v->row[i];
+        RowView *dr = &d->row[i];
 
-    for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
-        char v[32];
-        ValueText(&m->items[i], v, sizeof(v));
-        for (p = v; *p; p++) s = s * 31u + (unsigned char)*p;
+        if (r->shown != dr->shown) {
+            ShUiShow(g_ui.name[i], r->shown);
+            ShUiShow(g_ui.value[i], r->shown);
+            dr->shown = r->shown;
+        }
+        if (!r->shown) continue;
+        SetTextIf(g_ui.name[i], dr->name, LABEL, r->name);
+        SetTextIf(g_ui.value[i], dr->value, sizeof(dr->value), r->value);
+        if (r->selected != dr->selected) {
+            ShUiSetColour(g_ui.name[i], r->selected ? C_SEL : C_ROW);
+            ShUiSetColour(g_ui.value[i], r->selected ? C_SEL : C_ROW);
+            dr->selected = r->selected;
+        }
     }
-    return s;
+    if (v->sel != d->sel || v->rows != d->rows) {
+        ShUiSetPos(g_ui.bar, PAD / 2, RowY(v->sel) + BAR_DY);
+        d->sel = v->sel;
+    }
+    y = RowY(v->rows);
+    if (v->rows != d->rows || strcmp(v->footer, d->footer) != 0 ||
+        strcmp(v->status, d->status) != 0) {
+        if (v->footer[0]) {
+            ShUiSetPos(g_ui.footer, PAD, y + 2.0f);
+            y += ROW_H;
+        }
+        if (v->status[0]) ShUiSetPos(g_ui.status, PAD, y + 2.0f);
+        if ((v->footer[0] != 0) != (d->footer[0] != 0))
+            ShUiShow(g_ui.footer, v->footer[0] != 0);
+        if ((v->status[0] != 0) != (d->status[0] != 0))
+            ShUiShow(g_ui.status, v->status[0] != 0);
+        SetTextIf(g_ui.footer, d->footer, sizeof(d->footer), v->footer);
+        SetTextIf(g_ui.status, d->status, sizeof(d->status), v->status);
+        ShUiSetSize(g_ui.panel, MENU_W, PanelHeight(v));
+        d->rows = v->rows;
+    }
 }
 
-static LRESULT CALLBACK MenuProc(HWND h, UINT msg, WPARAM w,
-                                 LPARAM l) {
-    if (msg == WM_PAINT) { PaintMenu(h); return 0; }
-    if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
-    return DefWindowProcA(h, msg, w, l);
-}
-
+/* Keys are polled here, the engine draws the result. */
 static DWORD WINAPI MenuThread(LPVOID p) {
-    WNDCLASSA wc;
-    MSG msg;
-    unsigned sig = 0, lastSig = ~0u;
-    int moved;
+    View v;
     (void)p;
 
-    memset(&wc, 0, sizeof(wc));
-    wc.lpfnWndProc = MenuProc;
-    wc.hInstance = GetModuleHandleA(NULL);
-    wc.lpszClassName = "GRWScriptHookMenu";
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    RegisterClassA(&wc);
-
-    g_font = CreateFontA(15, 0, 0, 0, FW_BOLD, 0, 0, 0,
-                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                         CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                         FF_DONTCARE, "Consolas");
-
-    g_wnd = CreateWindowExA(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-        "GRWScriptHookMenu", "ScriptHookMenu", WS_POPUP,
-        MARGIN, MARGIN, 380, 200, NULL, NULL, wc.hInstance, NULL);
-    if (!g_wnd) return 1;
-
     for (;;) {
-        while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
         Sleep(TICK_MS);
 
         if (Pressed(g_key)) {
             g_open = !g_open;
             if (g_open) g_current = g_root;
         }
-        if (g_open) {
-            Lock();
-            Navigate();
-            sig = MenuSig();
-            Unlock();
+        if (g_ui.built && g_ui.gen != ShUiGen()) DropWidgets();
+        if (!g_open) {
+            if (g_ui.built && g_ui.shown) {
+                ShUiShow(g_ui.panel, 0);
+                g_ui.shown = 0;
+            }
+            continue;
         }
-        moved = FitMenu();
-        if (g_open && (moved || sig != lastSig)) {
-            lastSig = sig;
-            InvalidateRect(g_wnd, NULL, FALSE);
+        if (!g_ui.built && !BuildWidgets()) continue;
+
+        Lock();
+        Navigate();
+        Capture(&v);
+        Unlock();
+
+        Sync(&v);
+        if (!g_ui.shown) {
+            ShUiShow(g_ui.panel, 1);
+            g_ui.shown = 1;
         }
     }
     return 0;

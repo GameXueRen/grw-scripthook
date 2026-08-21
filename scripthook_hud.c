@@ -1,9 +1,6 @@
-/* One overlay per corner, owned by the API. Slots pack from
- * whoever registered, so an absent plugin leaves no gap.
- */
-/* Windows are sized to their content and opaque, which is
- * the only shape proven to draw over the game.
- */
+/* HUD text slots, one plate per slot, drawn by the engine
+ * through the native UI. Slots pack per corner from whoever
+ * registered, so an absent plugin leaves no gap. */
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
@@ -15,11 +12,18 @@
 #define HUD_SLOTS   32
 #define HUD_TEXT    512
 #define HUD_NAME    32
-#define HUD_LINE_H  17
-#define HUD_PAD     6
-#define HUD_MARGIN  12
+#define HUD_LINES   12
+#define HUD_LINE    96
 #define HUD_TICK_MS 120
-#define HUD_ANCHORS 4
+
+/* Geometry in HUD pixels. */
+#define LINE_H      26.0f
+#define PAD         10.0f
+#define MARGIN      24.0f
+#define CHAR_W      9.5f
+#define MIN_W       120.0f
+#define MAX_W       720.0f
+#define GAP         8.0f
 
 typedef struct {
     int      used;
@@ -31,21 +35,24 @@ typedef struct {
     char     text[HUD_TEXT];
 } HudSlot;
 
+/* What the engine currently shows for a slot. */
+typedef struct {
+    int      gen;
+    uint32_t panel;
+    uint32_t line[HUD_LINES];
+    char     shown[HUD_LINES][HUD_LINE];
+    int      lines;
+    uint32_t colour;
+    int      visible;
+    float    x, y, w, h;
+} HudView;
+
 static HudSlot g_slots[HUD_SLOTS];
+static HudView g_view[HUD_SLOTS];
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
 static volatile int g_started = 0;
-static HWND g_win[HUD_ANCHORS];
-static HFONT g_font = NULL;
-
-/* Re-asserting topmost every tick makes the game fight us
- * for z-order and hangs it, so each window is touched only
- * when its content or geometry actually changes. */
 static volatile int g_rev = 0;
-static int g_seen[HUD_ANCHORS];
-static int g_shown[HUD_ANCHORS];
-static RECT g_last[HUD_ANCHORS];
-static int g_placed[HUD_ANCHORS];
 
 extern void ShSetError(int err);
 
@@ -57,23 +64,14 @@ static void HudUnlock(void) {
     if (g_lockReady) LeaveCriticalSection(&g_lock);
 }
 
-/* Marks the overlay dirty, so the timer knows there is
- * something new to draw. */
 static void HudChanged(void) {
     g_rev++;
-}
-
-static int AnchorOf(HWND h) {
-    int i;
-    for (i = 0; i < HUD_ANCHORS; i++)
-        if (g_win[i] == h) return i;
-    return 0;
 }
 
 /* Slots for one corner, priority first then registration,
  * so layout holds whichever plugin loaded first.
  */
-static int Gather(int anchor, HudSlot **out, int max) {
+static int Gather(int anchor, int *out, int max) {
     int n = 0, pass, i;
 
     for (pass = 0; pass < 2; pass++) {
@@ -83,171 +81,176 @@ static int Gather(int anchor, HudSlot **out, int max) {
             if ((s->anchor & 3) != anchor) continue;
             if (pass == 0 && s->priority >= 0) continue;
             if (pass == 1 && s->priority < 0) continue;
-            out[n++] = s;
+            out[n++] = i;
         }
     }
     return n;
 }
 
-static int LineCount(const char *s) {
-    int n = 1;
-    while (*s) { if (*s == '\n') n++; s++; }
+/* Split text into lines, measure the widest one. */
+static int SplitLines(const char *text, char lines[][HUD_LINE],
+                      int *widest) {
+    int n = 0, w = 0;
+    const char *p = text;
+
+    *widest = 0;
+    while (*p && n < HUD_LINES) {
+        const char *e = strchr(p, '\n');
+        int len = e ? (int)(e - p) : (int)strlen(p);
+        if (len > HUD_LINE - 1) len = HUD_LINE - 1;
+        memcpy(lines[n], p, len);
+        lines[n][len] = 0;
+        if (len > w) w = len;
+        n++;
+        if (!e) break;
+        p = e + 1;
+    }
+    *widest = w;
     return n;
 }
 
-static void PaintHud(HWND h) {
-    PAINTSTRUCT ps;
-    HDC dc = BeginPaint(h, &ps);
-    RECT rc;
-    HFONT oldFont;
-    HudSlot *list[HUD_SLOTS];
-    int n, i, y = HUD_PAD;
-
-    GetClientRect(h, &rc);
-    FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-    oldFont = (HFONT)SelectObject(dc, g_font);
-    SetBkMode(dc, TRANSPARENT);
-
-    HudLock();
-    n = Gather(AnchorOf(h), list, HUD_SLOTS);
-    for (i = 0; i < n; i++) {
-        const char *p = list[i]->text;
-        uint32_t c = list[i]->colour;
-
-        SetTextColor(dc, RGB((c >> 16) & 0xFF, (c >> 8) & 0xFF,
-                             c & 0xFF));
-        while (*p) {
-            const char *e = strchr(p, '\n');
-            int len = e ? (int)(e - p) : (int)strlen(p);
-            TextOutA(dc, HUD_PAD, y, p, len);
-            y += HUD_LINE_H;
-            if (!e) break;
-            p = e + 1;
-        }
-        y += HUD_PAD;
-    }
-    HudUnlock();
-
-    SelectObject(dc, oldFont);
-    EndPaint(h, &ps);
+static void DropView(HudView *v) {
+    if (v->panel && v->gen == ShUiGen()) ShUiDestroy(v->panel);
+    memset(v, 0, sizeof(*v));
 }
 
-/* Sized to fit its text. Returns 1 when the window needs a
- * repaint, so an idle overlay costs nothing at all.
- */
-static int FitWindow(HWND h, int anchor) {
-    HDC dc = GetDC(h);
-    HFONT oldFont = (HFONT)SelectObject(dc, g_font);
-    HudSlot *list[HUD_SLOTS];
-    int n, i, lines = 0, w = 0;
-    int sw = GetSystemMetrics(SM_CXSCREEN);
-    int sh = GetSystemMetrics(SM_CYSCREEN);
-    int ht, x, y;
+static int EnsureView(HudView *v, float x, float y, float w, float h) {
+    int i;
 
-    HudLock();
-    n = Gather(anchor, list, HUD_SLOTS);
-    for (i = 0; i < n; i++) {
-        const char *p = list[i]->text;
-        lines += LineCount(p);
-        while (*p) {
-            const char *e = strchr(p, '\n');
-            int len = e ? (int)(e - p) : (int)strlen(p);
-            SIZE sz;
-            if (GetTextExtentPoint32A(dc, p, len, &sz) && sz.cx > w)
-                w = sz.cx;
-            if (!e) break;
-            p = e + 1;
-        }
+    if (v->panel && v->gen == ShUiGen()) return 1;
+    memset(v, 0, sizeof(*v));
+    v->gen = ShUiGen();
+    v->panel = ShUiPanel(x, y, w, h, 0x000000, 0.7f);
+    if (!v->panel) return 0;
+    for (i = 0; i < HUD_LINES; i++) {
+        v->line[i] = ShUiLabel(v->panel, PAD, PAD + LINE_H * (float)i,
+                               w - 2 * PAD, LINE_H, " ", 0xFFFFFF);
+        ShUiShow(v->line[i], 0);
     }
-    HudUnlock();
-
-    SelectObject(dc, oldFont);
-    ReleaseDC(h, dc);
-
-    if (n == 0 || lines == 0) {
-        if (g_shown[anchor]) {
-            ShowWindow(h, SW_HIDE);
-            g_shown[anchor] = 0;
-        }
-        return 0;
-    }
-    w += HUD_PAD * 2;
-    ht = lines * HUD_LINE_H + n * HUD_PAD + HUD_PAD;
-
-    x = (anchor == SH_HUD_TOPLEFT || anchor == SH_HUD_BOTTOMLEFT)
-        ? HUD_MARGIN : sw - HUD_MARGIN - w;
-    y = (anchor == SH_HUD_TOPLEFT || anchor == SH_HUD_TOPRIGHT)
-        ? HUD_MARGIN : sh - HUD_MARGIN - ht;
-
-    if (g_shown[anchor] && g_last[anchor].left == x &&
-        g_last[anchor].top == y && g_last[anchor].right == w &&
-        g_last[anchor].bottom == ht)
-        return 0;
-
-    g_last[anchor].left = x;
-    g_last[anchor].top = y;
-    g_last[anchor].right = w;
-    g_last[anchor].bottom = ht;
-
-    /* Topmost is claimed once. Later moves keep the z-order
-     * we already have, which is what the game can live with.
-     */
-    SetWindowPos(h, g_placed[anchor] ? NULL : HWND_TOPMOST,
-                 x, y, w, ht,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW |
-                 (g_placed[anchor] ? SWP_NOZORDER : 0));
-    g_placed[anchor] = 1;
-    g_shown[anchor] = 1;
+    v->x = x; v->y = y; v->w = w; v->h = h;
+    v->visible = 1;
+    v->colour = 0xFFFFFF;
     return 1;
 }
 
-static LRESULT CALLBACK HudProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    if (m == WM_PAINT) { PaintHud(h); return 0; }
-    if (m == WM_TIMER) {
-        int a = AnchorOf(h);
-        int rev = g_rev;
-        int moved = FitWindow(h, a);
+/* One slot: create or update its plate and lines. */
+static void SyncSlot(int idx, float x, float y) {
+    HudSlot s;
+    HudView *v = &g_view[idx];
+    char lines[HUD_LINES][HUD_LINE];
+    int n, widest, i;
+    float w, h;
 
-        if (moved || rev != g_seen[a]) {
-            g_seen[a] = rev;
-            if (g_shown[a]) InvalidateRect(h, NULL, FALSE);
-        }
-        return 0;
+    HudLock();
+    s = g_slots[idx];
+    HudUnlock();
+
+    n = SplitLines(s.text, lines, &widest);
+    w = (float)widest * CHAR_W + 2 * PAD;
+    if (w < MIN_W) w = MIN_W;
+    if (w > MAX_W) w = MAX_W;
+    h = (float)n * LINE_H + 2 * PAD;
+
+    if (!EnsureView(v, x, y, w, h)) return;
+    if (v->x != x || v->y != y) {
+        ShUiSetPos(v->panel, x, y);
+        v->x = x; v->y = y;
     }
-    if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
-    return DefWindowProcA(h, m, w, l);
+    if (v->w != w || v->h != h) {
+        ShUiSetSize(v->panel, w, h);
+        for (i = 0; i < HUD_LINES; i++)
+            ShUiSetSize(v->line[i], w - 2 * PAD, LINE_H);
+        v->w = w; v->h = h;
+    }
+    for (i = 0; i < HUD_LINES; i++) {
+        int want = i < n;
+        if (want != (i < v->lines)) ShUiShow(v->line[i], want);
+        if (!want) continue;
+        if (strcmp(v->shown[i], lines[i]) != 0) {
+            strncpy(v->shown[i], lines[i], HUD_LINE - 1);
+            ShUiSetText(v->line[i], lines[i][0] ? lines[i] : " ");
+        }
+        if (v->colour != s.colour) ShUiSetColour(v->line[i], s.colour);
+    }
+    v->lines = n;
+    v->colour = s.colour;
+    if (!v->visible) { ShUiShow(v->panel, 1); v->visible = 1; }
+}
+
+/* Slot height, for stacking before the slot is built. */
+static float SlotHeight(int idx) {
+    char lines[HUD_LINES][HUD_LINE];
+    int widest, n;
+    HudLock();
+    n = SplitLines(g_slots[idx].text, lines, &widest);
+    HudUnlock();
+    return (float)n * LINE_H + 2 * PAD;
+}
+
+static float SlotWidth(int idx) {
+    char lines[HUD_LINES][HUD_LINE];
+    int widest;
+    float w;
+    HudLock();
+    SplitLines(g_slots[idx].text, lines, &widest);
+    HudUnlock();
+    w = (float)widest * CHAR_W + 2 * PAD;
+    if (w < MIN_W) w = MIN_W;
+    if (w > MAX_W) w = MAX_W;
+    return w;
+}
+
+/* Lay every corner out and push whatever changed. */
+static void SyncAll(void) {
+    int list[HUD_SLOTS], n, a, i;
+    int active[HUD_SLOTS];
+    /* The HUD lays out in a 1920 x 1080 reference space and
+     * the engine scales it to the screen. */
+    float sw = 1920.0f;
+    float sh = 1080.0f;
+
+    memset(active, 0, sizeof(active));
+    for (a = 0; a < 4; a++) {
+        float y;
+        int top = (a == SH_HUD_TOPLEFT || a == SH_HUD_TOPRIGHT);
+        int left = (a == SH_HUD_TOPLEFT || a == SH_HUD_BOTTOMLEFT);
+
+        HudLock();
+        n = Gather(a, list, HUD_SLOTS);
+        HudUnlock();
+        y = top ? MARGIN : sh - MARGIN;
+        for (i = 0; i < n; i++) {
+            float h = SlotHeight(list[i]);
+            float w = SlotWidth(list[i]);
+            float x = left ? MARGIN : sw - MARGIN - w;
+            if (!top) y -= h;
+            SyncSlot(list[i], x, y);
+            active[list[i]] = 1;
+            y += top ? h + GAP : -GAP;
+        }
+    }
+    for (i = 0; i < HUD_SLOTS; i++) {
+        HudView *v = &g_view[i];
+        if (active[i] || !v->panel) continue;
+        if (v->gen != ShUiGen()) { memset(v, 0, sizeof(*v)); continue; }
+        if (!g_slots[i].used) { DropView(v); continue; }
+        if (v->visible) { ShUiShow(v->panel, 0); v->visible = 0; }
+    }
 }
 
 static DWORD WINAPI HudThread(LPVOID p) {
-    WNDCLASSA wc;
-    MSG msg;
-    int i;
+    int seen = -1, gen = -1;
     (void)p;
 
-    memset(&wc, 0, sizeof(wc));
-    wc.lpfnWndProc = HudProc;
-    wc.hInstance = GetModuleHandleA(NULL);
-    wc.lpszClassName = "GRWScriptHookHud";
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    RegisterClassA(&wc);
-
-    g_font = CreateFontA(14, 0, 0, 0, FW_BOLD, 0, 0, 0,
-                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                         CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                         FF_DONTCARE, "Consolas");
-
-    for (i = 0; i < HUD_ANCHORS; i++) {
-        g_win[i] = CreateWindowExA(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            "GRWScriptHookHud", "ScriptHook", WS_POPUP,
-            HUD_MARGIN, HUD_MARGIN, 320, 34,
-            NULL, NULL, wc.hInstance, NULL);
-        if (g_win[i]) SetTimer(g_win[i], 1, HUD_TICK_MS, NULL);
-    }
-
-    while (GetMessageA(&msg, NULL, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+    for (;;) {
+        int rev = g_rev, g;
+        Sleep(HUD_TICK_MS);
+        if (!ShUiReady()) continue;
+        g = ShUiGen();
+        if (rev == seen && g == gen) continue;
+        SyncAll();
+        seen = rev;
+        gen = g;
     }
     return 0;
 }

@@ -66,7 +66,10 @@ enum ShError {
     SH_ERR_NO_GROUND,
     SH_ERR_NOT_IN_GAME,
     SH_ERR_NOT_STREAMED,
-    SH_ERR_CONTROLLER
+    SH_ERR_CONTROLLER,
+    SH_ERR_UI_NOT_READY,   /**< in game, scene not up yet */
+    SH_ERR_UI_PROP,        /**< no such property on the class */
+    SH_ERR_UI_ASSET        /**< font or texture not loaded */
 };
 
 /** @} */
@@ -491,7 +494,7 @@ SH_API void ShMenuOpen(int open);
 
 /** @} */
 /** @defgroup hud HUD
- *  One overlay window owned by the API; slots pack tight.
+ *  Drawn by the engine's own UI; slots pack per corner.
  *  @{ */
 
 enum {
@@ -821,6 +824,222 @@ SH_API int  ShGetWeather(int *out);
  */
 SH_API int  ShSetTime(float hours);
 SH_API int  ShGetTime(float *out);
+
+/** @} */
+/** @defgroup reflect Reflected objects
+ *  The engine's own method tables, callable by name.
+ *  @{ */
+
+/** An object is [vtable, methodTable, ...]; the table is
+ *  32 byte entries of crc32(name), index and function.
+ */
+typedef struct {
+    uint32_t nameHash;
+    int      index;
+    uint64_t fn;
+} ShMethod;
+
+/** The function behind a method name, 0 when absent. */
+SH_API int  ShReflectMethod(uint64_t obj, uint32_t nameHash,
+                            uint64_t *outFn);
+/** Every method of the object's class, in table order. */
+SH_API int  ShReflectMethods(uint64_t obj, ShMethod *out, int max);
+/** The class hash, through the descriptor getter. */
+SH_API uint32_t ShReflectClassHash(uint64_t obj);
+
+/** Call a method by name on the game thread and wait.
+ *  obj is this; up to three more integer arguments.
+ */
+SH_API int  ShReflectCall(uint64_t obj, uint32_t nameHash,
+                          uint64_t a1, uint64_t a2, uint64_t a3,
+                          uint64_t *outRet);
+
+/** crc32 of the method names the scene calls rely on. */
+#define SH_HASH_ENTER     0x78B1EF6Au
+#define SH_HASH_EXIT      0x343B2B30u
+#define SH_HASH_INIT      0x66464B4Au
+#define SH_HASH_SHUTDOWN  0x6CD4BC94u
+#define SH_HASH_GAMEOVER  0xCA671D0Au  /**< GameFlow, reason */
+
+/** A scene is any reflected object with Enter and Exit.
+ *  Enter refuses objects without Exit, so it can be undone.
+ */
+SH_API int  ShSceneEnter(uint64_t obj);
+SH_API int  ShSceneExit(uint64_t obj);
+
+/** The GR_GameFlow machine, identity checked. */
+SH_API uint64_t ShGameFlow(void);
+
+/** Its sub objects, slots 0 to 16. Slot 9 is the game over
+ *  sequence: Enter plays the death with no reload, Exit
+ *  restores. Verified in game. */
+#define SH_FLOW_GAMEOVER_SCENE  9
+#define SH_FLOW_ALT_SCENE       11
+SH_API uint64_t ShGameFlowObject(int slot);
+
+/** The HybridMenu, the shell every menu page lives in. */
+SH_API uint64_t ShHybridMenu(void);
+
+/** The real thing: death, card and checkpoint reload.
+ *  Reason 1 is the one verified in game.
+ */
+SH_API int  ShTriggerGameOver(int reason);
+
+/** @} */
+/** @defgroup ui Native UI
+ *  Widgets in the engine's own HUD tree, drawn by the game.
+ *  @{ */
+
+/** HUD pixels; a panel's children are relative to it.
+ *  Colours are 0xRRGGBB. Ids die when the scene reloads.
+ */
+SH_API int      ShUiReady(void);
+/** Kill switch, on by default. */
+SH_API void     ShUiEnable(int on);
+/** Font and plate texture for new widgets, by asset GUID
+ *  ("873fe53f-3b90-db4d-9887-d3cc6edeaba9", storage order).
+ *  Defaults: the HUD font and the white 16x16 texture. */
+SH_API int      ShUiSetDefaultFont(const char *guid);
+SH_API int      ShUiSetDefaultImage(const char *guid);
+/** Changes when the scene reloads; older ids are dead. */
+SH_API int      ShUiGen(void);
+/** The phoenix::Scene handle that hosts every ShUi widget,
+ *  built and driven by the DLL itself; 0 until in game. */
+SH_API uint64_t ShSceneHandle(void);
+
+/** A container with a translucent quad behind it. */
+SH_API uint32_t ShUiPanel(float x, float y, float w, float h,
+                          uint32_t rgb, float alpha);
+/** A line of text in the HUD font. panel 0 is the root. */
+SH_API uint32_t ShUiLabel(uint32_t panel, float x, float y, float w,
+                          float h, const char *text, uint32_t rgb);
+/** A tinted quad, for bars and highlights. */
+SH_API uint32_t ShUiImage(uint32_t panel, float x, float y, float w,
+                          float h, uint32_t rgb, float alpha);
+
+SH_API int  ShUiSetText(uint32_t id, const char *text);
+SH_API int  ShUiSetPos(uint32_t id, float x, float y);
+SH_API int  ShUiSetSize(uint32_t id, float w, float h);
+SH_API int  ShUiSetColour(uint32_t id, uint32_t rgb);
+SH_API int  ShUiSetAlpha(uint32_t id, float alpha);
+/** Hiding a panel hides its children too. */
+SH_API int  ShUiShow(uint32_t id, int visible);
+/** Detaches the widget and its children from the tree. */
+SH_API int  ShUiDestroy(uint32_t id);
+
+/** Properties by the engine's own ids, typed from its
+ *  property tables at runtime. Any id the class has works.
+ */
+#define SH_PT_FLOAT   1
+#define SH_PT_BOOL    2
+#define SH_PT_UINT    3
+#define SH_PT_VEC2    4
+#define SH_PT_VEC3    5
+#define SH_PT_STRING  6
+
+#define SH_P_POSITION  0x01   /**< Widget vec3, local position */
+#define SH_P_ROTATION3 0x02   /**< Widget vec3 */
+#define SH_P_ROTATION  0x03   /**< Widget float, degrees */
+#define SH_P_COLOUR    0x05   /**< Widget vec3, 0..255 */
+#define SH_P_ALPHA     0x06   /**< Widget float, 0..1 */
+#define SH_P_VISIBLE   0x07   /**< Widget bool */
+#define SH_P_SCALE     0x35   /**< Widget vec3 */
+#define SH_P_TEXT      0x08   /**< Label string */
+#define SH_P_AUTOSIZE  0x09   /**< Label bool */
+#define SH_P_STYLE     0x0A   /**< Label string */
+#define SH_P_FONTSIZE  0x0C   /**< Label float */
+#define SH_P_LINEGAP   0x0E   /**< Label float */
+#define SH_P_SIZE      0x0F   /**< Label vec2 */
+#define SH_P_IMAGE     0x2A   /**< Image string */
+#define SH_P_UV0       0x38   /**< Image vec2 */
+#define SH_P_UV1       0x39   /**< Image vec2 */
+#define SH_P_CONTSIZE  0x3E   /**< Container vec2 */
+
+/** Widget classes for ShUiCreate. A panel is a container
+ *  with a tinted quad behind it; a container is bare. */
+#define SH_W_CONTAINER 1
+#define SH_W_LABEL     2
+#define SH_W_IMAGE     3
+#define SH_W_PANEL     4
+
+/** Any widget under any container (0 = the scene root), at
+ *  any depth. Text, colour, alpha, UVs and the rest go
+ *  through the property calls below. */
+SH_API uint32_t ShUiCreate(uint32_t parent, int cls, float x, float y,
+                           float w, float h);
+
+/** 0 when the widget's class has no such property. */
+SH_API int  ShUiPropType(uint32_t id, uint32_t prop);
+SH_API int  ShUiSetF(uint32_t id, uint32_t prop, float v);
+SH_API int  ShUiSetU(uint32_t id, uint32_t prop, uint32_t v);
+SH_API int  ShUiSetV(uint32_t id, uint32_t prop, const float *v, int n);
+SH_API int  ShUiSetS(uint32_t id, uint32_t prop, const char *utf8);
+SH_API int  ShUiGetF(uint32_t id, uint32_t prop, float *out);
+SH_API int  ShUiGetU(uint32_t id, uint32_t prop, uint32_t *out);
+SH_API int  ShUiGetV(uint32_t id, uint32_t prop, float *out, int n);
+SH_API int  ShUiGetS(uint32_t id, uint32_t prop, char *out, int n);
+/** Label size follows its text on the axes set to 1. */
+SH_API int  ShUiSetAutoSize(uint32_t id, int autoW, int autoH);
+/** The label's laid out box: its text bounds once an axis
+ *  is automatic, otherwise the size that was set. */
+SH_API int  ShUiMeasure(uint32_t id, float *w, float *h);
+
+/** RGBA8 pixels to an engine texture, stride in bytes.
+ *  Returns an id, 0 on failure; lives for the session. */
+SH_API uint32_t ShUiTextureCreate(int w, int h, const uint8_t *rgba,
+                                  int stride);
+/** Shows a texture on an image widget or panel plate. */
+SH_API int  ShUiImageSet(uint32_t id, uint32_t texture);
+/** The resolved property records: class, id, type. */
+SH_API int  ShUiPropCount(void);
+SH_API int  ShUiPropAt(int i, char *cls, int n, uint32_t *prop,
+                       int *type);
+
+/** Scenes: layers of your own. Scene 1 is the default.
+ *  Order below 0 draws under the game's UI, the rest over
+ *  it, lowest first. */
+SH_API uint32_t ShUiSceneCreate(const char *name, int order);
+SH_API int      ShUiSceneSetOrder(uint32_t scene, int order);
+SH_API int      ShUiSceneShow(uint32_t scene, int visible);
+/** Every widget of the scene, then the scene. */
+SH_API int      ShUiSceneDestroy(uint32_t scene);
+/** A widget in a scene; parent 0 is that scene's root. */
+SH_API uint32_t ShUiCreateIn(uint32_t scene, uint32_t parent, int cls,
+                             float x, float y, float w, float h);
+/** After a world reload, once the scene is back: the old
+ *  widgets are gone, rebuild inside. */
+SH_API int      ShUiSetReset(uint32_t scene,
+                             void (*fn)(uint32_t scene, void *user),
+                             void *user);
+/** Edits between Begin and Commit run as one job. Creates
+ *  and reads still run at once. Per thread. */
+SH_API int      ShUiBegin(void);
+SH_API int      ShUiCommit(void);
+SH_API int      ShUiAbort(void);
+/** Commit from a worker; done(ok, user) when it landed. */
+SH_API int      ShUiCommitAsync(void (*done)(int ok, void *user),
+                                void *user);
+
+/** Tree: move a widget under another container of the same
+ *  scene at a sibling index (draw order); list children. */
+SH_API int      ShUiReparent(uint32_t id, uint32_t parent, int index);
+SH_API int      ShUiChildCount(uint32_t id);
+SH_API uint32_t ShUiChildAt(uint32_t id, int index);
+
+/** Input: the focused scene gets keys and pointer moves.
+ *  Return 1 from the callback to hide that key from the
+ *  game while it is held. Coordinates are 1920 x 1080. */
+#define SH_UI_EV_DOWN 1
+#define SH_UI_EV_UP   2
+#define SH_UI_EV_MOVE 3
+typedef struct { int type; int key; int x; int y; } ShUiEvent;
+typedef int (*ShUiInputFn)(uint32_t scene, const ShUiEvent *e,
+                           void *user);
+SH_API int      ShUiSetInput(uint32_t scene, ShUiInputFn fn, void *user);
+SH_API int      ShUiFocus(uint32_t scene, int take);
+SH_API uint32_t ShUiFocused(void);
+/** One virtual key hidden from the game until released. */
+SH_API int      ShBlockKey(int vk, int on);
 
 /** @} */
 /** @addtogroup core

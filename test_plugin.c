@@ -11,7 +11,7 @@
 #include "image.h"
 
 #define REPL_PORT 9999
-#define RESP_MAX  (1024 * 256)
+#define RESP_MAX  (1024 * 2048)
 #define CMD_TIMEOUT_MS 5000
 
 static FILE    *g_log = NULL;
@@ -396,8 +396,15 @@ done:
 }
 
 static void CmdRead(Resp *r, uint8_t *addr, int len) {
+    static uint8_t copy[4096];
+    SIZE_T got = 0;
+
     if (len > 4096) len = 4096;
-    if (!CanRead(addr, len)) {
+    /* Through the kernel: a page released between the check
+     * and the copy then fails here instead of faulting. */
+    if (!CanRead(addr, len) ||
+        !ReadProcessMemory(GetCurrentProcess(), addr, copy, len, &got) ||
+        (int)got < len) {
         RAppend(r, "cannot read %d bytes at %p (unmapped)\n", len, addr);
         return;
     }
@@ -407,7 +414,7 @@ static void CmdRead(Resp *r, uint8_t *addr, int len) {
         char ascii[17];
         int cols = (len - row < 16) ? len - row : 16;
         for (int c = 0; c < cols; c++) {
-            uint8_t b = addr[row + c];
+            uint8_t b = copy[row + c];
             RAppend(r, "%02x ", b);
             ascii[c] = (b >= 32 && b <= 126) ? (char)b : '.';
         }
@@ -835,6 +842,519 @@ static void CmdWriteQ(Resp *r, const char *line) {
     VirtualProtect(addr, 8, prot, &prot);
     RAppend(r, "wrote %p at %p (was %p)\n",
             (void *)val, addr, (void *)old);
+}
+
+/* Arbitrary bytes, for building structs in game memory. */
+/* Native UI through the ShUi* exports. */
+static void CmdUi(Resp *r, const char *line) {
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    int (*ready)(void);
+    uint32_t (*panel)(float, float, float, float, uint32_t, float);
+    uint32_t (*label)(uint32_t, float, float, float, float,
+                      const char *, uint32_t);
+    uint32_t (*image)(uint32_t, float, float, float, float,
+                      uint32_t, float);
+    int (*setText)(uint32_t, const char *);
+    int (*setPos)(uint32_t, float, float);
+    int (*setSize)(uint32_t, float, float);
+    int (*setColour)(uint32_t, uint32_t);
+    int (*setAlpha)(uint32_t, float);
+    int (*show)(uint32_t, int);
+    int (*destroy)(uint32_t);
+    int (*lastErr)(void);
+    char sub[32] = {0};
+    unsigned id = 0, parent = 0, rgb = 0xFFFFFF;
+    float x = 0, y = 0, w = 0, h = 0, a = 1.0f;
+    const char *text;
+    int ok = 0;
+
+    if (!m) { RAppend(r, "dinput8 missing\n"); return; }
+    *(FARPROC *)&ready = GetProcAddress(m, "ShUiReady");
+    *(FARPROC *)&panel = GetProcAddress(m, "ShUiPanel");
+    *(FARPROC *)&label = GetProcAddress(m, "ShUiLabel");
+    *(FARPROC *)&image = GetProcAddress(m, "ShUiImage");
+    *(FARPROC *)&setText = GetProcAddress(m, "ShUiSetText");
+    *(FARPROC *)&setPos = GetProcAddress(m, "ShUiSetPos");
+    *(FARPROC *)&setSize = GetProcAddress(m, "ShUiSetSize");
+    *(FARPROC *)&setColour = GetProcAddress(m, "ShUiSetColour");
+    *(FARPROC *)&setAlpha = GetProcAddress(m, "ShUiSetAlpha");
+    *(FARPROC *)&show = GetProcAddress(m, "ShUiShow");
+    *(FARPROC *)&destroy = GetProcAddress(m, "ShUiDestroy");
+    *(FARPROC *)&lastErr = GetProcAddress(m, "ShLastError");
+    if (!ready || !panel || !label || !destroy) {
+        RAppend(r, "ShUi* exports missing\n");
+        return;
+    }
+    sscanf(line, "%*s %31s", sub);
+    if (strcmp(sub, "enable") == 0) {
+        void (*enable)(int);
+        int on = 1;
+        *(FARPROC *)&enable = GetProcAddress(m, "ShUiEnable");
+        sscanf(line, "%*s %*s %d", &on);
+        if (!enable) { RAppend(r, "ShUiEnable missing\n"); return; }
+        enable(on);
+        RAppend(r, "native ui %s\n", on ? "enabled" : "disabled");
+        return;
+    }
+    if (strcmp(sub, "ready") == 0) {
+        ok = ready();
+        RAppend(r, "ready %d err %d\n", ok, lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "scene") == 0) {
+        uint32_t (*screate)(const char *, int);
+        int (*sorder)(uint32_t, int);
+        int (*sshow)(uint32_t, int);
+        int (*sdestroy)(uint32_t);
+        char what[16] = {0};
+        int a = 0, b = 0;
+        *(FARPROC *)&screate = GetProcAddress(m, "ShUiSceneCreate");
+        *(FARPROC *)&sorder = GetProcAddress(m, "ShUiSceneSetOrder");
+        *(FARPROC *)&sshow = GetProcAddress(m, "ShUiSceneShow");
+        *(FARPROC *)&sdestroy = GetProcAddress(m, "ShUiSceneDestroy");
+        sscanf(line, "%*s %*s %15s %d %d", what, &a, &b);
+        if (!screate || !sorder || !sshow || !sdestroy) {
+            RAppend(r, "scene exports missing\n");
+        } else if (strcmp(what, "new") == 0) {
+            RAppend(r, "scene id %u\n", screate("repl", a));
+        } else if (strcmp(what, "order") == 0) {
+            RAppend(r, "order ok %d\n", sorder((uint32_t)a, b));
+        } else if (strcmp(what, "show") == 0) {
+            RAppend(r, "show ok %d\n", sshow((uint32_t)a, b));
+        } else if (strcmp(what, "destroy") == 0) {
+            RAppend(r, "destroy ok %d\n", sdestroy((uint32_t)a));
+        } else {
+            RAppend(r, "usage: ui scene new order | order id o | "
+                       "show id v | destroy id\n");
+        }
+        return;
+    }
+    if (strcmp(sub, "createin") == 0) {
+        uint32_t (*createin)(uint32_t, uint32_t, int, float, float,
+                             float, float);
+        unsigned sid = 0, parent = 0; int cls = 0;
+        float x = 0, y = 0, w = 0, h = 0;
+        *(FARPROC *)&createin = GetProcAddress(m, "ShUiCreateIn");
+        if (!createin) { RAppend(r, "ShUiCreateIn missing\n"); return; }
+        if (sscanf(line, "%*s %*s %u %u %d %f %f %f %f", &sid, &parent,
+                   &cls, &x, &y, &w, &h) != 7) {
+            RAppend(r, "usage: ui createin scene parent cls x y w h\n");
+            return;
+        }
+        id = createin(sid, parent, cls, x, y, w, h);
+        RAppend(r, "createin id %u err %d\n", id, lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "reparent") == 0) {
+        int (*rep)(uint32_t, uint32_t, int);
+        unsigned parent = 0; int at = -1;
+        *(FARPROC *)&rep = GetProcAddress(m, "ShUiReparent");
+        if (!rep) { RAppend(r, "ShUiReparent missing\n"); return; }
+        sscanf(line, "%*s %*s %u %u %d", &id, &parent, &at);
+        RAppend(r, "reparent ok %d err %d\n", rep(id, parent, at),
+                lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "children") == 0) {
+        int (*count)(uint32_t);
+        uint32_t (*at)(uint32_t, int);
+        int i, n;
+        *(FARPROC *)&count = GetProcAddress(m, "ShUiChildCount");
+        *(FARPROC *)&at = GetProcAddress(m, "ShUiChildAt");
+        if (!count || !at) { RAppend(r, "child exports missing\n"); return; }
+        sscanf(line, "%*s %*s %u", &id);
+        n = count(id);
+        RAppend(r, "id %u has %d children:", id, n);
+        for (i = 0; i < n; i++) RAppend(r, " %u", at(id, i));
+        RAppend(r, "\n");
+        return;
+    }
+    if (strcmp(sub, "focus") == 0) {
+        int (*focus)(uint32_t, int);
+        uint32_t (*focused)(void);
+        unsigned sid = 0; int take = 1;
+        *(FARPROC *)&focus = GetProcAddress(m, "ShUiFocus");
+        *(FARPROC *)&focused = GetProcAddress(m, "ShUiFocused");
+        if (!focus || !focused) { RAppend(r, "focus exports missing\n"); return; }
+        sscanf(line, "%*s %*s %u %d", &sid, &take);
+        RAppend(r, "focus ok %d now %u\n", focus(sid, take), focused());
+        return;
+    }
+    if (strcmp(sub, "autosize") == 0) {
+        int (*autosz)(uint32_t, int, int);
+        int aw = 1, ah = 0;
+        *(FARPROC *)&autosz = GetProcAddress(m, "ShUiSetAutoSize");
+        if (!autosz) { RAppend(r, "ShUiSetAutoSize missing\n"); return; }
+        sscanf(line, "%*s %*s %u %d %d", &id, &aw, &ah);
+        RAppend(r, "autosize ok %d\n", autosz(id, aw, ah));
+        return;
+    }
+    if (strcmp(sub, "batchtest") == 0) {
+        /* begin, n position edits, commit, on this thread */
+        int (*bbegin)(void); int (*bcommit)(void);
+        int (*setv)(uint32_t, uint32_t, const float *, int);
+        unsigned n = 20; int i, ok = 1; DWORD t0;
+        float v[3] = {0, 20, 0};
+        *(FARPROC *)&bbegin = GetProcAddress(m, "ShUiBegin");
+        *(FARPROC *)&bcommit = GetProcAddress(m, "ShUiCommit");
+        *(FARPROC *)&setv = GetProcAddress(m, "ShUiSetV");
+        sscanf(line, "%*s %*s %u %u", &id, &n);
+        if (!bbegin || !bcommit || !setv) { RAppend(r, "exports missing\n"); return; }
+        t0 = GetTickCount();
+        if (!bbegin()) { RAppend(r, "begin failed\n"); return; }
+        for (i = 0; i < (int)n; i++) {
+            v[0] = 20.0f + 3.0f * (float)i;
+            if (!setv(id, 1, v, 3)) ok = 0;
+        }
+        RAppend(r, "batchtest id %u n %u edits ok %d commit %d in %lu ms\n",
+                id, n, ok, bcommit(), (unsigned long)(GetTickCount() - t0));
+        return;
+    }
+    if (strcmp(sub, "batch") == 0) {
+        int (*bbegin)(void); int (*bcommit)(void); int (*babort)(void);
+        char what[16] = {0};
+        *(FARPROC *)&bbegin = GetProcAddress(m, "ShUiBegin");
+        *(FARPROC *)&bcommit = GetProcAddress(m, "ShUiCommit");
+        *(FARPROC *)&babort = GetProcAddress(m, "ShUiAbort");
+        sscanf(line, "%*s %*s %15s", what);
+        if (!bbegin || !bcommit || !babort) { RAppend(r, "batch exports missing\n"); return; }
+        if (strcmp(what, "begin") == 0) RAppend(r, "begin ok %d\n", bbegin());
+        else if (strcmp(what, "commit") == 0) RAppend(r, "commit ok %d\n", bcommit());
+        else if (strcmp(what, "abort") == 0) RAppend(r, "abort ok %d\n", babort());
+        else RAppend(r, "usage: ui batch begin|commit|abort\n");
+        return;
+    }
+    if (strcmp(sub, "font") == 0 || strcmp(sub, "image") == 0) {
+        int (*setdef)(const char *);
+        char guid[64] = {0};
+        *(FARPROC *)&setdef = GetProcAddress(m, strcmp(sub, "font") == 0
+                                             ? "ShUiSetDefaultFont"
+                                             : "ShUiSetDefaultImage");
+        sscanf(line, "%*s %*s %63s", guid);
+        if (!setdef) { RAppend(r, "export missing\n"); return; }
+        ok = setdef(guid);
+        RAppend(r, "default %s %s ok %d err %d\n", sub, guid, ok,
+                lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "create") == 0) {
+        /* ui create <parent> <cls> x y w h */
+        uint32_t (*create)(uint32_t, int, float, float, float, float);
+        unsigned parent = 0; int cls = 0; float cx = 0, cy = 0, cw = 0, ch = 0;
+        *(FARPROC *)&create = GetProcAddress(m, "ShUiCreate");
+        if (sscanf(line, "%*s %*s %u %d %f %f %f %f", &parent, &cls,
+                   &cx, &cy, &cw, &ch) != 6 || !create) {
+            RAppend(r, "usage: ui create <parent> <cls 1..4> x y w h\n");
+            return;
+        }
+        id = create(parent, cls, cx, cy, cw, ch);
+        RAppend(r, "create id %u err %d\n", id, lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "texraw") == 0) {
+        /* ui texraw <addr> <w> <h>: RGBA8 already in memory */
+        uint32_t (*texc)(int, int, const uint8_t *, int);
+        char as[64] = {0}; int w = 0, h = 0; uint64_t addr;
+        *(FARPROC *)&texc = GetProcAddress(m, "ShUiTextureCreate");
+        if (sscanf(line, "%*s %*s %63s %d %d", as, &w, &h) != 3 || !texc) {
+            RAppend(r, "usage: ui texraw <addr> <w> <h>\n"); return;
+        }
+        addr = ParseHex(as);
+        if (!CanRead((void *)addr, (size_t)w * h * 4)) { RAppend(r, "pixels unreadable\n"); return; }
+        id = texc(w, h, (const uint8_t *)addr, w * 4);
+        RAppend(r, "texture id %u err %d\n", id, lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "imgset") == 0) {
+        int (*imgset)(uint32_t, uint32_t);
+        unsigned tid = 0;
+        *(FARPROC *)&imgset = GetProcAddress(m, "ShUiImageSet");
+        if (sscanf(line, "%*s %*s %u %u", &id, &tid) != 2 || !imgset) {
+            RAppend(r, "usage: ui imgset <widget> <texture>\n"); return;
+        }
+        ok = imgset(id, tid);
+        RAppend(r, "imgset ok %d err %d\n", ok, lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "props") == 0) {
+        int (*count)(void);
+        int (*at)(int, char *, int, uint32_t *, int *);
+        int i, n;
+        *(FARPROC *)&count = GetProcAddress(m, "ShUiPropCount");
+        *(FARPROC *)&at = GetProcAddress(m, "ShUiPropAt");
+        if (!count || !at) { RAppend(r, "prop exports missing\n"); return; }
+        {
+            int (*stats)(int *, uint64_t *);
+            int sections = 0; uint64_t bytes = 0;
+            *(FARPROC *)&stats = GetProcAddress(m, "ShUiPropStats");
+            if (stats) {
+                stats(&sections, &bytes);
+                RAppend(r, "scanned %d sections, %llu bytes\n", sections,
+                        (unsigned long long)bytes);
+            }
+        }
+        n = count();
+        RAppend(r, "%d property records\n", n);
+        for (i = 0; i < n; i++) {
+            char cls[48]; uint32_t pid; int type;
+            if (at(i, cls, sizeof(cls), &pid, &type))
+                RAppend(r, "  %-24s #%02x type %d\n", cls, pid, type);
+        }
+        return;
+    }
+    if (strcmp(sub, "ptype") == 0 || strcmp(sub, "getf") == 0 ||
+        strcmp(sub, "getv") == 0 || strcmp(sub, "gets") == 0 ||
+        strcmp(sub, "setf") == 0 || strcmp(sub, "setu") == 0 ||
+        strcmp(sub, "setv") == 0 || strcmp(sub, "sets") == 0 ||
+        strcmp(sub, "measure") == 0) {
+        int (*ptype)(uint32_t, uint32_t);
+        int (*setf)(uint32_t, uint32_t, float);
+        int (*setu)(uint32_t, uint32_t, uint32_t);
+        int (*setv)(uint32_t, uint32_t, const float *, int);
+        int (*sets)(uint32_t, uint32_t, const char *);
+        int (*getf)(uint32_t, uint32_t, float *);
+        int (*getv)(uint32_t, uint32_t, float *, int);
+        int (*gets)(uint32_t, uint32_t, char *, int);
+        int (*measure)(uint32_t, float *, float *);
+        unsigned pid = 0; float fv[3] = {0, 0, 0}; char sv[200] = {0};
+        int n = 0;
+        *(FARPROC *)&ptype = GetProcAddress(m, "ShUiPropType");
+        *(FARPROC *)&setf = GetProcAddress(m, "ShUiSetF");
+        *(FARPROC *)&setu = GetProcAddress(m, "ShUiSetU");
+        *(FARPROC *)&setv = GetProcAddress(m, "ShUiSetV");
+        *(FARPROC *)&sets = GetProcAddress(m, "ShUiSetS");
+        *(FARPROC *)&getf = GetProcAddress(m, "ShUiGetF");
+        *(FARPROC *)&getv = GetProcAddress(m, "ShUiGetV");
+        *(FARPROC *)&gets = GetProcAddress(m, "ShUiGetS");
+        *(FARPROC *)&measure = GetProcAddress(m, "ShUiMeasure");
+        if (!ptype || !setf || !measure) { RAppend(r, "prop exports missing\n"); return; }
+        if (strcmp(sub, "measure") == 0) {
+            sscanf(line, "%*s %*s %u", &id);
+            ok = measure(id, &fv[0], &fv[1]);
+            RAppend(r, "measure id %u ok %d w %.1f h %.1f\n", id, ok, fv[0], fv[1]);
+            return;
+        }
+        if (sscanf(line, "%*s %*s %u %x", &id, &pid) != 2) {
+            RAppend(r, "usage: ui %s id prop [values]\n", sub);
+            return;
+        }
+        if (strcmp(sub, "ptype") == 0) {
+            RAppend(r, "id %u prop #%x type %d\n", id, pid, ptype(id, pid));
+        } else if (strcmp(sub, "setf") == 0) {
+            sscanf(line, "%*s %*s %*u %*x %f", &fv[0]);
+            ok = setf(id, pid, fv[0]);
+            RAppend(r, "setf ok %d\n", ok);
+        } else if (strcmp(sub, "setu") == 0) {
+            unsigned uv = 0;
+            sscanf(line, "%*s %*s %*u %*x %u", &uv);
+            ok = setu(id, pid, uv);
+            RAppend(r, "setu ok %d\n", ok);
+        } else if (strcmp(sub, "setv") == 0) {
+            n = sscanf(line, "%*s %*s %*u %*x %f %f %f", &fv[0], &fv[1], &fv[2]);
+            ok = setv(id, pid, fv, n);
+            RAppend(r, "setv n %d ok %d\n", n, ok);
+        } else if (strcmp(sub, "sets") == 0) {
+            const char *t = strstr(line, " text ");
+            ok = sets(id, pid, t ? t + 6 : "");
+            RAppend(r, "sets ok %d\n", ok);
+        } else if (strcmp(sub, "getf") == 0) {
+            ok = getf(id, pid, &fv[0]);
+            RAppend(r, "getf ok %d v %.3f\n", ok, fv[0]);
+        } else if (strcmp(sub, "getv") == 0) {
+            n = ptype(id, pid) == 5 ? 3 : 2;
+            ok = getv(id, pid, fv, n);
+            RAppend(r, "getv ok %d v %.3f %.3f %.3f\n", ok, fv[0], fv[1], fv[2]);
+        } else if (strcmp(sub, "gets") == 0) {
+            ok = gets(id, pid, sv, sizeof(sv));
+            RAppend(r, "gets ok %d %s\n", ok, sv);
+        }
+        return;
+    }
+    if (strcmp(sub, "panel") == 0) {
+        if (sscanf(line, "%*s %*s %f %f %f %f %x %f",
+                   &x, &y, &w, &h, &rgb, &a) < 5) {
+            RAppend(r, "usage: ui panel x y w h rgb [alpha]\n");
+            return;
+        }
+        id = panel(x, y, w, h, rgb, a);
+        RAppend(r, "panel id %u err %d\n", id, lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "label") == 0) {
+        if (sscanf(line, "%*s %*s %u %f %f %f %f %x",
+                   &parent, &x, &y, &w, &h, &rgb) != 6) {
+            RAppend(r, "usage: ui label panel x y w h rgb text\n");
+            return;
+        }
+        text = strstr(line, " text ");
+        text = text ? text + 6 : "text";
+        id = label(parent, x, y, w, h, text, rgb);
+        RAppend(r, "label id %u err %d\n", id, lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "image") == 0) {
+        if (sscanf(line, "%*s %*s %u %f %f %f %f %x %f",
+                   &parent, &x, &y, &w, &h, &rgb, &a) < 6) {
+            RAppend(r, "usage: ui image panel x y w h rgb [alpha]\n");
+            return;
+        }
+        id = image(parent, x, y, w, h, rgb, a);
+        RAppend(r, "image id %u err %d\n", id, lastErr ? lastErr() : -1);
+        return;
+    }
+    if (strcmp(sub, "text") == 0) {
+        char tmp[256] = {0};
+        if (sscanf(line, "%*s %*s %u %255[^\n]", &id, tmp) != 2) {
+            RAppend(r, "usage: ui text id words\n");
+            return;
+        }
+        ok = setText(id, tmp);
+    } else if (strcmp(sub, "pos") == 0) {
+        if (sscanf(line, "%*s %*s %u %f %f", &id, &x, &y) != 3) {
+            RAppend(r, "usage: ui pos id x y\n"); return;
+        }
+        ok = setPos(id, x, y);
+    } else if (strcmp(sub, "size") == 0) {
+        if (sscanf(line, "%*s %*s %u %f %f", &id, &w, &h) != 3) {
+            RAppend(r, "usage: ui size id w h\n"); return;
+        }
+        ok = setSize(id, w, h);
+    } else if (strcmp(sub, "colour") == 0) {
+        if (sscanf(line, "%*s %*s %u %x", &id, &rgb) != 2) {
+            RAppend(r, "usage: ui colour id rrggbb\n"); return;
+        }
+        ok = setColour(id, rgb);
+    } else if (strcmp(sub, "alpha") == 0) {
+        if (sscanf(line, "%*s %*s %u %f", &id, &a) != 2) {
+            RAppend(r, "usage: ui alpha id a\n"); return;
+        }
+        ok = setAlpha(id, a);
+    } else if (strcmp(sub, "show") == 0) {
+        int v = 1;
+        if (sscanf(line, "%*s %*s %u %d", &id, &v) != 2) {
+            RAppend(r, "usage: ui show id 0|1\n"); return;
+        }
+        ok = show(id, v);
+    } else if (strcmp(sub, "destroy") == 0) {
+        if (sscanf(line, "%*s %*s %u", &id) != 1) {
+            RAppend(r, "usage: ui destroy id\n"); return;
+        }
+        ok = destroy(id);
+    } else {
+        RAppend(r, "ui ready|panel|label|image|text|pos|size|"
+                   "colour|alpha|show|destroy\n");
+        return;
+    }
+    RAppend(r, "%s id %u ok %d err %d\n", sub, id, ok,
+            lastErr ? lastErr() : -1);
+}
+
+static void CmdWriteBytes(Resp *r, const char *line) {
+    char as[64] = {0}, hs[2048] = {0};
+    uint8_t buf[1024], *addr;
+    int n = 0;
+    SIZE_T put = 0;
+
+    if (sscanf(line, "%*s %63s %2047s", as, hs) != 2) {
+        RAppend(r, "usage: writebytes <addr> <hexbytes>\n");
+        return;
+    }
+    addr = (uint8_t *)ParseHex(as);
+    for (const char *p = hs; p[0] && p[1] && n < 1024; p += 2) {
+        unsigned v;
+        if (sscanf(p, "%2x", &v) != 1) break;
+        buf[n++] = (uint8_t)v;
+    }
+    if (!WriteProcessMemory(GetCurrentProcess(), addr, buf, n, &put)) {
+        RAppend(r, "write failed at %p (err %lu)\n", addr,
+                GetLastError());
+        return;
+    }
+    RAppend(r, "wrote %d bytes at %p\n", (int)put, addr);
+}
+
+/* Scratch memory inside the process, never freed. */
+static void CmdAlloc(Resp *r, const char *line) {
+    char ss[64] = {0};
+    size_t size;
+    void *mem;
+
+    sscanf(line, "%*s %63s", ss);
+    size = ss[0] ? (size_t)ParseHex(ss) : 4096;
+    mem = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE,
+                       PAGE_READWRITE);
+    if (!mem) {
+        RAppend(r, "VirtualAlloc failed (err %lu)\n", GetLastError());
+        return;
+    }
+    RAppend(r, "alloc %p size %llx\n", mem, (unsigned long long)size);
+}
+
+/* Scan once for objects with a given vtable, then follow an
+ * offset chain in process and dump the bytes, one line each.
+ */
+static void CmdChase(Resp *r, const char *line) {
+    char vs[64] = {0}, os[128] = {0}, ls[32] = {0}, ms[32] = {0};
+    int64_t offs[8];
+    int noffs = 0, len, max, found = 0;
+    uint64_t want;
+    MEMORY_BASIC_INFORMATION mbi;
+    uint8_t *scan = NULL;
+
+    sscanf(line, "%*s %63s %127s %31s %31s", vs, os, ls, ms);
+    if (!vs[0] || !os[0]) {
+        RAppend(r, "usage: chase <vtable> <off,off,..> [len] [max]\n");
+        RAppend(r, "  derefs at every offset but the last\n");
+        return;
+    }
+    want = ParseHex(vs);
+    len = ls[0] ? (int)ParseHex(ls) : 0x40;
+    if (len > 512) len = 512;
+    max = ms[0] ? (int)ParseHex(ms) : 4000;
+    for (char *p = os; *p && noffs < 8; ) {
+        char *comma = strchr(p, ',');
+        if (comma) *comma = 0;
+        offs[noffs++] = (int64_t)ParseHex(p);
+        if (!comma) break;
+        p = comma + 1;
+    }
+    while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
+        uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
+        if (next <= scan) break;
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE |
+                            PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE |
+                            PAGE_EXECUTE_WRITECOPY)) &&
+            !(mbi.Protect & PAGE_GUARD))
+        {
+            uint8_t *b = (uint8_t *)mbi.BaseAddress;
+            size_t sz = mbi.RegionSize;
+            for (size_t o = 0; o + 8 <= sz; o += 8) {
+                uint64_t v, p;
+                int i;
+                memcpy(&v, b + o, 8);
+                if (v != want) continue;
+                p = (uint64_t)(b + o);
+                RAppend(r, "obj=%p ", (void *)p);
+                for (i = 0; i < noffs - 1 && p; i++)
+                    p = SafeReadPtr((void *)(p + offs[i]));
+                if (p) p += offs[noffs - 1];
+                if (!p || !CanRead((void *)p, len)) {
+                    RAppend(r, "at=%p -\n", (void *)p);
+                } else {
+                    RAppend(r, "at=%p ", (void *)p);
+                    for (i = 0; i < len; i++)
+                        RAppend(r, "%02x", ((uint8_t *)p)[i]);
+                    RAppend(r, "\n");
+                }
+                if (++found >= max) goto done_chase;
+            }
+        }
+        scan = next;
+    }
+done_chase:
+    RAppend(r, "found %d\n", found);
 }
 
 /* ---- differential float scanner ---- */
@@ -1419,6 +1939,37 @@ static void CmdGCall(Resp *r, const char *line) {
         RAppend(r, "returned %p after %dms\n",
                 (void *)ret, waited * 10);
     }
+}
+
+/* gcall6 <fn> a0 a1 a2 a3 a4 a5: six integer arguments. */
+static void CmdGCall6(Resp *r, const char *line) {
+    char fs[64] = {0}, a[6][64] = {{0}};
+    uint64_t f, args[6];
+    int i, waited, n;
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    int (*q6)(uint64_t, const uint64_t *);
+    int (*qres)(uint64_t *);
+    uint64_t ret = 0;
+
+    n = sscanf(line, "%*s %63s %63s %63s %63s %63s %63s %63s", fs,
+               a[0], a[1], a[2], a[3], a[4], a[5]);
+    if (n < 1 || !fs[0]) {
+        RAppend(r, "usage: gcall6 <fn> a0 a1 a2 a3 a4 a5\n");
+        return;
+    }
+    f = ParseHex(fs);
+    if (!m) { RAppend(r, "dinput8 not loaded\n"); return; }
+    *(FARPROC *)&q6 = GetProcAddress(m, "ShQueueCall6");
+    *(FARPROC *)&qres = GetProcAddress(m, "ShQueueResult");
+    if (!q6 || !qres) { RAppend(r, "ShQueueCall6 missing\n"); return; }
+    for (i = 0; i < 6; i++) args[i] = a[i][0] ? ParseHex(a[i]) : 0;
+    if (!q6(f, args)) { RAppend(r, "queue busy or bad function\n"); return; }
+    for (waited = 0; waited < 400; waited++) {
+        if (qres(&ret)) break;
+        Sleep(10);
+    }
+    if (waited >= 400) { RAppend(r, "timed out, is physics ready\n"); return; }
+    RAppend(r, "returned %p after %dms\n", (void *)ret, waited * 10);
 }
 
 /* gcallf <fn> <rcx> <rdx> <f2> <f3> <f4>, for calls whose
@@ -4991,6 +5542,10 @@ static void Dispatch(const char *line, Resp *r) {
     else if (strcmp(cmd, "onfire") == 0)    CmdOnFire(r, line);
     else if (strcmp(cmd, "createcomp") == 0) CmdCreateComp(r, line);
     else if (strcmp(cmd, "writeq") == 0)    CmdWriteQ(r, line);
+    else if (strcmp(cmd, "writebytes") == 0) CmdWriteBytes(r, line);
+    else if (strcmp(cmd, "alloc") == 0)     CmdAlloc(r, line);
+    else if (strcmp(cmd, "chase") == 0)     CmdChase(r, line);
+    else if (strcmp(cmd, "ui") == 0)        CmdUi(r, line);
     else if (strcmp(cmd, "ents") == 0)      CmdEnts(r, line);
     else if (strcmp(cmd, "entmark") == 0)   CmdEntMark(r, line);
     else if (strcmp(cmd, "enthp") == 0)     CmdEntHp(r, line);
@@ -5015,6 +5570,7 @@ static void Dispatch(const char *line, Resp *r) {
     else if (strcmp(cmd, "tpoff") == 0)     CmdTpOff(r);
     else if (strcmp(cmd, "gcall") == 0)     CmdGCall(r, line);
     else if (strcmp(cmd, "gcallf") == 0)    CmdGCallF(r, line);
+    else if (strcmp(cmd, "gcall6") == 0)    CmdGCall6(r, line);
     else if (strcmp(cmd, "placerot") == 0)  CmdPlaceRot(r, line);
     else if (strcmp(cmd, "chaos") == 0)     CmdChaos(r, line);
     else if (strcmp(cmd, "havok") == 0)     CmdHavok(r, line);

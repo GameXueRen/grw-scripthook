@@ -122,12 +122,17 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     return TRUE;
 }
 
+extern void ShWrapDirectInput(void *di);
+
 __declspec(dllexport) HRESULT WINAPI DirectInput8Create(
     HINSTANCE inst, DWORD ver, REFIID iid, LPVOID *out, LPUNKNOWN outer)
 {
-    if (p_DirectInput8Create)
-        return p_DirectInput8Create(inst, ver, iid, out, outer);
-    return E_FAIL;
+    HRESULT hr;
+    if (!p_DirectInput8Create) return E_FAIL;
+    hr = p_DirectInput8Create(inst, ver, iid, out, outer);
+    Log("DirectInput8Create hr %08lx", (unsigned long)hr);
+    if (SUCCEEDED(hr) && out && *out) ShWrapDirectInput(*out);
+    return hr;
 }
 
 __declspec(dllexport) HRESULT WINAPI DllCanUnloadNow(void) {

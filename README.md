@@ -191,6 +191,10 @@ scripthook_resource.c resources and skill points
 scripthook_stealth.c  detection visibility scale
 scripthook_ammo.c     ammo by weapon slot
 scripthook_weather.c  weather type and time of day
+scripthook_reflect.c  method tables by name, scenes, GameFlow objects
+scripthook_ui.c       native widgets, panels, labels, quads
+scripthook_scene.c    the phoenix scene of our own that hosts them
+scripthook_uiprop.c   widget properties by id from the engine's tables
 scripthook_hud.c      overlay slots
 scripthook_menu.c     the shared F4 menu
 guard.c               landing pad for the spawn trampoline

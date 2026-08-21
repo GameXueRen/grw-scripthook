@@ -158,19 +158,42 @@ typedef uint64_t (__attribute__((ms_abi)) *ShQFn_t)(uint64_t,
                                                     uint64_t,
                                                     uint64_t);
 extern void ShSpawnPump(void);
+extern void ShSceneTick(void);
 
 static volatile uint64_t g_qFn = 0;
-static uint64_t g_qArg[4];
+static uint64_t g_qArg[6];
 static volatile uint64_t g_qRet = 0;
 static volatile int g_qPending = 0;
 static volatile int g_qDone = 0;
 static volatile int g_qFloat = 0;
+static volatile int g_qSix = 0;
 static volatile float g_qF[3];
 
 typedef uint64_t (__attribute__((ms_abi)) *ShQFnF_t)(uint64_t,
                                                      uint64_t,
                                                      float, float,
                                                      float);
+typedef uint64_t (__attribute__((ms_abi)) *ShQFn6_t)(uint64_t,
+                                                     uint64_t,
+                                                     uint64_t,
+                                                     uint64_t,
+                                                     uint64_t,
+                                                     uint64_t);
+
+/* Six integer arguments; the fifth and sixth go on the
+ * stack, which the four argument path cannot reach. */
+SH_API int ShQueueCall6(uint64_t fn, const uint64_t *args) {
+    int i;
+    if (!fn || !args || g_qPending) return 0;
+    for (i = 0; i < 6; i++) g_qArg[i] = args[i];
+    g_qFloat = 0;
+    g_qSix = 1;
+    g_qRet = 0;
+    g_qDone = 0;
+    g_qFn = fn;
+    g_qPending = 1;
+    return 1;
+}
 
 SH_API int ShQueueCall(uint64_t fn, uint64_t a0, uint64_t a1,
                        uint64_t a2, uint64_t a3) {
@@ -178,6 +201,7 @@ SH_API int ShQueueCall(uint64_t fn, uint64_t a0, uint64_t a1,
     g_qArg[0] = a0; g_qArg[1] = a1;
     g_qArg[2] = a2; g_qArg[3] = a3;
     g_qFloat = 0;
+    g_qSix = 0;
     g_qRet = 0;
     g_qDone = 0;
     g_qFn = fn;
@@ -194,6 +218,7 @@ SH_API int ShQueueCallF(uint64_t fn, uint64_t a0, uint64_t a1,
     g_qArg[0] = a0; g_qArg[1] = a1;
     g_qF[0] = f2; g_qF[1] = f3; g_qF[2] = f4;
     g_qFloat = 1;
+    g_qSix = 0;
     g_qRet = 0;
     g_qDone = 0;
     g_qFn = fn;
@@ -385,17 +410,20 @@ RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
     RecordRay(rdx, r8);
 
     ShSpawnPump();
+    ShSceneTick();
 
     if (g_qPending && g_qFn) {
         uint64_t f = g_qFn;
         uint64_t a0 = g_qArg[0], a1 = g_qArg[1];
         uint64_t a2 = g_qArg[2], a3 = g_qArg[3];
-        int isF = g_qFloat;
+        uint64_t a4 = g_qArg[4], a5 = g_qArg[5];
+        int isF = g_qFloat, isSix = g_qSix;
         float f2 = g_qF[0], f3 = g_qF[1], f4 = g_qF[2];
 
         g_qPending = 0;
-        if (isF) g_qRet = ((ShQFnF_t)f)(a0, a1, f2, f3, f4);
-        else     g_qRet = ((ShQFn_t)f)(a0, a1, a2, a3);
+        if (isF)        g_qRet = ((ShQFnF_t)f)(a0, a1, f2, f3, f4);
+        else if (isSix) g_qRet = ((ShQFn6_t)f)(a0, a1, a2, a3, a4, a5);
+        else            g_qRet = ((ShQFn_t)f)(a0, a1, a2, a3);
         g_qDone = 1;
     }
     if (!g_req || g_busy || !g_B) return;
