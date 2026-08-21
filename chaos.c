@@ -740,9 +740,9 @@ static void TickWitness(void) {
 
         at.x += (float)cos(a) * WP_R;
         at.y += (float)sin(a) * WP_R;
-        /* Face the player. Measured: the engine's yaw runs
-         * clockwise, so the spoke angle is negated. */
-        ShQueueTransform(g_wpEnt[i], &at, -(a + 3.14159f), 0.0f, 0.0f);
+        /* Face the player. Yaw runs clockwise and zero yaw
+         * looks along -y, both measured on screen. */
+        ShQueueTransform(g_wpEnt[i], &at, -(a + 1.5708f), 0.0f, 0.0f);
     }
 }
 
