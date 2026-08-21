@@ -196,6 +196,7 @@ static void CmdHelp(Resp *r) {
     RAppend(r, "                     qwords where (q & mask) == val\n");
     RAppend(r, "  readstr <hex>      read null-terminated string\n");
     RAppend(r, "  hwbpchain [rcx|rdx|r8] [off..] deref chain at hit\n");
+    RAppend(r, "  hwbpfilter [idx] [hex]  keep hits with chain[idx]==hex\n");
     RAppend(r, "  dis <hex> [len]    raw bytes for disasm (default 64)\n");
     RAppend(r, "  strings <hex> <len> printable strings in range\n");
     RAppend(r, "  silexlist          list SilexNetMessage names\n");
@@ -1556,27 +1557,35 @@ static uint64_t g_bpRcx[4];
 /* Generic hit time capture: the last 8 hits' registers and
  * a deref chain walked from one register at the break. */
 #define CHAIN_MAX 4
+#define RING_MAX  32
 static int      g_bpChainReg = 0;       /* 0 rcx 1 rdx 2 r8 */
 static int      g_bpChainN = 0;
 static uint32_t g_bpChainOff[CHAIN_MAX];
 static volatile int g_bpRing = 0;
-static uint64_t g_bpRingReg[8][3];
-static uint64_t g_bpRingVal[8][CHAIN_MAX + 1];
+static uint64_t g_bpRingReg[RING_MAX][3];
+static uint64_t g_bpRingVal[RING_MAX][CHAIN_MAX + 1];
+/* Filter: keep a hit only if chain[idx] == value. */
+static int      g_bpFiltIdx = -1;
+static uint64_t g_bpFiltVal = 0;
 
 static void BpCaptureChain(PCONTEXT c) {
-    int k = g_bpRing++ % 8, i;
-    uint64_t v;
+    uint64_t regs[3], vals[CHAIN_MAX + 1], v;
+    int i, k;
 
-    g_bpRingReg[k][0] = c->Rcx;
-    g_bpRingReg[k][1] = c->Rdx;
-    g_bpRingReg[k][2] = c->R8;
-    v = g_bpRingReg[k][g_bpChainReg];
-    g_bpRingVal[k][0] = v;
+    regs[0] = c->Rcx; regs[1] = c->Rdx; regs[2] = c->R8;
+    v = regs[g_bpChainReg];
+    vals[0] = v;
     for (i = 0; i < g_bpChainN; i++) {
         v = CanRead((void *)(v + g_bpChainOff[i]), 8)
             ? SafeReadPtr((void *)(v + g_bpChainOff[i])) : 0;
-        g_bpRingVal[k][i + 1] = v;
+        vals[i + 1] = v;
     }
+    if (g_bpFiltIdx >= 0 && g_bpFiltIdx <= g_bpChainN &&
+        vals[g_bpFiltIdx] != g_bpFiltVal)
+        return;
+    k = g_bpRing++ % RING_MAX;
+    memcpy(g_bpRingReg[k], regs, sizeof(regs));
+    memcpy(g_bpRingVal[k], vals, sizeof(vals));
 }
 
 /* A projectile keeps its hits at +0xA60, count at +0xA6A,
@@ -1831,8 +1840,24 @@ static void CmdHwbpChain(Resp *r, const char *line) {
             g_bpChainN);
 }
 
+/* hwbpfilter <chainIndex> <hexValue>   no args clears */
+static void CmdHwbpFilter(Resp *r, const char *line) {
+    char is[16] = {0}, vs[32] = {0};
+
+    if (sscanf(line, "%*s %15s %31s", is, vs) < 2) {
+        g_bpFiltIdx = -1;
+        RAppend(r, "filter cleared\n");
+        return;
+    }
+    g_bpFiltIdx = atoi(is);
+    g_bpFiltVal = ParseHex(vs);
+    g_bpRing = 0;
+    RAppend(r, "keeping hits with chain[%d] == %p\n",
+            g_bpFiltIdx, (void *)g_bpFiltVal);
+}
+
 static void CmdHwbpInfo(Resp *r) {
-    int k, i, n = g_bpRing < 8 ? g_bpRing : 8;
+    int k, i, n = g_bpRing < RING_MAX ? g_bpRing : RING_MAX;
 
     RAppend(r, "watch %p  hits=%llu\n",
             (void *)g_bpAddr, (unsigned long long)g_bpHits);
@@ -5752,6 +5777,7 @@ static void Dispatch(const char *line, Resp *r) {
     else if (strcmp(cmd, "hwbp") == 0)      CmdHwbp(r, line);
     else if (strcmp(cmd, "hwbpinfo") == 0)  CmdHwbpInfo(r);
     else if (strcmp(cmd, "hwbpchain") == 0) CmdHwbpChain(r, line);
+    else if (strcmp(cmd, "hwbpfilter") == 0) CmdHwbpFilter(r, line);
     else if (strcmp(cmd, "hwbpoff") == 0)   CmdHwbpOff(r);
     else if (strcmp(cmd, "pos") == 0)       CmdPos(r);
     else if (strcmp(cmd, "tp") == 0)        CmdTp(r, line);
