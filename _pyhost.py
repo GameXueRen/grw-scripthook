@@ -21,6 +21,8 @@ _mtimes = {}
 _next_scan = 0.0
 _auto = True
 _gen = 0
+_sh_mtime = 0
+_self_mtime = 0
 
 
 def _dir():
@@ -109,9 +111,33 @@ def unload(mod):
     sh.log('unloaded ' + mod)
 
 
+def _sh_stamp():
+    try:
+        return os.path.getmtime(sh.__file__)
+    except OSError:
+        return 0
+
+
 def scan():
     """Load new files, reload edited ones, drop deleted ones."""
+    global _sh_mtime
     seen = set()
+
+    # sh.py itself is imported once at boot, so a rebuilt
+    # binding module needs the same treatment as a plugin.
+    stamp = _sh_stamp()
+    if _sh_mtime and stamp != _sh_mtime:
+        try:
+            importlib.reload(sh)
+            sh.log('reloaded sh bindings')
+            for mod in list(plugins):
+                _stop(mod)
+                sys.modules.pop(mod, None)
+            _mtimes.clear()
+        except Exception:
+            sh.log('sh reload FAILED\n' + traceback.format_exc())
+    _sh_mtime = stamp
+
     for mod in _names():
         seen.add(mod)
         try:
@@ -188,8 +214,39 @@ def _check_world():
                        % (mod, traceback.format_exc()))
 
 
+def _reload_self():
+    """Swap this runtime out while the game keeps running.
+
+    pyhost.asi calls _pyhost.tick() by name, and reload
+    updates the module in place, so the next tick lands in
+    the new code.
+    """
+    global _self_mtime
+    try:
+        stamp = os.path.getmtime(__file__)
+    except OSError:
+        return False
+    if not _self_mtime:
+        _self_mtime = stamp
+        return False
+    if stamp == _self_mtime:
+        return False
+    _self_mtime = stamp
+    sh.log('reloading the runtime')
+    for mod in list(plugins):
+        _stop(mod)
+        sys.modules.pop(mod, None)
+    try:
+        importlib.reload(sys.modules[__name__])
+    except Exception:
+        sh.log('runtime reload FAILED\n' + traceback.format_exc())
+    return True
+
+
 def tick():
     global _next_scan
+    if _reload_self():
+        return
     _check_world()
     now = time.perf_counter()
     if now >= _next_scan:
