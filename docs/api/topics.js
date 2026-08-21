@@ -7,6 +7,7 @@ var topics =
     [ "Entities", "group__entities.html", "group__entities" ],
     [ "Engine calls", "group__engine.html", "group__engine" ],
     [ "Vehicles", "group__vehicles.html", "group__vehicles" ],
+    [ "NPCs", "group__npcs.html", "group__npcs" ],
     [ "Physics rays", "group__rays.html", "group__rays" ],
     [ "Combat events", "group__combat.html", "group__combat" ],
     [ "Visibility", "group__visibility.html", "group__visibility" ],

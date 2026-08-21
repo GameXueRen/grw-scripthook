@@ -26,7 +26,7 @@
  <tbody>
  <tr id="projectrow">
   <td id="projectalign">
-   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.6.0</span>
+   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.7.0</span>
    </div>
    <div id="projectbrief">Plugin API for Ghost Recon Wildlands</div>
   </td>
@@ -129,15 +129,22 @@ Enumerations</h2></td></tr>
 , <a class="el" href="#ggac58e14f8083064326d59d36fd08d88fea5c65c7e06c942cc89dfc870d95b90a62">SH_WEATHER_RAIN_HEAVY</a>
 <br />
  }</td></tr>
-<tr class="memdesc:gac58e14f8083064326d59d36fd08d88fe"><td class="mdescLeft">&#160;</td><td class="mdescRight">Weather type, changed instantly.  <a href="#gac58e14f8083064326d59d36fd08d88fe">More...</a><br /></td></tr>
+<tr class="memdesc:gac58e14f8083064326d59d36fd08d88fe"><td class="mdescLeft">&#160;</td><td class="mdescRight">Weather type, blended by the engine over its default ten seconds.  <a href="#gac58e14f8083064326d59d36fd08d88fe">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
 <tr class="memitem:ga936363a06aede4618369d9d8a82cda39" id="r_ga936363a06aede4618369d9d8a82cda39"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga936363a06aede4618369d9d8a82cda39">ShSetWeather</a> (int type)</td></tr>
+<tr class="memitem:gad346baacdf04fc420168d36ac581727b" id="r_gad346baacdf04fc420168d36ac581727b"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gad346baacdf04fc420168d36ac581727b">ShSetWeatherBlend</a> (int type, float seconds)</td></tr>
+<tr class="memdesc:gad346baacdf04fc420168d36ac581727b"><td class="mdescLeft">&#160;</td><td class="mdescRight">The same, blended over seconds.  <br /></td></tr>
+<tr class="memitem:ga4bd72a8afbe60c330a265570db754a8d" id="r_ga4bd72a8afbe60c330a265570db754a8d"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga4bd72a8afbe60c330a265570db754a8d">ShReleaseWeather</a> (void)</td></tr>
+<tr class="memdesc:ga4bd72a8afbe60c330a265570db754a8d"><td class="mdescLeft">&#160;</td><td class="mdescRight">Hand the weather back to the ambient system.  <br /></td></tr>
 <tr class="memitem:ga40b22e54ffe843323f8602f4b2553ba3" id="r_ga40b22e54ffe843323f8602f4b2553ba3"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga40b22e54ffe843323f8602f4b2553ba3">ShGetWeather</a> (int *out)</td></tr>
 <tr class="memitem:ga2e3b8e13f5706c01e016e3af376fb7de" id="r_ga2e3b8e13f5706c01e016e3af376fb7de"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga2e3b8e13f5706c01e016e3af376fb7de">ShSetTime</a> (float hours)</td></tr>
 <tr class="memdesc:ga2e3b8e13f5706c01e016e3af376fb7de"><td class="mdescLeft">&#160;</td><td class="mdescRight">Time of day in hours past midnight, 0 to 24.  <br /></td></tr>
 <tr class="memitem:gaf321322a85a72d78e5e1a9fd53d9f4ed" id="r_gaf321322a85a72d78e5e1a9fd53d9f4ed"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gaf321322a85a72d78e5e1a9fd53d9f4ed">ShGetTime</a> (float *out)</td></tr>
+<tr class="memitem:ga8f21a924cc3c08b670207bad61e86ea7" id="r_ga8f21a924cc3c08b670207bad61e86ea7"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga8f21a924cc3c08b670207bad61e86ea7">ShSetTimeSpeed</a> (float multiplier)</td></tr>
+<tr class="memdesc:ga8f21a924cc3c08b670207bad61e86ea7"><td class="mdescLeft">&#160;</td><td class="mdescRight">Clock rate.  <br /></td></tr>
+<tr class="memitem:ga1e8aad33fc6613f2168d85423b4e1ab7" id="r_ga1e8aad33fc6613f2168d85423b4e1ab7"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga1e8aad33fc6613f2168d85423b4e1ab7">ShGetTimeSpeed</a> (float *out)</td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
 <div class="textblock"><p>The environment object, via the engine's transition. </p>
@@ -154,8 +161,8 @@ Functions</h2></td></tr>
       </table>
 </div><div class="memdoc">
 
-<p>Weather type, changed instantly. </p>
-<p>The first set freezes ambient weather until the game restarts. </p>
+<p>Weather type, blended by the engine over its default ten seconds. </p>
+<p>Ambient stays off until ShReleaseWeather. </p>
 <table class="fieldtable">
 <tr><th colspan="2">Enumerator</th></tr><tr><td class="fieldname"><a id="ggac58e14f8083064326d59d36fd08d88feabd8f829e7bb48c4183135f85373de695" name="ggac58e14f8083064326d59d36fd08d88feabd8f829e7bb48c4183135f85373de695"></a>SH_WEATHER_SUNNY&#160;</td><td class="fielddoc"></td></tr>
 <tr><td class="fieldname"><a id="ggac58e14f8083064326d59d36fd08d88fea9714a2db70d3e7519d39d21ca6085c15" name="ggac58e14f8083064326d59d36fd08d88fea9714a2db70d3e7519d39d21ca6085c15"></a>SH_WEATHER_CLOUDS_LIGHT&#160;</td><td class="fielddoc"></td></tr>
@@ -182,6 +189,49 @@ Functions</h2></td></tr>
         </tr>
       </table>
 </div><div class="memdoc">
+
+</div>
+</div>
+<a id="gad346baacdf04fc420168d36ac581727b" name="gad346baacdf04fc420168d36ac581727b"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#gad346baacdf04fc420168d36ac581727b">&#9670;&#160;</a></span>ShSetWeatherBlend()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShSetWeatherBlend </td>
+          <td>(</td>
+          <td class="paramtype">int</td>          <td class="paramname"><span class="paramname"><em>type</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>seconds</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>The same, blended over seconds. </p>
+<p>0 changes at once. </p>
+
+</div>
+</div>
+<a id="ga4bd72a8afbe60c330a265570db754a8d" name="ga4bd72a8afbe60c330a265570db754a8d"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga4bd72a8afbe60c330a265570db754a8d">&#9670;&#160;</a></span>ShReleaseWeather()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShReleaseWeather </td>
+          <td>(</td>
+          <td class="paramtype">void</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Hand the weather back to the ambient system. </p>
 
 </div>
 </div>
@@ -218,7 +268,7 @@ Functions</h2></td></tr>
 </div><div class="memdoc">
 
 <p>Time of day in hours past midnight, 0 to 24. </p>
-<p>The first set stops the clock until the game restarts. </p>
+<p>The clock keeps running from the new hour. </p>
 
 </div>
 </div>
@@ -230,6 +280,43 @@ Functions</h2></td></tr>
       <table class="memname">
         <tr>
           <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShGetTime </td>
+          <td>(</td>
+          <td class="paramtype">float *</td>          <td class="paramname"><span class="paramname"><em>out</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="ga8f21a924cc3c08b670207bad61e86ea7" name="ga8f21a924cc3c08b670207bad61e86ea7"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga8f21a924cc3c08b670207bad61e86ea7">&#9670;&#160;</a></span>ShSetTimeSpeed()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShSetTimeSpeed </td>
+          <td>(</td>
+          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>multiplier</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Clock rate. </p>
+<p>1 is normal, 0 stops it, 100 runs a day in about fifteen minutes. Holds until set again. </p>
+
+</div>
+</div>
+<a id="ga1e8aad33fc6613f2168d85423b4e1ab7" name="ga1e8aad33fc6613f2168d85423b4e1ab7"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga1e8aad33fc6613f2168d85423b4e1ab7">&#9670;&#160;</a></span>ShGetTimeSpeed()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShGetTimeSpeed </td>
           <td>(</td>
           <td class="paramtype">float *</td>          <td class="paramname"><span class="paramname"><em>out</em></span></td><td>)</td>
           <td></td>

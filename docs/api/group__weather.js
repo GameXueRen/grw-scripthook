@@ -9,7 +9,11 @@ var group__weather =
       [ "SH_WEATHER_RAIN_HEAVY", "group__weather.html#ggac58e14f8083064326d59d36fd08d88fea5c65c7e06c942cc89dfc870d95b90a62", null ]
     ] ],
     [ "ShSetWeather", "group__weather.html#ga936363a06aede4618369d9d8a82cda39", null ],
+    [ "ShSetWeatherBlend", "group__weather.html#gad346baacdf04fc420168d36ac581727b", null ],
+    [ "ShReleaseWeather", "group__weather.html#ga4bd72a8afbe60c330a265570db754a8d", null ],
     [ "ShGetWeather", "group__weather.html#ga40b22e54ffe843323f8602f4b2553ba3", null ],
     [ "ShSetTime", "group__weather.html#ga2e3b8e13f5706c01e016e3af376fb7de", null ],
-    [ "ShGetTime", "group__weather.html#gaf321322a85a72d78e5e1a9fd53d9f4ed", null ]
+    [ "ShGetTime", "group__weather.html#gaf321322a85a72d78e5e1a9fd53d9f4ed", null ],
+    [ "ShSetTimeSpeed", "group__weather.html#ga8f21a924cc3c08b670207bad61e86ea7", null ],
+    [ "ShGetTimeSpeed", "group__weather.html#ga1e8aad33fc6613f2168d85423b4e1ab7", null ]
 ];

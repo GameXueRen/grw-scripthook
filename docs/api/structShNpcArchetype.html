@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.18.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>GRW ScriptHook: ShVehicle Struct Reference</title>
+<title>GRW ScriptHook: ShNpcArchetype Struct Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="codefolding.js"></script>
 <script type="text/javascript" src="clipboard.js"></script>
@@ -87,7 +87,7 @@ document.addEventListener('DOMContentLoaded', codefold.init);
   </div>
 </div>
 <script type="text/javascript">
-document.addEventListener('DOMContentLoaded',() => { initNavTree('structShVehicle.html','',''); });
+document.addEventListener('DOMContentLoaded',() => { initNavTree('structShNpcArchetype.html','',''); });
 </script>
 <div id="container">
 <div id="doc-content">
@@ -110,7 +110,7 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('structShVehicl
 </div>
 
 <div class="header">
-  <div class="headertitle"><div class="title">ShVehicle Struct Reference<div class="ingroups"><a class="el" href="group__vehicles.html">Vehicles</a></div></div></div>
+  <div class="headertitle"><div class="title">ShNpcArchetype Struct Reference<div class="ingroups"><a class="el" href="group__npcs.html">NPCs</a></div></div></div>
 </div><!--header-->
 <div class="contents">
 
@@ -118,35 +118,41 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('structShVehicl
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-attribs" class="groupheader"><a id="pub-attribs" name="pub-attribs"></a>
 Data Fields</h2></td></tr>
-<tr class="memitem:a75cc9fd9914430c5f4b209ce756fff3f" id="r_a75cc9fd9914430c5f4b209ce756fff3f"><td class="memItemLeft">uint32_t&#160;</td><td class="memItemRight"><a class="el" href="#a75cc9fd9914430c5f4b209ce756fff3f">id</a></td></tr>
-<tr class="memitem:a27923a82d85d6e87f026bcd25915f939" id="r_a27923a82d85d6e87f026bcd25915f939"><td class="memItemLeft">const char *&#160;</td><td class="memItemRight"><a class="el" href="#a27923a82d85d6e87f026bcd25915f939">name</a></td></tr>
+<tr class="memitem:ae35174746ae626083fd054bbac11f35a" id="r_ae35174746ae626083fd054bbac11f35a"><td class="memItemLeft">uint64_t&#160;</td><td class="memItemRight"><a class="el" href="#ae35174746ae626083fd054bbac11f35a">id</a></td></tr>
+<tr class="memdesc:ae35174746ae626083fd054bbac11f35a"><td class="mdescLeft">&#160;</td><td class="mdescRight">archetype id, stable across sessions  <br /></td></tr>
+<tr class="memitem:a91983373b759cdc0c38534bc19bc686b" id="r_a91983373b759cdc0c38534bc19bc686b"><td class="memItemLeft">int&#160;</td><td class="memItemRight"><a class="el" href="#a91983373b759cdc0c38534bc19bc686b">kind</a></td></tr>
+<tr class="memdesc:a91983373b759cdc0c38534bc19bc686b"><td class="mdescLeft">&#160;</td><td class="mdescRight">1 = spawnable NPC, 10 = none  <br /></td></tr>
 </table>
 <a name="doc-variable-members" id="doc-variable-members"></a><h2 id="header-doc-variable-members" class="groupheader">Field Documentation</h2>
-<a id="a75cc9fd9914430c5f4b209ce756fff3f" name="a75cc9fd9914430c5f4b209ce756fff3f"></a>
-<h2 class="memtitle"><span class="permalink"><a href="#a75cc9fd9914430c5f4b209ce756fff3f">&#9670;&#160;</a></span>id</h2>
+<a id="ae35174746ae626083fd054bbac11f35a" name="ae35174746ae626083fd054bbac11f35a"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ae35174746ae626083fd054bbac11f35a">&#9670;&#160;</a></span>id</h2>
 
 <div class="memitem">
 <div class="memproto">
       <table class="memname">
         <tr>
-          <td class="memname">uint32_t ShVehicle::id</td>
+          <td class="memname">uint64_t ShNpcArchetype::id</td>
         </tr>
       </table>
 </div><div class="memdoc">
 
+<p>archetype id, stable across sessions </p>
+
 </div>
 </div>
-<a id="a27923a82d85d6e87f026bcd25915f939" name="a27923a82d85d6e87f026bcd25915f939"></a>
-<h2 class="memtitle"><span class="permalink"><a href="#a27923a82d85d6e87f026bcd25915f939">&#9670;&#160;</a></span>name</h2>
+<a id="a91983373b759cdc0c38534bc19bc686b" name="a91983373b759cdc0c38534bc19bc686b"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a91983373b759cdc0c38534bc19bc686b">&#9670;&#160;</a></span>kind</h2>
 
 <div class="memitem">
 <div class="memproto">
       <table class="memname">
         <tr>
-          <td class="memname">const char* ShVehicle::name</td>
+          <td class="memname">int ShNpcArchetype::kind</td>
         </tr>
       </table>
 </div><div class="memdoc">
+
+<p>1 = spawnable NPC, 10 = none </p>
 
 </div>
 </div>
@@ -166,7 +172,7 @@ Data Fields</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="structShVehicle.html">ShVehicle</a></li>
+    <li class="navelem"><a href="structShNpcArchetype.html">ShNpcArchetype</a></li>
     <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.18.0 </li>
   </ul>
 </div>

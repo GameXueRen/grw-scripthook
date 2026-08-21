@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.18.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>GRW ScriptHook: Engine calls</title>
+<title>GRW ScriptHook: NPCs</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="codefolding.js"></script>
 <script type="text/javascript" src="clipboard.js"></script>
@@ -87,7 +87,7 @@ document.addEventListener('DOMContentLoaded', codefold.init);
   </div>
 </div>
 <script type="text/javascript">
-document.addEventListener('DOMContentLoaded',() => { initNavTree('group__engine.html','',''); });
+document.addEventListener('DOMContentLoaded',() => { initNavTree('group__npcs.html','',''); });
 </script>
 <div id="container">
 <div id="doc-content">
@@ -110,120 +110,86 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('group__engine.
 </div>
 
 <div class="header">
-  <div class="headertitle"><div class="title">Engine calls </div></div>
+  <div class="headertitle"><div class="title">NPCs </div></div>
 </div><!--header-->
 <div class="contents">
 
-<p>Queue your own finds onto the game thread.  
+<p>Standalone NPCs by archetype, built like the engine's spawn director does (FINDINGS "NPC SPAWN WORKS").  
 <a href="#details">More...</a></p>
 <table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
+Data Structures</h2></td></tr>
+<tr class="memitem:ShNpcArchetype" id="r_ShNpcArchetype"><td class="memItemLeft">struct &#160;</td><td class="memItemRight"><a class="el" href="structShNpcArchetype.html">ShNpcArchetype</a></td></tr>
+</table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
-<tr class="memitem:ga917b757c075f7e1671b2a705fef6b1e6" id="r_ga917b757c075f7e1671b2a705fef6b1e6"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga917b757c075f7e1671b2a705fef6b1e6">ShQueueCall</a> (uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)</td></tr>
-<tr class="memdesc:ga917b757c075f7e1671b2a705fef6b1e6"><td class="mdescLeft">&#160;</td><td class="mdescRight">Run an engine call on the GAME THREAD.  <br /></td></tr>
-<tr class="memitem:ga7fbbaa8988adc48d0fa83f0f51bb37ff" id="r_ga7fbbaa8988adc48d0fa83f0f51bb37ff"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga7fbbaa8988adc48d0fa83f0f51bb37ff">ShQueueCallF</a> (uint64_t fn, uint64_t a0, uint64_t a1, float f2, float f3, float f4)</td></tr>
-<tr class="memdesc:ga7fbbaa8988adc48d0fa83f0f51bb37ff"><td class="mdescLeft">&#160;</td><td class="mdescRight">Args three to five as floats, which the ABI passes in xmm2, xmm3 and the stack rather than the int registers.  <br /></td></tr>
-<tr class="memitem:ga826bb490c381048bd9093963a00ae804" id="r_ga826bb490c381048bd9093963a00ae804"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga826bb490c381048bd9093963a00ae804">ShQueueResult</a> (uint64_t *outRet)</td></tr>
+<tr class="memitem:gab9dc9671b30f73784157b085b670149c" id="r_gab9dc9671b30f73784157b085b670149c"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gab9dc9671b30f73784157b085b670149c">ShNpcCount</a> (void)</td></tr>
+<tr class="memdesc:gab9dc9671b30f73784157b085b670149c"><td class="mdescLeft">&#160;</td><td class="mdescRight">The archetype registry, read once per session on first use.  <br /></td></tr>
+<tr class="memitem:ga2660a8c47b1e5965ed675a535d710b9e" id="r_ga2660a8c47b1e5965ed675a535d710b9e"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> const <a class="el" href="structShNpcArchetype.html">ShNpcArchetype</a> *&#160;</td><td class="memItemRight"><a class="el" href="#ga2660a8c47b1e5965ed675a535d710b9e">ShNpcAt</a> (int index)</td></tr>
+<tr class="memitem:ga2ead7877c2185832e4ed6fbae96d9ec5" id="r_ga2ead7877c2185832e4ed6fbae96d9ec5"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> uint64_t&#160;</td><td class="memItemRight"><a class="el" href="#ga2ead7877c2185832e4ed6fbae96d9ec5">ShSpawnNpc</a> (uint64_t archetypeId, const <a class="el" href="structShVec3.html">ShVec3</a> *pos)</td></tr>
+<tr class="memdesc:ga2ead7877c2185832e4ed6fbae96d9ec5"><td class="mdescLeft">&#160;</td><td class="mdescRight">Spawn an NPC and return its ENTITY, or 0 on failure.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock"><p>Queue your own finds onto the game thread. </p>
+<div class="textblock"><p>Standalone NPCs by archetype, built like the engine's spawn director does (FINDINGS "NPC SPAWN WORKS"). </p>
 </div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Function Documentation</h2>
-<a id="ga917b757c075f7e1671b2a705fef6b1e6" name="ga917b757c075f7e1671b2a705fef6b1e6"></a>
-<h2 class="memtitle"><span class="permalink"><a href="#ga917b757c075f7e1671b2a705fef6b1e6">&#9670;&#160;</a></span>ShQueueCall()</h2>
+<a id="gab9dc9671b30f73784157b085b670149c" name="gab9dc9671b30f73784157b085b670149c"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#gab9dc9671b30f73784157b085b670149c">&#9670;&#160;</a></span>ShNpcCount()</h2>
 
 <div class="memitem">
 <div class="memproto">
       <table class="memname">
         <tr>
-          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShQueueCall </td>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShNpcCount </td>
           <td>(</td>
-          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>fn</em></span>, </td>
-        </tr>
-        <tr>
-          <td class="paramkey"></td>
+          <td class="paramtype">void</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
           <td></td>
-          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>a0</em></span>, </td>
-        </tr>
-        <tr>
-          <td class="paramkey"></td>
-          <td></td>
-          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>a1</em></span>, </td>
-        </tr>
-        <tr>
-          <td class="paramkey"></td>
-          <td></td>
-          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>a2</em></span>, </td>
-        </tr>
-        <tr>
-          <td class="paramkey"></td>
-          <td></td>
-          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>a3</em></span>&#160;)</td>
         </tr>
       </table>
 </div><div class="memdoc">
 
-<p>Run an engine call on the GAME THREAD. </p>
-<p>Calls that take engine locks deadlock from any other thread. Queue returns 1 when accepted. Poll ShQueueResult until it returns 1, which is usually the next frame. </p>
+<p>The archetype registry, read once per session on first use. </p>
+<p>About 530 entries, about 150 of them kind 1. </p>
 
 </div>
 </div>
-<a id="ga7fbbaa8988adc48d0fa83f0f51bb37ff" name="ga7fbbaa8988adc48d0fa83f0f51bb37ff"></a>
-<h2 class="memtitle"><span class="permalink"><a href="#ga7fbbaa8988adc48d0fa83f0f51bb37ff">&#9670;&#160;</a></span>ShQueueCallF()</h2>
+<a id="ga2660a8c47b1e5965ed675a535d710b9e" name="ga2660a8c47b1e5965ed675a535d710b9e"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga2660a8c47b1e5965ed675a535d710b9e">&#9670;&#160;</a></span>ShNpcAt()</h2>
 
 <div class="memitem">
 <div class="memproto">
       <table class="memname">
         <tr>
-          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShQueueCallF </td>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> const <a class="el" href="structShNpcArchetype.html">ShNpcArchetype</a> * ShNpcAt </td>
           <td>(</td>
-          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>fn</em></span>, </td>
-        </tr>
-        <tr>
-          <td class="paramkey"></td>
+          <td class="paramtype">int</td>          <td class="paramname"><span class="paramname"><em>index</em></span></td><td>)</td>
           <td></td>
-          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>a0</em></span>, </td>
-        </tr>
-        <tr>
-          <td class="paramkey"></td>
-          <td></td>
-          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>a1</em></span>, </td>
-        </tr>
-        <tr>
-          <td class="paramkey"></td>
-          <td></td>
-          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>f2</em></span>, </td>
-        </tr>
-        <tr>
-          <td class="paramkey"></td>
-          <td></td>
-          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>f3</em></span>, </td>
-        </tr>
-        <tr>
-          <td class="paramkey"></td>
-          <td></td>
-          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>f4</em></span>&#160;)</td>
         </tr>
       </table>
 </div><div class="memdoc">
 
-<p>Args three to five as floats, which the ABI passes in xmm2, xmm3 and the stack rather than the int registers. </p>
-
 </div>
 </div>
-<a id="ga826bb490c381048bd9093963a00ae804" name="ga826bb490c381048bd9093963a00ae804"></a>
-<h2 class="memtitle"><span class="permalink"><a href="#ga826bb490c381048bd9093963a00ae804">&#9670;&#160;</a></span>ShQueueResult()</h2>
+<a id="ga2ead7877c2185832e4ed6fbae96d9ec5" name="ga2ead7877c2185832e4ed6fbae96d9ec5"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga2ead7877c2185832e4ed6fbae96d9ec5">&#9670;&#160;</a></span>ShSpawnNpc()</h2>
 
 <div class="memitem">
 <div class="memproto">
       <table class="memname">
         <tr>
-          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShQueueResult </td>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> uint64_t ShSpawnNpc </td>
           <td>(</td>
-          <td class="paramtype">uint64_t *</td>          <td class="paramname"><span class="paramname"><em>outRet</em></span></td><td>)</td>
+          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>archetypeId</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
           <td></td>
+          <td class="paramtype">const <a class="el" href="structShVec3.html">ShVec3</a> *</td>          <td class="paramname"><span class="paramname"><em>pos</em></span>&#160;)</td>
         </tr>
       </table>
 </div><div class="memdoc">
+
+<p>Spawn an NPC and return its ENTITY, or 0 on failure. </p>
+<p>Blocks until it exists, usually a frame or two. The NPC joins the population manager with the current Camp and Job, so its AI runs like a native spawn. </p>
 
 </div>
 </div>

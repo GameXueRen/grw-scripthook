@@ -26,7 +26,7 @@
  <tbody>
  <tr id="projectrow">
   <td id="projectalign">
-   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.6.0</span>
+   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.7.0</span>
    </div>
    <div id="projectbrief">Plugin API for Ghost Recon Wildlands</div>
   </td>
@@ -122,20 +122,21 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('topics.html','
 <tr id="row_4_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__entities.html" target="_self">Entities</a></td><td class="desc">Enumeration by kind, via the net identity component </td></tr>
 <tr id="row_5_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__engine.html" target="_self">Engine calls</a></td><td class="desc">Queue your own finds onto the game thread </td></tr>
 <tr id="row_6_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__vehicles.html" target="_self">Vehicles</a></td><td class="desc">A spec per vehicle and a spawner the manager owns </td></tr>
-<tr id="row_7_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__rays.html" target="_self">Physics rays</a></td><td class="desc">Every cast the engine makes passes through the hook </td></tr>
-<tr id="row_8_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__combat.html" target="_self">Combat events</a></td><td class="desc">Shots and impacts from the projectile hook </td></tr>
-<tr id="row_9_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__visibility.html" target="_self">Visibility</a></td><td class="desc">Render node visible bits, applied on the game thread </td></tr>
-<tr id="row_10_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__menu.html" target="_self">Menu</a></td><td class="desc">One root owned by the API; every plugin adds a submenu </td></tr>
-<tr id="row_11_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__hud.html" target="_self">HUD</a></td><td class="desc">Drawn by the engine's own UI; slots pack per corner </td></tr>
-<tr id="row_12_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__camera.html" target="_self">Camera</a></td><td class="desc">Per field ownership, so plugins compose </td></tr>
-<tr id="row_13_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__motion.html" target="_self">Motion</a></td><td class="desc">Push things rather than teleporting them </td></tr>
-<tr id="row_14_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__havokdiag.html" target="_self">Havok diagnostics</a></td><td class="desc">For debugging the mapping rather than for mods </td></tr>
-<tr id="row_15_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__input.html" target="_self">Input</a></td><td class="desc">Blocked at the game's own import slots, since it polls </td></tr>
-<tr id="row_16_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__crash.html" target="_self">Crash reports</a></td><td class="desc">Faults land in scripthook_crash.log, annotated </td></tr>
-<tr id="row_17_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__stats.html" target="_self">Stats and ammo</a></td><td class="desc">Health, resources, skill points, stealth and ammo </td></tr>
-<tr id="row_18_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__weather.html" target="_self">Weather and time</a></td><td class="desc">The environment object, via the engine's transition </td></tr>
-<tr id="row_19_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__reflect.html" target="_self">Reflected objects</a></td><td class="desc">The engine's own method tables, callable by name </td></tr>
-<tr id="row_20_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__ui.html" target="_self">Native UI</a></td><td class="desc">Engine widgets in scenes of our own; see <a class="el" href="ui_8md.html">docs/ui.md</a> </td></tr>
+<tr id="row_7_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__npcs.html" target="_self">NPCs</a></td><td class="desc">Standalone NPCs by archetype, built like the engine's spawn director does (FINDINGS "NPC SPAWN WORKS") </td></tr>
+<tr id="row_8_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__rays.html" target="_self">Physics rays</a></td><td class="desc">Every cast the engine makes passes through the hook </td></tr>
+<tr id="row_9_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__combat.html" target="_self">Combat events</a></td><td class="desc">Shots and impacts from the projectile hook </td></tr>
+<tr id="row_10_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__visibility.html" target="_self">Visibility</a></td><td class="desc">Render node visible bits, applied on the game thread </td></tr>
+<tr id="row_11_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__menu.html" target="_self">Menu</a></td><td class="desc">One root owned by the API; every plugin adds a submenu </td></tr>
+<tr id="row_12_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__hud.html" target="_self">HUD</a></td><td class="desc">Drawn by the engine's own UI; slots pack per corner </td></tr>
+<tr id="row_13_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__camera.html" target="_self">Camera</a></td><td class="desc">Per field ownership, so plugins compose </td></tr>
+<tr id="row_14_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__motion.html" target="_self">Motion</a></td><td class="desc">Push things rather than teleporting them </td></tr>
+<tr id="row_15_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__havokdiag.html" target="_self">Havok diagnostics</a></td><td class="desc">For debugging the mapping rather than for mods </td></tr>
+<tr id="row_16_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__input.html" target="_self">Input</a></td><td class="desc">Blocked at the game's own import slots, since it polls </td></tr>
+<tr id="row_17_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__crash.html" target="_self">Crash reports</a></td><td class="desc">Faults land in scripthook_crash.log, annotated </td></tr>
+<tr id="row_18_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__stats.html" target="_self">Stats and ammo</a></td><td class="desc">Health, resources, skill points, stealth and ammo </td></tr>
+<tr id="row_19_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__weather.html" target="_self">Weather and time</a></td><td class="desc">The environment object, via the engine's transition </td></tr>
+<tr id="row_20_" class="even"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__reflect.html" target="_self">Reflected objects</a></td><td class="desc">The engine's own method tables, callable by name </td></tr>
+<tr id="row_21_" class="odd"><td class="entry"><span class="spacer">&#160;</span><a class="el" href="group__ui.html" target="_self">Native UI</a></td><td class="desc">Engine widgets in scenes of our own; see <a class="el" href="ui_8md.html">docs/ui.md</a> </td></tr>
 </table>
 </div><!-- directory -->
 </div><!-- contents -->

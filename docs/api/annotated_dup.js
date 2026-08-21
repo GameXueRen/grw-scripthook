@@ -6,6 +6,7 @@ var annotated_dup =
     [ "ShEntity", "structShEntity.html", "structShEntity" ],
     [ "ShHit", "structShHit.html", "structShHit" ],
     [ "ShMethod", "structShMethod.html", "structShMethod" ],
+    [ "ShNpcArchetype", "structShNpcArchetype.html", "structShNpcArchetype" ],
     [ "ShPlayer", "structShPlayer.html", "structShPlayer" ],
     [ "ShRay", "structShRay.html", "structShRay" ],
     [ "ShRayQuery", "structShRayQuery.html", "structShRayQuery" ],
