@@ -113,6 +113,11 @@ F4 and the Windows keys are never hidden, so the player can
 always reach the game's menu. `ShBlockKey(vk, on)` is the
 same block without the callback.
 
+If you poll a hotkey yourself, test the held bit
+(`GetAsyncKeyState(vk) & 0x8000`) and detect the edge; the
+"pressed since last call" bit is consumed by whichever thread
+polls first, and the UI input thread polls every key.
+
 ## Lifecycle
 
 A world reload (death, fast travel, mission restart) destroys

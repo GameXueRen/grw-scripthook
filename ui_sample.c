@@ -93,19 +93,24 @@ static void OnReset(uint32_t scene, void *user) {
 }
 
 static DWORD WINAPI Main(LPVOID arg) {
-    int built = 0;
+    int built = 0, wasDown = 0;
     (void)arg;
     g_scene = ShUiSceneCreate("ui_sample", 10);
     ShUiSetReset(g_scene, OnReset, NULL);
     ShUiSetInput(g_scene, OnInput, NULL);
     for (;;) {
-        Sleep(40);
+        int down;
+        Sleep(20);
         if (!built && ShUiReady()) built = Build();
-        if (GetAsyncKeyState(VK_F7) & 1) {
+        /* edge on the held bit; the "since last call" bit */
+        /* is eaten by whoever else polls the key */
+        down = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
+        if (down && !wasDown) {
             g_open = !g_open;
             ShUiSceneShow(g_scene, g_open);
             ShUiFocus(g_scene, g_open);
         }
+        wasDown = down;
     }
     return 0;
 }
