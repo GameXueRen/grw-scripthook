@@ -641,6 +641,297 @@ def off_witness():
     _wp['ents'] = []
 
 
+# ---- motion: velocity and shoves ----
+
+def _cars(radius=45.0, limit=24):
+    return _nearby(sh.KIND_VEHICLE, radius, limit)
+
+
+def _npcs(radius=60.0, limit=32):
+    return _nearby(sh.KIND_NPC, radius, limit)
+
+
+def fx_launch_cars():
+    """Every car nearby leaves the ground at once."""
+    for e in _cars():
+        v = sh.Vec3(random.uniform(-6, 6), random.uniform(-6, 6),
+                    random.uniform(18, 30))
+        sh.AddVelocity(e.entity, v)
+
+
+def fx_car_tornado():
+    """Spin them where they stand, hard."""
+    for e in _cars():
+        sh.SetAngularVelocity(e.entity, sh.Vec3(0.0, 0.0,
+                                                random.uniform(6, 14)))
+
+
+def fx_shove_all():
+    """One shove outward from the player, cars and people."""
+    p = _pos()
+    if p is None:
+        return
+    for e in _cars(50.0) + _npcs(50.0):
+        got = _transform(e.entity)
+        if got is None:
+            continue
+        at = got[0]
+        dx, dy = at.x - p.x, at.y - p.y
+        n = math.hypot(dx, dy) or 1.0
+        sh.Shove(e.entity, sh.Vec3(dx / n, dy / n, 0.4), 25.0, None)
+
+
+def fx_magnet():
+    """The opposite: everything comes to you."""
+    p = _pos()
+    if p is None:
+        return
+    for e in _cars(70.0) + _npcs(70.0):
+        got = _transform(e.entity)
+        if got is None:
+            continue
+        at = got[0]
+        dx, dy, dz = p.x - at.x, p.y - at.y, p.z - at.z
+        n = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+        sh.SetVelocity(e.entity, sh.Vec3(dx / n * 18.0, dy / n * 18.0,
+                                         dz / n * 18.0 + 2.0))
+
+
+def fx_freeze_all():
+    """Everything nearby stops dead."""
+    zero = sh.Vec3(0.0, 0.0, 0.0)
+    for e in _cars(60.0) + _npcs(60.0):
+        sh.SetVelocity(e.entity, zero)
+        sh.SetAngularVelocity(e.entity, zero)
+
+
+_float = {'ents': []}
+
+
+def on_float():
+    _float['ents'] = [e.entity for e in _cars(60.0)]
+    for e in _float['ents']:
+        sh.SetEntityPhysics(e, 0)
+
+
+def tick_float():
+    """Held just off the ground, drifting upward slowly."""
+    for e in _float['ents']:
+        got = _transform(e)
+        if got:
+            pos = got[0]
+            pos.z += 0.02
+            sh.QueueTransform(e, pos, got[1], 0.0, 0.0)
+
+
+def off_float():
+    for e in _float['ents']:
+        sh.SetEntityPhysics(e, 1)
+    _float['ents'] = []
+
+
+_jitter = {'ents': []}
+
+
+def on_jitter():
+    _jitter['ents'] = [e.entity for e in _cars(50.0)]
+
+
+def tick_jitter():
+    for e in _jitter['ents']:
+        sh.AddVelocity(e, sh.Vec3(random.uniform(-3, 3),
+                                  random.uniform(-3, 3),
+                                  random.uniform(0, 4)))
+
+
+def off_jitter():
+    _jitter['ents'] = []
+
+
+def fx_hop():
+    """You, upward, without the fall damage."""
+    r = _root()
+    if r:
+        sh.AddVelocity(r, sh.Vec3(0.0, 0.0, 14.0))
+
+
+# ---- rides: the Domino attach primitive ----
+
+_ride = {'ents': []}
+
+
+def on_hat_car():
+    """A car balanced on your head, physics off."""
+    r = _root()
+    p = _pos()
+    if r == 0 or p is None:
+        return
+    cars = _cars(80.0, 4)
+    if len(cars) == 0:
+        return
+    e = cars[0].entity
+    sh.SetEntityPhysics(e, 0)
+    at = sh.Vec3(p.x, p.y, p.z + 2.3)
+    sh.PlaceEntityRot(e, at, 0.0, 0.0, 0.0)
+    sh.AttachEntity(e, r, sh.Vec3(0.0, 0.0, 2.3))
+    _ride['ents'] = [e]
+
+
+def on_entourage():
+    """Six NPCs orbiting, attached so they never lag."""
+    r = _root()
+    p = _pos()
+    if r == 0 or p is None:
+        return
+    _ride['ents'] = []
+    for i in range(sh.NpcCount()):
+        if len(_ride['ents']) >= 6:
+            break
+        a = sh.NpcAt(i)
+        if not a or a.contents.kind != 1:
+            continue
+        ang = len(_ride['ents']) * (2 * math.pi / 6)
+        off = sh.Vec3(math.cos(ang) * 2.5, math.sin(ang) * 2.5, 0.0)
+        e = sh.SpawnNpc(a.contents.id,
+                        sh.Vec3(p.x + off.x, p.y + off.y, p.z))
+        if e:
+            sh.SetEntityPhysics(e, 0)
+            sh.AttachEntity(e, r, off)
+            _ride['ents'].append(e)
+
+
+def off_ride():
+    for e in _ride['ents']:
+        sh.DetachEntity(e)
+        sh.SetEntityPhysics(e, 1)
+    _ride['ents'] = []
+
+
+def off_entourage():
+    for e in _ride['ents']:
+        sh.DetachEntity(e)
+        sh.Despawn(e)
+    _ride['ents'] = []
+
+
+# ---- weather and world, from the Domino work ----
+
+def fx_lightning():
+    """Three strikes, right now."""
+    for _ in range(3):
+        sh.TriggerLightning()
+
+
+def on_thunderstorm():
+    sh.SetWeatherBlend(sh.WEATHER_RAIN_HEAVY, 3.0)
+    sh.SetLightningFrequency(1, 25.0)
+
+
+def tick_thunderstorm():
+    if random.random() < 0.02:
+        sh.TriggerLightning()
+
+
+def off_thunderstorm():
+    sh.SetLightningFrequency(0, 0.0)
+    sh.ReleaseWeather()
+
+
+def on_shielded():
+    """Explosions ignore a sphere around you."""
+    p = _pos()
+    if p:
+        sh.ExplosionShield(p, 30.0)
+
+
+def tick_shielded():
+    p = _pos()
+    if p:
+        sh.ExplosionShield(p, 30.0)
+
+
+def off_shielded():
+    sh.ExplosionShield(None, 0.0)
+
+
+def on_ghostmode():
+    sh.SetGhostMode(1)
+
+
+def off_ghostmode():
+    sh.SetGhostMode(0)
+
+
+def on_immortal():
+    sh.SetGodModePlayer(1)
+
+
+def off_immortal():
+    sh.SetGodModePlayer(0)
+
+
+def on_cannot_die():
+    sh.SetCannotDiePlayer(1)
+
+
+def off_cannot_die():
+    sh.SetCannotDiePlayer(0)
+
+
+def fx_paper_cut():
+    """One point of damage, through the real damage path."""
+    sh.DamagePlayer(1)
+
+
+def fx_weather_creep():
+    """The sky turns over half a minute, not instantly."""
+    sh.SetWeatherBlend(random.randrange(6), 30.0)
+
+
+def fx_hopscotch():
+    """A long hop teleport, 300 ms per hop as the API asks."""
+    p = _pos()
+    if p is None:
+        return
+    at = sh.Vec3(p.x + random.uniform(-150, 150),
+                 p.y + random.uniform(-150, 150), p.z + 40.0)
+    sh.TeleportPlayerHops(at, None, 60.0, 300)
+
+
+# ---- combat events ----
+
+# One handler each, registered once in start(). Effects
+# only flip a flag, so one ending leaves the others alone.
+_evt = {'recoil': False, 'vampire': False, 'impact': False}
+
+
+def _on_shot(_shot):
+    """Every shot you fire kicks you off the ground."""
+    if _evt['recoil'] is False:
+        return
+    r = _root()
+    if r:
+        sh.AddVelocity(r, sh.Vec3(random.uniform(-2, 2),
+                                  random.uniform(-2, 2), 6.0))
+
+
+def _on_hit(hit):
+    if hit.byPlayer is False:
+        return
+    if _evt['vampire']:
+        cur, mx = ctypes.c_uint32(), ctypes.c_uint32()
+        if sh.GetHealthPlayer(ctypes.byref(cur), ctypes.byref(mx)):
+            sh.SetHealthPlayer(min(mx.value, cur.value + 200))
+    if _evt['impact'] and hit.root:
+        sh.Shove(hit.root, sh.Vec3(0.0, 0.0, 1.0), 40.0, None)
+
+
+def _flag(name, on):
+    def go():
+        _evt[name] = on
+    return go
+
+
 # ---- the effect table ----
 # (name, timed, start, tick, stop, seconds; 0 means default)
 
@@ -700,6 +991,40 @@ EFFECTS = [
     ('Balkan Parking', 0, fx_balkan, None, None, 0),
     ('Fidget Spinner', 1, on_fidget, tick_fidget, None, 10),
     ('Witness Protection', 1, on_witness, tick_witness, off_witness, 20),
+
+    # Motion, from the velocity and shove API.
+    ('Liftoff', 0, fx_launch_cars, None, None, 0),
+    ('Car Tornado', 0, fx_car_tornado, None, None, 0),
+    ('Get Off Me', 0, fx_shove_all, None, None, 0),
+    ('Magnetic', 0, fx_magnet, None, None, 0),
+    ('Time Stop', 0, fx_freeze_all, None, None, 0),
+    ('Bunny Hop', 0, fx_hop, None, None, 0),
+    ('Anti Gravity', 1, on_float, tick_float, off_float, 15),
+    ('Bad Suspension', 1, on_jitter, tick_jitter, off_jitter, 15),
+
+    # Rides, from the Domino attach primitive.
+    ('Hat Car', 1, on_hat_car, None, off_ride, 25),
+    ('Entourage', 1, on_entourage, None, off_entourage, 25),
+
+    # World, from the Domino weather and player work.
+    ('Zeus', 0, fx_lightning, None, None, 0),
+    ('Thunderstorm', 1, on_thunderstorm, tick_thunderstorm,
+     off_thunderstorm, 30),
+    ('Bomb Shelter', 1, on_shielded, tick_shielded, off_shielded, 25),
+    ('Phase Shift', 1, on_ghostmode, None, off_ghostmode, 15),
+    ('Immortal', 1, on_immortal, None, off_immortal, 20),
+    ('Last Stand', 1, on_cannot_die, None, off_cannot_die, 25),
+    ('Paper Cut', 0, fx_paper_cut, None, None, 0),
+    ('Slow Front', 0, fx_weather_creep, None, None, 0),
+    ('Hopscotch', 0, fx_hopscotch, None, None, 0),
+
+    # Combat events, from the hit and shot hooks.
+    ('Rocket Jump', 1, _flag('recoil', True), None,
+     _flag('recoil', False), 20),
+    ('Vampire', 1, _flag('vampire', True), None,
+     _flag('vampire', False), 25),
+    ('Hammer Blow', 1, _flag('impact', True), None,
+     _flag('impact', False), 20),
 ]
 
 
@@ -781,10 +1106,13 @@ def _stop_all():
     for idx, _ in _state['active']:
         _run_stop(idx)
     _state['active'] = []
-    # Never leave input blocked or the screen black.
+    # Never leave input blocked, the screen black, an event
+    # armed or a spawned thing attached to the player.
     _in_mask = 0
     sh.BlockInput(0)
     _black.clear()
+    for k in _evt:
+        _evt[k] = False
 
 
 def _draw():
@@ -813,6 +1141,9 @@ def start():
     _hud = sh.HudCreate('chaos', sh.HUD_TOPRIGHT, 0)
     if _hud:
         sh.HudColour(_hud, 0xFFCC33)
+
+    sh.on_fire(_on_shot)
+    sh.on_hit(_on_hit)
 
     _menu = sh.menu('Chaos')
     if _menu:
@@ -904,6 +1235,7 @@ def on_frame():
 
 def stop():
     _stop_all()
+    sh.clear_events()
     if _menu:
         _menu.destroy()
     if _hud:
