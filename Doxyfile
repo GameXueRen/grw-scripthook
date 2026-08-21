@@ -3,7 +3,7 @@
 # Non-default options only.
 
 PROJECT_NAME           = "GRW ScriptHook"
-PROJECT_NUMBER         = 0.7.0
+PROJECT_NUMBER         = 0.8.0
 PROJECT_BRIEF          = "Plugin API for Ghost Recon Wildlands"
 
 INPUT                  = scripthook.h docs/plugins.md docs/ui.md
