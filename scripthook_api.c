@@ -280,9 +280,67 @@ SH_API int ShWalkToRoot(uint64_t entity, uint64_t *outRoot) {
     return 1;
 }
 
-/* The transform is embedded at obj+0x30, not a pointer. */
+/* Public guarded reads, so a plugin walking engine memory
+ * cannot kill the game with a stale pointer. */
+SH_API int ShReadBytes(uint64_t addr, void *out, uint32_t len) {
+    if (!out || !len) return ShFail(SH_ERR_BAD_ARG);
+    if (!ShReadMem(addr, out, (size_t)len))
+        return ShFail(SH_ERR_UNWRITABLE);
+    g_lastError = SH_OK;
+    return 1;
+}
+
+SH_API uint64_t ShReadU64(uint64_t addr, int *ok) {
+    uint64_t v = 0;
+    int got = ShReadMem(addr, &v, 8);
+    if (ok) *ok = got;
+    if (!got) { ShFail(SH_ERR_UNWRITABLE); return 0; }
+    g_lastError = SH_OK;
+    return v;
+}
+
+SH_API float ShReadF32(uint64_t addr, int *ok) {
+    float v = 0.0f;
+    int got = ShReadMem(addr, &v, 4);
+    if (ok) *ok = got;
+    if (!got) { ShFail(SH_ERR_UNWRITABLE); return 0.0f; }
+    g_lastError = SH_OK;
+    return v;
+}
+
+int ShPeekPlayer(ShPlayer *out);
+
+/* The SOLDIER, from its own matrix. The player global's
+ * transform sits at the camera, measured 1.9 m behind and
+ * 1.6 m above the body, so it misplaces anything spawned. */
 SH_API int ShGetPlayerPosition(ShVec3 *out) {
+    ShPlayer pl;
     uint64_t obj;
+    float m[16];
+
+    if (!out) return ShFail(SH_ERR_BAD_ARG);
+    /* Peek never scans, so this stays frame path safe. */
+    if (ShPeekPlayer(&pl) && pl.entity &&
+        ShReadMem(pl.entity + OFF_ENT_MATRIX, m, 64)) {
+        out->x = m[12];
+        out->y = m[13];
+        out->z = m[14];
+        g_lastError = SH_OK;
+        return 1;
+    }
+    /* Before the player is known, the global is all we have. */
+    obj = ShQ(SH_PLAYER_GLOBAL);
+    if (!obj) return ShFail(SH_ERR_NO_GLOBAL);
+    if (!ShVec(obj + OFF_GLOBAL_TF + OFF_TF_POS, out))
+        return ShFail(SH_ERR_NO_POSITION);
+    g_lastError = SH_OK;
+    return 1;
+}
+
+/* The camera, which is what the player global holds. */
+SH_API int ShGetCameraEyePosition(ShVec3 *out) {
+    uint64_t obj;
+
     if (!out) return ShFail(SH_ERR_BAD_ARG);
     obj = ShQ(SH_PLAYER_GLOBAL);
     if (!obj) return ShFail(SH_ERR_NO_GLOBAL);

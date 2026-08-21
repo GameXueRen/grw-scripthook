@@ -148,10 +148,12 @@ SH_API int  ShGetVersion(void);
  *  the vehicle; the entity stays the soldier.
  */
 SH_API int  ShGetPlayer(ShPlayer *out);
-/** NOT the eye: measured 1.71m above the feet once and
- *  2.72m another time. The eye is ShGetHeadPosition.
- */
+/** The soldier's own position, from its matrix. Use this
+ *  for anything placed in the world. */
 SH_API int  ShGetPlayerPosition(ShVec3 *out);
+/** Where the player global says the view sits, about 1.9m
+ *  behind and 1.6m above the body in third person. */
+SH_API int  ShGetCameraEyePosition(ShVec3 *out);
 /** Teleport the player, at any range. Verified 9.9km
  *  cross map, landing within 3m of the target.
  */
@@ -314,6 +316,13 @@ SH_API const char *ShVehicleName(uint32_t vehicleId);
 SH_API uint64_t ShSpawnVehicle(uint32_t vehicleId,
                                const ShVec3 *pos);
 SH_API void ShSpawnInvalidate(void);
+
+/** Guarded reads, for anything walking engine memory. They
+ *  go through the kernel, so a freed page fails instead of
+ *  killing the game. */
+SH_API int      ShReadBytes(uint64_t addr, void *out, uint32_t len);
+SH_API uint64_t ShReadU64(uint64_t addr, int *ok);
+SH_API float    ShReadF32(uint64_t addr, int *ok);
 
 /** A per frame hook on the game thread. Keep it fast: the
  *  frame waits for it. Registration fails past 16 slots. */
@@ -536,6 +545,11 @@ SH_API int  ShMenuNumber(uint32_t menu, const char *label,
 SH_API int  ShMenuList(uint32_t menu, const char *label,
                        const char **opts, int n, int initial,
                        ShMenuFn fn, void *user);
+/** Drop a menu's items, keeping the row, so a plugin can
+ *  rebuild its own menu without stacking duplicates. */
+SH_API int  ShMenuClear(uint32_t menu);
+/** Remove the row and its subtree. */
+SH_API int  ShMenuDestroy(uint32_t menu);
 /** The line under the items. Empty text removes it. */
 SH_API int  ShMenuStatus(uint32_t menu, const char *text);
 SH_API void ShMenuSetKey(int vk);

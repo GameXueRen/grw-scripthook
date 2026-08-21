@@ -123,6 +123,19 @@ static uint32_t NewMenu(const char *title, uint32_t parent) {
     return 0;
 }
 
+/* Free a menu and everything under it. Caller holds the
+ * lock. Depth is bounded by MENUS, so recursion is safe. */
+static void DropMenu(uint32_t h) {
+    Menu *m = MenuOf(h);
+    int i;
+
+    if (!m) return;
+    for (i = 0; i < m->count; i++)
+        if (m->items[i].kind == IT_SUB && m->items[i].sub)
+            DropMenu(m->items[i].sub);
+    memset(m, 0, sizeof(*m));
+}
+
 static Item *NewItem(Menu *m, int kind, const char *label,
                      ShMenuFn fn, void *user) {
     Item *it;
@@ -423,6 +436,52 @@ SH_API uint32_t ShMenuCreate(const char *title) {
     Unlock();
     ShSetError(h ? SH_OK : SH_ERR_NO_CANDIDATE);
     return h;
+}
+
+/* Drop the items but keep the row, so a plugin can rebuild
+ * its own menu (a reload) without stacking duplicates. */
+SH_API int ShMenuClear(uint32_t menu) {
+    Menu *m;
+
+    Lock();
+    m = MenuOf(menu);
+    if (m) {
+        int i;
+        for (i = 0; i < m->count; i++)
+            if (m->items[i].kind == IT_SUB && m->items[i].sub)
+                DropMenu(m->items[i].sub);
+        m->count = 0;
+        m->sel = 0;
+    }
+    Unlock();
+    return m != NULL;
+}
+
+/* Remove the row itself, and its subtree with it. */
+SH_API int ShMenuDestroy(uint32_t menu) {
+    Menu *parent;
+    int found = 0;
+
+    if (menu == g_root) return 0;
+    Lock();
+    parent = MenuOf(MenuOf(menu) ? MenuOf(menu)->parent : 0);
+    if (parent) {
+        int i, w = 0;
+        for (i = 0; i < parent->count; i++) {
+            if (parent->items[i].kind == IT_SUB &&
+                parent->items[i].sub == menu) {
+                found = 1;
+                continue;
+            }
+            if (w != i) parent->items[w] = parent->items[i];
+            w++;
+        }
+        parent->count = w;
+        if (parent->sel >= w) parent->sel = w ? w - 1 : 0;
+    }
+    DropMenu(menu);
+    Unlock();
+    return found;
 }
 
 SH_API uint32_t ShMenuSub(uint32_t parent, const char *label) {

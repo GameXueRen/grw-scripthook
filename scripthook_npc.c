@@ -73,14 +73,27 @@ static int g_npcCount = 0;
 static volatile int g_listWanted = 0;
 static volatile int g_listDone = 0;
 
+/* The collector writes an array record here. It is bigger
+ * than the three fields we read, and a tight buffer let the
+ * engine walk off the end and corrupt the stack. */
+typedef struct {
+    uint64_t ptr;
+    uint16_t cap;
+    uint16_t cnt;
+    uint8_t  spare[0x38];
+} ArchList;
+
 static void ListOnGameThread(void) {
-    struct { uint64_t ptr; uint16_t cap, cnt; uint32_t pad; } hdr;
+    ArchList hdr;
     uint64_t reg = ShReadQ(ImgAddr(RVA_REGISTRY));
     int i, n = 0;
 
     memset(&hdr, 0, sizeof(hdr));
     if (!reg) return;
     ((Collect_t)ImgAddr(RVA_COLLECT))(reg, ImgAddr(RVA_ARCH_DESC), &hdr);
+    if (!hdr.ptr || hdr.cnt > 0x4000 ||
+        !ShReadableAddr(hdr.ptr, (size_t)hdr.cnt * 8))
+        return;
     for (i = 0; i < hdr.cnt && n < NPC_MAX; i++) {
         uint64_t blk = ShReadQ(hdr.ptr + (uint64_t)i * 8);
         uint64_t obj = BlockObj(blk);
@@ -95,6 +108,10 @@ static void ListOnGameThread(void) {
 }
 
 /* ---- one spawn, on the game thread ---- */
+
+/* The pump signals this, so a spawn costs the frame the
+ * engine needs and no polling granularity on top. */
+static HANDLE g_pumpEvent;
 
 static volatile uint64_t g_pendId = 0;
 static const void *g_pendMtx = NULL;
@@ -155,10 +172,13 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
 
 /* Called from the physics hook, next to ShSpawnPump. */
 void ShNpcPump(void) {
+    int did = 0;
+
     if (g_listWanted) {
         g_listWanted = 0;
         ListOnGameThread();
         g_listDone = 1;
+        did = 1;
     }
     if (g_pendId) {
         uint64_t id = g_pendId;
@@ -166,13 +186,24 @@ void ShNpcPump(void) {
         g_pendId = 0;
         if (mtx) SpawnOnGameThread(id, mtx);
         g_pendDone = 1;
+        did = 1;
     }
+    if (did && g_pumpEvent) SetEvent(g_pumpEvent);
 }
 
 static int WaitFlag(volatile int *flag, int ms) {
-    int waited;
-    for (waited = 0; waited < ms / 10 && !*flag; waited++)
-        Sleep(10);
+    DWORD end = GetTickCount() + (DWORD)ms;
+
+    if (!g_pumpEvent)
+        g_pumpEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    while (!*flag) {
+        DWORD now = GetTickCount();
+        if (now >= end) break;
+        if (g_pumpEvent)
+            WaitForSingleObject(g_pumpEvent, end - now);
+        else
+            Sleep(1);
+    }
     return *flag;
 }
 
