@@ -1568,7 +1568,8 @@ static uint64_t g_bpRingVal[RING_MAX][CHAIN_MAX + 1];
 static int      g_bpFiltIdx = -1;
 static uint64_t g_bpFiltVal = 0;
 
-static void BpCaptureChain(PCONTEXT c) {
+/* Returns 1 when the hit passes the filter and was kept. */
+static int BpCaptureChain(PCONTEXT c) {
     uint64_t regs[3], vals[CHAIN_MAX + 1], v;
     int i, k;
 
@@ -1582,10 +1583,11 @@ static void BpCaptureChain(PCONTEXT c) {
     }
     if (g_bpFiltIdx >= 0 && g_bpFiltIdx <= g_bpChainN &&
         vals[g_bpFiltIdx] != g_bpFiltVal)
-        return;
+        return 0;
     k = g_bpRing++ % RING_MAX;
     memcpy(g_bpRingReg[k], regs, sizeof(regs));
     memcpy(g_bpRingVal[k], vals, sizeof(vals));
+    return 1;
 }
 
 /* A projectile keeps its hits at +0xA60, count at +0xA6A,
@@ -1669,13 +1671,13 @@ static LONG CALLBACK BpHandler(PEXCEPTION_POINTERS ei) {
         /* ring buffers: keep the MOST RECENT samples */
         g_bpRip[g_bpN % 8] = ei->ContextRecord->Rip;
         g_bpN++;
-        {
+        /* With a filter set, only matching hits keep a sample. */
+        if (BpCaptureChain(ei->ContextRecord)) {
             int k = g_bpS++ % 4;
             uint64_t rsp = ei->ContextRecord->Rsp;
             g_bpRsp[k] = rsp;
             g_bpRdx[k] = ei->ContextRecord->Rdx;
             g_bpRcx[k] = ei->ContextRecord->Rcx;
-            BpCaptureChain(ei->ContextRecord);
             {
                 uint64_t p = ei->ContextRecord->Rcx;
                 uint16_t n = 0;
