@@ -1,0 +1,9 @@
+# Build output. The Makefile writes binaries next to
+# GRW.exe via GAMEDIR, and out/ is the scratch target.
+out/
+*.o
+*.obj
+
+# Editor and tool state
+.claude/
+__pycache__/
