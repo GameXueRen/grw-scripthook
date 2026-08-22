@@ -1177,6 +1177,45 @@ SH_API int      ShGameSceneActive(const char *name);
 SH_API int      ShGameScenes(char *buf, int n);
 
 /** @} */
+/** @defgroup widgets The engine's widget tree
+ *  Every widget the engine has, ours and the game's own,
+ *  by its engine handle. @{ */
+
+/** Read only. Writing into a tree you do not own is how
+ *  a scene gets corrupted. */
+
+/** The scenes drawn last frame, as handles. Walk one with
+ *  ShSceneRoot and the ShWidget calls below. */
+SH_API int      ShGameSceneCount(void);
+SH_API uint64_t ShGameSceneAt(int i);
+SH_API int      ShGameSceneName(uint64_t scene, char *buf, int n);
+
+/** The root widget of any scene, ours or the game's. */
+SH_API uint64_t ShSceneRoot(uint64_t scene);
+
+/** Children in the engine's own draw order. */
+SH_API int      ShWidgetChildCount(uint64_t widget);
+SH_API uint64_t ShWidgetChildAt(uint64_t widget, int i);
+
+/** The class name, "LabelWidget" and the like. */
+SH_API int      ShWidgetClass(uint64_t widget, char *out, int n);
+
+/** Any property the class has, by the same ids the SH_P_
+ *  defines carry. 0 when the class lacks it. */
+SH_API int      ShWidgetPropType(uint64_t widget, uint32_t prop);
+SH_API int      ShWidgetGetF(uint64_t widget, uint32_t prop, float *out);
+SH_API int      ShWidgetGetU(uint64_t widget, uint32_t prop,
+                             uint32_t *out);
+SH_API int      ShWidgetGetV(uint64_t widget, uint32_t prop, float *out,
+                             int n);
+SH_API int      ShWidgetGetS(uint64_t widget, uint32_t prop, char *out,
+                             int n);
+
+/** The handle behind one of our own ids, so a widget made
+ *  with ShUiCreate reads back the same way. */
+SH_API uint64_t ShUiHandle(uint32_t id);
+
+/** @} */
 /** @addtogroup core
  *  @{ */
 

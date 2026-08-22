@@ -11,7 +11,9 @@
 
 #include "scripthook.h"
 
-#define TICK_MS     250
+/* The mode switches on a keypress, so the walk has to keep
+ * up with it. 250 left the camera held far too long. */
+#define TICK_MS     60
 #define MAX_PARTS   64
 
 /* The player position is already at head height, so forward
@@ -25,6 +27,13 @@
 #define UP_MIN      -30.0f
 #define UP_MAX      30.0f
 #define UP_STEP     5.0f
+
+/* How long the aim has to hold before the camera is handed
+ * over, so the zoom into the body is never on screen. */
+#define SETTLE_DEF  600.0f
+#define SETTLE_MIN  0.0f
+#define SETTLE_MAX  2000.0f
+#define SETTLE_STEP 50.0f
 
 typedef int (*IsInGame_t)(void);
 typedef int (*GameState_t)(void);
@@ -40,6 +49,16 @@ typedef int (*MenuToggle_t)(uint32_t, const char *, int,
 typedef int (*MenuNumber_t)(uint32_t, const char *, float, float,
                             float, float, ShMenuFn, void *);
 typedef int (*MenuStatus_t)(uint32_t, const char *);
+typedef int (*MenuAction_t)(uint32_t, const char *, ShMenuFn, void *);
+typedef int (*SceneCount_t)(void);
+typedef uint64_t (*SceneAt_t)(int);
+typedef uint64_t (*SceneRoot_t)(uint64_t);
+typedef int (*ChildCount_t)(uint64_t);
+typedef uint64_t (*ChildAt_t)(uint64_t, int);
+typedef int (*WidgetClass_t)(uint64_t, char *, int);
+typedef int (*WidgetGetS_t)(uint64_t, uint32_t, char *, int);
+typedef int (*SceneName_t)(uint64_t, char *, int);
+typedef int (*WidgetPropType_t)(uint64_t, uint32_t);
 
 static IsInGame_t   g_inGame;
 static GameState_t  g_state;
@@ -50,12 +69,29 @@ static HeadNodes_t  g_headNodes;
 static SetVisible_t g_setVisible;
 static MenuStatus_t g_status;
 static SetBlur_t    g_setBlur;
+static SceneCount_t  g_sceneCount;
+static SceneAt_t     g_sceneAt;
+static SceneRoot_t   g_sceneRoot;
+static ChildCount_t  g_childCount;
+static ChildAt_t     g_childAt;
+static WidgetClass_t g_widgetClass;
+static WidgetGetS_t  g_widgetGetS;
+static SceneName_t   g_sceneName;
+static WidgetPropType_t g_widgetPropType;
 
 static uint32_t g_menu = 0;
 static volatile int   g_on = 0;
 static volatile int   g_wantHide = 1;
 static volatile float g_fwd = FWD_DEF;
 static volatile float g_up = UP_DEF;
+static volatile int   g_settleMs = (int)SETTLE_DEF;
+
+/* Counted so the status line can say where the walk got
+ * to, rather than only whether it matched. */
+static volatile int g_nScenes, g_nWidgets, g_nLabels, g_nText;
+static volatile int g_nSights;
+
+static int Aiming(void);
 
 static uint64_t g_root = 0;
 static uint64_t g_hideRoot = 0;
@@ -122,6 +158,9 @@ static void Report(void) {
     if (!g_status) return;
     if (!g_on)
         snprintf(line, sizeof(line), "off");
+    else if (!g_widgetGetS)
+        snprintf(line, sizeof(line),
+                 "on, no widget tree: update the ScriptHook");
     else if (!g_wantHide)
         snprintf(line, sizeof(line), "on, head left visible");
     else if (g_nparts > 0)
@@ -184,6 +223,163 @@ static void OnUp(uint32_t menu, uint32_t item, int value,
     if (g_on && g_held) PushCamera();
 }
 
+/* 0 hands the camera over the instant iron sights come up,
+ * which shows the eye flying into the body. */
+static void OnSettle(uint32_t menu, uint32_t item, int value,
+                     void *user) {
+    (void)menu; (void)item; (void)user;
+    g_settleMs = value;
+}
+
+/* The weapon prompt names the mode Alt switches TO, not
+ * the one you are in. So a label reading OVER THE SHOULDER
+ * means iron sights are up right now. */
+/* Iron sights are the engine's own aim camera. Holding the
+ * eye there rips the scope glass off the weapon and smears
+ * the scenery through the temporal upscaler. */
+/* The label holds a localisation key, not the drawn text:
+ * [AIMMODE_PC_OTS] is what renders as OVER THE SHOULDER.
+ * The literal is kept for a build that resolves inline. */
+#define WANT_KEY     "AIMMODE_PC_OTS"
+#define WANT_LABEL   "OVER THE SHOULDER"
+#define WANT_SCENE   "HUD_WeaponItemDisplay"
+#define WALK_DEPTH   10
+#define WALK_BUDGET  600
+
+static int Contains(const char *hay, const char *needle) {
+    int i, j;
+
+    for (i = 0; hay[i]; i++) {
+        for (j = 0; needle[j]; j++) {
+            char a = hay[i + j], b = needle[j];
+            if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+            if (b >= 'a' && b <= 'z') b = (char)(b - 32);
+            if (a != b) break;
+        }
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static int LabelSays(uint64_t w, int depth, int *budget) {
+    char cls[32], txt[160];
+    int n, i;
+
+    if (!w || depth > WALK_DEPTH) return 0;
+    if (--*budget < 0) return 0;
+    g_nWidgets++;
+
+    if (g_widgetClass(w, cls, sizeof(cls)) && Contains(cls, "Label")) {
+        g_nLabels++;
+        if (g_widgetGetS(w, SH_P_TEXT, txt, sizeof(txt))) {
+            g_nText++;
+            if (Contains(txt, WANT_KEY) || Contains(txt, WANT_LABEL))
+                return 1;
+        }
+    }
+
+    n = g_childCount(w);
+    for (i = 0; i < n; i++)
+        if (LabelSays(g_childAt(w, i), depth + 1, budget)) return 1;
+    return 0;
+}
+
+/* The weapon prompt stays up after ADS ends, so the aim
+ * mode alone would leave the camera released for good.
+ * Our own poll: the hook only blocks the GAME's reads. */
+static int Aiming(void) {
+    return (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+}
+
+/* Walks the game's own UI, so it needs a ScriptHook that
+ * exposes the widget tree. Older ones keep the camera. */
+static int IronSights(void) {
+    int i, n, budget = WALK_BUDGET;
+
+    if (!g_sceneCount || !g_sceneAt || !g_sceneRoot ||
+        !g_childCount || !g_childAt || !g_widgetClass ||
+        !g_widgetGetS)
+        return 0;
+
+    g_nWidgets = 0; g_nLabels = 0; g_nText = 0;
+    n = g_sceneCount();
+    g_nScenes = n;
+    for (i = 0; i < n; i++) {
+        uint64_t s = g_sceneAt(i), root;
+        char name[64];
+
+        /* Only the weapon display carries the prompt, and
+         * walking all thirteen scenes every tick is work
+         * for nothing. */
+        if (g_sceneName && g_sceneName(s, name, sizeof(name)) &&
+            !Contains(name, WANT_SCENE))
+            continue;
+        root = g_sceneRoot(s);
+        if (!root) continue;
+        if (LabelSays(root, 0, &budget)) { g_nSights = 1; return 1; }
+    }
+    g_nSights = 0;
+    return 0;
+}
+
+/* Every widget of every game scene, written out, because
+ * the label we want is on screen and the walk does not
+ * see its text. Ground truth beats another guess. */
+static FILE *g_dump;
+
+static void DumpWidget(uint64_t w, int depth, int *budget) {
+    char cls[48], txt[192], pad[24];
+    int n, i, got, type;
+
+    if (!w || depth > 16 || --*budget < 0) return;
+
+    for (i = 0; i < depth && i < 20; i++) pad[i] = ' ';
+    pad[i] = 0;
+
+    cls[0] = 0;
+    g_widgetClass(w, cls, sizeof(cls));
+    type = g_widgetPropType ? g_widgetPropType(w, SH_P_TEXT) : -1;
+    got = g_widgetGetS(w, SH_P_TEXT, txt, sizeof(txt));
+
+    fprintf(g_dump, "%s%016llx %-28s texttype %d %s\n", pad,
+            (unsigned long long)w, cls[0] ? cls : "?", type,
+            got ? txt : "<no text>");
+
+    n = g_childCount(w);
+    for (i = 0; i < n; i++)
+        DumpWidget(g_childAt(w, i), depth + 1, budget);
+}
+
+static void OnDump(uint32_t menu, uint32_t item, int value,
+                   void *user) {
+    char path[MAX_PATH], name[64];
+    int i, n, budget = 20000;
+    (void)menu; (void)item; (void)value; (void)user;
+
+    if (!g_sceneCount) return;
+    GetModuleFileNameA(NULL, path, sizeof(path));
+    { char *s = strrchr(path, '\\'); if (s) s[1] = 0; }
+    strcat(path, "firstperson_ui.log");
+
+    g_dump = fopen(path, "w");
+    if (!g_dump) return;
+    n = g_sceneCount();
+    fprintf(g_dump, "%d scenes drawn last frame\n\n", n);
+    for (i = 0; i < n; i++) {
+        uint64_t s = g_sceneAt(i), root = g_sceneRoot(s);
+        name[0] = 0;
+        if (g_sceneName) g_sceneName(s, name, sizeof(name));
+        fprintf(g_dump, "scene %d %016llx root %016llx name %s\n",
+                i, (unsigned long long)s, (unsigned long long)root,
+                name[0] ? name : "?");
+        DumpWidget(root, 1, &budget);
+        fprintf(g_dump, "\n");
+    }
+    fclose(g_dump);
+    g_dump = NULL;
+    if (g_status) g_status(g_menu, "dumped firstperson_ui.log");
+}
+
 /* Paused counts as in game, but the player lookup falls
  * back to a heap scan while a menu is up. Nothing here is
  * urgent enough to pay for that, so the tick waits. */
@@ -196,7 +392,7 @@ static int Playing(void) {
  * dropped and armed again on the new one.
  */
 static DWORD WINAPI TickThread(LPVOID p) {
-    int said = 0;
+    int said = 0, settle = 0;
     (void)p;
 
     for (;;) {
@@ -209,7 +405,20 @@ static DWORD WINAPI TickThread(LPVOID p) {
             Hold(0);
             continue;
         }
-        Hold(1);
+        /* The engine's aim camera owns iron sights, but
+         * only while the player is actually aiming. */
+        /* The wait is on the AIM, not on the mode: raising
+         * the weapon zooms the eye into the body, while
+         * Alt switches mode with no transition at all. */
+        /* So an already settled aim hands over the moment
+         * the mode changes. Taking it back is immediate. */
+        if (Aiming()) {
+            if (settle < g_settleMs) settle += TICK_MS;
+        } else {
+            settle = 0;
+        }
+        Hold(!(settle >= g_settleMs && IronSights()));
+        if (!g_held) continue;
 
         root = PlayerRoot();
         if (!root) continue;
@@ -251,6 +460,18 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_setVisible = GetProcAddress(m, "ShSetVisible");
     /* Optional: an older dinput8 just keeps the blur. */
     *(FARPROC *)&g_setBlur = GetProcAddress(m, "ShSetCameraBlur");
+    /* Optional: without the widget tree the camera is held
+     * through iron sights, which is the old behaviour. */
+    *(FARPROC *)&g_sceneCount = GetProcAddress(m, "ShGameSceneCount");
+    *(FARPROC *)&g_sceneAt = GetProcAddress(m, "ShGameSceneAt");
+    *(FARPROC *)&g_sceneRoot = GetProcAddress(m, "ShSceneRoot");
+    *(FARPROC *)&g_childCount = GetProcAddress(m, "ShWidgetChildCount");
+    *(FARPROC *)&g_childAt = GetProcAddress(m, "ShWidgetChildAt");
+    *(FARPROC *)&g_widgetClass = GetProcAddress(m, "ShWidgetClass");
+    *(FARPROC *)&g_widgetGetS = GetProcAddress(m, "ShWidgetGetS");
+    *(FARPROC *)&g_sceneName = GetProcAddress(m, "ShGameSceneName");
+    *(FARPROC *)&g_widgetPropType =
+        GetProcAddress(m, "ShWidgetPropType");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuToggle = GetProcAddress(m, "ShMenuToggle");
     *(FARPROC *)&menuNumber = GetProcAddress(m, "ShMenuNumber");
@@ -267,6 +488,14 @@ static DWORD WINAPI BindThread(LPVOID p) {
                FWD_STEP, OnForward, NULL);
     menuNumber(g_menu, "Height cm", UP_DEF, UP_MIN, UP_MAX,
                UP_STEP, OnUp, NULL);
+    menuNumber(g_menu, "ADS settle ms", SETTLE_DEF, SETTLE_MIN,
+               SETTLE_MAX, SETTLE_STEP, OnSettle, NULL);
+    {
+        MenuAction_t menuAction;
+        *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
+        if (menuAction)
+            menuAction(g_menu, "Dump UI to log", OnDump, NULL);
+    }
     Report();
 
     CreateThread(NULL, 0, TickThread, NULL, 0, NULL);

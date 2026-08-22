@@ -1617,6 +1617,105 @@ SH_API int ShUiImageSet(uint32_t id, uint32_t texture) {
     return ok;
 }
 
+/* ---- any widget, by engine handle ---- */
+
+/* The calls above address widgets we made, by id. These
+ * address any widget the engine has, including the game's
+ * own, so a plugin can read the UI it is looking at. */
+/* Read only on purpose: writing into the game's tree is
+ * how you corrupt a scene you do not own. */
+extern int ShPropClassOf(uint64_t handle, char *out, int n);
+
+/* A widget handle is [vtable, ..., private at +0x20], and
+ * the private carries the child array. */
+static uint64_t PrivOf(uint64_t widget) {
+    if (!Sane(widget) || !Readable(widget, 0x28)) return 0;
+    return RQ(widget + 0x20);
+}
+
+SH_API int ShWidgetChildCount(uint64_t widget) {
+    uint64_t priv = PrivOf(widget), n;
+    if (!priv || !Readable(priv + C_ORDER + 16, 8)) return 0;
+    n = RQ(priv + C_ORDER + 8);
+    return (n > 4096) ? 0 : (int)n;
+}
+
+SH_API uint64_t ShWidgetChildAt(uint64_t widget, int i) {
+    uint64_t priv = PrivOf(widget), n, arr;
+    if (!priv || i < 0 || !Readable(priv + C_ORDER + 16, 8)) return 0;
+    n = RQ(priv + C_ORDER + 8);
+    if (n > 4096 || (uint64_t)i >= n) return 0;
+    arr = RQ(priv + C_ORDER + 16);
+    return arr ? RQ(arr + 8 * (uint64_t)i) : 0;
+}
+
+/* "LabelWidget", "ImageWidget", "Container" and so on. */
+SH_API int ShWidgetClass(uint64_t widget, char *out, int n) {
+    if (!out || n < 2 || !Sane(widget)) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    return ShPropClassOf(widget, out, n);
+}
+
+SH_API int ShWidgetPropType(uint64_t widget, uint32_t prop) {
+    if (!Sane(widget)) return 0;
+    return ShPropType(widget, prop);
+}
+
+SH_API int ShWidgetGetF(uint64_t widget, uint32_t prop, float *out) {
+    if (!out || !Sane(widget)) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    return ShPropGetF(widget, prop, out);
+}
+
+SH_API int ShWidgetGetU(uint64_t widget, uint32_t prop, uint32_t *out) {
+    if (!out || !Sane(widget)) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    return ShPropGetU(widget, prop, out);
+}
+
+SH_API int ShWidgetGetV(uint64_t widget, uint32_t prop, float *out,
+                        int n) {
+    if (!out || n < 2 || n > 3 || !Sane(widget)) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    return ShPropGetV(widget, prop, out, n);
+}
+
+/* The block is {len, cap, refcount, chars}, the same shape
+ * the label setter builds. */
+SH_API int ShWidgetGetS(uint64_t widget, uint32_t prop, char *out,
+                        int n) {
+    uint64_t block;
+    uint32_t len;
+
+    if (!out || n < 1 || !Sane(widget)) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    out[0] = 0;
+    block = ShPropGetS(widget, prop);
+    if (!block || !Readable(block, 12)) return 0;
+    memcpy(&len, (void *)(uintptr_t)block, 4);
+    if ((int)len > n - 1) len = (uint32_t)(n - 1);
+    if (!Readable(block + 12, len)) return 0;
+    memcpy(out, (void *)(uintptr_t)(block + 12), len);
+    out[len] = 0;
+    return 1;
+}
+
+/* The engine handle behind one of our own ids, so the two
+ * halves of the API meet. */
+SH_API uint64_t ShUiHandle(uint32_t id) {
+    Widget *w;
+    uint64_t h;
+    Lock();
+    w = Get(id);
+    h = w ? w->handle : 0;
+    Unlock();
+    return h;
+}
+
 SH_API int ShUiPropCount(void) {
     return ShPropCount();
 }

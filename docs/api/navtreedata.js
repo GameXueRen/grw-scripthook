@@ -65,7 +65,7 @@ var NAVTREEINDEX =
 [
 "annotated.html",
 "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263",
-"structShShot.html"
+"structShRay.html#a4b58813096e86713e20de6c882dc0bcd"
 ];
 
 const SYNCONMSG = 'click to disable panel synchronization';

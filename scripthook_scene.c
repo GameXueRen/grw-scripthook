@@ -299,6 +299,33 @@ SH_API int ShGameSceneActive(const char *name) {
     return 0;
 }
 
+/* The scenes the game drew last frame, as engine handles.
+ * Everything under one is reachable with the ShWidget
+ * calls, so a plugin can read the game's own UI. */
+SH_API int ShGameSceneCount(void) {
+    return g_nActivePrev;
+}
+
+SH_API uint64_t ShGameSceneAt(int i) {
+    if (i < 0 || i >= g_nActivePrev) return 0;
+    return g_activePrev[i];
+}
+
+SH_API int ShGameSceneName(uint64_t scene, char *buf, int n) {
+    const char *nm;
+    if (!buf || n < 1) return 0;
+    nm = SceneName(scene);
+    strncpy(buf, nm, (size_t)n - 1);
+    buf[n - 1] = 0;
+    return buf[0] != 0;
+}
+
+/* The root widget of a scene, ours or the game's. */
+SH_API uint64_t ShSceneRoot(uint64_t scene) {
+    uint64_t priv = RQ(scene + 8);
+    return priv ? RQ(priv + SP_ROOT) : 0;
+}
+
 SH_API int ShGameScenes(char *buf, int n) {
     int i, used = 0, count = 0;
     if (!buf || n < 1) return 0;
