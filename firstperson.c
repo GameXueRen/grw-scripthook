@@ -77,6 +77,18 @@ static void PushCamera(void) {
     if (g_fp) g_fp(g_fwd / 100.0f, g_up / 100.0f);
 }
 
+/* The hook reapplies the eye every frame until it is given
+ * back, so a screen the player opens has to release it. The
+ * drone owns its own camera and fights us for it. */
+static volatile int g_held = 0;
+
+static void Hold(int want) {
+    if (want == g_held) return;
+    g_held = want;
+    if (want) PushCamera();
+    else if (g_release) g_release(SH_CAM_POS);
+}
+
 /* Entity wide show: releases every hold on the root and
  * unhides all nodes in one deferred call, applied on the
  * game thread against the live node list. */
@@ -128,7 +140,7 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
         uint64_t root = PlayerRoot();
 
         g_on = 1;
-        PushCamera();
+        Hold(1);
         if (g_setBlur) g_setBlur(0);
         if (root && g_wantHide) {
             g_root = root;
@@ -138,7 +150,7 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
         g_on = 0;
         ShowHead();
         if (g_setBlur) g_setBlur(1);
-        if (g_release) g_release(SH_CAM_POS);
+        Hold(0);
     }
     Report();
 }
@@ -160,14 +172,16 @@ static void OnForward(uint32_t menu, uint32_t item, int value,
                       void *user) {
     (void)menu; (void)item; (void)user;
     g_fwd = (float)value;
-    if (g_on) PushCamera();
+    /* Only while we already own it, or adjusting a slider
+     * would take the camera back during a screen. */
+    if (g_on && g_held) PushCamera();
 }
 
 static void OnUp(uint32_t menu, uint32_t item, int value,
                  void *user) {
     (void)menu; (void)item; (void)user;
     g_up = (float)value;
-    if (g_on) PushCamera();
+    if (g_on && g_held) PushCamera();
 }
 
 /* Paused counts as in game, but the player lookup falls
@@ -189,7 +203,13 @@ static DWORD WINAPI TickThread(LPVOID p) {
         uint64_t root;
 
         Sleep(TICK_MS);
-        if (!g_on || !Playing()) continue;
+        /* Give the camera back on every screen, not just on
+         * the toggle, or the drone never gets it. */
+        if (!g_on || !Playing()) {
+            Hold(0);
+            continue;
+        }
+        Hold(1);
 
         root = PlayerRoot();
         if (!root) continue;

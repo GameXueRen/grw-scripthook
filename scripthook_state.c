@@ -144,11 +144,18 @@ SH_API int ShInLoadout(void)   { return (ShGetUiState() & SH_UI_LOADOUT) != 0; }
 SH_API int ShInMap(void)       { return (ShGetUiState() & SH_UI_MAP) != 0; }
 SH_API int ShInBinocular(void) { return (ShGetUiState() & SH_UI_BINOCULAR) != 0; }
 
-/* the pause family: tabs, loadout, map, skills */
+/* Every screen that takes the player out of normal play.
+ * A mod that forces the camera per frame must stop on all
+ * of these, so they all report as paused. */
+/* SH_UI_VEHICLE is the vehicle HUD, which is normal play,
+ * so it is deliberately absent. The camera template check
+ * in ShInPauseMenu only ever caught the pause tabs. */
+#define SH_UI_SCREENS  (SH_UI_PAUSE | SH_UI_LOADOUT | SH_UI_MAP | \
+                        SH_UI_SKILLS | SH_UI_COMWHEEL | SH_UI_POPUP | \
+                        SH_UI_CINEMATIC | SH_UI_DRONE | SH_UI_BINOCULAR)
+
 static int Paused(void) {
-    uint32_t ui = ShGetUiState();
-    if (ui & (SH_UI_PAUSE | SH_UI_LOADOUT | SH_UI_MAP | SH_UI_SKILLS))
-        return 1;
+    if (ShGetUiState() & SH_UI_SCREENS) return 1;
     return ShInPauseMenu();
 }
 
