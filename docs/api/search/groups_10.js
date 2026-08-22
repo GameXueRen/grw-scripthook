@@ -1,5 +1,4 @@
 var searchData=
 [
-  ['vehicles_0',['Vehicles',['../group__vehicles.html',1,'']]],
-  ['visibility_1',['Visibility',['../group__visibility.html',1,'']]]
+  ['weather_20and_20time_0',['Weather and time',['../group__weather.html',1,'']]]
 ];

@@ -7,6 +7,5 @@ var searchData=
   ['hits_4',['hits',['../structShRay.html#a803cdd14f70f2b3fde1c19bc1dd724d6',1,'ShRay']]],
   ['hitsonly_5',['hitsOnly',['../structShRayQuery.html#a76b7908f923086317ed5124b9f966c12',1,'ShRayQuery']]],
   ['hold_20across_20the_20api_6',['Rules that hold across the API',['../index.html#autotoc_md1',1,'']]],
-  ['hooks_7',['The four hooks',['../python.html#autotoc_md3',1,'']]],
-  ['hud_8',['HUD',['../group__hud.html',1,'']]]
+  ['hud_7',['HUD',['../group__hud.html',1,'']]]
 ];

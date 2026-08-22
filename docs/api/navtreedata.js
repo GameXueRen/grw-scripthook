@@ -26,25 +26,17 @@ var NAVTREE =
 [
   [ "GRW ScriptHook", "index.html", [
     [ "Writing a plugin", "index.html", "index" ],
-    [ "Writing a plugin in Python", "python.html", [
-      [ "The four hooks", "python.html#autotoc_md3", null ],
-      [ "Threads", "python.html#autotoc_md4", null ],
-      [ "Names", "python.html#autotoc_md5", null ],
-      [ "Menus", "python.html#autotoc_md6", null ],
-      [ "Events", "python.html#autotoc_md7", null ],
-      [ "Installing", "python.html#autotoc_md8", null ]
-    ] ],
     [ "Native UI", "ui.html", [
-      [ "Scenes", "ui.html#autotoc_md9", null ],
-      [ "Widgets", "ui.html#autotoc_md10", null ],
-      [ "Properties", "ui.html#autotoc_md11", null ],
-      [ "Batches", "ui.html#autotoc_md12", null ],
-      [ "Input", "ui.html#autotoc_md13", null ],
-      [ "Lifecycle", "ui.html#autotoc_md14", null ],
-      [ "What the game is showing", "ui.html#autotoc_md15", null ],
-      [ "Fonts and textures", "ui.html#autotoc_md16", null ],
-      [ "Errors", "ui.html#autotoc_md17", null ],
-      [ "What it costs", "ui.html#autotoc_md18", null ]
+      [ "Scenes", "ui.html#autotoc_md3", null ],
+      [ "Widgets", "ui.html#autotoc_md4", null ],
+      [ "Properties", "ui.html#autotoc_md5", null ],
+      [ "Batches", "ui.html#autotoc_md6", null ],
+      [ "Input", "ui.html#autotoc_md7", null ],
+      [ "Lifecycle", "ui.html#autotoc_md8", null ],
+      [ "What the game is showing", "ui.html#autotoc_md9", null ],
+      [ "Fonts and textures", "ui.html#autotoc_md10", null ],
+      [ "Errors", "ui.html#autotoc_md11", null ],
+      [ "What it costs", "ui.html#autotoc_md12", null ]
     ] ],
     [ "Topics", "topics.html", "topics" ],
     [ "Data Structures", "annotated.html", [
@@ -72,8 +64,8 @@ var NAVTREE =
 var NAVTREEINDEX =
 [
 "annotated.html",
-"group__state.html#ggad09ea399101d05a6198c72b8226f8b5da3d1bdbd9c47168f4e8a53707236b31e9",
-"structShRayQuery.html#a76b7908f923086317ed5124b9f966c12"
+"group__stats.html#ga1aaa7a55caf3c90e493da7bf078d5caf",
+"ui.html#autotoc_md10"
 ];
 
 const SYNCONMSG = 'click to disable panel synchronization';

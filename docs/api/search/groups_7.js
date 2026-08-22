@@ -1,4 +1,5 @@
 var searchData=
 [
-  ['input_0',['Input',['../group__input.html',1,'']]]
+  ['menu_0',['Menu',['../group__menu.html',1,'']]],
+  ['motion_1',['Motion',['../group__motion.html',1,'']]]
 ];

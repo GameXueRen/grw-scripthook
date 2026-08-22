@@ -11,7 +11,7 @@ endif
 GAMEDIR = ../..
 
 .PHONY: all roulette fling tpgun spawner crazycars freecam fov fps \
-        chaos sample docs clean pyhost
+        chaos sample docs clean
 
 sample: $(GAMEDIR)/ui_sample.asi
 
@@ -20,20 +20,6 @@ $(GAMEDIR)/ui_sample.asi: ui_sample.c scripthook.h libscripthook.a
 
 docs:
 	doxygen Doxyfile
-
-pyhost: $(GAMEDIR)/pyhost.asi $(GAMEDIR)/python/sh.py \
-        $(GAMEDIR)/python/_pyhost.py
-
-$(GAMEDIR)/python/_pyhost.py: _pyhost.py
-	mkdir -p $(GAMEDIR)/python
-	cp _pyhost.py $@
-
-$(GAMEDIR)/pyhost.asi: pyhost.c scripthook.h libscripthook.a
-	$(CC) $(CFLAGS) -o $@ pyhost.c -L. -lscripthook
-
-$(GAMEDIR)/python/sh.py: gen_sh.py scripthook.h
-	mkdir -p $(GAMEDIR)/python
-	python3 gen_sh.py scripthook.h $@
 
 all: $(GAMEDIR)/dinput8.dll $(GAMEDIR)/test_plugin.asi
 

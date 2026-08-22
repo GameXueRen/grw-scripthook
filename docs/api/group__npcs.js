@@ -6,6 +6,5 @@ var group__npcs =
     ] ],
     [ "ShNpcCount", "group__npcs.html#gab9dc9671b30f73784157b085b670149c", null ],
     [ "ShNpcAt", "group__npcs.html#ga2660a8c47b1e5965ed675a535d710b9e", null ],
-    [ "ShSpawnNpc", "group__npcs.html#ga2ead7877c2185832e4ed6fbae96d9ec5", null ],
-    [ "ShDespawn", "group__npcs.html#gad5c76851353b560508e50c012aae2984", null ]
+    [ "ShSpawnNpc", "group__npcs.html#ga2ead7877c2185832e4ed6fbae96d9ec5", null ]
 ];

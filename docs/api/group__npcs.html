@@ -26,7 +26,7 @@
  <tbody>
  <tr id="projectrow">
   <td id="projectalign">
-   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.10.0</span>
+   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.8.0</span>
    </div>
    <div id="projectbrief">Plugin API for Ghost Recon Wildlands</div>
   </td>
@@ -128,8 +128,6 @@ Functions</h2></td></tr>
 <tr class="memitem:ga2660a8c47b1e5965ed675a535d710b9e" id="r_ga2660a8c47b1e5965ed675a535d710b9e"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> const <a class="el" href="structShNpcArchetype.html">ShNpcArchetype</a> *&#160;</td><td class="memItemRight"><a class="el" href="#ga2660a8c47b1e5965ed675a535d710b9e">ShNpcAt</a> (int index)</td></tr>
 <tr class="memitem:ga2ead7877c2185832e4ed6fbae96d9ec5" id="r_ga2ead7877c2185832e4ed6fbae96d9ec5"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> uint64_t&#160;</td><td class="memItemRight"><a class="el" href="#ga2ead7877c2185832e4ed6fbae96d9ec5">ShSpawnNpc</a> (uint64_t archetypeId, const <a class="el" href="structShVec3.html">ShVec3</a> *pos)</td></tr>
 <tr class="memdesc:ga2ead7877c2185832e4ed6fbae96d9ec5"><td class="mdescLeft">&#160;</td><td class="mdescRight">Spawn an NPC and return its ENTITY, or 0 on failure.  <br /></td></tr>
-<tr class="memitem:gad5c76851353b560508e50c012aae2984" id="r_gad5c76851353b560508e50c012aae2984"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#gad5c76851353b560508e50c012aae2984">ShDespawn</a> (uint64_t entity)</td></tr>
-<tr class="memdesc:gad5c76851353b560508e50c012aae2984"><td class="mdescLeft">&#160;</td><td class="mdescRight">Retire a spawned entity, NPC or vehicle, through the spawn manager.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
 <div class="textblock"><p>Standalone NPCs by archetype, built like the engine's spawn director does (FINDINGS "NPC SPAWN WORKS"). </p>
@@ -192,26 +190,6 @@ Functions</h2></td></tr>
 
 <p>Spawn an NPC and return its ENTITY, or 0 on failure. </p>
 <p>Blocks until it exists, usually a frame or two. The NPC joins the population manager with the current Camp and Job, so its AI runs like a native spawn. </p>
-
-</div>
-</div>
-<a id="gad5c76851353b560508e50c012aae2984" name="gad5c76851353b560508e50c012aae2984"></a>
-<h2 class="memtitle"><span class="permalink"><a href="#gad5c76851353b560508e50c012aae2984">&#9670;&#160;</a></span>ShDespawn()</h2>
-
-<div class="memitem">
-<div class="memproto">
-      <table class="memname">
-        <tr>
-          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShDespawn </td>
-          <td>(</td>
-          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>entity</em></span></td><td>)</td>
-          <td></td>
-        </tr>
-      </table>
-</div><div class="memdoc">
-
-<p>Retire a spawned entity, NPC or vehicle, through the spawn manager. </p>
-<p>Entities built outside the spawn system have no spec and refuse. </p>
 
 </div>
 </div>

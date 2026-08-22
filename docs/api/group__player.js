@@ -15,7 +15,6 @@ var group__player =
     [ "ShInvalidate_t", "group__player.html#gaca138d28b33f723c093614bd43113671", null ],
     [ "ShGetPlayer", "group__player.html#ga64356e0564073a015c7ecba6f2e1baec", null ],
     [ "ShGetPlayerPosition", "group__player.html#ga7272d881be2a967b7122cc1f8458e7cb", null ],
-    [ "ShGetCameraEyePosition", "group__player.html#ga655dcf71944a7a4cbfbcef291fc28f4d", null ],
     [ "ShTeleportPlayer", "group__player.html#ga5fb9432f1a44c76813a143294446e988", null ],
     [ "ShTeleportPlayerHops", "group__player.html#gae2b6aaafd6736f136b6da2ea8bfd58eb", null ],
     [ "ShIsInVehicle", "group__player.html#ga63c4266d6b2f4d5b662e0c283dbc105c", null ],
