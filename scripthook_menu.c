@@ -278,6 +278,19 @@ static void DropWidgets(void) {
     memset(&g_ui, 0, sizeof(g_ui));
 }
 
+/* Every widget of the menu, or none of it. A single create
+ * can fail when the game state flickers, and a menu missing
+ * half its rows never repaired itself. */
+static int Complete(void) {
+    int i;
+
+    if (!g_ui.panel || !g_ui.bar || !g_ui.title) return 0;
+    if (!g_ui.footer || !g_ui.status) return 0;
+    for (i = 0; i < VISIBLE; i++)
+        if (!g_ui.name[i] || !g_ui.value[i]) return 0;
+    return 1;
+}
+
 /* One creation per widget, hidden rows included, so later
  * updates are text and position only. */
 static int BuildWidgets(void) {
@@ -298,13 +311,24 @@ static int BuildWidgets(void) {
                                  C_ROW);
         g_ui.value[i] = ShUiLabel(g_ui.panel, MENU_W - PAD - VALUE_W,
                                   RowY(i), VALUE_W, ROW_H, " ", C_ROW);
-        ShUiShow(g_ui.name[i], 0);
-        ShUiShow(g_ui.value[i], 0);
     }
     g_ui.footer = ShUiLabel(g_ui.panel, PAD, RowY(0), MENU_W - 2 * PAD,
                             ROW_H, " ", C_FOOT);
     g_ui.status = ShUiLabel(g_ui.panel, PAD, RowY(0), MENU_W - 2 * PAD,
                             ROW_H, " ", C_STATUS);
+
+    /* Destroying the panel takes the subtree with it, so the
+     * next tick starts clean instead of leaking slots. */
+    if (!Complete()) {
+        ShUiDestroy(g_ui.panel);
+        memset(&g_ui, 0, sizeof(g_ui));
+        return 0;
+    }
+
+    for (i = 0; i < VISIBLE; i++) {
+        ShUiShow(g_ui.name[i], 0);
+        ShUiShow(g_ui.value[i], 0);
+    }
     ShUiShow(g_ui.footer, 0);
     ShUiShow(g_ui.status, 0);
     ShUiShow(g_ui.panel, 0);

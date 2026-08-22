@@ -936,18 +936,38 @@ static uint64_t ApplyOp(int op, Widget *w) {
 
 static int RunJob(int op, Widget *w) {
     uint64_t ret = 0;
-    int waited = 0;
+    int waited = 0, queued;
 
     while (!ShQueueCall((uint64_t)(uintptr_t)Job, (uint64_t)op,
                         (uint64_t)(uintptr_t)w, 0, 0)) {
-        if (++waited > JOB_WAIT_MS) { ShSetError(SH_ERR_HOOK_FAILED); return 0; }
+        if (++waited > JOB_WAIT_MS) {
+            ShSetError(SH_ERR_HOOK_FAILED);
+            Log("job op %d on thread %lu FAILED: the call queue "
+                "never accepted it in %d ms", op,
+                (unsigned long)GetCurrentThreadId(), JOB_WAIT_MS);
+            return 0;
+        }
         Sleep(1);
     }
+    queued = waited;
     while (!ShQueueResult(&ret)) {
-        if (++waited > JOB_WAIT_MS) { ShSetError(SH_ERR_HOOK_FAILED); return 0; }
+        if (++waited > JOB_WAIT_MS) {
+            ShSetError(SH_ERR_HOOK_FAILED);
+            Log("job op %d on thread %lu FAILED: no result in %d ms "
+                "(%d ms of that waiting to queue)", op,
+                (unsigned long)GetCurrentThreadId(), JOB_WAIT_MS,
+                queued);
+            return 0;
+        }
         Sleep(1);
     }
-    if (!ret) { ShSetError(SH_ERR_HOOK_FAILED); return 0; }
+    if (!ret) {
+        ShSetError(SH_ERR_HOOK_FAILED);
+        Log("job op %d on thread %lu FAILED: the job itself "
+            "returned 0 after %d ms", op,
+            (unsigned long)GetCurrentThreadId(), waited);
+        return 0;
+    }
     ShSetError(SH_OK);
     return 1;
 }
@@ -1177,11 +1197,39 @@ static uint32_t Create(uint32_t scene, int kind, int op, uint32_t parent,
     Widget *wd;
     uint32_t id = 0;
 
-    if (scene == 0 || scene > MAX_SCENES) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    /* These three used to return with no log, so a build
+     * that stopped part way said nothing about why. */
+    if (scene == 0 || scene > MAX_SCENES) {
+        ShSetError(SH_ERR_BAD_ARG);
+        Log("create kind %d REFUSED: bad scene %u", kind, scene);
+        return 0;
+    }
     Lock();
-    if (!Resolve((int)scene) || !ValidParent(scene, parent)) { Unlock(); return 0; }
+    if (!Resolve((int)scene)) {
+        Log("create kind %d REFUSED: scene %u not resolved, err %d",
+            kind, scene, ShLastError());
+        Unlock();
+        return 0;
+    }
+    if (!ValidParent(scene, parent)) {
+        Log("create kind %d REFUSED: parent %u invalid, err %d",
+            kind, parent, ShLastError());
+        Unlock();
+        return 0;
+    }
     wd = Slot(&id);
-    if (!wd) { ShSetError(SH_ERR_NO_CANDIDATE); Unlock(); return 0; }
+    if (!wd) {
+        int a = 0, z = 0, i;
+        for (i = 0; i < MAX_UI; i++) {
+            if (g_w[i].alive) a++;
+            if (g_w[i].zombie) z++;
+        }
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        Log("create kind %d REFUSED: no slot, %d alive %d zombie of %d",
+            kind, a, z, MAX_UI);
+        Unlock();
+        return 0;
+    }
     wd->kind = kind; wd->parent = parent; wd->scene = scene;
     wd->x = x; wd->y = y; wd->w = w; wd->h = h;
     wd->rgb = rgb; wd->alpha = alpha; wd->shown = 1.0f;
