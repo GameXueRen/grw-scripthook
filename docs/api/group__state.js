@@ -10,7 +10,10 @@ var group__state =
       [ "SH_STATE_INGAME", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6acea0857e20450a4a45147ba60096debe", null ],
       [ "SH_STATE_RELOADING", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6aa9b1f895ac3c2b1e40f28ef6d35be37f", null ],
       [ "SH_STATE_PAUSED", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6aad417f90cadf98933428e1825fb1cb52", null ],
-      [ "SH_STATE_GAMEOVER", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263", null ]
+      [ "SH_STATE_GAMEOVER", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263", null ],
+      [ "SH_STATE_DRONE", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6a372078e1c347fc24063cd3169dccf2a4", null ],
+      [ "SH_STATE_BINOCULAR", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6a5a02a2cbf0b02d56cb723cdf42df4f22", null ],
+      [ "SH_STATE_CINEMATIC", "group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6a0edac63579def9401d5bf6a6b53278bd", null ]
     ] ],
     [ "ShUiState", "group__state.html#gad09ea399101d05a6198c72b8226f8b5d", [
       [ "SH_UI_DRONE", "group__state.html#ggad09ea399101d05a6198c72b8226f8b5dacc8a2db1a2dc470b1baba9c153e52d71", null ],

@@ -26,7 +26,7 @@
  <tbody>
  <tr id="projectrow">
   <td id="projectalign">
-   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.8.0</span>
+   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.10.5</span>
    </div>
    <div id="projectbrief">Plugin API for Ghost Recon Wildlands</div>
   </td>
@@ -210,6 +210,9 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>SH_SCENE_PAUSE&#160;:&#160;<a class="el" href="group__ui.html#ga586d9789d8921d7088f4bc99e737064f">scripthook.h</a></li>
 <li>SH_SCENE_SKILLS&#160;:&#160;<a class="el" href="group__ui.html#gabffc588d25551515bfc422f4e9f83e36">scripthook.h</a></li>
 <li>SH_SCENE_VEHICLE&#160;:&#160;<a class="el" href="group__ui.html#gafd42fd142e9ae29a486a0fb740391a45">scripthook.h</a></li>
+<li>SH_STATE_BINOCULAR&#160;:&#160;<a class="el" href="group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6a5a02a2cbf0b02d56cb723cdf42df4f22">scripthook.h</a></li>
+<li>SH_STATE_CINEMATIC&#160;:&#160;<a class="el" href="group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6a0edac63579def9401d5bf6a6b53278bd">scripthook.h</a></li>
+<li>SH_STATE_DRONE&#160;:&#160;<a class="el" href="group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6a372078e1c347fc24063cd3169dccf2a4">scripthook.h</a></li>
 <li>SH_STATE_GAMEOVER&#160;:&#160;<a class="el" href="group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263">scripthook.h</a></li>
 <li>SH_STATE_INGAME&#160;:&#160;<a class="el" href="group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6acea0857e20450a4a45147ba60096debe">scripthook.h</a></li>
 <li>SH_STATE_LOADING&#160;:&#160;<a class="el" href="group__state.html#gga9f4fd702cc8aa619d7d6e85a9a2479d6ad902985a4712994b76945fb4b43a666e">scripthook.h</a></li>
@@ -246,6 +249,7 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>SH_WEATHER_SUNNY&#160;:&#160;<a class="el" href="group__weather.html#ggac58e14f8083064326d59d36fd08d88feabd8f829e7bb48c4183135f85373de695">scripthook.h</a></li>
 <li>ShAddAngularVelocity()&#160;:&#160;<a class="el" href="group__motion.html#ga2d5beeda7aedcfd1a6330e774fe1b76a">scripthook.h</a></li>
 <li>ShAddVelocity()&#160;:&#160;<a class="el" href="group__motion.html#ga43764d146e7146590bc80566e31bfdfb">scripthook.h</a></li>
+<li>ShAttachEntity()&#160;:&#160;<a class="el" href="group__domino.html#ga532003dd0bc62e05a780e73352e47f6c">scripthook.h</a></li>
 <li>ShBlockedInput()&#160;:&#160;<a class="el" href="group__input.html#gaafc253087e96986f6558a4fb12463430">scripthook.h</a></li>
 <li>ShBlockInput()&#160;:&#160;<a class="el" href="group__input.html#ga3a33becdee5987b133438206ecb18edc">scripthook.h</a></li>
 <li>ShBlockKey()&#160;:&#160;<a class="el" href="group__ui.html#ga0d9eb1a4872d98c36120b3b0fef9f356">scripthook.h</a></li>
@@ -271,14 +275,18 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>ShCrashInterceptOn()&#160;:&#160;<a class="el" href="scripthook_8h.html#af1f730ee6b0b156f4742f3e889d4229f">scripthook.h</a></li>
 <li>ShCrashReport()&#160;:&#160;<a class="el" href="group__crash.html#ga2890d78014f97122a6bcd5e63b1b33e5">scripthook.h</a></li>
 <li>ShDamagePlayer()&#160;:&#160;<a class="el" href="group__stats.html#gabdbaea33cc6ea7965e737dc0b6db5fdf">scripthook.h</a></li>
+<li>ShDespawn()&#160;:&#160;<a class="el" href="group__npcs.html#gad5c76851353b560508e50c012aae2984">scripthook.h</a></li>
+<li>ShDetachEntity()&#160;:&#160;<a class="el" href="group__domino.html#ga9af10914bfa18f95707274a1c7c44e58">scripthook.h</a></li>
 <li>ShEntityKind&#160;:&#160;<a class="el" href="group__entities.html#gaf36cb48868c9094b790c45e98ea60212">scripthook.h</a></li>
 <li>ShEntityNodeCount()&#160;:&#160;<a class="el" href="group__visibility.html#ga398589bacc4408b6edfaf8a45b836eb2">scripthook.h</a></li>
 <li>ShError&#160;:&#160;<a class="el" href="group__core.html#gadde25b0f1a1193e012570c5bb2223395">scripthook.h</a></li>
 <li>ShErrorString()&#160;:&#160;<a class="el" href="group__core.html#gaaeb52751cce0254a8712a61ac105cb06">scripthook.h</a></li>
 <li>ShErrorString_t&#160;:&#160;<a class="el" href="group__player.html#ga30ce1a0f6181a6ee608536486902dd0b">scripthook.h</a></li>
+<li>ShExplosionShield()&#160;:&#160;<a class="el" href="group__domino.html#ga5ffa396e74fdd95112f52e9b7074a224">scripthook.h</a></li>
 <li>ShFindComponent()&#160;:&#160;<a class="el" href="group__entities.html#ga0d670d6b971f31012cb82d789781a462">scripthook.h</a></li>
 <li>ShFindEntities()&#160;:&#160;<a class="el" href="group__entities.html#ga70170169196e3b4df9fc3e984c42ff48">scripthook.h</a></li>
 <li>ShFireFn&#160;:&#160;<a class="el" href="group__combat.html#ga379cf9cc2a73a916aab82d0fbe0c9501">scripthook.h</a></li>
+<li>ShFrameFn_t&#160;:&#160;<a class="el" href="group__vehicles.html#ga1a376de6d2372a6b40f6cf7fc55becae">scripthook.h</a></li>
 <li>ShGameFlow()&#160;:&#160;<a class="el" href="group__reflect.html#gaab27e0c98f6e62e14a6c9d5cfd2cca37">scripthook.h</a></li>
 <li>ShGameFlowObject()&#160;:&#160;<a class="el" href="group__reflect.html#ga2ce4944f5d5e18f609882f26c4bbd452">scripthook.h</a></li>
 <li>ShGameSceneActive()&#160;:&#160;<a class="el" href="group__ui.html#ga2f52535bd2c8a9f8a507edb66761649e">scripthook.h</a></li>
@@ -288,6 +296,7 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>ShGetAngularVelocity()&#160;:&#160;<a class="el" href="group__motion.html#ga38268b15880de7eca57083d145fa50d2">scripthook.h</a></li>
 <li>ShGetBodyId()&#160;:&#160;<a class="el" href="group__havokdiag.html#ga8168d73a800722f34f2773f7b64e547b">scripthook.h</a></li>
 <li>ShGetCamera()&#160;:&#160;<a class="el" href="group__camera.html#gaf4f400653636d7840feac951ec3fadb6">scripthook.h</a></li>
+<li>ShGetCameraEyePosition()&#160;:&#160;<a class="el" href="group__player.html#ga655dcf71944a7a4cbfbcef291fc28f4d">scripthook.h</a></li>
 <li>ShGetComponents()&#160;:&#160;<a class="el" href="group__entities.html#ga397c6746ac1c48b43fc6fa9ab9048ec2">scripthook.h</a></li>
 <li>ShGetEntityKind()&#160;:&#160;<a class="el" href="group__entities.html#ga611c5269fdc7d901eb017be012739f25">scripthook.h</a></li>
 <li>ShGetEntityNodes()&#160;:&#160;<a class="el" href="group__visibility.html#gad367900eb3ed2f28953bf5f39c3ab7ae">scripthook.h</a></li>
@@ -295,6 +304,7 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>ShGetGameState()&#160;:&#160;<a class="el" href="group__state.html#gaa26669d8d11c933d6c4d889a829fb3df">scripthook.h</a></li>
 <li>ShGetGameState_t&#160;:&#160;<a class="el" href="group__state.html#gad416e2d3e2dce7fa962adaa67d4317e7">scripthook.h</a></li>
 <li>ShGetGameStateName()&#160;:&#160;<a class="el" href="group__state.html#ga565636b6f71cd3607e43cdbfae2046a4">scripthook.h</a></li>
+<li>ShGetGodMode()&#160;:&#160;<a class="el" href="group__domino.html#ga20cec972750d1152278708f1defeaf2a">scripthook.h</a></li>
 <li>ShGetHeadNodes()&#160;:&#160;<a class="el" href="group__visibility.html#gaba91cbb0a4aeacb265e05756360b97eb">scripthook.h</a></li>
 <li>ShGetHeadPosition()&#160;:&#160;<a class="el" href="group__camera.html#ga4a0aa9b26304d43fc06483066115330a">scripthook.h</a></li>
 <li>ShGetHealthEntity()&#160;:&#160;<a class="el" href="group__stats.html#ga8ed17bc7b6f29ff6c7e922b0cf149b53">scripthook.h</a></li>
@@ -317,6 +327,7 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>ShGetVersion_t&#160;:&#160;<a class="el" href="group__player.html#ga3ac72520632d0e21045ff4e842b4efbc">scripthook.h</a></li>
 <li>ShGetVisibility()&#160;:&#160;<a class="el" href="group__stats.html#ga1aaa7a55caf3c90e493da7bf078d5caf">scripthook.h</a></li>
 <li>ShGetWeather()&#160;:&#160;<a class="el" href="group__weather.html#ga40b22e54ffe843323f8602f4b2553ba3">scripthook.h</a></li>
+<li>ShGetWetness()&#160;:&#160;<a class="el" href="group__domino.html#ga806e7598a67d841055cfced7fb277592">scripthook.h</a></li>
 <li>ShGroundHeight()&#160;:&#160;<a class="el" href="group__ground.html#gaf527989f7185d57d25fdc7230ac226ee">scripthook.h</a></li>
 <li>ShGroundHeight_t&#160;:&#160;<a class="el" href="group__core.html#gae88eeed66deee7b951b5cfddb4edba14">scripthook.h</a></li>
 <li>ShGroundHeightFrom()&#160;:&#160;<a class="el" href="group__ground.html#ga3df602fab1124a51ff692f7aa58249da">scripthook.h</a></li>
@@ -349,7 +360,9 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>ShLastError()&#160;:&#160;<a class="el" href="group__core.html#ga8d2cc1fdff752654f5e3392a01405242">scripthook.h</a></li>
 <li>ShLastError_t&#160;:&#160;<a class="el" href="group__player.html#ga183aa4ed8875177e38f055168d127680">scripthook.h</a></li>
 <li>ShMenuAction()&#160;:&#160;<a class="el" href="group__menu.html#gaa6693a18f130ac37bfef2866c840b4f1">scripthook.h</a></li>
+<li>ShMenuClear()&#160;:&#160;<a class="el" href="group__menu.html#gaacd52ee1813fb776310d25aa40b18840">scripthook.h</a></li>
 <li>ShMenuCreate()&#160;:&#160;<a class="el" href="group__menu.html#ga25d5261be1e3a1552d957a26d60b5951">scripthook.h</a></li>
+<li>ShMenuDestroy()&#160;:&#160;<a class="el" href="group__menu.html#gaff367b78609751ed712872c3e4649068">scripthook.h</a></li>
 <li>ShMenuFn&#160;:&#160;<a class="el" href="group__menu.html#ga8fd0828ddf2e212f1287ec624ab96f1c">scripthook.h</a></li>
 <li>ShMenuIsOpen()&#160;:&#160;<a class="el" href="group__menu.html#ga24f40aa409a5b8610891eda731148b89">scripthook.h</a></li>
 <li>ShMenuList()&#160;:&#160;<a class="el" href="group__menu.html#gae0d30affc54cce7c3b04616e6d6d1646">scripthook.h</a></li>
@@ -379,10 +392,14 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>ShRayFilterPlayer()&#160;:&#160;<a class="el" href="group__rays.html#gaa6899b483f84181dff72826be7d79515">scripthook.h</a></li>
 <li>ShRayLog()&#160;:&#160;<a class="el" href="group__rays.html#ga91b2b2f7b240c5a956f8885eef5b62fa">scripthook.h</a></li>
 <li>ShRayMode&#160;:&#160;<a class="el" href="group__rays.html#ga984a1b14e2771446d9685de2e5a69e9a">scripthook.h</a></li>
+<li>ShReadBytes()&#160;:&#160;<a class="el" href="group__vehicles.html#ga49f312b6cc51027a1ede1e40a848b257">scripthook.h</a></li>
+<li>ShReadF32()&#160;:&#160;<a class="el" href="group__vehicles.html#ga108fc0cb3e8f8f6ce89bb9586b1e6e7a">scripthook.h</a></li>
+<li>ShReadU64()&#160;:&#160;<a class="el" href="group__vehicles.html#ga91cfeff828337d1cc54d38ace347f00e">scripthook.h</a></li>
 <li>ShReflectCall()&#160;:&#160;<a class="el" href="group__reflect.html#gab357c6d745287490a3a2ad0f7c34f709">scripthook.h</a></li>
 <li>ShReflectClassHash()&#160;:&#160;<a class="el" href="group__reflect.html#ga25244e5c6ec9e8de2ef178217c6e6562">scripthook.h</a></li>
 <li>ShReflectMethod()&#160;:&#160;<a class="el" href="group__reflect.html#gaeba87ca8265b147b03cbee358678671d">scripthook.h</a></li>
 <li>ShReflectMethods()&#160;:&#160;<a class="el" href="group__reflect.html#gae46cfcf02c0d5befee1059ed8e0bc361">scripthook.h</a></li>
+<li>ShRegisterFrameCallback()&#160;:&#160;<a class="el" href="group__vehicles.html#ga69fb08a5b38547c3eca74114247189ca">scripthook.h</a></li>
 <li>ShReleaseWeather()&#160;:&#160;<a class="el" href="group__weather.html#ga4bd72a8afbe60c330a265570db754a8d">scripthook.h</a></li>
 <li>ShSceneEnter()&#160;:&#160;<a class="el" href="group__reflect.html#gaa290634c6f4560f9b449fea173e83077">scripthook.h</a></li>
 <li>ShSceneExit()&#160;:&#160;<a class="el" href="group__reflect.html#ga9a817b712c0ec32102419535c814feb8">scripthook.h</a></li>
@@ -395,12 +412,16 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>ShSetCannotDiePlayer()&#160;:&#160;<a class="el" href="group__stats.html#ga823f9bbb16d0150bb9561b3252aa5f8c">scripthook.h</a></li>
 <li>ShSetCrashFreeze()&#160;:&#160;<a class="el" href="group__crash.html#gad83d579c254e332dddb8d567d82403cf">scripthook.h</a></li>
 <li>ShSetCrashIntercept()&#160;:&#160;<a class="el" href="scripthook_8h.html#a1dd6b32fd51f73b15fa2ded8ef7ae2c8">scripthook.h</a></li>
+<li>ShSetEntityPhysics()&#160;:&#160;<a class="el" href="group__domino.html#gac3dda33120213619f9e13dd9f74fd1b5">scripthook.h</a></li>
+<li>ShSetGhostMode()&#160;:&#160;<a class="el" href="group__domino.html#ga465d45aa52612654c07136c046ecf903">scripthook.h</a></li>
+<li>ShSetGodMode()&#160;:&#160;<a class="el" href="group__domino.html#gaa9355789a27bfde23342c5671fcc2ec9">scripthook.h</a></li>
 <li>ShSetGodModeEntity()&#160;:&#160;<a class="el" href="group__stats.html#ga0a12ce86a2141026f987c5ff4c09028a">scripthook.h</a></li>
 <li>ShSetGodModePlayer()&#160;:&#160;<a class="el" href="group__stats.html#ga5c7babd264ef109c718b13d0881fe624">scripthook.h</a></li>
 <li>ShSetGodModePlayer_t&#160;:&#160;<a class="el" href="group__core.html#gafb0eabbf5070f2a41ef0c6addd05bd67">scripthook.h</a></li>
 <li>ShSetHealthEntity()&#160;:&#160;<a class="el" href="group__stats.html#ga826811c88863277d55f9d84690dfd3b5">scripthook.h</a></li>
 <li>ShSetHealthPlayer()&#160;:&#160;<a class="el" href="group__stats.html#gaee7b058c57fe806af8a8d6559fcabf94">scripthook.h</a></li>
 <li>ShSetHealthPlayer_t&#160;:&#160;<a class="el" href="group__core.html#ga69f717740d3e2f9ba3063b2a08378b0e">scripthook.h</a></li>
+<li>ShSetLightningFrequency()&#160;:&#160;<a class="el" href="group__domino.html#ga9ee16c76ee72b830e1cb974cb0839efd">scripthook.h</a></li>
 <li>ShSetResource()&#160;:&#160;<a class="el" href="group__stats.html#ga46eafde39ee12b703485f273b651ca2c">scripthook.h</a></li>
 <li>ShSetSkillPoints()&#160;:&#160;<a class="el" href="group__stats.html#ga2d3a06002a0123f99c50e398c7b21446">scripthook.h</a></li>
 <li>ShSetTime()&#160;:&#160;<a class="el" href="group__weather.html#ga2e3b8e13f5706c01e016e3af376fb7de">scripthook.h</a></li>
@@ -423,6 +444,7 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>ShTeleportPlayerToGround()&#160;:&#160;<a class="el" href="group__ground.html#gabc8b81b024a971abce48510f1786ea6b">scripthook.h</a></li>
 <li>ShTeleportPlayerToGround_t&#160;:&#160;<a class="el" href="group__core.html#ga9ac385a963df9fcb70fc59b0c13ce113">scripthook.h</a></li>
 <li>ShTriggerGameOver()&#160;:&#160;<a class="el" href="group__reflect.html#gaff3153a779ac8028e43c7d0d79167cae">scripthook.h</a></li>
+<li>ShTriggerLightning()&#160;:&#160;<a class="el" href="group__domino.html#ga3a484660bc4f7ee8ec84badb1f962a83">scripthook.h</a></li>
 <li>ShUiAbort()&#160;:&#160;<a class="el" href="group__ui.html#gadf07a43718862ac0300deff6869296d2">scripthook.h</a></li>
 <li>ShUiBegin()&#160;:&#160;<a class="el" href="group__ui.html#gaf1a572ee76f084f664804af4a1221053">scripthook.h</a></li>
 <li>ShUiChildAt()&#160;:&#160;<a class="el" href="group__ui.html#gac6c6e631192cd527fb2b725d3782fb68">scripthook.h</a></li>
@@ -472,6 +494,7 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('globals.html',
 <li>ShUiShow()&#160;:&#160;<a class="el" href="group__ui.html#ga6557183ee851430a3ec5ca262949dc42">scripthook.h</a></li>
 <li>ShUiState&#160;:&#160;<a class="el" href="group__state.html#gad09ea399101d05a6198c72b8226f8b5d">scripthook.h</a></li>
 <li>ShUiTextureCreate()&#160;:&#160;<a class="el" href="group__ui.html#gae548d33e6b20bc011f739b1fa00e1163">scripthook.h</a></li>
+<li>ShUnregisterFrameCallback()&#160;:&#160;<a class="el" href="group__vehicles.html#ga9a2d96e09d11a514961644da9649904b">scripthook.h</a></li>
 <li>ShVehicleAt()&#160;:&#160;<a class="el" href="group__vehicles.html#gad63a04adff683000aeb442f7c6aac95a">scripthook.h</a></li>
 <li>ShVehicleCount()&#160;:&#160;<a class="el" href="group__vehicles.html#ga058887e1ee52479af94372da4b8f6443">scripthook.h</a></li>
 <li>ShVehicleName()&#160;:&#160;<a class="el" href="group__vehicles.html#gaa84e5c08854ad75c347907251723c340">scripthook.h</a></li>

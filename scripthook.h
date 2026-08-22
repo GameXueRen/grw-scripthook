@@ -43,7 +43,16 @@ enum ShGameState {
      *  up. ShIsInGame stays true: the world is loaded. */
     SH_STATE_PAUSED,
     /** The game over screen is drawn. */
-    SH_STATE_GAMEOVER
+    SH_STATE_GAMEOVER,
+
+    /** Live play with the engine driving its own camera.
+     *  The game is running, so these are NOT paused, and
+     *  ShIsInGame stays true for all three. */
+    /** A mod that places the camera every frame has to let
+     *  go here, or it fights the engine for it. */
+    SH_STATE_DRONE,
+    SH_STATE_BINOCULAR,
+    SH_STATE_CINEMATIC
 };
 
 /** What the game's UI is showing, from the scenes it drew

@@ -26,7 +26,7 @@
  <tbody>
  <tr id="projectrow">
   <td id="projectalign">
-   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.8.0</span>
+   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.10.5</span>
    </div>
    <div id="projectbrief">Plugin API for Ghost Recon Wildlands</div>
   </td>
@@ -134,6 +134,10 @@ Enumerations</h2></td></tr>
 , <a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6aa9b1f895ac3c2b1e40f28ef6d35be37f">SH_STATE_RELOADING</a>
 , <a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6aad417f90cadf98933428e1825fb1cb52">SH_STATE_PAUSED</a>
 , <a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263">SH_STATE_GAMEOVER</a>
+, <br />
+&#160;&#160;<a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6a372078e1c347fc24063cd3169dccf2a4">SH_STATE_DRONE</a>
+, <a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6a5a02a2cbf0b02d56cb723cdf42df4f22">SH_STATE_BINOCULAR</a>
+, <a class="el" href="#gga9f4fd702cc8aa619d7d6e85a9a2479d6a0edac63579def9401d5bf6a6b53278bd">SH_STATE_CINEMATIC</a>
 <br />
  }</td></tr>
 <tr class="memitem:gad09ea399101d05a6198c72b8226f8b5d" id="r_gad09ea399101d05a6198c72b8226f8b5d"><td class="memItemLeft">enum &#160;</td><td class="memItemRight"><a class="el" href="#gad09ea399101d05a6198c72b8226f8b5d">ShUiState</a> { <br />
@@ -225,6 +229,11 @@ Functions</h2></td></tr>
 </td></tr>
 <tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6aee39fa1df18ef4edbef16492385fa263"></a>SH_STATE_GAMEOVER&#160;</td><td class="fielddoc"><p>The game over screen is drawn. </p>
 </td></tr>
+<tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6a372078e1c347fc24063cd3169dccf2a4" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6a372078e1c347fc24063cd3169dccf2a4"></a>SH_STATE_DRONE&#160;</td><td class="fielddoc"><p>Live play with the engine driving its own camera. </p>
+<p>The game is running, so these are NOT paused, and ShIsInGame stays true for all three. A mod that places the camera every frame has to let go here, or it fights the engine for it. </p>
+</td></tr>
+<tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6a5a02a2cbf0b02d56cb723cdf42df4f22" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6a5a02a2cbf0b02d56cb723cdf42df4f22"></a>SH_STATE_BINOCULAR&#160;</td><td class="fielddoc"></td></tr>
+<tr><td class="fieldname"><a id="gga9f4fd702cc8aa619d7d6e85a9a2479d6a0edac63579def9401d5bf6a6b53278bd" name="gga9f4fd702cc8aa619d7d6e85a9a2479d6a0edac63579def9401d5bf6a6b53278bd"></a>SH_STATE_CINEMATIC&#160;</td><td class="fielddoc"></td></tr>
 </table>
 
 </div>

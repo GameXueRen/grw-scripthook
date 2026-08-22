@@ -26,7 +26,7 @@
  <tbody>
  <tr id="projectrow">
   <td id="projectalign">
-   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.8.0</span>
+   <div id="projectname">GRW ScriptHook<span id="projectnumber">&#160;0.10.5</span>
    </div>
    <div id="projectbrief">Plugin API for Ghost Recon Wildlands</div>
   </td>
@@ -121,6 +121,11 @@ document.addEventListener('DOMContentLoaded',() => { initNavTree('group__vehicle
 Data Structures</h2></td></tr>
 <tr class="memitem:ShVehicle" id="r_ShVehicle"><td class="memItemLeft">struct &#160;</td><td class="memItemRight"><a class="el" href="structShVehicle.html">ShVehicle</a></td></tr>
 </table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 id="header-typedef-members" class="groupheader"><a id="typedef-members" name="typedef-members"></a>
+Typedefs</h2></td></tr>
+<tr class="memitem:ga1a376de6d2372a6b40f6cf7fc55becae" id="r_ga1a376de6d2372a6b40f6cf7fc55becae"><td class="memItemLeft">typedef void(*)&#160;</td><td class="memItemRight"><a class="el" href="#ga1a376de6d2372a6b40f6cf7fc55becae">ShFrameFn_t</a>(void *user)</td></tr>
+<tr class="memdesc:ga1a376de6d2372a6b40f6cf7fc55becae"><td class="mdescLeft">&#160;</td><td class="mdescRight">A per frame hook on the game thread.  <br /></td></tr>
+</table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
 <tr class="memitem:ga058887e1ee52479af94372da4b8f6443" id="r_ga058887e1ee52479af94372da4b8f6443"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga058887e1ee52479af94372da4b8f6443">ShVehicleCount</a> (void)</td></tr>
@@ -130,10 +135,34 @@ Functions</h2></td></tr>
 <tr class="memitem:ga03236231a48925f1d31351378d574b46" id="r_ga03236231a48925f1d31351378d574b46"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> uint64_t&#160;</td><td class="memItemRight"><a class="el" href="#ga03236231a48925f1d31351378d574b46">ShSpawnVehicle</a> (uint32_t vehicleId, const <a class="el" href="structShVec3.html">ShVec3</a> *pos)</td></tr>
 <tr class="memdesc:ga03236231a48925f1d31351378d574b46"><td class="mdescLeft">&#160;</td><td class="mdescRight">Spawn a vehicle and return its ENTITY, or 0 on failure.  <br /></td></tr>
 <tr class="memitem:ga50d653a0409f3973de463fbf80f09877" id="r_ga50d653a0409f3973de463fbf80f09877"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> void&#160;</td><td class="memItemRight"><a class="el" href="#ga50d653a0409f3973de463fbf80f09877">ShSpawnInvalidate</a> (void)</td></tr>
+<tr class="memitem:ga49f312b6cc51027a1ede1e40a848b257" id="r_ga49f312b6cc51027a1ede1e40a848b257"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga49f312b6cc51027a1ede1e40a848b257">ShReadBytes</a> (uint64_t addr, void *out, uint32_t len)</td></tr>
+<tr class="memdesc:ga49f312b6cc51027a1ede1e40a848b257"><td class="mdescLeft">&#160;</td><td class="mdescRight">Guarded reads, for anything walking engine memory.  <br /></td></tr>
+<tr class="memitem:ga91cfeff828337d1cc54d38ace347f00e" id="r_ga91cfeff828337d1cc54d38ace347f00e"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> uint64_t&#160;</td><td class="memItemRight"><a class="el" href="#ga91cfeff828337d1cc54d38ace347f00e">ShReadU64</a> (uint64_t addr, int *ok)</td></tr>
+<tr class="memitem:ga108fc0cb3e8f8f6ce89bb9586b1e6e7a" id="r_ga108fc0cb3e8f8f6ce89bb9586b1e6e7a"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> float&#160;</td><td class="memItemRight"><a class="el" href="#ga108fc0cb3e8f8f6ce89bb9586b1e6e7a">ShReadF32</a> (uint64_t addr, int *ok)</td></tr>
+<tr class="memitem:ga69fb08a5b38547c3eca74114247189ca" id="r_ga69fb08a5b38547c3eca74114247189ca"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int&#160;</td><td class="memItemRight"><a class="el" href="#ga69fb08a5b38547c3eca74114247189ca">ShRegisterFrameCallback</a> (<a class="el" href="#ga1a376de6d2372a6b40f6cf7fc55becae">ShFrameFn_t</a> fn, void *user)</td></tr>
+<tr class="memitem:ga9a2d96e09d11a514961644da9649904b" id="r_ga9a2d96e09d11a514961644da9649904b"><td class="memItemLeft"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> void&#160;</td><td class="memItemRight"><a class="el" href="#ga9a2d96e09d11a514961644da9649904b">ShUnregisterFrameCallback</a> (<a class="el" href="#ga1a376de6d2372a6b40f6cf7fc55becae">ShFrameFn_t</a> fn)</td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
 <div class="textblock"><p>A spec per vehicle and a spawner the manager owns. </p>
-</div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Function Documentation</h2>
+</div><a name="doc-typedef-members" id="doc-typedef-members"></a><h2 id="header-doc-typedef-members" class="groupheader">Typedef Documentation</h2>
+<a id="ga1a376de6d2372a6b40f6cf7fc55becae" name="ga1a376de6d2372a6b40f6cf7fc55becae"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga1a376de6d2372a6b40f6cf7fc55becae">&#9670;&#160;</a></span>ShFrameFn_t</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">typedef void(*) ShFrameFn_t(void *user)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>A per frame hook on the game thread. </p>
+<p>Keep it fast: the frame waits for it. Registration fails past 16 slots. </p>
+
+</div>
+</div>
+<a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Function Documentation</h2>
 <a id="ga058887e1ee52479af94372da4b8f6443" name="ga058887e1ee52479af94372da4b8f6443"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#ga058887e1ee52479af94372da4b8f6443">&#9670;&#160;</a></span>ShVehicleCount()</h2>
 
@@ -222,6 +251,115 @@ Functions</h2></td></tr>
           <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> void ShSpawnInvalidate </td>
           <td>(</td>
           <td class="paramtype">void</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="ga49f312b6cc51027a1ede1e40a848b257" name="ga49f312b6cc51027a1ede1e40a848b257"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga49f312b6cc51027a1ede1e40a848b257">&#9670;&#160;</a></span>ShReadBytes()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShReadBytes </td>
+          <td>(</td>
+          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>addr</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">void *</td>          <td class="paramname"><span class="paramname"><em>out</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">uint32_t</td>          <td class="paramname"><span class="paramname"><em>len</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Guarded reads, for anything walking engine memory. </p>
+<p>They go through the kernel, so a freed page fails instead of killing the game. </p>
+
+</div>
+</div>
+<a id="ga91cfeff828337d1cc54d38ace347f00e" name="ga91cfeff828337d1cc54d38ace347f00e"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga91cfeff828337d1cc54d38ace347f00e">&#9670;&#160;</a></span>ShReadU64()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> uint64_t ShReadU64 </td>
+          <td>(</td>
+          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>addr</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">int *</td>          <td class="paramname"><span class="paramname"><em>ok</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="ga108fc0cb3e8f8f6ce89bb9586b1e6e7a" name="ga108fc0cb3e8f8f6ce89bb9586b1e6e7a"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga108fc0cb3e8f8f6ce89bb9586b1e6e7a">&#9670;&#160;</a></span>ShReadF32()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> float ShReadF32 </td>
+          <td>(</td>
+          <td class="paramtype">uint64_t</td>          <td class="paramname"><span class="paramname"><em>addr</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">int *</td>          <td class="paramname"><span class="paramname"><em>ok</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="ga69fb08a5b38547c3eca74114247189ca" name="ga69fb08a5b38547c3eca74114247189ca"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga69fb08a5b38547c3eca74114247189ca">&#9670;&#160;</a></span>ShRegisterFrameCallback()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> int ShRegisterFrameCallback </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="#ga1a376de6d2372a6b40f6cf7fc55becae">ShFrameFn_t</a></td>          <td class="paramname"><span class="paramname"><em>fn</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">void *</td>          <td class="paramname"><span class="paramname"><em>user</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="ga9a2d96e09d11a514961644da9649904b" name="ga9a2d96e09d11a514961644da9649904b"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ga9a2d96e09d11a514961644da9649904b">&#9670;&#160;</a></span>ShUnregisterFrameCallback()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="group__core.html#ga3f24d11e8c633c563a61d8346373ade1">SH_API</a> void ShUnregisterFrameCallback </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="#ga1a376de6d2372a6b40f6cf7fc55becae">ShFrameFn_t</a></td>          <td class="paramname"><span class="paramname"><em>fn</em></span></td><td>)</td>
           <td></td>
         </tr>
       </table>

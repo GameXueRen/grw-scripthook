@@ -144,19 +144,24 @@ SH_API int ShInLoadout(void)   { return (ShGetUiState() & SH_UI_LOADOUT) != 0; }
 SH_API int ShInMap(void)       { return (ShGetUiState() & SH_UI_MAP) != 0; }
 SH_API int ShInBinocular(void) { return (ShGetUiState() & SH_UI_BINOCULAR) != 0; }
 
-/* Every screen that takes the player out of normal play.
- * A mod that forces the camera per frame must stop on all
- * of these, so they all report as paused. */
-/* SH_UI_VEHICLE is the vehicle HUD, which is normal play,
- * so it is deliberately absent. The camera template check
- * in ShInPauseMenu only ever caught the pause tabs. */
-#define SH_UI_SCREENS  (SH_UI_PAUSE | SH_UI_LOADOUT | SH_UI_MAP | \
-                        SH_UI_SKILLS | SH_UI_COMWHEEL | SH_UI_POPUP | \
-                        SH_UI_CINEMATIC | SH_UI_DRONE | SH_UI_BINOCULAR)
+/* The screens that stop play: the pause tabs and the pages
+ * reached from them. SH_UI_VEHICLE is the vehicle HUD, so
+ * it is normal play and deliberately absent. */
+#define SH_UI_PAUSED   (SH_UI_PAUSE | SH_UI_LOADOUT | SH_UI_MAP | \
+                        SH_UI_SKILLS | SH_UI_POPUP)
 
 static int Paused(void) {
-    if (ShGetUiState() & SH_UI_SCREENS) return 1;
+    if (ShGetUiState() & SH_UI_PAUSED) return 1;
     return ShInPauseMenu();
+}
+
+/* Live play where the engine owns the camera. The game is
+ * still running, so none of these is a pause. */
+static int EngineCamera(uint32_t ui) {
+    if (ui & SH_UI_DRONE) return SH_STATE_DRONE;
+    if (ui & SH_UI_BINOCULAR) return SH_STATE_BINOCULAR;
+    if (ui & SH_UI_CINEMATIC) return SH_STATE_CINEMATIC;
+    return 0;
 }
 
 SH_API int ShGetGameStateName(char *buf, int len) {
@@ -182,6 +187,9 @@ SH_API int ShGetGameStateName(char *buf, int len) {
         else if (ui & SH_UI_VEHICLE) sub = " (vehicle)";
         if (ui & SH_UI_LOADING) snprintf(buf, len, "Reloading");
         else if (ui & SH_UI_GAMEOVER) snprintf(buf, len, "GameOver");
+        else if (ui & SH_UI_DRONE) snprintf(buf, len, "Drone");
+        else if (ui & SH_UI_BINOCULAR) snprintf(buf, len, "Binocular");
+        else if (ui & SH_UI_CINEMATIC) snprintf(buf, len, "Cinematic");
         else if (Paused()) snprintf(buf, len, "Paused%s", sub);
         else snprintf(buf, len, "Playing%s", sub);
     }
@@ -227,8 +235,13 @@ SH_API int ShGetGameState(void) {
     if (h == HASH_PLAYING || h == HASH_INGAME) {
         /* the flow stays Playing through all of these */
         uint32_t ui = ShGetUiState();
+        int cam;
         if (ui & SH_UI_LOADING) return SH_STATE_RELOADING;
         if (ui & SH_UI_GAMEOVER) return SH_STATE_GAMEOVER;
+        /* Ahead of the pause check: the drone is live play,
+         * so it reports as the drone, never as paused. */
+        cam = EngineCamera(ui);
+        if (cam) return cam;
         if (Paused()) return SH_STATE_PAUSED;
         return SH_STATE_INGAME;
     }
@@ -243,7 +256,9 @@ SH_API int ShGetGameState(void) {
  */
 SH_API int ShIsInGame(void) {
     int s = ShGetGameState();
-    return s == SH_STATE_INGAME || s == SH_STATE_PAUSED;
+    return s == SH_STATE_INGAME || s == SH_STATE_PAUSED ||
+           s == SH_STATE_DRONE || s == SH_STATE_BINOCULAR ||
+           s == SH_STATE_CINEMATIC;
 }
 
 /* dinput8 watches the state itself. Plugins never have
