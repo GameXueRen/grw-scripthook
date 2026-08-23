@@ -38,6 +38,21 @@
 #define CAM_MATS    0x420
 #define CAM_MAT_N   9
 
+/* The camera manager, one frame ahead of the camera build.
+ * The behaviour's transform lands here first, so an override
+ * placed here reaches culling and the matrices together. */
+#define MGR_SITE    SH_IMG(0x7E888FE)
+#define MGR_LEN     5
+#define MGR_NEXT    SH_IMG(0x10D8890)
+
+/* Verified live in gameplay: the mode at +0x6C reads 3, so
+ * consumers take the position from +0x170 while the render
+ * camera takes the rows at +0x190. Both are restated. */
+#define MGR_MODE    0x6C
+#define MGR_POS     0x170
+#define MGR_FOV     0x180
+#define MGR_XFORM   0x190
+
 /* Ownership is per field, so two plugins can hold different
  * parts of the camera at once. Orbit is a private bit: it
  * owns position, but derives it instead of storing it. */
@@ -75,6 +90,9 @@ static volatile uint32_t g_apply = 0;
 static uint8_t *g_camStub = NULL;
 static uint8_t  g_thunkOrig[5];
 
+static uint8_t *g_mgrStub = NULL;
+static int      g_mgrHooked = 0;
+
 extern void ShSetError(int err);
 extern void ShVisibilityPump(void);
 extern void ShTransformPump(void);
@@ -93,9 +111,7 @@ extern void *ShAllocNear(uint64_t target);
 /* The engine consumes this with no checks of its own, so a
  * NaN or a runaway value crashes it far from here. Refuse
  * the write and keep the engine's frame instead. */
-static void WritePos(uint64_t cam, float x, float y, float z) {
-    float *m = (float *)(uintptr_t)(cam + CAM_POSE);
-
+static void WritePos(float *m, float x, float y, float z) {
     if (x != x || y != y || z != z) return;
     if (fabsf(x) > 1e6f || fabsf(y) > 1e6f || fabsf(z) > 1e6f)
         return;
@@ -109,12 +125,11 @@ static void WritePos(uint64_t cam, float x, float y, float z) {
 /* Derived from the player and the engine's own basis, never
  * from the slot we write, so nothing can accumulate.
  */
-static void ApplyOrbit(uint64_t cam) {
-    const float *m = (const float *)(uintptr_t)(cam + CAM_POSE);
+static void ApplyOrbit(float *m) {
     ShVec3 p;
 
     if (!ShGetPlayerPosition(&p)) return;
-    WritePos(cam,
+    WritePos(m,
              p.x - m[4] * g_back,
              p.y - m[5] * g_back,
              p.z - m[6] * g_back + g_up);
@@ -123,8 +138,7 @@ static void ApplyOrbit(uint64_t cam) {
 /* Game basis: x right, y forward, z up. Rebuilt absolutely
  * from yaw and pitch, so roll is dropped.
  */
-static void WriteRot(uint64_t cam) {
-    float *m = (float *)(uintptr_t)(cam + CAM_POSE);
+static void WriteRot(float *m) {
     float cy = cosf(g_yaw), sy = sinf(g_yaw);
     float cp = cosf(g_pitch), sp = sinf(g_pitch);
     float r[3], f[3], u[3];
@@ -184,8 +198,7 @@ void ShCameraVehicleHint(int inVehicle) {
 /* First person. The eye is the head bone, nudged forward
  * along the engine's own view axis to clear the face.
  */
-static void ApplyHead(uint64_t cam) {
-    const float *m = (const float *)(uintptr_t)(cam + CAM_POSE);
+static void ApplyHead(float *m, float fov) {
     ShVec3 h;
     float fx = m[4], fy = m[5], fz = m[6];
     float ex = m[12], ey = m[13], ez = m[14];
@@ -197,8 +210,7 @@ static void ApplyHead(uint64_t cam) {
     /* A zoomed camera is a scope. The mask and reticle
      * anchor to the engine's own view, so moving the eye
      * displaces them. Skip and let it render. */
-    if (*(const float *)(uintptr_t)(cam + CAM_FOV) < CAM_ZOOM_FOV)
-        return;
+    if (fov < CAM_ZOOM_FOV) return;
 
     d = sqrtf((ex - h.x) * (ex - h.x) + (ey - h.y) * (ey - h.y)
               + (ez - h.z) * (ez - h.z));
@@ -246,21 +258,24 @@ static void ApplyHead(uint64_t cam) {
             pz += (ez + fz * t - pz) * w;
         }
     }
-    WritePos(cam, px, py, pz);
+    WritePos(m, px, py, pz);
 }
 
 /* Each field is written only if its bit is set, so the
  * engine keeps ownership of everything else.
  */
-static void ApplyFields(uint64_t cam) {
-    if (g_apply & SH_CAM_ROT) WriteRot(cam);
-    if (g_apply & CAM_HEAD_BIT) ApplyHead(cam);
-    else if (g_apply & CAM_ORBIT_BIT) ApplyOrbit(cam);
+static void ApplyPose(float *m, float fov) {
+    if (g_apply & SH_CAM_ROT) WriteRot(m);
+    if (g_apply & CAM_HEAD_BIT) ApplyHead(m, fov);
+    else if (g_apply & CAM_ORBIT_BIT) ApplyOrbit(m);
     else if (g_apply & SH_CAM_POS)
-        WritePos(cam, g_absPos.x, g_absPos.y, g_absPos.z);
-    /* fov is not written here. It is taken at its source,
-     * ahead of culling. See scripthook_fov.c
-     */
+        WritePos(m, g_absPos.x, g_absPos.y, g_absPos.z);
+}
+
+/* Skew and mode belong to the render camera, so they stay
+ * on the camera build. Position, rotation and fov are all
+ * taken further up, at their own source. */
+static void ApplyFields(uint64_t cam) {
     if (g_apply & SH_CAM_SKEW) {
         *(float *)(uintptr_t)(cam + CAM_SKEWX) = g_skewX;
         *(float *)(uintptr_t)(cam + CAM_SKEWY) = g_skewY;
@@ -308,6 +323,93 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
         ShHeadPump();
         if (g_apply) ApplyFields(rcx);
     }
+}
+
+/* The manager's own transform, before any consumer reads
+ * it. Rows match CAM_POSE: 0 right, 1 forward, 2 up, 3 the
+ * translation. RAX holds the manager at the patch site. */
+static void __attribute__((ms_abi)) MgrCallback(uint64_t cm) {
+    float *m, *p;
+
+    if (!cm || !g_apply) return;
+    if (!ShReadableAddr(cm + MGR_XFORM, 0x40)) return;
+    /* Same identity basis test ShInPauseMenu reports on. */
+    if (g_uiAt != 0 && g_calls - g_uiAt <= 4) return;
+
+    m = (float *)(uintptr_t)(cm + MGR_XFORM);
+    p = (float *)(uintptr_t)(cm + MGR_POS);
+
+    ApplyPose(m, *(const float *)(uintptr_t)(cm + MGR_FOV));
+
+    /* The engine fills the position vector from a second
+     * call, so the row above is restated here rather than
+     * left to disagree with it. */
+    p[0] = m[12];
+    p[1] = m[13];
+    p[2] = m[14];
+    p[3] = 0.0f;
+    g_writes++;
+}
+
+/* The site keeps its call opcode, so the stub is entered
+ * with the return address already pushed and tail jumps to
+ * the original target, which returns past the site. */
+/* The site's frame sits 8 off a 16 byte boundary, which
+ * faults the callback's movaps spills. Align through rbp
+ * rather than assume, then restore the exact rsp. */
+static int BuildMgrStub(void) {
+    uint8_t *s = (uint8_t *)ShAllocNear(MGR_SITE);
+    int64_t rel;
+    int o = 0;
+
+    if (!s) return 0;
+    memset(s, 0xCC, 0x1000);
+
+    s[o++] = 0x55;
+    s[o++] = 0x48; s[o++] = 0x89; s[o++] = 0xE5;
+    s[o++] = 0x48; s[o++] = 0x83; s[o++] = 0xE4; s[o++] = 0xF0;
+    s[o++] = 0x48; s[o++] = 0x83; s[o++] = 0xEC; s[o++] = 0x20;
+    s[o++] = 0x48; s[o++] = 0x89; s[o++] = 0xC1;
+    s[o++] = 0x48; s[o++] = 0xB8;
+    *(uint64_t *)(s + o) = (uint64_t)(uintptr_t)MgrCallback;
+    o += 8;
+    s[o++] = 0xFF; s[o++] = 0xD0;
+    s[o++] = 0x48; s[o++] = 0x89; s[o++] = 0xEC;
+    s[o++] = 0x5D;
+
+    rel = (int64_t)MGR_NEXT - ((int64_t)(uintptr_t)(s + o) + 5);
+    if (rel > 0x7FFFFFFFLL || rel < -0x7FFFFFFFLL) return 0;
+    s[o++] = 0xE9;
+    *(int32_t *)(s + o) = (int32_t)rel;
+
+    g_mgrStub = s;
+    return 1;
+}
+
+/* Refuse anything but the call we decoded, so a build we do
+ * not know keeps its own camera. */
+static int MgrInstall(void) {
+    uint8_t *at = (uint8_t *)(uintptr_t)MGR_SITE;
+    int64_t rel;
+    DWORD old;
+
+    if (g_mgrHooked) return 1;
+    if (!ShReadableAddr(MGR_SITE, MGR_LEN)) return 0;
+    if (at[0] != 0xE8) return 0;
+    if ((uint64_t)((int64_t)MGR_SITE + MGR_LEN
+                   + *(int32_t *)(at + 1)) != MGR_NEXT)
+        return 0;
+    if (!BuildMgrStub()) return 0;
+
+    rel = (int64_t)(uintptr_t)g_mgrStub - ((int64_t)MGR_SITE + 5);
+    if (rel > 0x7FFFFFFFLL || rel < -0x7FFFFFFFLL) return 0;
+    if (!VirtualProtect(at, MGR_LEN, PAGE_EXECUTE_READWRITE, &old))
+        return 0;
+    *(int32_t *)(at + 1) = (int32_t)rel;
+    VirtualProtect(at, MGR_LEN, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, MGR_LEN);
+    g_mgrHooked = 1;
+    return 1;
 }
 
 static int BuildStub(void) {
@@ -407,6 +509,10 @@ SH_API int ShCameraHookInstall(void) {
     }
 
     if (!PatchThunk()) {
+        ShSetError(SH_ERR_HOOK_FAILED);
+        return 0;
+    }
+    if (!MgrInstall()) {
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
     }
