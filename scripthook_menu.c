@@ -1,6 +1,14 @@
 /* A shared menu, one root owned by the API. Every plugin
  * registers a submenu, so sixteen addons cost sixteen rows.
- * Drawn by the engine itself through the native UI. */
+ *
+ * The menu model (menus, items, navigation, callbacks) lives
+ * here. Rendering is done by the D3D11 overlay in
+ * scripthook_ovl.cpp: every frame it snapshots the current menu
+ * through ShMenuCaptureView and draws it with Dear ImGui inside
+ * the game's Present call, using the same look and interaction
+ * as the original native-UI menu. The overlay declares itself
+ * ready via ShMenuSetOverlayReady; until then the menu never
+ * swallows the keyboard. */
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
@@ -15,24 +23,6 @@
 #define VISIBLE     12
 #define TICK_MS     40
 #define OPTS        12
-
-/* Geometry in HUD pixels. */
-#define MENU_X      16.0f
-#define MENU_Y      16.0f
-#define MENU_W      400.0f
-#define PAD         16.0f
-#define TITLE_H     34.0f
-#define ROW_H       28.0f
-#define BAR_DY      -4.0f
-#define BAR_H       22.0f
-#define VALUE_W     150.0f
-
-#define C_TITLE     0xFFD25Au
-#define C_ROW       0xD2D2D2u
-#define C_SEL       0x8CF0FFu
-#define C_FOOT      0x8C8C8Cu
-#define C_STATUS    0xA0E6A0u
-#define C_BAR       0x28465Au
 
 enum { IT_ACTION = 0, IT_SUB, IT_TOGGLE, IT_NUMBER, IT_LIST };
 
@@ -60,23 +50,6 @@ typedef struct {
     Item     items[ITEMS];
 } Menu;
 
-/* What is on screen, so only differences are pushed. */
-typedef struct {
-    char name[LABEL];
-    char value[32];
-    int  shown;
-    int  selected;
-} RowView;
-
-typedef struct {
-    char    title[LABEL];
-    char    status[96];
-    char    footer[32];
-    int     rows;
-    int     sel;
-    RowView row[VISIBLE];
-} View;
-
 static Menu g_menus[MENUS];
 static uint32_t g_root = 0;
 static volatile uint32_t g_current = 0;
@@ -86,18 +59,6 @@ static volatile int g_greeted = 0;
 static volatile int g_started = 0;
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
-
-/* Native widget ids, valid for one UI generation. built is
- * written by the build worker and read by the menu thread, so
- * it is the one volatile field: everything else is only
- * touched while built is 1. */
-static struct {
-    volatile int built;
-    int          gen, shown;
-    uint32_t panel, title, bar, footer, status;
-    uint32_t name[VISIBLE], value[VISIBLE];
-    View     drawn;
-} g_ui;
 
 extern void ShSetError(int err);
 
@@ -295,183 +256,11 @@ static void Navigate(void) {
     }
 }
 
-/* Snapshot of the current menu. Caller holds the lock. */
-static void Capture(View *v) {
-    Menu *m = MenuOf(g_current);
-    int i;
-
-    memset(v, 0, sizeof(*v));
-    if (!m) return;
-    strncpy(v->title, m->title, LABEL - 1);
-    strncpy(v->status, m->status, sizeof(v->status) - 1);
-    for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
-        RowView *r = &v->row[v->rows];
-        strncpy(r->name, m->items[i].label, LABEL - 1);
-        ValueText(&m->items[i], r->value, sizeof(r->value));
-        r->shown = 1;
-        r->selected = (i == m->sel);
-        if (r->selected) v->sel = v->rows;
-        v->rows++;
-    }
-    if (m->count > VISIBLE)
-        snprintf(v->footer, sizeof(v->footer), "%d of %d",
-                 m->sel + 1, m->count);
-}
-
-static float RowY(int i) {
-    return PAD + TITLE_H + ROW_H * (float)i;
-}
-
-static float PanelHeight(const View *v) {
-    float h = PAD + TITLE_H + ROW_H * (float)v->rows + PAD;
-    if (v->footer[0]) h += ROW_H;
-    if (v->status[0]) h += ROW_H;
-    return h;
-}
-
-static void DropWidgets(void) {
-    if (g_ui.built && g_ui.gen == ShUiGen() && g_ui.panel)
-        ShUiDestroy(g_ui.panel);
-    memset(&g_ui, 0, sizeof(g_ui));
-}
-
-/* Every widget of the menu, or none of it. A single create
- * can fail when the game state flickers, and a menu missing
- * half its rows never repaired itself. */
-static int Complete(void) {
-    int i;
-
-    if (!g_ui.panel || !g_ui.bar || !g_ui.title) return 0;
-    if (!g_ui.footer || !g_ui.status) return 0;
-    for (i = 0; i < VISIBLE; i++)
-        if (!g_ui.name[i] || !g_ui.value[i]) return 0;
-    return 1;
-}
-
-/* One creation per widget, hidden rows included, so later
- * updates are text and position only. */
-static int BuildWidgets(void) {
-    int i;
-
-    memset(&g_ui, 0, sizeof(g_ui));
-    if (!ShUiReady()) return 0;
-    g_ui.gen = ShUiGen();
-    g_ui.panel = ShUiPanel(MENU_X, MENU_Y, MENU_W, 200.0f, 0x000000, 0.8f);
-    if (!g_ui.panel) return 0;
-    g_ui.bar = ShUiImage(g_ui.panel, PAD / 2, RowY(0) + BAR_DY,
-                         MENU_W - PAD, BAR_H, C_BAR, 0.9f);
-    g_ui.title = ShUiLabel(g_ui.panel, PAD, PAD, MENU_W - 2 * PAD,
-                           TITLE_H, " ", C_TITLE);
-    for (i = 0; i < VISIBLE; i++) {
-        g_ui.name[i] = ShUiLabel(g_ui.panel, PAD + 8.0f, RowY(i),
-                                 MENU_W - VALUE_W - PAD, ROW_H, " ",
-                                 C_ROW);
-        g_ui.value[i] = ShUiLabel(g_ui.panel, MENU_W - PAD - VALUE_W,
-                                  RowY(i), VALUE_W, ROW_H, " ", C_ROW);
-    }
-    g_ui.footer = ShUiLabel(g_ui.panel, PAD, RowY(0), MENU_W - 2 * PAD,
-                            ROW_H, " ", C_FOOT);
-    g_ui.status = ShUiLabel(g_ui.panel, PAD, RowY(0), MENU_W - 2 * PAD,
-                            ROW_H, " ", C_STATUS);
-
-    /* Destroying the panel takes the subtree with it, so the
-     * next tick starts clean instead of leaking slots. */
-    if (!Complete()) {
-        ShUiDestroy(g_ui.panel);
-        memset(&g_ui, 0, sizeof(g_ui));
-        return 0;
-    }
-
-    /* Hide the whole menu in one batched job: the creates
-     * above were one job each, but ~30 more for the hides
-     * would double a cold first build. */
-    if (ShUiBegin()) {
-        for (i = 0; i < VISIBLE; i++) {
-            ShUiShow(g_ui.name[i], 0);
-            ShUiShow(g_ui.value[i], 0);
-        }
-        ShUiShow(g_ui.footer, 0);
-        ShUiShow(g_ui.status, 0);
-        ShUiShow(g_ui.panel, 0);
-        ShUiCommit();
-    } else {
-        for (i = 0; i < VISIBLE; i++) {
-            ShUiShow(g_ui.name[i], 0);
-            ShUiShow(g_ui.value[i], 0);
-        }
-        ShUiShow(g_ui.footer, 0);
-        ShUiShow(g_ui.status, 0);
-        ShUiShow(g_ui.panel, 0);
-    }
-    /* shown first: the menu thread reads both, and built is
-     * the volatile handoff that says the rest is ready. */
-    g_ui.shown = 0;
-    g_ui.built = 1;
-    return 1;
-}
-
-static void SetTextIf(uint32_t id, char *have, int cap,
-                      const char *want) {
-    if (strcmp(have, want) == 0) return;
-    strncpy(have, want, cap - 1);
-    have[cap - 1] = 0;
-    ShUiSetText(id, want[0] ? want : " ");
-}
-
-/* Push the differences between the drawn view and v. */
-static void Sync(const View *v) {
-    View *d = &g_ui.drawn;
-    float y;
-    int i;
-
-    SetTextIf(g_ui.title, d->title, LABEL, v->title);
-    for (i = 0; i < VISIBLE; i++) {
-        const RowView *r = &v->row[i];
-        RowView *dr = &d->row[i];
-
-        if (r->shown != dr->shown) {
-            ShUiShow(g_ui.name[i], r->shown);
-            ShUiShow(g_ui.value[i], r->shown);
-            dr->shown = r->shown;
-        }
-        if (!r->shown) continue;
-        SetTextIf(g_ui.name[i], dr->name, LABEL, r->name);
-        SetTextIf(g_ui.value[i], dr->value, sizeof(dr->value), r->value);
-        if (r->selected != dr->selected) {
-            ShUiSetColour(g_ui.name[i], r->selected ? C_SEL : C_ROW);
-            ShUiSetColour(g_ui.value[i], r->selected ? C_SEL : C_ROW);
-            dr->selected = r->selected;
-        }
-    }
-    if (v->sel != d->sel || v->rows != d->rows) {
-        ShUiSetPos(g_ui.bar, PAD / 2, RowY(v->sel) + BAR_DY);
-        d->sel = v->sel;
-    }
-    y = RowY(v->rows);
-    if (v->rows != d->rows || strcmp(v->footer, d->footer) != 0 ||
-        strcmp(v->status, d->status) != 0) {
-        if (v->footer[0]) {
-            ShUiSetPos(g_ui.footer, PAD, y + 2.0f);
-            y += ROW_H;
-        }
-        if (v->status[0]) ShUiSetPos(g_ui.status, PAD, y + 2.0f);
-        if ((v->footer[0] != 0) != (d->footer[0] != 0))
-            ShUiShow(g_ui.footer, v->footer[0] != 0);
-        if ((v->status[0] != 0) != (d->status[0] != 0))
-            ShUiShow(g_ui.status, v->status[0] != 0);
-        SetTextIf(g_ui.footer, d->footer, sizeof(d->footer), v->footer);
-        SetTextIf(g_ui.status, d->status, sizeof(d->status), v->status);
-        ShUiSetSize(g_ui.panel, MENU_W, PanelHeight(v));
-        d->rows = v->rows;
-    }
-}
-
 /* Keys are taken only while the menu is actually drawn. A
- * menu that is wanted but cannot render yet (UI scene not up,
+ * menu that is wanted but cannot render yet (overlay not up,
  * game state not PLAYING, a world reload) must never swallow
  * the keyboard: that is exactly the bug where the character
- * freezes with no menu on screen, and where F4 looks dead
- * while the menu thread sits inside a widget job.
+ * freezes with no menu on screen.
  */
 static volatile int g_captureNow = 0;
 static volatile int g_escDefer = 0;
@@ -516,56 +305,45 @@ static void EscDeferTick(void) {
     }
 }
 
-/* Push the menu's view to the engine. A menu update is ~30
- * property ops, and doing them one at a time costs a game
- * thread queue round trip each; batching them into one job
- * turns the whole update into a single round trip. Falls back
- * to individual ops if no batch slot is free. show only makes
- * the panel visible (the open path); the warmup keeps it
- * hidden. */
-static void PushView(const View *v, int show) {
-    int batched = ShUiBegin();
+/* The overlay (scripthook_ovl.cpp) renders on the game render
+ * thread. Until it is up, the menu is wanted-but-not-drawable
+ * and must neither capture the keyboard nor claim visibility. */
+static volatile int g_ovlReady = 0;
 
-    Sync(v);
-    if (show && !g_ui.shown) {
-        ShUiShow(g_ui.panel, 1);
-        g_ui.shown = 1;
+void ShMenuSetOverlayReady(int ready) {
+    g_ovlReady = ready ? 1 : 0;
+}
+
+/* Snapshot the current menu for the overlay renderer. Labels
+ * and values are copied, so the renderer can draw them without
+ * holding the lock. */
+void ShMenuCaptureView(ShMenuView *v) {
+    Menu *m;
+    int i;
+
+    memset(v, 0, sizeof(*v));
+    Lock();
+    m = MenuOf(g_current);
+    if (m) {
+        strncpy(v->title, m->title, sizeof(v->title) - 1);
+        strncpy(v->status, m->status, sizeof(v->status) - 1);
+        for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
+            ShMenuRow *r = &v->row[v->rows];
+            strncpy(r->name, m->items[i].label, sizeof(r->name) - 1);
+            ValueText(&m->items[i], r->value, sizeof(r->value));
+            r->selected = (i == m->sel);
+            if (r->selected) v->sel = v->rows;
+            v->rows++;
+        }
+        if (m->count > VISIBLE)
+            snprintf(v->footer, sizeof(v->footer), "%d of %d",
+                     m->sel + 1, m->count);
     }
-    if (batched) ShUiCommit();
+    Unlock();
 }
 
-/* The first build resolves the engine scene, scans the asset
- * tables (a whole address space walk on a cold session) and
- * creates ~29 widgets through the game thread: seconds on the
- * first open. Run it on a worker so the menu thread keeps
- * polling F4; opening then shows prebuilt widgets. A failed
- * build backs off so a missing asset cannot make us rescan
- * the whole address space every tick. */
-static volatile int g_buildPending = 0;
-static HANDLE g_buildThread = NULL;
-
-static DWORD WINAPI BuildWorker(LPVOID p) {
-    (void)p;
-    for (;;) {
-        if (!g_buildPending) { Sleep(40); continue; }
-        g_buildPending = 0;
-        if (g_ui.built) continue;
-        if (BuildWidgets()) continue;
-        Sleep(500);
-    }
-    return 0;
-}
-
-/* Ask the worker to build the widgets while the menu is
- * closed, so the first F4 is a show and not a build. */
-static void TryBuild(void) {
-    if (g_ui.built) return;
-    g_buildPending = 1;
-}
-
-/* Keys are polled here, the engine draws the result. */
+/* Keys are polled here; the overlay draws the result. */
 static DWORD WINAPI MenuThread(LPVOID p) {
-    View v;
     (void)p;
 
     for (;;) {
@@ -573,7 +351,7 @@ static DWORD WINAPI MenuThread(LPVOID p) {
 
         EscDeferTick();
 
-        /* F4 first, on every tick, before any UI work that
+        /* F4 first, on every tick, before any menu work that
          * could block: the toggle must never depend on the
          * menu having rendered. */
         if (Pressed(g_key)) {
@@ -581,36 +359,23 @@ static DWORD WINAPI MenuThread(LPVOID p) {
             if (g_open) g_current = g_root;
         }
 
-        if (g_ui.built && g_ui.gen != ShUiGen()) DropWidgets();
-
         if (!g_open) {
-            if (g_ui.built && g_ui.shown) {
-                ShUiShow(g_ui.panel, 0);
-                g_ui.shown = 0;
-            }
             MenuCapture(0);
-            /* first F4 must be instant: build the widgets now,
-             * hidden, so opening is a show and not a build */
-            TryBuild();
             continue;
         }
 
-        /* Wanted but not drawable yet: the widget build can
-         * take seconds on a cold session, so it runs on the
-         * build worker. Hand the keys back and wait for it;
+        /* Open but not yet renderable: the overlay initialises
+         * on the first Present. Hand the keys back and wait;
          * F4 keeps polling meanwhile. */
-        if (!g_ui.built) {
+        if (!g_ovlReady) {
             MenuCapture(0);
-            TryBuild();
             continue;
         }
 
         Lock();
         Navigate();
-        Capture(&v);
         Unlock();
 
-        PushView(&v, 1);
         /* Only a menu that is actually on screen takes the
          * keyboard. */
         MenuCapture(1);
@@ -625,7 +390,6 @@ static void EnsureMenu(void) {
     g_lockReady = 1;
     g_root = NewMenu("SCRIPTHOOK", 0);
     CreateThread(NULL, 0, MenuThread, NULL, 0, NULL);
-    CreateThread(NULL, 0, BuildWorker, NULL, 0, NULL);
 }
 
 SH_API uint32_t ShMenuCreate(const char *title) {

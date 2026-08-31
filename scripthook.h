@@ -610,6 +610,29 @@ SH_API void ShMenuSetKey(int vk);
 SH_API int  ShMenuIsOpen(void);
 SH_API void ShMenuOpen(int open);
 
+/** One row of the menu, copied for the overlay renderer. */
+typedef struct ShMenuRow {
+    char name[48];
+    char value[32];
+    int  selected;
+} ShMenuRow;
+
+/** One frame of the current menu, captured under the lock for
+ *  the D3D11 overlay (scripthook_ovl.cpp) to draw. */
+typedef struct ShMenuView {
+    char title[48];
+    char status[96];
+    char footer[16];
+    int  rows;
+    int  sel;
+    ShMenuRow row[12];
+} ShMenuView;
+
+/** Internal: snapshot the current menu for the overlay. */
+void ShMenuCaptureView(ShMenuView *v);
+/** Internal: tell the menu the overlay can render now. */
+void ShMenuSetOverlayReady(int ready);
+
 /** @} */
 /** @defgroup hud HUD
  *  Drawn by the engine's own UI; slots pack per corner.

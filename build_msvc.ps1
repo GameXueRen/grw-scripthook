@@ -26,7 +26,11 @@ param(
 
     # Remove the built dinput8.dll, scripts output and the
     # import library instead of building.
-    [switch]$Clean
+    [switch]$Clean,
+
+    # Dear ImGui source folder (imgui.h / imgui.cpp / backends\),
+    # compiled into dinput8.dll for the menu overlay.
+    [string]$Imgui = (Join-Path $PSScriptRoot '..\..\GitHub\imgui-1.92.7')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,6 +78,10 @@ if ($BackupDir) {
 
 if (-not (Test-Path $vcvars)) {
     throw "vcvars64.bat not found: $vcvars"
+}
+
+if (-not (Test-Path (Join-Path $Imgui 'imgui.h'))) {
+    throw "imgui.h not found under '$Imgui'"
 }
 
 # Load the MSVC x64 build environment into this process.
@@ -141,13 +149,35 @@ $fwSources = @(
     'scripthook_hud.c', 'scripthook_menu.c', 'guard.c'
 ) | ForEach-Object { Join-Path $root $_ }
 
-$fwLink = @(
-    "$tmp\guard_pad.obj",
+# ---- menu overlay: Dear ImGui + the D3D11 overlay (C++) ----
+$cpp = @(
+    '/nologo', '/O2', '/W3', '/c', '/std:c++17', '/utf-8',
+    '/D_CRT_SECURE_NO_WARNINGS', '/DSH_BUILD=1',
+    "/I$root", "/I$Imgui", "/I$Imgui\backends",
+    "/Fo$tmp\"
+)
+$cppSources = @(
+    (Join-Path $Imgui 'imgui.cpp'),
+    (Join-Path $Imgui 'imgui_draw.cpp'),
+    (Join-Path $Imgui 'imgui_tables.cpp'),
+    (Join-Path $Imgui 'imgui_widgets.cpp'),
+    (Join-Path $Imgui 'backends\imgui_impl_dx11.cpp'),
+    (Join-Path $Imgui 'backends\imgui_impl_win32.cpp'),
+    (Join-Path $root 'scripthook_ovl.cpp')
+)
+& cl @cpp $cppSources
+if ($LASTEXITCODE -ne 0) { throw 'cl failed for the imgui overlay sources' }
+$cppObjs = $cppSources | ForEach-Object {
+    Join-Path $tmp ("{0}.obj" -f [IO.Path]::GetFileNameWithoutExtension($_))
+}
+
+$fwLink = @("$tmp\guard_pad.obj") + $cppObjs + @(
     "/Fe:$out",
     '/link',
     "/DEF:$root\proxy.def",
     "/IMPLIB:$root\libscripthook.lib",
-    'dinput8.lib', 'dxguid.lib', 'gdi32.lib', 'user32.lib'
+    'dinput8.lib', 'dxguid.lib', 'gdi32.lib', 'user32.lib',
+    'd3d11.lib', 'dxgi.lib', 'dwmapi.lib'
 )
 Invoke-FrameworkBuild -Sources $fwSources -LinkArgs $fwLink
 Write-Host "built $out"
