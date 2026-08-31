@@ -175,20 +175,20 @@ static void Report(void) {
     g_status(g_menu, line);
 }
 
+/* The callbacks must not touch the player: resolving it and
+ * hiding the head can each fall back to a full address space
+ * scan, which would stall the menu callback thread for
+ * seconds. The tick thread does that work on its own clock.
+ */
 static void OnToggle(uint32_t menu, uint32_t item, int value,
                      void *user) {
     (void)menu; (void)item; (void)user;
 
     if (value) {
-        uint64_t root = PlayerRoot();
-
         g_on = 1;
+        g_nparts = 0;
         Hold(1);
         if (g_setBlur) g_setBlur(0);
-        if (root && g_wantHide) {
-            g_root = root;
-            HideHead(root);
-        }
     } else {
         g_on = 0;
         ShowHead();
@@ -202,12 +202,7 @@ static void OnHide(uint32_t menu, uint32_t item, int value,
                    void *user) {
     (void)menu; (void)item; (void)user;
     g_wantHide = value;
-    if (value) {
-        uint64_t root = PlayerRoot();
-        if (g_on && root) HideHead(root);
-    } else {
-        ShowHead();
-    }
+    if (!value) ShowHead();
     Report();
 }
 

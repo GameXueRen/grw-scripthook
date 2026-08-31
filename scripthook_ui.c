@@ -186,6 +186,12 @@ static struct {
     uint64_t fontAsset, imageAsset, pool;
 } g_ctx;
 
+/* The asset records sit in the image's data section, so the
+ * offset from the module base is stable across sessions. A
+ * cached offset is verified before use; a recycled or moved
+ * block simply misses and falls back to the full scan. */
+static uint64_t g_assetFontOff, g_assetImageOff;
+
 /* batches: edits recorded per thread, one job per commit */
 typedef struct {
     int      op;
@@ -313,13 +319,30 @@ static uint64_t ScanVtable(uint64_t vt, ScanFn test, void *user) {
 }
 
 /* An asset is a PhoenixAtom object: GUID at +0x10, class
- * GUID at +0x30. One shot scan of the heap for the pair;
- * returns the object, 0 when that asset is not loaded. */
-static uint64_t ScanGuid(const uint8_t *guid, const uint8_t *cls) {
+ * GUID at +0x30. Verify a candidate record: the GUID must
+ * still match, or a recycled block would pass as the wrong
+ * asset and the labels would render blank. */
+static uint64_t AssetAt(uint64_t rec, const uint8_t *guid) {
+    uint64_t obj;
+    char nm[96];
+    if (!Readable(rec, 0x28)) return 0;
+    if (memcmp((void *)(uintptr_t)(rec + 0x10), guid, 16) != 0) return 0;
+    obj = RQ(rec);
+    if (!Readable(obj, 8)) return 0;
+    if (!ShPropRttiOf(obj, nm, sizeof(nm))) return 0;
+    if (!strstr(nm, "Asset")) return 0;
+    return rec;
+}
+
+/* One shot scan of the heap for the two asset records, in a
+ * single walk so a cold first build does not pay for the
+ * missing assets twice. Stops early once both are found. */
+static void ScanAssets(uint64_t *font, uint64_t *image) {
     MEMORY_BASIC_INFORMATION mbi;
     uint8_t *scan = NULL;
 
-    while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
+    while (VirtualQuery(scan, &mbi, sizeof(mbi)) &&
+           (!*font || !*image)) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
         if (next <= scan) break;
         if (mbi.State == MEM_COMMIT &&
@@ -338,18 +361,19 @@ static uint64_t ScanGuid(const uint8_t *guid, const uint8_t *cls) {
                                        chunk, want, &got) || got < 0x40)
                     break;
                 for (o = 0; o + 0x40 <= got; o += 8) {
-                    uint64_t rec, obj;
-                    char nm[96];
-                    if (memcmp(chunk + o, guid, 16) != 0) continue;
+                    uint64_t rec;
                     /* record {object, flags, guid}: the object
                        must carry an Asset class vtable */
-                    rec = (uint64_t)(uintptr_t)(b + done + o) - 0x10;
-                    obj = RQ(rec);
-                    if (!Readable(obj, 8)) continue;
-                    if (!ShPropRttiOf(obj, nm, sizeof(nm))) continue;
-                    if (!strstr(nm, "Asset")) continue;
-                    (void)cls;
-                    return rec;
+                    if (!*font &&
+                        memcmp(chunk + o, g_fontGuid, 16) == 0) {
+                        rec = (uint64_t)(uintptr_t)(b + done + o) - 0x10;
+                        if (AssetAt(rec, g_fontGuid)) *font = rec;
+                    }
+                    if (!*image &&
+                        memcmp(chunk + o, g_imageGuid, 16) == 0) {
+                        rec = (uint64_t)(uintptr_t)(b + done + o) - 0x10;
+                        if (AssetAt(rec, g_imageGuid)) *image = rec;
+                    }
                 }
                 /* overlap so a pair on the chunk edge is seen */
                 done += (got > 0x38) ? got - 0x38 : got;
@@ -357,7 +381,31 @@ static uint64_t ScanGuid(const uint8_t *guid, const uint8_t *cls) {
         }
         scan = next;
     }
-    return 0;
+}
+
+/* Cached asset records, verified in place, then one combined
+ * scan for whatever is still missing. The scan is a whole
+ * address space walk and takes seconds on a cold session, so
+ * the verified offsets matter for the very first F4. */
+static void FindAssets(uint64_t *font, uint64_t *image) {
+    uint64_t rec;
+    DWORD t0 = GetTickCount();
+
+    if (!*font && g_assetFontOff) {
+        rec = AssetAt(ShImageBase() + g_assetFontOff, g_fontGuid);
+        if (rec) *font = rec; else g_assetFontOff = 0;
+    }
+    if (!*image && g_assetImageOff) {
+        rec = AssetAt(ShImageBase() + g_assetImageOff, g_imageGuid);
+        if (rec) *image = rec; else g_assetImageOff = 0;
+    }
+    if (*font && *image) return;
+    ScanAssets(font, image);
+    if (*font) g_assetFontOff = *font - ShImageBase();
+    if (*image) g_assetImageOff = *image - ShImageBase();
+    Log("asset scan: %lu ms, font %llx image %llx",
+        (unsigned long)(GetTickCount() - t0),
+        (unsigned long long)*font, (unsigned long long)*image);
 }
 
 static int Nibble(char c) {
@@ -423,6 +471,7 @@ static int DefaultScene(void) {
 /* assets, purge of dead widgets, then the scene */
 static int Resolve(int sid) {
     uint64_t scene, root, rootPriv;
+    DWORD t0 = GetTickCount();
 
     if (!g_enabled) { ShSetError(SH_ERR_NOT_IN_GAME); return 0; }
     if (!ShIsInGame()) { ShSetError(SH_ERR_NOT_IN_GAME); return 0; }
@@ -432,8 +481,7 @@ static int Resolve(int sid) {
     }
     if (ShSceneLive(sid)) return 1;
     g_ctx.pool = RQ(G_POOL);
-    if (!g_ctx.fontAsset) g_ctx.fontAsset = ScanGuid(g_fontGuid, NULL);
-    if (!g_ctx.imageAsset) g_ctx.imageAsset = ScanGuid(g_imageGuid, NULL);
+    FindAssets(&g_ctx.fontAsset, &g_ctx.imageAsset);
     if (!g_ctx.fontAsset || !g_ctx.imageAsset) {
         ShSetError(SH_ERR_UI_ASSET);
         return 0;
@@ -445,6 +493,8 @@ static int Resolve(int sid) {
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;
     }
+    Log("resolve scene %d: %lu ms", sid,
+        (unsigned long)(GetTickCount() - t0));
     return 1;
 }
 
@@ -740,7 +790,7 @@ static uint64_t __attribute__((ms_abi)) Job(uint64_t op, uint64_t arg,
 }
 
 static uint64_t JobBody(int op, Widget *w) {
-    int i, s;
+    int i;
 
     if (op == OP_BATCH) {
         Batch *bt = (Batch *)(uintptr_t)w->scratch;
@@ -761,26 +811,16 @@ static uint64_t JobBody(int op, Widget *w) {
         return ok;
     }
     if (op == OP_PURGE) {
-        /* dead scenes: children first, then panels */
-        for (s = 1; s <= MAX_SCENES; s++) {
-            uint64_t priv = ShSceneDeadPriv(s);
-            ShSceneLock(priv);
-            for (i = 0; i < MAX_UI; i++) {
-                Widget *k = &g_w[i];
-                if (k->zombie && k->scene == (uint32_t)s && k->kind != K_PANEL) {
-                    DestroyOne(k->handle, k->inst);
-                    k->zombie = 0;
-                }
-            }
-            for (i = 0; i < MAX_UI; i++) {
-                Widget *k = &g_w[i];
-                if (k->zombie && k->scene == (uint32_t)s) {
-                    DestroyOne(k->plateHandle, k->plateInst);
-                    DestroyOne(k->handle, k->inst);
-                    k->zombie = 0;
-                }
-            }
-            ShSceneUnlock(priv);
+        /* Dead scenes: their widgets are freed when the scene's
+         * own destructor runs on recreate. Destroying them here
+         * leaves freed handles in the parents' child arrays for
+         * that destructor to walk, or double frees widgets the
+         * engine already tore down with the world. Drop the
+         * references only; the natives belong to the scene
+         * teardown. */
+        for (i = 0; i < MAX_UI; i++) {
+            Widget *k = &g_w[i];
+            if (k->zombie) memset(k, 0, sizeof(*k));
         }
         return 1;
     }
@@ -1013,6 +1053,14 @@ void ShUiOnEnterPlaying(void) {
     Lock();
     Log("state change: gen %d to %d", g_ctx.gen, g_ctx.gen + 1);
     ShSceneInvalidate();
+    /* The asset record's object pointer is rewritten by the
+     * engine on every world reload. The cached offset to the
+     * record is stable (it sits in the image's data section),
+     * but the object it points to is not, so the resolved
+     * handles must be cleared here for the next resolve to
+     * re-verify and pick up the current object. */
+    g_ctx.fontAsset = 0;
+    g_ctx.imageAsset = 0;
     g_ctx.gen++;
     for (i = 0; i < MAX_UI; i++) {
         if (g_w[i].alive) g_w[i].zombie = 1;

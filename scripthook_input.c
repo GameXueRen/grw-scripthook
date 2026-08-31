@@ -44,9 +44,14 @@ static int Install(void);
 static int Suppressed(int vk) {
     uint32_t b = g_block;
 
-    if (vk <= 0 || vk >= 256 || Escapes(vk)) return 0;
-    if (g_capture) return 1;
+    if (vk <= 0 || vk >= 256) return 0;
+    /* An explicitly blocked key wins over the escape list, so
+     * a mod menu can claim ESC while it is open. Escapes still
+     * pass when nothing claims them, so pause and alt-tab
+     * always work outside the menu. */
     if (g_anyKeyBlock && g_keyBlock[vk]) return 1;
+    if (Escapes(vk)) return 0;
+    if (g_capture) return 1;
     if (!b) return 0;
     if (b & SH_INPUT_KEYS) return 1;
     if ((b & SH_INPUT_MOVE) &&

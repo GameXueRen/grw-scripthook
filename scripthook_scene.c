@@ -90,6 +90,7 @@ typedef struct {
     int      visible;
     uint64_t handle, priv, rootH, rootP;
     uint64_t dead;         /* last session's scene */
+    uint64_t vt;           /* the scene class vtable, to verify dead */
     LONG     flippedFrame; /* flip once per frame */
 } SceneSlot;
 
@@ -439,11 +440,24 @@ static uint64_t __attribute__((ms_abi)) CreateJob(uint64_t sid, uint64_t b,
     uint8_t idx;
     (void)b; (void)c; (void)d;
 
-    if (s->dead) { DestroyEngineScene(s->dead); s->dead = 0; }
+    /* The engine may have freed the previous scene with the
+     * world; destroying a stale handle faults the game. The
+     * vtable is cached at creation, so a recycled block fails
+     * the check and the teardown is skipped. */
+    if (s->dead) {
+        if (s->vt && RQ(s->dead) != s->vt)
+            Log("scene %llu: dead %llx stale, engine freed it",
+                (unsigned long long)sid,
+                (unsigned long long)s->dead);
+        else
+            DestroyEngineScene(s->dead);
+        s->dead = 0;
+    }
 
     scene = EAlloc(0x10);
     if (!scene) return 0;
     ((Fn1)F_SCENE_CTOR)(scene);
+    s->vt = RQ(scene);
     priv = RQ(scene + 8);
     if (!priv) return 0;
     ((Scene3)F_SCENE_SETCTX)(scene, &res, (uint64_t)(uintptr_t)&g_localizer);
@@ -611,7 +625,13 @@ void ShSceneInvalidate(void) {
         if (!g_s[i].live) continue;
         Log("scene %d: invalidated %llx", i + 1,
             (unsigned long long)g_s[i].handle);
-        if (g_s[i].dead) DestroyEngineScene(g_s[i].dead);
+        if (g_s[i].dead) {
+            if (g_s[i].vt && RQ(g_s[i].dead) != g_s[i].vt)
+                Log("scene %d: dead %llx stale, engine freed it",
+                    i + 1, (unsigned long long)g_s[i].dead);
+            else
+                DestroyEngineScene(g_s[i].dead);
+        }
         g_s[i].dead = g_s[i].handle;
         g_s[i].live = 0;
     }

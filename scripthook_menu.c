@@ -87,9 +87,13 @@ static volatile int g_started = 0;
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
 
-/* Native widget ids, valid for one UI generation. */
+/* Native widget ids, valid for one UI generation. built is
+ * written by the build worker and read by the menu thread, so
+ * it is the one volatile field: everything else is only
+ * touched while built is 1. */
 static struct {
-    int      built, gen, shown;
+    volatile int built;
+    int          gen, shown;
     uint32_t panel, title, bar, footer, status;
     uint32_t name[VISIBLE], value[VISIBLE];
     View     drawn;
@@ -166,18 +170,71 @@ static void ValueText(const Item *it, char *out, int n) {
         snprintf(out, n, "< %s >", it->opts[it->value % it->nopts]);
 }
 
-/* Receivers run on the menu thread, so the lock is dropped
- * around the call and any API call is legal inside one.
+/* A plugin callback can be heavy (a heap scan, a node walk,
+ * visibility jobs on the game thread), and running it on the
+ * menu thread would freeze navigation for the whole duration.
+ * Dispatch callbacks to a single worker instead: the item's
+ * state is already applied by the caller, so the callback only
+ * notifies the plugin. FIFO order keeps rapid toggles sane.
  */
-static void Fire(uint32_t menu, int idx, Item *it) {
-    ShMenuFn fn = it->fn;
-    void *user = it->user;
-    int v = (it->kind == IT_NUMBER) ? (int)it->num : it->value;
+#define CALL_MAX 32
+typedef struct {
+    ShMenuFn fn;
+    void *user;
+    uint32_t menu, item;
+    int value;
+} Call;
+
+static Call g_call[CALL_MAX];
+static volatile int g_callHead = 0;
+static volatile int g_callTail = 0;
+static HANDLE g_callThread = NULL;
+
+static DWORD WINAPI CallThread(LPVOID p);
+
+static void CallPush(ShMenuFn fn, void *user, uint32_t menu,
+                     uint32_t item, int value) {
+    int next;
 
     if (!fn) return;
-    Unlock();
-    fn(menu, (uint32_t)idx, v, user);
     Lock();
+    next = (g_callHead + 1) % CALL_MAX;
+    if (next != g_callTail) {
+        g_call[g_callHead].fn = fn;
+        g_call[g_callHead].user = user;
+        g_call[g_callHead].menu = menu;
+        g_call[g_callHead].item = item;
+        g_call[g_callHead].value = value;
+        g_callHead = next;
+    }
+    Unlock();
+    if (!g_callThread)
+        g_callThread = CreateThread(NULL, 0, CallThread, NULL, 0, NULL);
+}
+
+static DWORD WINAPI CallThread(LPVOID p) {
+    (void)p;
+    for (;;) {
+        Call c;
+        int has = 0;
+
+        Lock();
+        if (g_callHead != g_callTail) {
+            c = g_call[g_callTail];
+            g_callTail = (g_callTail + 1) % CALL_MAX;
+            has = 1;
+        }
+        Unlock();
+        if (!has) { Sleep(5); continue; }
+        if (c.fn) c.fn(c.menu, c.item, c.value, c.user);
+    }
+    return 0;
+}
+
+static void Fire(uint32_t menu, int idx, Item *it) {
+    int v = (it->kind == IT_NUMBER) ? (int)it->num : it->value;
+
+    CallPush(it->fn, it->user, menu, (uint32_t)idx, v);
 }
 
 static int Pressed(int vk) {
@@ -325,15 +382,31 @@ static int BuildWidgets(void) {
         return 0;
     }
 
-    for (i = 0; i < VISIBLE; i++) {
-        ShUiShow(g_ui.name[i], 0);
-        ShUiShow(g_ui.value[i], 0);
+    /* Hide the whole menu in one batched job: the creates
+     * above were one job each, but ~30 more for the hides
+     * would double a cold first build. */
+    if (ShUiBegin()) {
+        for (i = 0; i < VISIBLE; i++) {
+            ShUiShow(g_ui.name[i], 0);
+            ShUiShow(g_ui.value[i], 0);
+        }
+        ShUiShow(g_ui.footer, 0);
+        ShUiShow(g_ui.status, 0);
+        ShUiShow(g_ui.panel, 0);
+        ShUiCommit();
+    } else {
+        for (i = 0; i < VISIBLE; i++) {
+            ShUiShow(g_ui.name[i], 0);
+            ShUiShow(g_ui.value[i], 0);
+        }
+        ShUiShow(g_ui.footer, 0);
+        ShUiShow(g_ui.status, 0);
+        ShUiShow(g_ui.panel, 0);
     }
-    ShUiShow(g_ui.footer, 0);
-    ShUiShow(g_ui.status, 0);
-    ShUiShow(g_ui.panel, 0);
-    g_ui.built = 1;
+    /* shown first: the menu thread reads both, and built is
+     * the volatile handoff that says the rest is ready. */
     g_ui.shown = 0;
+    g_ui.built = 1;
     return 1;
 }
 
@@ -393,44 +466,154 @@ static void Sync(const View *v) {
     }
 }
 
+/* Keys are taken only while the menu is actually drawn. A
+ * menu that is wanted but cannot render yet (UI scene not up,
+ * game state not PLAYING, a world reload) must never swallow
+ * the keyboard: that is exactly the bug where the character
+ * freezes with no menu on screen, and where F4 looks dead
+ * while the menu thread sits inside a widget job.
+ */
+static volatile int g_captureNow = 0;
+static volatile int g_escDefer = 0;
+static DWORD g_escDeferAt = 0;
+
+/* Not SetCapture: that is a Win32 API and the name collides. */
+static void MenuCapture(int on) {
+    if (on == g_captureNow) return;
+    g_captureNow = on;
+    ShCaptureKeys(on);
+    if (on) {
+        /* While the menu is up, ESC belongs to it: the menu
+         * navigates with it (back a level, or exit). Without
+         * the block the game would open its own pause menu on
+         * the same press and the two fight. */
+        ShBlockKey(VK_ESCAPE, 1);
+        g_escDefer = 0;
+        return;
+    }
+    /* Releasing capture: if ESC is still held, the very press
+     * that closed the menu is in flight. Keep it blocked until
+     * the key goes up (or a short timeout) so it never reaches
+     * the game and pops its pause menu on the way out. */
+    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) {
+        g_escDefer = 1;
+        g_escDeferAt = GetTickCount();
+        return;
+    }
+    ShBlockKey(VK_ESCAPE, 0);
+}
+
+/* A deferred ESC block ends once the key is up, or after a
+ * second so a stuck key cannot swallow ESC forever. */
+static void EscDeferTick(void) {
+    DWORD now;
+    if (!g_escDefer) return;
+    now = GetTickCount();
+    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) == 0 ||
+        (int)(now - g_escDeferAt) > 1000) {
+        g_escDefer = 0;
+        ShBlockKey(VK_ESCAPE, 0);
+    }
+}
+
+/* Push the menu's view to the engine. A menu update is ~30
+ * property ops, and doing them one at a time costs a game
+ * thread queue round trip each; batching them into one job
+ * turns the whole update into a single round trip. Falls back
+ * to individual ops if no batch slot is free. show only makes
+ * the panel visible (the open path); the warmup keeps it
+ * hidden. */
+static void PushView(const View *v, int show) {
+    int batched = ShUiBegin();
+
+    Sync(v);
+    if (show && !g_ui.shown) {
+        ShUiShow(g_ui.panel, 1);
+        g_ui.shown = 1;
+    }
+    if (batched) ShUiCommit();
+}
+
+/* The first build resolves the engine scene, scans the asset
+ * tables (a whole address space walk on a cold session) and
+ * creates ~29 widgets through the game thread: seconds on the
+ * first open. Run it on a worker so the menu thread keeps
+ * polling F4; opening then shows prebuilt widgets. A failed
+ * build backs off so a missing asset cannot make us rescan
+ * the whole address space every tick. */
+static volatile int g_buildPending = 0;
+static HANDLE g_buildThread = NULL;
+
+static DWORD WINAPI BuildWorker(LPVOID p) {
+    (void)p;
+    for (;;) {
+        if (!g_buildPending) { Sleep(40); continue; }
+        g_buildPending = 0;
+        if (g_ui.built) continue;
+        if (BuildWidgets()) continue;
+        Sleep(500);
+    }
+    return 0;
+}
+
+/* Ask the worker to build the widgets while the menu is
+ * closed, so the first F4 is a show and not a build. */
+static void TryBuild(void) {
+    if (g_ui.built) return;
+    g_buildPending = 1;
+}
+
 /* Keys are polled here, the engine draws the result. */
 static DWORD WINAPI MenuThread(LPVOID p) {
     View v;
-    int captured = -1;
     (void)p;
 
     for (;;) {
         Sleep(TICK_MS);
 
+        EscDeferTick();
+
+        /* F4 first, on every tick, before any UI work that
+         * could block: the toggle must never depend on the
+         * menu having rendered. */
         if (Pressed(g_key)) {
             g_open = !g_open;
             if (g_open) g_current = g_root;
         }
-        /* an open menu owns the keyboard, however it opened */
-        if (g_open != captured) {
-            captured = g_open;
-            ShCaptureKeys(captured);
-        }
+
         if (g_ui.built && g_ui.gen != ShUiGen()) DropWidgets();
+
         if (!g_open) {
             if (g_ui.built && g_ui.shown) {
                 ShUiShow(g_ui.panel, 0);
                 g_ui.shown = 0;
             }
+            MenuCapture(0);
+            /* first F4 must be instant: build the widgets now,
+             * hidden, so opening is a show and not a build */
+            TryBuild();
             continue;
         }
-        if (!g_ui.built && !BuildWidgets()) continue;
+
+        /* Wanted but not drawable yet: the widget build can
+         * take seconds on a cold session, so it runs on the
+         * build worker. Hand the keys back and wait for it;
+         * F4 keeps polling meanwhile. */
+        if (!g_ui.built) {
+            MenuCapture(0);
+            TryBuild();
+            continue;
+        }
 
         Lock();
         Navigate();
         Capture(&v);
         Unlock();
 
-        Sync(&v);
-        if (!g_ui.shown) {
-            ShUiShow(g_ui.panel, 1);
-            g_ui.shown = 1;
-        }
+        PushView(&v, 1);
+        /* Only a menu that is actually on screen takes the
+         * keyboard. */
+        MenuCapture(1);
     }
     return 0;
 }
@@ -442,6 +625,7 @@ static void EnsureMenu(void) {
     g_lockReady = 1;
     g_root = NewMenu("SCRIPTHOOK", 0);
     CreateThread(NULL, 0, MenuThread, NULL, 0, NULL);
+    CreateThread(NULL, 0, BuildWorker, NULL, 0, NULL);
 }
 
 SH_API uint32_t ShMenuCreate(const char *title) {
