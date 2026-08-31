@@ -3,6 +3,12 @@
  */
 #include <stdint.h>
 
+#ifdef _MSC_VER
+/* MSVC x64 has no inline assembler, so the pad lives in
+ * guard.asm (ml64). Keep the byte sequence there in sync
+ * with the GNU block below. */
+extern void ShGuardAlign(void);
+#else
 /* Raw bytes, not mnemonics: a different nop width would
  * move the pad and put the stale return in live code.
  */
@@ -35,6 +41,7 @@ __asm__(
 
     "  .byte 0xC3\n"                        /* ret           */
 );
+#endif
 
 extern void ShGuardAlign(void);
 

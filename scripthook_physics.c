@@ -36,11 +36,11 @@ typedef uint8_t (__attribute__((ms_abi)) *CastRay_t)(void *, void *,
                                                      void *, char, char,
                                                      uint8_t, char);
 
-static uint8_t  g_hitArr[0x880] __attribute__((aligned(16)));
-static uint8_t  g_recs[REC_COUNT * REC_STRIDE] __attribute__((aligned(16)));
-static uint8_t  g_desc[0x80] __attribute__((aligned(16)));
-static float    g_org[4] __attribute__((aligned(16)));
-static float    g_dir[4] __attribute__((aligned(16)));
+static SH_ALIGNED(16) uint8_t g_hitArr[0x880];
+static SH_ALIGNED(16) uint8_t g_recs[REC_COUNT * REC_STRIDE];
+static SH_ALIGNED(16) uint8_t g_desc[0x80];
+static SH_ALIGNED(16) float   g_org[4];
+static SH_ALIGNED(16) float   g_dir[4];
 
 static volatile LONG g_req = 0;
 static volatile LONG g_done = 0;

@@ -1,9 +1,31 @@
 # Writing a plugin {#mainpage}
 
-A plugin is a DLL renamed to `.asi`, placed in the folder that
-contains `GRW.exe`. The loader in `dinput8.dll` loads every
-`.asi` it finds there. If a plugin fails to load,
-`scripthook.log` in the game folder records the reason.
+A plugin is a DLL renamed to `.asi`, placed in its own folder
+under `scripts\` next to `GRW.exe`:
+
+```
+<gamedir>/
+├── dinput8.dll
+├── scripthook.ini       main config, created on first launch
+├── logs/                every log file, timestamps on each line
+└── scripts/
+    └── firstperson/
+        ├── firstperson.asi
+        └── firstperson.ini    the plugin's own config
+```
+
+The loader walks `scripts\` and loads `scripts\<name>\<name>.asi`
+for every folder. A plugin's settings belong beside it as
+`scripts\<name>\<name>.ini`; `ShPluginIniPath()` hands you that
+path so the lookup is not the plugin's problem. If a plugin fails
+to load, `logs/scripthook.log` records the reason.
+
+`scripthook.ini` is the main config, parsed before any plugin
+loads. The loader reads `[loader] load_plugins` and one
+`[plugins] <name>` line per plugin to skip a plugin without
+removing it. Future framework features will take their switches
+from the same file. Plugins can read it too through
+`ShConfigGetInt` / `ShConfigGetBool` / `ShConfigGetStr`.
 
 ## Build and link
 

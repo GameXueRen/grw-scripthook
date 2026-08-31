@@ -6,6 +6,18 @@
 
 #include <stdint.h>
 
+/* Compiler shims so the same sources build with MSVC, which
+ * has no __attribute__ and already uses the MS x64 ABI that
+ * these engine callbacks are written for. GCC and Clang keep
+ * the attribute; MSVC treats ms_abi as a no-op and gets its
+ * alignment from __declspec(align) instead. */
+#ifdef _MSC_VER
+#define __attribute__(x) /* no-op */
+#define SH_ALIGNED(x)    __declspec(align(x))
+#else
+#define SH_ALIGNED(x)    __attribute__((aligned(x)))
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -730,7 +742,7 @@ SH_API int  ShSetCrashIntercept(int on);
 SH_API int  ShCrashInterceptOn(void);
 
 /** @defgroup crash Crash reports
- *  Faults land in scripthook_crash.log, annotated.
+ *  Faults land in logs/scripthook_crash.log, annotated.
  *  @{ */
 
 /** How many crashes have been caught this session. */
@@ -1225,6 +1237,56 @@ typedef int (*ShSetGodModePlayer_t)(int);
 typedef int (*ShPhysicsReady_t)(void);
 typedef int (*ShGroundHeight_t)(float, float, float *);
 typedef int (*ShTeleportPlayerToGround_t)(float, float, float);
+
+/** @} */
+/** @defgroup config Config and paths
+ *  The on-disk layout: the main scripthook.ini, one folder
+ *  per plugin, and a single logs directory.
+ *
+ *  ```
+ *  <gamedir>/
+ *  ├── GRW.exe
+ *  ├── dinput8.dll
+ *  ├── scripthook.ini        main config
+ *  ├── logs/                 every log file
+ *  └── scripts/<name>/
+ *      ├── <name>.asi
+ *      └── <name>.ini        the plugin's own config
+ *  ```
+ *
+ *  Every path is anchored to the folder holding GRW.exe, so
+ *  it stays correct no matter what the working directory is.
+ *  @{ */
+
+/** Parse scripthook.ini. The loader runs this before any
+ *  plugin loads; calling it again is harmless. */
+SH_API void ShConfigInit(void);
+
+/** Integer setting from the main config; def when missing. */
+SH_API int  ShConfigGetInt(const char *section, const char *key,
+                           int def);
+
+/** Boolean setting: 1/0, true/false, yes/no, on/off. */
+SH_API int  ShConfigGetBool(const char *section, const char *key,
+                            int def);
+
+/** String setting; copies the value or def. Returns 1. */
+SH_API int  ShConfigGetStr(const char *section, const char *key,
+                           const char *def, char *out, int size);
+
+/** The folder containing GRW.exe, no trailing backslash. */
+SH_API int  ShGameDir(char *buf, int size);
+
+/** <gamedir>\scripts\ (with trailing backslash). */
+SH_API int  ShScriptsDir(char *buf, int size);
+
+/** <gamedir>\logs\<name>; the logs directory is created if
+ *  missing. Name may include a subfolder. */
+SH_API int  ShLogPath(const char *name, char *buf, int size);
+
+/** <gamedir>\scripts\<name>\<name>.ini, the config file
+ *  that belongs beside a plugin of the same name. */
+SH_API int  ShPluginIniPath(const char *plugin, char *buf, int size);
 
 /** @} */
 

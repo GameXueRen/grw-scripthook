@@ -3,6 +3,8 @@
 out/
 *.o
 *.obj
+*.lib
+*.exp
 
 # Editor and tool state
 .claude/

@@ -12,6 +12,7 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
 extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern void ShSetError(int err);
@@ -20,6 +21,10 @@ extern void ShSetError(int err);
 #define CRASH_SEEN_MAX 16
 #define CRASH_STACK_N  24
 #define CRASH_FILE     "scripthook_crash.log"
+
+/* Resolved once at startup: the report has to work from an
+ * exception handler, where building a path is too much. */
+static char g_crashPath[MAX_PATH];
 
 /* Static buffers under one guard: a stack overflow must
  * not need 4KB of stack to be reported, and two threads
@@ -39,7 +44,8 @@ static void Emit(const char *text, int len) {
     HANDLE f;
     DWORD wrote = 0;
 
-    f = CreateFileA(CRASH_FILE, FILE_APPEND_DATA, FILE_SHARE_READ,
+    f = CreateFileA(g_crashPath[0] ? g_crashPath : CRASH_FILE,
+                    FILE_APPEND_DATA, FILE_SHARE_READ,
                     NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return;
     WriteFile(f, text, (DWORD)len, &wrote, NULL);
@@ -106,6 +112,15 @@ static void Report(EXCEPTION_POINTERS *ep, int fatal) {
     if (!fatal && Duplicate(er->ExceptionCode, at)) goto done;
     g_logged++;
 
+    {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        n += snprintf(g_buf + n, sizeof(g_buf) - n,
+                      "[%04u-%02u-%02u %02u:%02u:%02u.%03u] crash report\n",
+                      st.wYear, st.wMonth, st.wDay,
+                      st.wHour, st.wMinute, st.wSecond,
+                      st.wMilliseconds);
+    }
     n += Header(g_buf + n, (int)sizeof(g_buf) - n);
     Where(site, sizeof(site), at);
     n += snprintf(g_buf + n, sizeof(g_buf) - n,
@@ -304,6 +319,9 @@ static int g_intercept = 0;
 static void *g_veh = NULL;
 
 void ShCrashStartup(void) {
+    /* All logs live in <gamedir>\logs; resolve the path once
+     * so the crash handler itself stays minimal. */
+    LogPath(g_crashPath, sizeof(g_crashPath), CRASH_FILE);
     SetUnhandledExceptionFilter(CrashUef);
 }
 

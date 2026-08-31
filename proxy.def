@@ -1,0 +1,11 @@
+; The DirectInput8 proxy entry points, exported for MSVC
+; builds. GCC builds use __declspec(dllexport) instead.
+; PRIVATE keeps the COM exports out of the import library,
+; exactly as the system dinput8 does.
+LIBRARY dinput8
+EXPORTS
+    DirectInput8Create
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE
+    DllRegisterServer PRIVATE
+    DllUnregisterServer PRIVATE

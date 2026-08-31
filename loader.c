@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <stdio.h>
+#include <string.h>
 #include "log.h"
 #include "scripthook.h"
 
@@ -11,6 +12,17 @@ typedef HRESULT (WINAPI *DllRegisterServer_t)(void);
 typedef HRESULT (WINAPI *DllUnregisterServer_t)(void);
 
 static HMODULE g_realDinput8 = NULL;
+
+/* The Windows SDK already declares DllCanUnloadNow and
+ * DllGetClassObject, so dllexport on the definition is a
+ * linkage mismatch under MSVC. Those builds export the five
+ * proxy entry points through proxy.def instead; GCC keeps
+ * the attribute. */
+#ifdef _MSC_VER
+#define SH_PROXY_EXPORT
+#else
+#define SH_PROXY_EXPORT __declspec(dllexport)
+#endif
 
 static DirectInput8Create_t   p_DirectInput8Create;
 static DllCanUnloadNow_t      p_DllCanUnloadNow;
@@ -45,32 +57,69 @@ static void LoadRealDinput8(void) {
 extern void ShStateStartup(void);
 extern void ShCrashStartup(void);
 
-/* Beside the exe, not the working directory: the game is
- * free to change that, and plugins now load from a thread.
+/* Plugins live one folder each under scripts\, named after
+ * the plugin:
+ *
+ *   scripts/<name>/<name>.asi
+ *   scripts/<name>/<name>.ini
+ *
+ * The folder scan means a plugin's assets, config and log
+ * stay together and nothing from the game root is touched.
+ * scripts\ is created if this is a fresh install.
  */
 static void LoadASIPlugins(void) {
-    char dir[MAX_PATH], pat[MAX_PATH], full[MAX_PATH];
+    char scriptsDir[MAX_PATH], pat[MAX_PATH], full[MAX_PATH];
     WIN32_FIND_DATAA fd;
     HANDLE h;
-    char *slash;
+    int n = 0, nSkipped = 0;
 
-    if (!GetModuleFileNameA(NULL, dir, MAX_PATH)) {
+    if (!ShScriptsDir(scriptsDir, sizeof(scriptsDir))) {
         Log("cannot find the game directory");
         return;
     }
-    slash = strrchr(dir, '\\');
-    if (slash) slash[1] = 0;
-    else dir[0] = 0;
+    /* Fresh install: make the layout the loader expects.
+     * CreateDirectoryA dislikes the trailing backslash. */
+    {
+        char dir[MAX_PATH];
+        size_t len = strlen(scriptsDir);
+        if (len > 0 && scriptsDir[len - 1] == '\\') len--;
+        memcpy(dir, scriptsDir, len);
+        dir[len] = 0;
+        CreateDirectoryA(dir, NULL);
+    }
 
-    snprintf(pat, sizeof(pat), "%s*.asi", dir);
+    if (!ShConfigGetBool("loader", "load_plugins", 1)) {
+        Log("plugin loading disabled in scripthook.ini");
+        return;
+    }
+
+    snprintf(pat, sizeof(pat), "%s*", scriptsDir);
     h = FindFirstFileA(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) {
-        Log("no .asi plugins in %s", dir);
+        Log("no plugin folders in %s", scriptsDir);
         return;
     }
     do {
-        snprintf(full, sizeof(full), "%s%s", dir, fd.cFileName);
-        Log("loading plugin: %s", fd.cFileName);
+        const char *name = fd.cFileName;
+
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            continue;
+        if (name[0] == '.') continue;
+
+        snprintf(full, sizeof(full), "%s%s\\%s.asi",
+                 scriptsDir, name, name);
+        if (GetFileAttributesA(full) == INVALID_FILE_ATTRIBUTES) {
+            Log("scripts\\%s: no %s.asi, skipping", name, name);
+            nSkipped++;
+            continue;
+        }
+        if (!ShConfigGetBool("plugins", name, 1)) {
+            Log("plugin disabled in scripthook.ini: %s", name);
+            nSkipped++;
+            continue;
+        }
+        n++;
+        Log("loading plugin: scripts\\%s\\%s.asi", name, name);
         HMODULE mod = LoadLibraryA(full);
         if (mod)
             Log("  loaded at %p", (void *)mod);
@@ -78,6 +127,7 @@ static void LoadASIPlugins(void) {
             Log("  FAILED (error %lu)", GetLastError());
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+    Log("plugin scan done: %d loaded, %d skipped", n, nSkipped);
 }
 
 /* Plugins load here, not in DllMain. LoadLibrary blocks on
@@ -85,6 +135,8 @@ static void LoadASIPlugins(void) {
  * against a fully initialised DLL and may import it. */
 static DWORD WINAPI LoaderThread(LPVOID p) {
     (void)p;
+    ShConfigInit();
+    Log("config loaded from scripthook.ini");
     LoadASIPlugins();
     return 0;
 }
@@ -124,7 +176,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 
 extern void ShWrapDirectInput(void *di);
 
-__declspec(dllexport) HRESULT WINAPI DirectInput8Create(
+SH_PROXY_EXPORT HRESULT WINAPI DirectInput8Create(
     HINSTANCE inst, DWORD ver, REFIID iid, LPVOID *out, LPUNKNOWN outer)
 {
     HRESULT hr;
@@ -135,12 +187,12 @@ __declspec(dllexport) HRESULT WINAPI DirectInput8Create(
     return hr;
 }
 
-__declspec(dllexport) HRESULT WINAPI DllCanUnloadNow(void) {
+SH_PROXY_EXPORT HRESULT WINAPI DllCanUnloadNow(void) {
     if (p_DllCanUnloadNow) return p_DllCanUnloadNow();
     return S_FALSE;
 }
 
-__declspec(dllexport) HRESULT WINAPI DllGetClassObject(
+SH_PROXY_EXPORT HRESULT WINAPI DllGetClassObject(
     REFCLSID clsid, REFIID iid, LPVOID *out)
 {
     if (p_DllGetClassObject)
@@ -148,12 +200,12 @@ __declspec(dllexport) HRESULT WINAPI DllGetClassObject(
     return E_FAIL;
 }
 
-__declspec(dllexport) HRESULT WINAPI DllRegisterServer(void) {
+SH_PROXY_EXPORT HRESULT WINAPI DllRegisterServer(void) {
     if (p_DllRegisterServer) return p_DllRegisterServer();
     return E_FAIL;
 }
 
-__declspec(dllexport) HRESULT WINAPI DllUnregisterServer(void) {
+SH_PROXY_EXPORT HRESULT WINAPI DllUnregisterServer(void) {
     if (p_DllUnregisterServer) return p_DllUnregisterServer();
     return E_FAIL;
 }

@@ -6,6 +6,7 @@
  * thread rather than from DllMain. */
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -59,6 +60,9 @@ typedef int (*WidgetClass_t)(uint64_t, char *, int);
 typedef int (*WidgetGetS_t)(uint64_t, uint32_t, char *, int);
 typedef int (*SceneName_t)(uint64_t, char *, int);
 typedef int (*WidgetPropType_t)(uint64_t, uint32_t);
+typedef int (*LogPath_t)(const char *, char *, int);
+
+static LogPath_t    g_logPath;
 
 static IsInGame_t   g_inGame;
 static GameState_t  g_state;
@@ -357,9 +361,14 @@ static void OnDump(uint32_t menu, uint32_t item, int value,
     (void)menu; (void)item; (void)value; (void)user;
 
     if (!g_sceneCount) return;
-    GetModuleFileNameA(NULL, path, sizeof(path));
-    { char *s = strrchr(path, '\\'); if (s) s[1] = 0; }
-    strcat(path, "firstperson_ui.log");
+    /* All logs live in <gamedir>\logs; fall back to the exe
+     * folder on hooks old enough to lack ShLogPath. */
+    if (!g_logPath ||
+        !g_logPath("firstperson_ui.log", path, sizeof(path))) {
+        GetModuleFileNameA(NULL, path, sizeof(path));
+        { char *s = strrchr(path, '\\'); if (s) s[1] = 0; }
+        strcat(path, "firstperson_ui.log");
+    }
 
     g_dump = fopen(path, "w");
     if (!g_dump) return;
@@ -439,6 +448,49 @@ static DWORD WINAPI TickThread(LPVOID p) {
     return 0;
 }
 
+/* The plugin's own settings live in
+ * scripts/firstperson/firstperson.ini, beside the .asi.
+ * They are optional: the built-in defaults stand in. */
+static int  IniInt(const char *path, const char *key, int def) {
+    return GetPrivateProfileIntA("Settings", key, def, path);
+}
+
+static int  IniBool(const char *path, const char *key, int def) {
+    char buf[16];
+    if (!GetPrivateProfileStringA("Settings", key, "", buf,
+                                  sizeof(buf), path))
+        return def;
+    if (!buf[0]) return def;
+    if (!_stricmp(buf, "1") || !_stricmp(buf, "true") ||
+        !_stricmp(buf, "yes") || !_stricmp(buf, "on")) return 1;
+    if (!_stricmp(buf, "0") || !_stricmp(buf, "false") ||
+        !_stricmp(buf, "no") || !_stricmp(buf, "off")) return 0;
+    return def;
+}
+
+static float IniFloat(const char *path, const char *key, float def) {
+    char buf[64];
+    if (!GetPrivateProfileStringA("Settings", key, "", buf,
+                                  sizeof(buf), path))
+        return def;
+    if (!buf[0]) return def;
+    return (float)atof(buf);
+}
+
+static void LoadIni(HMODULE m) {
+    typedef int (*PluginIni_t)(const char *, char *, int);
+    PluginIni_t pluginIni = NULL;
+    char path[MAX_PATH];
+
+    *(FARPROC *)&pluginIni = GetProcAddress(m, "ShPluginIniPath");
+    if (!pluginIni || !pluginIni("firstperson", path, sizeof(path)))
+        return;
+    g_wantHide = IniBool(path, "hide_head", g_wantHide);
+    g_fwd      = IniFloat(path, "forward_cm", g_fwd);
+    g_up       = IniFloat(path, "height_cm", g_up);
+    g_settleMs = IniInt(path, "settle_ms", g_settleMs);
+}
+
 static DWORD WINAPI BindThread(LPVOID p) {
     HMODULE m = NULL;
     MenuCreate_t menuCreate;
@@ -450,6 +502,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
         m = GetModuleHandleA("dinput8.dll");
         if (!m) Sleep(500);
     }
+    *(FARPROC *)&g_logPath = GetProcAddress(m, "ShLogPath");
     *(FARPROC *)&g_inGame = GetProcAddress(m, "ShIsInGame");
     *(FARPROC *)&g_state = GetProcAddress(m, "ShGetGameState");
     *(FARPROC *)&g_getPlayer = GetProcAddress(m, "ShGetPlayer");
@@ -481,15 +534,16 @@ static DWORD WINAPI BindThread(LPVOID p) {
     if (!menuCreate || !menuToggle || !menuNumber || !g_status)
         return 1;
 
+    LoadIni(m);
     g_menu = menuCreate("First person");
     menuToggle(g_menu, "Enabled", 0, OnToggle, NULL);
-    menuToggle(g_menu, "Hide head", 1, OnHide, NULL);
-    menuNumber(g_menu, "Forward cm", FWD_DEF, FWD_MIN, FWD_MAX,
+    menuToggle(g_menu, "Hide head", g_wantHide, OnHide, NULL);
+    menuNumber(g_menu, "Forward cm", g_fwd, FWD_MIN, FWD_MAX,
                FWD_STEP, OnForward, NULL);
-    menuNumber(g_menu, "Height cm", UP_DEF, UP_MIN, UP_MAX,
+    menuNumber(g_menu, "Height cm", g_up, UP_MIN, UP_MAX,
                UP_STEP, OnUp, NULL);
-    menuNumber(g_menu, "ADS settle ms", SETTLE_DEF, SETTLE_MIN,
-               SETTLE_MAX, SETTLE_STEP, OnSettle, NULL);
+    menuNumber(g_menu, "ADS settle ms", (float)g_settleMs,
+               SETTLE_MIN, SETTLE_MAX, SETTLE_STEP, OnSettle, NULL);
     {
         MenuAction_t menuAction;
         *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");

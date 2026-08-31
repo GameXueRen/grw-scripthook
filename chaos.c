@@ -862,11 +862,15 @@ static void PushHistory(const char *name, int timed) {
 
 /* On disk as well as on screen: a crash takes the HUD with
  * it, and the last few lines here are what say which
- * effect was live when the game went down. */
+ * effect was live when the game went down. Logs live in
+ * <gamedir>\logs, like every other log. */
 static void LogRoll(const char *name, int timed) {
     SYSTEMTIME t;
-    FILE *f = fopen("chaos.log", "a");
+    char path[MAX_PATH];
+    FILE *f;
 
+    if (!ShLogPath("chaos.log", path, sizeof(path))) return;
+    f = fopen(path, "a");
     if (!f) return;
     GetLocalTime(&t);
     fprintf(f, "%02d:%02d:%02d  %-22s %s\n",

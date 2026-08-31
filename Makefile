@@ -10,73 +10,88 @@ endif
 # Two up from src, so builds land beside GRW.exe.
 GAMEDIR = ../..
 
-.PHONY: all roulette fling tpgun spawner crazycars freecam fov fps \
+# Plugins land in scripts/<name>/<name>.asi, one folder per
+# plugin, which is what the loader scans for. Logs go into
+# <gamedir>/logs at runtime.
+
+.PHONY: all roulette fling spawner crazycars freecam fov fps \
         chaos sample docs clean
 
-sample: $(GAMEDIR)/ui_sample.asi
+sample: $(GAMEDIR)/scripts/ui_sample/ui_sample.asi
 
-$(GAMEDIR)/ui_sample.asi: ui_sample.c scripthook.h libscripthook.a
+$(GAMEDIR)/scripts/ui_sample/ui_sample.asi: ui_sample.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ ui_sample.c -L. -lscripthook -luser32
 
 docs:
 	doxygen Doxyfile
 
-all: $(GAMEDIR)/dinput8.dll $(GAMEDIR)/test_plugin.asi
+all: $(GAMEDIR)/dinput8.dll $(GAMEDIR)/scripts/test_plugin/test_plugin.asi
 
-roulette: $(GAMEDIR)/tp_roulette.asi
+roulette: $(GAMEDIR)/scripts/tp_roulette/tp_roulette.asi
 
-fling: $(GAMEDIR)/hitfling.asi
+fling: $(GAMEDIR)/scripts/hitfling/hitfling.asi
 
 # These bind with GetProcAddress. Linking libscripthook.a
 # instead works too, since the loader loads plugins from a
 # thread rather than from DllMain.
-$(GAMEDIR)/hitfling.asi: hitfling.c scripthook.h
+$(GAMEDIR)/scripts/hitfling/hitfling.asi: hitfling.c scripthook.h
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ hitfling.c -lgdi32 -luser32
 
-freecam: $(GAMEDIR)/freecam.asi
+freecam: $(GAMEDIR)/scripts/freecam/freecam.asi
 
-$(GAMEDIR)/freecam.asi: freecam.c scripthook.h
+$(GAMEDIR)/scripts/freecam/freecam.asi: freecam.c scripthook.h
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ freecam.c -lgdi32 -luser32
 
-fps: $(GAMEDIR)/firstperson.asi
+fps: $(GAMEDIR)/scripts/firstperson/firstperson.asi
 
-$(GAMEDIR)/firstperson.asi: firstperson.c scripthook.h
+$(GAMEDIR)/scripts/firstperson/firstperson.asi: firstperson.c scripthook.h
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ firstperson.c -lgdi32 -luser32
 
-chaos: $(GAMEDIR)/chaos.asi
+chaos: $(GAMEDIR)/scripts/chaos/chaos.asi
 
-$(GAMEDIR)/chaos.asi: chaos.c scripthook.h libscripthook.a
+$(GAMEDIR)/scripts/chaos/chaos.asi: chaos.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ chaos.c \
 		-L. -lscripthook -lgdi32 -luser32 -lwinmm
 
-fov: $(GAMEDIR)/fov_changer.asi
+fov: $(GAMEDIR)/scripts/fov_changer/fov_changer.asi
 
-$(GAMEDIR)/fov_changer.asi: fov_changer.c scripthook.h libscripthook.a
+$(GAMEDIR)/scripts/fov_changer/fov_changer.asi: fov_changer.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ fov_changer.c \
 		-L. -lscripthook -lgdi32 -luser32
 
-spawner: $(GAMEDIR)/spawner.asi
+spawner: $(GAMEDIR)/scripts/spawner/spawner.asi
 
-$(GAMEDIR)/spawner.asi: spawner.c scripthook.h
+$(GAMEDIR)/scripts/spawner/spawner.asi: spawner.c scripthook.h
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ spawner.c -lgdi32 -luser32
 
-crazycars: $(GAMEDIR)/CrazyCars.asi
+crazycars: $(GAMEDIR)/scripts/CrazyCars/CrazyCars.asi
 
-$(GAMEDIR)/CrazyCars.asi: crazycars.c scripthook.h
+$(GAMEDIR)/scripts/CrazyCars/CrazyCars.asi: crazycars.c scripthook.h
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ crazycars.c -lgdi32 -luser32
 
-tpgun: $(GAMEDIR)/tpgun.asi
+tpgun: $(GAMEDIR)/scripts/tpgun/tpgun.asi
 
-$(GAMEDIR)/tpgun.asi: tpgun.c scripthook.h
+$(GAMEDIR)/scripts/tpgun/tpgun.asi: tpgun.c scripthook.h
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ tpgun.c -lgdi32 -luser32
 
-$(GAMEDIR)/tp_roulette.asi: tp_roulette.c scripthook.h libscripthook.a
+$(GAMEDIR)/scripts/tp_roulette/tp_roulette.asi: tp_roulette.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ tp_roulette.c \
 		-L. -lscripthook -lgdi32 -luser32
 
 libscripthook.a: $(GAMEDIR)/dinput8.dll
 
-$(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
+$(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
+                        scripthook_physics.c \
                         scripthook_health.c scripthook_state.c \
                         scripthook_entity.c scripthook_spawn.c \
                         scripthook_npc.c scripthook_domino.c \
@@ -92,6 +107,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
                         scripthook_uiinput.c scripthook_dinput.c \
                         scripthook_hud.c scripthook_menu.c guard.c scripthook.h log.h
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
+		scripthook_config.c \
 		scripthook_physics.c scripthook_health.c \
 		scripthook_state.c scripthook_entity.c \
 		scripthook_spawn.c scripthook_npc.c scripthook_domino.c scripthook_hit.c \
@@ -111,9 +127,10 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_physics.c \
 		echo "dinput8.dll imports libwinpthread: the game cannot load it"; \
 		rm -f $@; exit 1; fi
 
-$(GAMEDIR)/test_plugin.asi: test_plugin.c
+$(GAMEDIR)/scripts/test_plugin/test_plugin.asi: test_plugin.c
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ test_plugin.c -lws2_32 -lgdi32 -luser32
 
 clean:
-	rm -f $(GAMEDIR)/dinput8.dll $(GAMEDIR)/test_plugin.asi
-	rm -f $(GAMEDIR)/scripthook.log $(GAMEDIR)/test_plugin.log
+	rm -f $(GAMEDIR)/dinput8.dll
+	rm -rf $(GAMEDIR)/logs $(GAMEDIR)/scripts

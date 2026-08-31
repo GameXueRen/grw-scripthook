@@ -108,11 +108,7 @@ static void ApiLog(const char *fmt, ...) {
         g_logReady = 1;
     }
     va_start(ap, fmt);
-    if (g_logFile) {
-        vfprintf(g_logFile, fmt, ap);
-        fputc('\n', g_logFile);
-        fflush(g_logFile);
-    }
+    Logv(fmt, ap);
     va_end(ap);
 }
 

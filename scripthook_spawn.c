@@ -126,7 +126,7 @@ static uint64_t g_specCache[VEHICLE_COUNT];
  * then rewritten froze the game, so rotate.
  */
 #define MTX_RING 64
-static uint8_t g_mtx[MTX_RING][64] __attribute__((aligned(16)));
+static SH_ALIGNED(16) uint8_t g_mtx[MTX_RING][64];
 static int g_mtxNext = 0;
 
 int ShVehicleCount(void) { return VEHICLE_COUNT; }

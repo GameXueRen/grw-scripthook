@@ -51,26 +51,65 @@ Three example mods are included:
 
 ## Building
 
-Requires a MinGW cross compiler. On Arch that is
-`mingw-w64-gcc`; on Debian, `gcc-mingw-w64-x86-64`.
+**MinGW (Linux/Proton).** Requires a MinGW cross compiler. On
+Arch that is `mingw-w64-gcc`; on Debian,
+`gcc-mingw-w64-x86-64`.
 
 ```sh
-make            # dinput8.dll and test_plugin.asi
-make fling      # hitfling.asi
-make tpgun      # tpgun.asi
-make sample     # ui_sample.asi
+make            # dinput8.dll and scripts/test_plugin/test_plugin.asi
+make fling      # scripts/hitfling/hitfling.asi
+make tpgun      # scripts/tpgun/tpgun.asi
+make sample     # scripts/ui_sample/ui_sample.asi
 make QUIET=1    # same, without the four benign warning families
 make docs       # the API reference into docs/api (doxygen)
 ```
 
-Output goes to `GAMEDIR`, set at the top of the Makefile, which
-should be the folder containing `GRW.exe`.
+**MSVC (Windows).** `build_msvc.ps1` builds the same outputs
+with the Visual Studio Build Tools x64 toolchain. It locates
+the game folder (a sibling of this repo's parent) or takes
+`-Gamedir`, and `-Clean` removes the built files.
+
+```powershell
+pwsh ./build_msvc.ps1            # auto-detected game folder
+pwsh ./build_msvc.ps1 -Gamedir "D:\Games\GRW"
+pwsh ./build_msvc.ps1 -Clean
+```
+
+The source is shared between the two compilers: the engine
+callbacks use `SH_MSABI`/`SH_ALIGNED` shims (GCC attributes,
+MSVC no-ops/`__declspec(align)`), the guard pad is emitted by
+inline asm on GCC and from `guard.asm` via ml64 on MSVC, and
+the proxy entry points are `__declspec(dllexport)` on GCC and
+listed in `proxy.def` on MSVC (where the SDK already declares
+two of them).
+
+Output goes to `GAMEDIR`, set at the top of the Makefile (or
+auto-detected by `build_msvc.ps1`), which should be the folder
+containing `GRW.exe`. Each plugin lands in
+`scripts/<name>/<name>.asi`, the layout the loader scans for.
 
 ## Installing
 
-Drop `dinput8.dll` next to `GRW.exe`, along with any `.asi` plugins.
-The proxy forwards every DirectInput8 export to the real system DLL,
-so the game behaves normally with or without plugins present.
+Drop `dinput8.dll` next to `GRW.exe`. Plugins go into `scripts/`,
+one folder each, named after the plugin:
+
+```
+Tom Clancy's Ghost Recon Wildlands/
+├── GRW.exe
+├── dinput8.dll
+├── scripthook.ini     main config, created on first launch
+├── logs/              every log file, timestamps on each line
+└── scripts/
+    └── firstperson/
+        ├── firstperson.asi
+        └── firstperson.ini    the plugin's own config
+```
+
+`scripthook.ini` controls the loader now (`[loader] load_plugins`,
+`[plugins] <name>=0` to disable one) and will hold the switches
+for the larger features. The proxy forwards every DirectInput8
+export to the real system DLL, so the game behaves normally with
+or without plugins present.
 
 ## Writing a mod
 
@@ -192,6 +231,7 @@ made pinned addresses easy to get away with and easy to get wrong.
 
 ```
 loader.c              dinput8 proxy, loads the real DLL and the .asi files
+scripthook_config.c   game/scripts/logs paths, the main scripthook.ini
 scripthook_api.c      player, teleport, entity placement, errors
 scripthook_entity.c   enumeration, components, kinds, visibility
 scripthook_health.c   the obfuscated health storage
@@ -218,10 +258,13 @@ scripthook_input.c    cursor freeze and the modifier poll stub
 scripthook_hud.c      overlay slots
 scripthook_menu.c     the shared F4 menu
 guard.c               landing pad for the spawn trampoline
+guard.asm             the same pad for MSVC (ml64)
 
 test_plugin.c         a REPL on port 9999, every debugging command
 hitfling.c tpgun.c    the example mods
 ui_sample.c           the native UI example
+build_msvc.ps1        MSVC build script (see Building)
+proxy.def             the proxy entry points for MSVC builds
 ```
 
 `test_plugin.c` is large because it accumulated every experiment

@@ -10,6 +10,12 @@
 
 #include "image.h"
 
+/* For the compiler shims only (SH_ALIGNED, and the MSVC
+ * no-op for __attribute__): this file binds the API through
+ * GetProcAddress with its own Api* structs, so nothing else
+ * from the header is used here. */
+#include "scripthook.h"
+
 #define REPL_PORT 9999
 #define RESP_MAX  (1024 * 2048)
 #define CMD_TIMEOUT_MS 5000
@@ -1941,7 +1947,7 @@ static void CmdHwbpOff(Resp *r) {
 
 /* ---- call primitive ---- */
 
-static float g_vec[4][4] __attribute__((aligned(16)));
+static SH_ALIGNED(16) float g_vec[4][4];
 
 static int IsImagePtr(uint64_t v) {
     return ShInImage(v);
@@ -2480,7 +2486,7 @@ static uint64_t g_gndThis = 0;
 /* Resolved lazily, since the base is only known at run. */
 static uint64_t g_gndFn = 0;
 #define GND_FN_RVA 0x1997270
-static float    g_gndIn[4] __attribute__((aligned(16)));
+static SH_ALIGNED(16) float g_gndIn[4];
 static float    g_gndOut = -1000.0f;
 static int      g_gndRet = -1;
 static int      g_gndHere = 0;
@@ -2491,8 +2497,8 @@ typedef uint8_t (__attribute__((ms_abi)) *CastRay_t)(void *, void *,
                                                     void *, char, char,
                                                     uint8_t, char);
 
-static uint8_t  g_castBuf[0x880] __attribute__((aligned(16)));
-static uint8_t  g_castRec[16 * 0x80] __attribute__((aligned(16)));
+static SH_ALIGNED(16) uint8_t g_castBuf[0x880];
+static SH_ALIGNED(16) uint8_t g_castRec[16 * 0x80];
 static volatile int g_castReq = 0;
 static volatile int g_castDone = 0;
 static uint64_t g_castB = 0;
@@ -2504,9 +2510,9 @@ static int      g_castCount = -1;
 static float    g_castHit[4];
 static int      g_castOwnDesc = 0;
 static float    g_castOrigin[4];
-static uint8_t  g_castDesc[0x80] __attribute__((aligned(16)));
-static float    g_castRayOrg[4] __attribute__((aligned(16)));
-static float    g_castRayDir[4] __attribute__((aligned(16)));
+static SH_ALIGNED(16) uint8_t g_castDesc[0x80];
+static SH_ALIGNED(16) float g_castRayOrg[4];
+static SH_ALIGNED(16) float g_castRayDir[4];
 static int      g_castTp = 0;
 static float    g_castTpZOff = 0.5f;
 static int      g_castTpDone = 0;
@@ -4727,7 +4733,7 @@ static void CmdGCallWnd(Resp *r, const char *line) {
  * overwritten later. One static buffer froze the game
  * twice, which looks like a retained pointer. */
 #define MTX_RING 64
-static uint8_t g_mtxRing[MTX_RING][64] __attribute__((aligned(16)));
+static SH_ALIGNED(16) uint8_t g_mtxRing[MTX_RING][64];
 static int g_mtxNext = 0;
 
 static void CmdMkMtx(Resp *r, const char *line) {
@@ -6078,10 +6084,28 @@ disc:
     return 0;
 }
 
+/* Logs live in <gamedir>\logs; ShLogPath is resolved late so
+ * the plugin also runs on older hooks that write next to the
+ * exe instead. */
+static int ReplLogOpen(void) {
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    typedef int (*LogPath_t)(const char *, char *, int);
+    LogPath_t logPath = NULL;
+    char path[MAX_PATH];
+
+    if (m) *(FARPROC *)&logPath = GetProcAddress(m, "ShLogPath");
+    if (logPath && logPath("scripthook_repl.log", path, sizeof(path))) {
+        g_log = fopen(path, "w");
+        return g_log != NULL;
+    }
+    g_log = fopen("scripthook_repl.log", "w");
+    return g_log != NULL;
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     (void)inst; (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
-        g_log = fopen("scripthook_repl.log", "w");
+        ReplLogOpen();
         PLog("REPL plugin loaded");
         CreateThread(NULL, 0, ServerThread, NULL, 0, NULL);
     }
