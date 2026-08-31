@@ -64,6 +64,16 @@ typedef int (*LogPath_t)(const char *, char *, int);
 
 static LogPath_t    g_logPath;
 
+/* Config convention, shared by every plugin: the .ini sits
+ * beside the .asi and takes its base name, so
+ * scripts\firstperson\firstperson.asi pairs with
+ * scripts\firstperson\firstperson.ini. The name is read from
+ * the module file rather than hardcoded, so the convention
+ * holds for any plugin and survives a rename. */
+static HINSTANCE g_inst = NULL;
+static char      g_name[64];
+static char      g_iniPath[MAX_PATH];
+
 static IsInGame_t   g_inGame;
 static GameState_t  g_state;
 static GetPlayer_t  g_getPlayer;
@@ -96,6 +106,7 @@ static volatile int g_nScenes, g_nWidgets, g_nLabels, g_nText;
 static volatile int g_nSights;
 
 static int Aiming(void);
+static void SaveIni(void);
 
 static uint64_t g_root = 0;
 static uint64_t g_hideRoot = 0;
@@ -202,6 +213,7 @@ static void OnHide(uint32_t menu, uint32_t item, int value,
                    void *user) {
     (void)menu; (void)item; (void)user;
     g_wantHide = value;
+    SaveIni();
     if (!value) ShowHead();
     Report();
 }
@@ -210,6 +222,7 @@ static void OnForward(uint32_t menu, uint32_t item, int value,
                       void *user) {
     (void)menu; (void)item; (void)user;
     g_fwd = (float)value;
+    SaveIni();
     /* Only while we already own it, or adjusting a slider
      * would take the camera back during a screen. */
     if (g_on && g_held) PushCamera();
@@ -219,6 +232,7 @@ static void OnUp(uint32_t menu, uint32_t item, int value,
                  void *user) {
     (void)menu; (void)item; (void)user;
     g_up = (float)value;
+    SaveIni();
     if (g_on && g_held) PushCamera();
 }
 
@@ -228,6 +242,7 @@ static void OnSettle(uint32_t menu, uint32_t item, int value,
                      void *user) {
     (void)menu; (void)item; (void)user;
     g_settleMs = value;
+    SaveIni();
 }
 
 /* The weapon prompt names the mode Alt switches TO, not
@@ -472,18 +487,55 @@ static float IniFloat(const char *path, const char *key, float def) {
     return (float)atof(buf);
 }
 
-static void LoadIni(HMODULE m) {
+/* Resolve <gamedir>\scripts\<name>\<name>.ini from the plugin's
+ * own file name and the loader's ShPluginIniPath, once. */
+static void ResolveIniPath(HMODULE m) {
     typedef int (*PluginIni_t)(const char *, char *, int);
     PluginIni_t pluginIni = NULL;
-    char path[MAX_PATH];
+    char mod[MAX_PATH];
+    const char *base, *dot;
+    size_t len;
+
+    g_name[0] = 0;
+    g_iniPath[0] = 0;
+    if (!g_inst || !GetModuleFileNameA(g_inst, mod, sizeof(mod)))
+        return;
+    base = strrchr(mod, '\\');
+    base = base ? base + 1 : mod;
+    dot = strrchr(base, '.');
+    len = dot ? (size_t)(dot - base) : strlen(base);
+    if (len >= sizeof(g_name)) len = sizeof(g_name) - 1;
+    memcpy(g_name, base, len);
+    g_name[len] = 0;
 
     *(FARPROC *)&pluginIni = GetProcAddress(m, "ShPluginIniPath");
-    if (!pluginIni || !pluginIni("firstperson", path, sizeof(path)))
-        return;
-    g_wantHide = IniBool(path, "hide_head", g_wantHide);
-    g_fwd      = IniFloat(path, "forward_cm", g_fwd);
-    g_up       = IniFloat(path, "height_cm", g_up);
-    g_settleMs = IniInt(path, "settle_ms", g_settleMs);
+    if (!pluginIni || !pluginIni(g_name, g_iniPath, sizeof(g_iniPath)))
+        g_iniPath[0] = 0;
+}
+
+static void LoadIni(void) {
+    if (!g_iniPath[0]) return;
+    g_wantHide = IniBool(g_iniPath, "hide_head", g_wantHide);
+    g_fwd      = IniFloat(g_iniPath, "forward_cm", g_fwd);
+    g_up       = IniFloat(g_iniPath, "height_cm", g_up);
+    g_settleMs = IniInt(g_iniPath, "settle_ms", g_settleMs);
+}
+
+/* Write the current settings back to <name>.ini. "Enabled" is
+ * a live state, not a setting, so it is deliberately not saved
+ * and always starts off. */
+static void SaveIni(void) {
+    char buf[64];
+
+    if (!g_iniPath[0]) return;
+    snprintf(buf, sizeof(buf), "%d", g_wantHide);
+    WritePrivateProfileStringA("Settings", "hide_head", buf, g_iniPath);
+    snprintf(buf, sizeof(buf), "%.1f", g_fwd);
+    WritePrivateProfileStringA("Settings", "forward_cm", buf, g_iniPath);
+    snprintf(buf, sizeof(buf), "%.1f", g_up);
+    WritePrivateProfileStringA("Settings", "height_cm", buf, g_iniPath);
+    snprintf(buf, sizeof(buf), "%d", g_settleMs);
+    WritePrivateProfileStringA("Settings", "settle_ms", buf, g_iniPath);
 }
 
 static DWORD WINAPI BindThread(LPVOID p) {
@@ -529,7 +581,8 @@ static DWORD WINAPI BindThread(LPVOID p) {
     if (!menuCreate || !menuToggle || !menuNumber || !g_status)
         return 1;
 
-    LoadIni(m);
+    ResolveIniPath(m);
+    LoadIni();
     g_menu = menuCreate("First person");
     menuToggle(g_menu, "Enabled", 0, OnToggle, NULL);
     menuToggle(g_menu, "Hide head", g_wantHide, OnHide, NULL);
@@ -554,6 +607,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
+        g_inst = inst;
         DisableThreadLibraryCalls(inst);
         CreateThread(NULL, 0, BindThread, NULL, 0, NULL);
     }

@@ -1284,8 +1284,16 @@ SH_API int  ShScriptsDir(char *buf, int size);
  *  missing. Name may include a subfolder. */
 SH_API int  ShLogPath(const char *name, char *buf, int size);
 
-/** <gamedir>\scripts\<name>\<name>.ini, the config file
- *  that belongs beside a plugin of the same name. */
+/** <gamedir>\scripts\<name>\<name>.ini, the config file that
+ *  belongs beside a plugin of the same name.
+ *
+ *  Plugin config convention (follow this in every plugin):
+ *  the .ini lives in the SAME folder as the .asi and uses the
+ *  SAME base name, so scripts\foo\bar.asi reads and writes
+ *  scripts\foo\bar.ini. Derive <name> from your own module
+ *  path rather than hardcoding it, so the pairing survives a
+ *  rename: GetModuleFileNameA(instance, path, MAX_PATH), take
+ *  the file part and strip the ".asi". */
 SH_API int  ShPluginIniPath(const char *plugin, char *buf, int size);
 
 /** @} */
