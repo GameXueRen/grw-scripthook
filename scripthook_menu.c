@@ -56,7 +56,6 @@ static uint32_t g_root = 0;
 static volatile uint32_t g_current = 0;
 static volatile int g_open = 0;
 static volatile int g_key = VK_F4;
-static volatile int g_greeted = 0;
 static volatile int g_started = 0;
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
@@ -645,21 +644,8 @@ SH_API void ShMenuOpen(int open) {
     if (g_open) g_current = g_root;
 }
 
-/* Opened once per session on entering Playing, so the key
- * is discoverable without anyone being told it.
- */
+/* Entering Playing used to auto-open the menu once so the F4 key
+ * was discoverable. That surprised players, so the menu only opens
+ * on F4 now; the entry point stays for the state machine. */
 void ShMenuOnEnterPlaying(void) {
-    Menu *root;
-    int have = 0;
-
-    if (!g_started || g_greeted) return;
-    Lock();
-    root = MenuOf(g_root);
-    if (root)
-        have = root->count > 0;
-    Unlock();
-    if (!have) return;
-    g_greeted = 1;
-    g_current = g_root;
-    g_open = 1;
 }
