@@ -98,7 +98,7 @@ New-Item -ItemType Directory -Force -Path $tmp, $scripts | Out-Null
 
 # Shared flags for every compile unit.
 $c = @(
-    '/nologo', '/O2', '/W3', '/LD', '/std:c17',
+    '/nologo', '/O2', '/W3', '/LD', '/std:c17', '/utf-8',
     "/I$root",
     '/D_CRT_SECURE_NO_WARNINGS',
     "/Fo$tmp\"

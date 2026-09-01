@@ -115,6 +115,16 @@ SH_API int ShPluginIniPath(const char *plugin, char *buf, int size) {
 
 /* ---- main config --------------------------------------------- */
 
+/* Forward declarations: the parser, the language tables and the
+ * lookup helpers are defined below in an order that is easy to
+ * read, so the cross calls get a prototype up front. */
+static void LoadConfig(void);
+static void ResolveLanguage(void);
+static void PeekLanguage(const char *text);
+static int  IsLangSection(const char *sec);
+static void AddLangEntry(const char *section, const char *key,
+                         const char *value);
+
 #define CONFIG_MAX  16384u
 #define ENTRIES_MAX 256
 
@@ -145,7 +155,65 @@ static const char *DEFAULT_CONFIG =
     "\n"
     "[logging]\n"
     "; future: log level (none, error, warn, info, debug)\n"
-    "; level=info\n";
+    "; level=info\n"
+    "\n"
+    "[Settings]\n"
+    "; Menu language: zh_cn = Chinese (default), en = English.\n"
+    "Language=zh_cn\n"
+    "\n"
+    "; ------------------------------------------------------------\n"
+    "; Translation tables. One section per language (the [Settings]\n"
+    "; Language value picks which one), plus optional per-menu\n"
+    "; subsections [lang.<menu title>] to give the same English word\n"
+    "; different translations in different menus. Keys are the menu\n"
+    "; labels verbatim; values are the localized text. Save this file\n"
+    "; as UTF-8. A missing key falls back to English.\n"
+    "; NOTE: <menu title> is the menu's display title (the string the\n"
+    "; plugin passed to ShMenuCreate), NOT the plugin folder name.\n"
+    "; Deeper menus use a dotted path: [zh_cn.A.B] then falls back to\n"
+    "; [zh_cn.A] then [zh_cn].\n"
+    "; ------------------------------------------------------------\n"
+    "\n"
+    "[zh_cn]\n"
+    "SCRIPTHOOK = 模组菜单\n"
+    "F4 opens this menu = 按 F4 打开此菜单\n"
+    "on = 开\n"
+    "off = 关\n"
+    "; The root menu's rows and every submenu title also read from\n"
+    "; the global table, so they live here too.\n"
+    "Chaos = 混沌模式\n"
+    "Field of view = 视野\n"
+    "First person = 第一人称\n"
+    "Free camera = 自由视角\n"
+    "Vehicles = 载具\n"
+    "\n"
+    "[zh_cn.Chaos]\n"
+    "Enabled = 混沌开关\n"
+    "Seconds between = 每次间隔\n"
+    "Effect seconds = 特效时长\n"
+    "Roll one now = 立即随机一个\n"
+    "Clear active = 清除当前特效\n"
+    "\n"
+    "[zh_cn.Field of view]\n"
+    "Override = 覆盖\n"
+    "Vertical fov = 垂直视野\n"
+    "Back to the game default = 恢复游戏默认\n"
+    "\n"
+    "[zh_cn.First person]\n"
+    "Enabled = 第一人称\n"
+    "Hide head = 隐藏头部\n"
+    "Forward cm = 前移(厘米)\n"
+    "Height cm = 高度(厘米)\n"
+    "ADS settle ms = ADS稳定(毫秒)\n"
+    "Dump UI to log = 转储UI到日志\n"
+    "\n"
+    "[zh_cn.Free camera]\n"
+    "Detached = 分离\n"
+    "Speed = 速度\n"
+    "Recentre on game camera = 对准游戏相机\n"
+    "\n"
+    "[zh_cn.Vehicles]\n"
+    "; Vehicle names are dynamic data, nothing to translate here.\n";
 
 static void WriteDefaultConfig(const char *path) {
     FILE *f = fopen(path, "w");
@@ -162,6 +230,7 @@ static void ParseConfig(const char *text) {
     const char *p = text;
     char section[48] = "";
 
+    PeekLanguage(text);
     while (*p) {
         char line[512];
         char *s, *e, *eq;
@@ -214,6 +283,24 @@ static void ParseConfig(const char *text) {
         }
 
         if (!*s) continue;
+
+        /* eq points at '='; the key is line..eq-1, value is s.
+         * Language sections never touch the main entry table, so
+         * a large translation set cannot crowd the config out. */
+        {
+            char *k = line;
+            while (*k == ' ' || *k == '\t') k++;
+            if (IsLangSection(section)) {
+                AddLangEntry(section, k, s);
+                continue;
+            }
+            i = strlen(k);
+            if (i >= sizeof(g_entries[g_nentries].key))
+                i = sizeof(g_entries[g_nentries].key) - 1;
+            memcpy(g_entries[g_nentries].key, k, i);
+            g_entries[g_nentries].key[i] = 0;
+        }
+
         if (g_nentries >= ENTRIES_MAX) continue;
 
         i = strlen(section);
@@ -221,17 +308,6 @@ static void ParseConfig(const char *text) {
             i = sizeof(g_entries[g_nentries].section) - 1;
         memcpy(g_entries[g_nentries].section, section, i);
         g_entries[g_nentries].section[i] = 0;
-
-        /* eq now points at '=', so the key is line..eq-1 */
-        {
-            char *k = line;
-            while (*k == ' ' || *k == '\t') k++;
-            i = strlen(k);
-            if (i >= sizeof(g_entries[g_nentries].key))
-                i = sizeof(g_entries[g_nentries].key) - 1;
-            memcpy(g_entries[g_nentries].key, k, i);
-            g_entries[g_nentries].key[i] = 0;
-        }
 
         i = strlen(s);
         if (i >= sizeof(g_entries[g_nentries].value))
@@ -241,6 +317,211 @@ static void ParseConfig(const char *text) {
 
         g_nentries++;
     }
+}
+
+/* ---- localization --------------------------------------------- */
+
+/* No language whitelist: whatever [Settings] Language names is the
+ * section prefix. Language=zh reads [zh], [zh.xx], [zh.xx.xx]; a
+ * Language=cn reads [cn], [cn.xx]... A section "[<lang>]" or
+ * "[<lang>.<scope>]" belongs to the table for that language;
+ * anything else (Settings, loader, plugins, logging) is config. */
+#define LANGS_MAX       512
+
+typedef struct {
+    char lang[16];
+    char scope[48];
+    char key[64];
+    char value[128];
+} LangEntry;
+
+static LangEntry g_langs[LANGS_MAX];
+static int  g_nlangs = 0;
+static char g_langName[16] = "";
+
+static int IsLangSection(const char *sec) {
+    size_t n;
+    if (!sec || !sec[0] || !g_langName[0]) return 0;
+    n = strlen(g_langName);
+    if (strncmp(sec, g_langName, n)) return 0;
+    return sec[n] == 0 || sec[n] == '.';
+}
+
+/* One quick pass for the [Settings] Language value before the
+ * tables are built, so IsLangSection knows the prefix to collect. */
+static void PeekLanguage(const char *text) {
+    const char *p = text;
+    int inSettings = 0;
+
+    while (*p) {
+        char line[256];
+        char *s;
+        size_t i = 0;
+
+        while (*p && *p != '\n' && *p != '\r' && i < sizeof(line) - 1)
+            line[i++] = *p++;
+        line[i] = 0;
+        if (*p == '\r') p++;
+        if (*p == '\n') p++;
+
+        s = line;
+        while (*s == ' ' || *s == '\t') s++;
+        if (!*s || *s == ';' || *s == '#') continue;
+
+        if (*s == '[') {
+            inSettings = !_strnicmp(s, "[Settings]", 10) ? 1 : 0;
+            continue;
+        }
+        if (inSettings && !_strnicmp(s, "Language=", 9)) {
+            char *v = s + 9;
+            size_t l;
+            while (*v == ' ' || *v == '\t') v++;
+            l = strlen(v);
+            while (l > 0 && (v[l - 1] == ' ' || v[l - 1] == '\t'))
+                l--;
+            if (l > 1 && (v[0] == '"' || v[0] == '\'') &&
+                v[l - 1] == v[0]) {
+                v++;
+                l -= 2;
+            }
+            if (l >= sizeof(g_langName)) l = sizeof(g_langName) - 1;
+            memcpy(g_langName, v, l);
+            g_langName[l] = 0;
+            return;
+        }
+    }
+}
+
+static void AddLangEntry(const char *section, const char *key,
+                         const char *value) {
+    char lang[16], scope[48];
+    const char *dot;
+    size_t n;
+    LangEntry *e;
+
+    if (g_nlangs >= LANGS_MAX) return;
+    dot = strchr(section, '.');
+    if (dot) {
+        n = (size_t)(dot - section);
+        if (n >= sizeof(lang)) n = sizeof(lang) - 1;
+        memcpy(lang, section, n);
+        lang[n] = 0;
+        strncpy(scope, dot + 1, sizeof(scope) - 1);
+        scope[sizeof(scope) - 1] = 0;
+    } else {
+        strncpy(lang, section, sizeof(lang) - 1);
+        lang[sizeof(lang) - 1] = 0;
+        scope[0] = 0;
+    }
+    e = &g_langs[g_nlangs++];
+    strncpy(e->lang, lang, sizeof(e->lang) - 1);
+    e->lang[sizeof(e->lang) - 1] = 0;
+    strncpy(e->scope, scope, sizeof(e->scope) - 1);
+    e->scope[sizeof(e->scope) - 1] = 0;
+    strncpy(e->key, key, sizeof(e->key) - 1);
+    e->key[sizeof(e->key) - 1] = 0;
+    strncpy(e->value, value, sizeof(e->value) - 1);
+    e->value[sizeof(e->value) - 1] = 0;
+}
+
+/* Direct hit on one entry. */
+static const char *LangFind(const char *lang, const char *scope,
+                            const char *key) {
+    int i;
+    for (i = 0; i < g_nlangs; i++) {
+        if (strcmp(g_langs[i].lang, lang)) continue;
+        if (g_langs[i].scope[0] &&
+            strcmp(g_langs[i].scope, scope))
+            continue;
+        if (!strcmp(g_langs[i].key, key))
+            return g_langs[i].value;
+    }
+    return NULL;
+}
+
+/* The [Settings] Language key is the table prefix, already peeked
+ * during parsing. An empty or missing value falls back to the
+ * documented default so a fresh config still localizes. There is no
+ * whitelist: Language=zh reads the [zh] tables, Language=cn the
+ * [cn] ones, whatever the string is. */
+static void ResolveLanguage(void) {
+    if (!g_langName[0]) {
+        strncpy(g_langName, "zh_cn", sizeof(g_langName) - 1);
+        g_langName[sizeof(g_langName) - 1] = 0;
+    }
+}
+
+/** Translate without a scope: the [lang] table, then English. */
+SH_API const char *ShLang(const char *text) {
+    const char *v;
+
+    if (!text) return "";
+    LoadConfig();
+    if (g_langName[0]) {
+        v = LangFind(g_langName, "", text);
+        if (v) return v;
+    }
+    v = LangFind("en", "", text);
+    return v ? v : text;
+}
+
+/** Translate within a menu's scope, falling through the scoped
+ *  and global tables of the active language, then English.
+ *  The scope is a dotted title path ("First person.Custom.Height"),
+ *  so deeper menus try the full path, then each shorter prefix,
+ *  then the global table: [lang.A.B.C] -> [lang.A.B] -> [lang.A]
+ *  -> [lang] -> the same for en -> the original text. */
+SH_API const char *ShLangFor(const char *scope, const char *text) {
+    const char *v;
+    char buf[64];
+
+    if (!text) return "";
+    if (!scope) scope = "";
+    LoadConfig();
+    if (g_langName[0]) {
+        const char *p = scope;
+        for (;;) {
+            v = LangFind(g_langName, p, text);
+            if (v) return v;
+            {
+                const char *dot = strrchr(p, '.');
+                size_t n;
+                if (!dot) break;
+                n = (size_t)(dot - scope);
+                if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+                memcpy(buf, scope, n);
+                buf[n] = 0;
+                p = buf;
+            }
+        }
+        v = LangFind(g_langName, "", text);
+        if (v) return v;
+    }
+    {
+        const char *p = scope;
+        for (;;) {
+            v = LangFind("en", p, text);
+            if (v) return v;
+            {
+                const char *dot = strrchr(p, '.');
+                size_t n;
+                if (!dot) break;
+                n = (size_t)(dot - scope);
+                if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+                memcpy(buf, scope, n);
+                buf[n] = 0;
+                p = buf;
+            }
+        }
+        v = LangFind("en", "", text);
+        if (v) return v;
+    }
+    return text;
+}
+
+SH_API const char *ShLangGet(void) {
+    LoadConfig();
+    return g_langName;
 }
 
 static void LoadConfig(void) {
@@ -266,6 +547,7 @@ static void LoadConfig(void) {
     fclose(f);
     g_config[n] = 0;
     ParseConfig(g_config);
+    ResolveLanguage();
 }
 
 static const char *FindEntry(const char *section, const char *key) {

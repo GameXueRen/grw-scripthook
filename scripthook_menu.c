@@ -119,16 +119,21 @@ static Item *NewItem(Menu *m, int kind, const char *label,
     return it;
 }
 
-/* Rendered text for the value side of a row. */
-static void ValueText(const Item *it, char *out, int n) {
+/* Rendered text for the value side of a row. Fixed words and list
+ * options are translated in the menu's scope; number and arrow
+ * formats are language-neutral. */
+static void ValueText(const char *scope, const Item *it,
+                      char *out, int n) {
     out[0] = 0;
     if (it->kind == IT_SUB) snprintf(out, n, ">");
     else if (it->kind == IT_TOGGLE)
-        snprintf(out, n, it->value ? "[on]" : "[off]");
+        snprintf(out, n, "[%s]", it->value ? ShLangFor(scope, "on")
+                                           : ShLangFor(scope, "off"));
     else if (it->kind == IT_NUMBER)
         snprintf(out, n, "< %.2f >", it->num);
     else if (it->kind == IT_LIST && it->nopts)
-        snprintf(out, n, "< %s >", it->opts[it->value % it->nopts]);
+        snprintf(out, n, "< %s >",
+                 ShLangFor(scope, it->opts[it->value % it->nopts]));
 }
 
 /* A plugin callback can be heavy (a heap scan, a node walk,
@@ -314,9 +319,40 @@ void ShMenuSetOverlayReady(int ready) {
     g_ovlReady = ready ? 1 : 0;
 }
 
-/* Snapshot the current menu for the overlay renderer. Labels
- * and values are copied, so the renderer can draw them without
- * holding the lock. */
+/* Dotted title path from the first submenu under the root down to
+ * m, e.g. "First person.Custom". Empty for the root itself. Used as
+ * the translation scope, so a deeper menu first matches its own
+ * section and falls back up its ancestors: [zh_cn.A.B.C] ->
+ * [zh_cn.A.B] -> [zh_cn.A] -> [zh_cn]. */
+static void MenuPath(const Menu *m, char *out, int n) {
+    const char *titles[8];
+    int k = 0;
+    size_t used = 0;
+    const Menu *cur = m;
+
+    out[0] = 0;
+    if (n <= 0) return;
+    while (cur && cur->parent && k < 8) {
+        titles[k++] = cur->title;
+        cur = MenuOf(cur->parent);
+    }
+    while (k > 0) {
+        const char *t = titles[--k];
+        int w = snprintf(out + used, n - used, "%s%s",
+                         used ? "." : "", t);
+        if (w < 0) break;
+        used += (size_t)w;
+        if (used >= (size_t)n) break;
+    }
+    out[n - 1] = 0;
+}
+
+/* Snapshot the current menu for the overlay renderer. Labels,
+ * values and the title are translated here (the model keeps the
+ * English originals), then copied so the renderer can draw them
+ * without holding the lock. Items are scoped to this menu's title
+ * path; the title itself is scoped to the parent's path so it
+ * matches the row that led here. */
 void ShMenuCaptureView(ShMenuView *v) {
     Menu *m;
     int i;
@@ -325,18 +361,32 @@ void ShMenuCaptureView(ShMenuView *v) {
     Lock();
     m = MenuOf(g_current);
     if (m) {
-        strncpy(v->title, m->title, sizeof(v->title) - 1);
-        strncpy(v->status, m->status, sizeof(v->status) - 1);
+        char path[64], parentPath[64];
+        Menu *pm = MenuOf(m->parent);
+
+        /* The root's rows and the submenus' titles read from the
+         * global table ([lang]), because MenuPath is empty for the
+         * root and for any menu whose parent is the root. Deeper
+         * menus use the dotted title path from the root's child
+         * down, falling back to [lang] level by level. */
+        MenuPath(m, path, sizeof(path));
+        MenuPath(pm, parentPath, sizeof(parentPath));
+
+        strncpy(v->title, ShLangFor(parentPath, m->title),
+                sizeof(v->title) - 1);
+        strncpy(v->status, ShLangFor(path, m->status),
+                sizeof(v->status) - 1);
         for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
             ShMenuRow *r = &v->row[v->rows];
-            strncpy(r->name, m->items[i].label, sizeof(r->name) - 1);
-            ValueText(&m->items[i], r->value, sizeof(r->value));
+            strncpy(r->name, ShLangFor(path, m->items[i].label),
+                    sizeof(r->name) - 1);
+            ValueText(path, &m->items[i], r->value, sizeof(r->value));
             r->selected = (i == m->sel);
             if (r->selected) v->sel = v->rows;
             v->rows++;
         }
         if (m->count > VISIBLE)
-            snprintf(v->footer, sizeof(v->footer), "%d of %d",
+            snprintf(v->footer, sizeof(v->footer), "%d / %d",
                      m->sel + 1, m->count);
     }
     Unlock();

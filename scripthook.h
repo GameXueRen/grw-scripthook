@@ -1320,6 +1320,23 @@ SH_API int  ShLogPath(const char *name, char *buf, int size);
 SH_API int  ShPluginIniPath(const char *plugin, char *buf, int size);
 
 /** @} */
+/** @defgroup lang Localization
+ *  Menu text is translated at capture time. The [Settings]
+ *  Language key in scripthook.ini selects the language; for
+ *  language "zh_cn" the [zh_cn] and [zh_cn.<scope>] sections
+ *  hold translations keyed by the original English text. Lookup
+ *  order: [lang.scope] -> [lang] -> [en.scope] -> [en] -> the
+ *  original text. @{ */
+
+/** Translate without a scope (framework text, plugin HUD text). */
+SH_API const char *ShLang(const char *text);
+/** Translate within a menu's scope (its English title). NULL
+ *  scope is the same as ShLang. */
+SH_API const char *ShLangFor(const char *scope, const char *text);
+/** The active language name, from [Settings] Language. */
+SH_API const char *ShLangGet(void);
+
+/** @} */
 
 #ifdef __cplusplus
 }
