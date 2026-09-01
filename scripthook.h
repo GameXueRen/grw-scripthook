@@ -606,6 +606,11 @@ SH_API int  ShMenuClear(uint32_t menu);
 SH_API int  ShMenuDestroy(uint32_t menu);
 /** The line under the items. Empty text removes it. */
 SH_API int  ShMenuStatus(uint32_t menu, const char *text);
+/** The hint shown under the title of this submenu, replacing the
+ *  control hints the root menu shows. Empty text removes it. The
+ *  text is translated as the menu's own scope, so it can be an
+ *  English key in the [lang.<menu>] table. */
+SH_API int  ShMenuHint(uint32_t menu, const char *text);
 SH_API void ShMenuSetKey(int vk);
 SH_API int  ShMenuIsOpen(void);
 SH_API void ShMenuOpen(int open);
@@ -621,6 +626,7 @@ typedef struct ShMenuRow {
  *  the D3D11 overlay (scripthook_ovl.cpp) to draw. */
 typedef struct ShMenuView {
     char title[48];
+    char hint[128];   /**< control hints under the title, \n lines */
     char status[96];
     char footer[16];
     int  rows;

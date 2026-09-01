@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <string.h>
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
@@ -116,11 +117,33 @@ void RenderMenu(const ShMenuView* v)
 {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     ImFont* font = ImGui::GetFont();
-    const float fs = 16.0f, titleFs = 18.0f;
+    const float fs = 16.0f, titleFs = 18.0f, hintFs = 14.0f;
+    const float hintLh = 18.0f, hintGap = 5.0f;
     const float x = MENU_X, y = MENU_Y;
     int i;
 
-    float h = PAD_TOP + TITLE_H + ROW_H * (float)v->rows + PAD;
+    // Control hints under the title: up to two \n-separated lines.
+    int hintLines = 0;
+    for (const char* hl = v->hint; *hl; ) {
+        hintLines++;
+        hl = strchr(hl, '\n');
+        if (!hl) break;
+        hl++;
+    }
+    if (hintLines > 2) hintLines = 2;
+    // hintH must reach down to the actual glyph bottom of the last
+    // hint line, not just hintGap + hintLh * lines. msyh's line
+    // height at 14px is ~15px, so hintLh=18 leaves a visible gap
+    // between the hint block and the first row. Measure descent
+    // from the font and use it.
+    float hintH = 0.0f;
+    if (hintLines) {
+        ImFontBaked* hb = font->GetFontBaked(hintFs);
+        float descent = hb ? -hb->Descent : 3.0f;
+        hintH = hintGap + hintLh * (float)(hintLines - 1) + descent;
+    }
+
+    float h = PAD_TOP + TITLE_H + hintH + ROW_H * (float)v->rows + PAD;
     if (v->footer[0]) h += ROW_H;
     if (v->status[0]) h += ROW_H;
 
@@ -131,9 +154,30 @@ void RenderMenu(const ShMenuView* v)
     float titleBy = CenteredBaseline(font, titleFs, y + PAD_TOP, TITLE_H);
     dl->AddText(font, titleFs, ImVec2(x + PAD, titleBy),
                 Col(0xFFD25Au), v->title);
+    // Control hints, two small grey lines under the title.
+    {
+        float hy = y + PAD_TOP + TITLE_H + hintGap;
+        const char* hl = v->hint;
+        int li = 0;
+        while (*hl && li < hintLines) {
+            char buf[128];
+            const char* nl = strchr(hl, '\n');
+            size_t n = nl ? (size_t)(nl - hl) : strlen(hl);
+            if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+            memcpy(buf, hl, n);
+            buf[n] = 0;
+            dl->AddText(font, hintFs, ImVec2(x + PAD, hy),
+                        Col(0x8C9BA8u), buf);
+            hy += hintLh;
+            li++;
+            hl = nl ? nl + 1 : hl + n;
+        }
+    }
+    // Row area starts below the title and the hints.
+    const float top = y + PAD_TOP + TITLE_H + hintH;
     // Selection bar behind the selected row (centred on row centre).
     if (v->rows > 0) {
-        float sy = y + PAD_TOP + TITLE_H + ROW_H * (float)v->sel;
+        float sy = top + ROW_H * (float)v->sel;
         dl->AddRectFilled(ImVec2(x + PAD * 0.5f, sy + BAR_DY),
                           ImVec2(x + MENU_W - PAD * 0.5f, sy + BAR_DY + BAR_H),
                           Col(0x28465Au, 230), 3.0f);
@@ -141,7 +185,7 @@ void RenderMenu(const ShMenuView* v)
     // Rows: name left, value right-aligned in its column.
     for (i = 0; i < v->rows; i++) {
         const ShMenuRow* r = &v->row[i];
-        float ry = y + PAD_TOP + TITLE_H + ROW_H * (float)i;
+        float ry = top + ROW_H * (float)i;
         ImU32 c = r->selected ? Col(0x8CF0FFu) : Col(0xD2D2D2u);
         float by = CenteredBaseline(font, fs, ry, ROW_H);
         dl->AddText(font, fs, ImVec2(x + PAD + 8.0f, by), c, r->name);
@@ -154,7 +198,7 @@ void RenderMenu(const ShMenuView* v)
         }
     }
     // Footer and status lines.
-    float fy = y + PAD_TOP + TITLE_H + ROW_H * (float)v->rows;
+    float fy = top + ROW_H * (float)v->rows;
     if (v->footer[0]) {
         float fby = CenteredBaseline(font, fs, fy, ROW_H);
         dl->AddText(font, fs, ImVec2(x + PAD, fby),

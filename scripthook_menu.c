@@ -42,6 +42,7 @@ typedef struct {
 typedef struct {
     int      used;
     char     title[LABEL];
+    char     hint[128];
     char     status[96];
     uint32_t parent;
     int      sel;
@@ -226,13 +227,17 @@ static void Navigate(void) {
     int left, right;
 
     if (!m || m->count == 0) return;
-    if (Pressed(VK_UP)) m->sel = (m->sel + m->count - 1) % m->count;
-    if (Pressed(VK_DOWN)) m->sel = (m->sel + 1) % m->count;
+    /* Arrows and WASD both navigate; each is polled independently,
+     * so the two coexist without stealing presses from each other. */
+    if (Pressed(VK_UP) || Pressed('W'))
+        m->sel = (m->sel + m->count - 1) % m->count;
+    if (Pressed(VK_DOWN) || Pressed('S'))
+        m->sel = (m->sel + 1) % m->count;
     Scroll(m);
 
     it = &m->items[m->sel];
-    left = Pressed(VK_LEFT);
-    right = Pressed(VK_RIGHT);
+    left = Pressed(VK_LEFT) || Pressed('A');
+    right = Pressed(VK_RIGHT) || Pressed('D');
     if (left || right) {
         int dir = right ? 1 : -1;
         if (it->kind == IT_NUMBER) {
@@ -371,6 +376,18 @@ void ShMenuCaptureView(ShMenuView *v) {
          * down, falling back to [lang] level by level. */
         MenuPath(m, path, sizeof(path));
         MenuPath(pm, parentPath, sizeof(parentPath));
+
+        /* The root shows the control hints; every submenu shows the
+         * plugin's own hint (ShMenuHint), translated in its scope.
+         * An unset hint stays empty and takes no room. */
+        if (m->parent == 0)
+            snprintf(v->hint, sizeof(v->hint), "%s\n%s",
+                     ShLang("F4 toggle menu, Enter select, ESC back"),
+                     ShLang("\xE2\x86\x91 \xE2\x86\x93 or W/S select, "
+                            "\xE2\x86\x90 \xE2\x86\x92 or A/D adjust"));
+        else if (m->hint[0])
+            strncpy(v->hint, ShLangFor(path, m->hint),
+                    sizeof(v->hint) - 1);
 
         strncpy(v->title, ShLangFor(parentPath, m->title),
                 sizeof(v->title) - 1);
@@ -601,6 +618,24 @@ SH_API int ShMenuStatus(uint32_t menu, const char *text) {
     return 1;
 }
 
+/* The hint shown under the title of a submenu. The root menu always
+ * shows the control hints instead. Empty text clears it. */
+SH_API int ShMenuHint(uint32_t menu, const char *text) {
+    Menu *m;
+
+    Lock();
+    m = MenuOf(menu);
+    if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
+    if (text) {
+        strncpy(m->hint, text, sizeof(m->hint) - 1);
+        m->hint[sizeof(m->hint) - 1] = 0;
+    } else {
+        m->hint[0] = 0;
+    }
+    Unlock();
+    return 1;
+}
+
 SH_API void ShMenuSetKey(int vk) { g_key = vk; }
 SH_API int  ShMenuIsOpen(void) { return g_open; }
 
@@ -620,12 +655,8 @@ void ShMenuOnEnterPlaying(void) {
     if (!g_started || g_greeted) return;
     Lock();
     root = MenuOf(g_root);
-    if (root) {
+    if (root)
         have = root->count > 0;
-        if (have)
-            strncpy(root->status, "F4 opens this menu",
-                    sizeof(root->status) - 1);
-    }
     Unlock();
     if (!have) return;
     g_greeted = 1;

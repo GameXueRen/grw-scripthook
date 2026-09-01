@@ -51,6 +51,7 @@ typedef int (*MenuNumber_t)(uint32_t, const char *, float, float,
                             float, float, ShMenuFn, void *);
 typedef int (*MenuStatus_t)(uint32_t, const char *);
 typedef int (*MenuAction_t)(uint32_t, const char *, ShMenuFn, void *);
+typedef int (*MenuHint_t)(uint32_t, const char *);
 typedef int (*SceneCount_t)(void);
 typedef uint64_t (*SceneAt_t)(int);
 typedef uint64_t (*SceneRoot_t)(uint64_t);
@@ -597,6 +598,14 @@ static DWORD WINAPI BindThread(LPVOID p) {
         *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
         if (menuAction)
             menuAction(g_menu, "Dump UI to log", OnDump, NULL);
+    }
+    {
+        MenuHint_t menuHint;
+        *(FARPROC *)&menuHint = GetProcAddress(m, "ShMenuHint");
+        if (menuHint)
+            menuHint(g_menu,
+                     "First-person view: hide head, adjust eye height "
+                     "and distance.");
     }
     Report();
 

@@ -176,7 +176,9 @@ static const char *DEFAULT_CONFIG =
     "\n"
     "[zh_cn]\n"
     "SCRIPTHOOK = 模组菜单\n"
-    "F4 opens this menu = 按 F4 打开此菜单\n"
+    "; Control hints shown under every menu title.\n"
+    "F4 toggle menu, Enter select, ESC back = F4 打开/关闭 菜单，回车选择，ESC 返回\n"
+    "\xE2\x86\x91 \xE2\x86\x93 or W/S select, \xE2\x86\x90 \xE2\x86\x92 or A/D adjust = \xE2\x86\x91 \xE2\x86\x93 或 W/S 上下选择，\xE2\x86\x90 \xE2\x86\x92 或 A/D 左右调整数值\n"
     "on = 开\n"
     "off = 关\n"
     "; The root menu's rows and every submenu title also read from\n"
@@ -201,6 +203,7 @@ static const char *DEFAULT_CONFIG =
     "\n"
     "[zh_cn.First person]\n"
     "Enabled = 第一人称\n"
+    "First-person view: hide head, adjust eye height and distance. = 第一人称视角，可隐藏头部，可调整视角前后高低\n"
     "Hide head = 隐藏头部\n"
     "Forward cm = 前移(厘米)\n"
     "Height cm = 高度(厘米)\n"
@@ -331,8 +334,8 @@ static void ParseConfig(const char *text) {
 typedef struct {
     char lang[16];
     char scope[48];
-    char key[64];
-    char value[128];
+    char key[128];
+    char value[256];
 } LangEntry;
 
 static LangEntry g_langs[LANGS_MAX];
