@@ -146,7 +146,12 @@ $fwSources = @(
     'scripthook_reflect.c', 'scripthook_ui.c',
     'scripthook_scene.c', 'scripthook_uiprop.c',
     'scripthook_uiinput.c', 'scripthook_dinput.c',
-    'scripthook_hud.c', 'scripthook_menu.c', 'guard.c'
+    'scripthook_hud.c', 'scripthook_menu.c', 'guard.c',
+    'scripthook_corefix.c',
+    'third_party/minhook/src/buffer.c',
+    'third_party/minhook/src/hook.c',
+    'third_party/minhook/src/trampoline.c',
+    'third_party/minhook/src/hde/hde64.c'
 ) | ForEach-Object { Join-Path $root $_ }
 
 # ---- menu overlay: Dear ImGui + the D3D11 overlay (C++) ----
@@ -189,6 +194,9 @@ Build-Plugin 'ui_sample'    'ui_sample.c'    @($libPath, 'libscripthook.lib', 'u
 Build-Plugin 'hitfling'     'hitfling.c'     @('gdi32.lib', 'user32.lib')
 Build-Plugin 'freecam'      'freecam.c'      @('gdi32.lib', 'user32.lib')
 Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')
+# Reinforcement prototype is parked outside the tree until its
+# combat/lock logic is verified; see reinf_boost/ next to the repo.
+#Build-Plugin 'Reinforcement' 'reinf_boost.c' @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'chaos'        'chaos.c'        @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib', 'winmm.lib')
 Build-Plugin 'fov_changer'  'fov_changer.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')

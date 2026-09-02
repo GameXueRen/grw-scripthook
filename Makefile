@@ -105,7 +105,12 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
                         scripthook_reflect.c scripthook_ui.c \
                         scripthook_scene.c scripthook_uiprop.c \
                         scripthook_uiinput.c scripthook_dinput.c \
-                        scripthook_hud.c scripthook_menu.c guard.c scripthook.h log.h
+                        scripthook_hud.c scripthook_menu.c guard.c scripthook.h log.h \
+                        scripthook_corefix.c \
+                        third_party/minhook/src/buffer.c \
+                        third_party/minhook/src/hook.c \
+                        third_party/minhook/src/trampoline.c \
+                        third_party/minhook/src/hde/hde64.c
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_config.c \
 		scripthook_physics.c scripthook_health.c \
@@ -121,6 +126,12 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
 		scripthook_scene.c scripthook_uiprop.c \
 		scripthook_uiinput.c scripthook_dinput.c \
 		scripthook_hud.c scripthook_menu.c guard.c \
+		scripthook_corefix.c \
+		third_party/minhook/src/buffer.c \
+		third_party/minhook/src/hook.c \
+		third_party/minhook/src/trampoline.c \
+		third_party/minhook/src/hde/hde64.c \
+		-Ithird_party/minhook/include \
 		-ldinput8 -ldxguid -lgdi32 -luser32 \
 		-Wl,--out-implib,libscripthook.a
 	@if x86_64-w64-mingw32-objdump -p $@ | grep -q libwinpthread; then \

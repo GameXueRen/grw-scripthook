@@ -56,6 +56,7 @@ static void LoadRealDinput8(void) {
 
 extern void ShStateStartup(void);
 extern void ShCrashStartup(void);
+extern void ShCoreFixStartup(void);
 
 /* Plugins live one folder each under scripts\, named after
  * the plugin:
@@ -160,6 +161,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
          * is reported too.
          */
         ShCrashStartup();
+        /* CPU core-count/affinity fix. Must run before the
+         * engine reads the processor count, so it goes here,
+         * on the attach path, not in the loader thread.
+         * No-op unless scripthook.ini [loader] cpu_core_fix=1.
+         */
+        ShCoreFixStartup();
         LoadRealDinput8();
         /* Watch state before plugins, so the world is
          * resolved by the time any of them ask.
