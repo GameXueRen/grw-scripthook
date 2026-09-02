@@ -516,6 +516,23 @@ void ShMenuCaptureView(ShMenuView *v) {
     Unlock();
 }
 
+/* Enter the root menu: order its rows by [MenuOrder] in the model
+ * and start at the first row, so an F4 open is always top-left and
+ * never lands on a row that moved during the sort. */
+static void OpenRoot(void) {
+    g_current = g_root;
+    Lock();
+    {
+        Menu *r = MenuOf(g_root);
+        if (r) {
+            ReorderRoot(r);
+            r->sel = 0;
+            r->top = 0;
+        }
+    }
+    Unlock();
+}
+
 /* Keys are polled here; the overlay draws the result. */
 static DWORD WINAPI MenuThread(LPVOID p) {
     (void)p;
@@ -537,7 +554,7 @@ static DWORD WINAPI MenuThread(LPVOID p) {
          * menu having rendered. */
         if (Pressed(g_key)) {
             g_open = !g_open;
-            if (g_open) g_current = g_root;
+            if (g_open) OpenRoot();
         }
 
         if (!g_open) {
@@ -783,7 +800,7 @@ SH_API int  ShMenuIsOpen(void) { return g_open; }
 SH_API void ShMenuOpen(int open) {
     EnsureMenu();
     g_open = open ? 1 : 0;
-    if (g_open) g_current = g_root;
+    if (g_open) OpenRoot();
 }
 
 /* Entering Playing used to auto-open the menu once so the F4 key
