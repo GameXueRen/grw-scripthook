@@ -407,7 +407,10 @@ void ShMenuCaptureView(ShMenuView *v) {
 
         /* The root shows the control hints; every submenu shows the
          * plugin's own hint (ShMenuHint), translated in its scope.
-         * An unset hint stays empty and takes no room. */
+         * Third-party plugins that never call ShMenuHint get a hint
+         * from the [MenuHints] config section, keyed by menu title,
+         * translated the same way. An unset hint stays empty and
+         * takes no room. */
         if (m->parent == 0)
             snprintf(v->hint, sizeof(v->hint), "%s\n%s",
                      ShLang("F4 toggle menu, Enter select, ESC back"),
@@ -416,6 +419,14 @@ void ShMenuCaptureView(ShMenuView *v) {
         else if (m->hint[0])
             SafeCopy(v->hint, sizeof(v->hint),
                      ShLangFor(path, m->hint));
+        else {
+            char confHint[128];
+            if (ShConfigGetStr("MenuHints", m->title, NULL,
+                               confHint, sizeof(confHint)) &&
+                confHint[0])
+                SafeCopy(v->hint, sizeof(v->hint),
+                         ShLangFor(path, confHint));
+        }
 
         SafeCopy(v->title, sizeof(v->title),
                  ShLangFor(parentPath, m->title));
