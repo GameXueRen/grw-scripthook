@@ -37,6 +37,8 @@ extern void ShPhysicsOnEnterPlaying(void);
 extern void ShCameraOnEnterPlaying(void);
 extern void ShHeadOnEnterPlaying(void);
 extern void ShMenuOnEnterPlaying(void);
+extern void ShSpawnInvalidate(void);
+extern void ShSpawnOnEnterPlaying(void);
 extern void ShUiOnEnterPlaying(void);
 extern void ShInvalidate(void);
 extern void ShInvalidateHealth(void);
@@ -214,6 +216,10 @@ static void OnStateChanged(uint32_t h) {
         ShCameraOnEnterPlaying();
         ShHeadOnEnterPlaying();
         ShMenuOnEnterPlaying();
+        /* The vehicle specs live in the engine heap: a world
+         * reload can move them, so drop the cache and rescan. */
+        ShSpawnInvalidate();
+        ShSpawnOnEnterPlaying();
     }
 }
 

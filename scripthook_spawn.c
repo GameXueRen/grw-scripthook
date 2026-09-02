@@ -175,71 +175,177 @@ const char *ShVehicleName(uint32_t vehicleId) {
  * doing it once for all vehicles is what makes repeated spawns
  * fast instead of re-walking the address space for each new
  * vehicle. The spec starts SPEC_HANDLE_OFF below the handle.
+ *
+ * The address space is split across a few worker threads: a full
+ * scan reads tens of gigabytes of committed writable memory, and
+ * a single thread took ~13s even with direct reads.
  */
-static void FindAllSpecs(void) {
+#define SCAN_WORKERS 4
+
+/* Shared "wanted spec" state for the parallel scan. The low dword
+ * (VEH_KIND_HASH) rejects almost every memory value in one compare;
+ * only hash hits take the lock. */
+static volatile uint64_t g_scanWants[VEHICLE_COUNT];
+static volatile int     g_scanIdx[VEHICLE_COUNT];
+static volatile int     g_scanLeft = 0;
+static uint8_t g_scanBuf[SCAN_WORKERS][0x10000];
+static volatile LONG    g_scanBusy = 0;
+
+typedef struct { uintptr_t lo, hi; int id; } ScanSeg;
+
+/* The region was just reported committed and writable by
+ * VirtualQuery, so a direct read is safe; SEH catches a page freed
+ * in the tiny gap instead of killing the game. ReadProcessMemory
+ * per 64KB chunk costs a kernel call and made a full scan take
+ * ~21s. */
+static int ChunkRead(uint8_t *dst, const void *src, size_t n) {
+#if defined(_MSC_VER)
+    int ok = 0;
+    __try {
+        memcpy(dst, src, n);
+        ok = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = 0;
+    }
+    return ok;
+#else
+    return ShReadMem((uint64_t)(uintptr_t)src, dst, n);
+#endif
+}
+
+static DWORD WINAPI ScanWorker(LPVOID p) {
+    ScanSeg *seg = (ScanSeg *)p;
+    uint8_t *scan = (uint8_t *)seg->lo;
+    uint8_t *buf = g_scanBuf[seg->id];
     MEMORY_BASIC_INFORMATION mbi;
-    uint8_t *scan = (uint8_t *)0x10000000;
 
-    EnterCriticalSection(&g_specLock);
-    while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
+    while ((uintptr_t)scan < seg->hi &&
+           VirtualQuery(scan, &mbi, sizeof(mbi))) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
-        int all;
+        size_t sz, o, k, got;
+
         if (next <= scan) break;
-        /* Wine keeps the heap low, Windows does not. Stopping
-         * at 60GB found nothing there and every spawn failed.
-         */
-        if ((uint64_t)(uintptr_t)mbi.BaseAddress >= 0x800000000000ULL)
-            break;
-        if (mbi.State == MEM_COMMIT &&
-            (mbi.Protect & PAGE_READWRITE) &&
-            !(mbi.Protect & PAGE_GUARD))
+        if ((uintptr_t)mbi.BaseAddress >= seg->hi) break;
+        if (g_scanLeft <= 0) break;
+        if (mbi.State != MEM_COMMIT ||
+            !(mbi.Protect & PAGE_READWRITE) ||
+            (mbi.Protect & PAGE_GUARD))
         {
-            uint8_t *b = (uint8_t *)mbi.BaseAddress;
-            size_t sz = mbi.RegionSize, o, k, got;
-            int i;
+            scan = next;
+            continue;
+        }
 
-            /* Chunked kernel reads: a page freed mid scan
-             * skips instead of faulting. Chunks overlap so
-             * no candidate spans a seam. */
-            static uint8_t buf[0x10000];
+        sz = mbi.RegionSize;
+        if ((uintptr_t)mbi.BaseAddress + sz > seg->hi)
+            sz = seg->hi - (uintptr_t)mbi.BaseAddress;
 
-            for (o = 0; o + 8 <= sz; o += sizeof(buf) - 8) {
-                got = sz - o;
-                if (got > sizeof(buf)) got = sizeof(buf);
-                if (!ShReadMem((uint64_t)(uintptr_t)(b + o), buf, got))
-                    continue;
-                for (k = 0; k + 8 <= got; k += 8) {
-                    uint64_t v;
-                    memcpy(&v, buf + k, 8);
-                    for (i = 0; i < VEHICLE_COUNT; i++) {
-                        uint64_t base;
-                        if (g_specCache[i]) continue;
-                        if (v != (((uint64_t)g_vehicles[i].id << 32)
-                                 | VEH_KIND_HASH))
-                            continue;
-                        base = (uint64_t)(uintptr_t)(b + o + k)
-                               - SPEC_HANDLE_OFF;
-                        if (ShReadQ(base) == SPEC_VTABLE)
-                            g_specCache[i] = base;
+        /* Chunked kernel reads: a page freed mid scan skips
+         * instead of faulting. Chunks overlap so no candidate
+         * spans a seam. */
+        for (o = 0; o + 8 <= sz && g_scanLeft > 0;
+             o += sizeof(g_scanBuf[0]) - 8) {
+            got = sz - o;
+            if (got > sizeof(g_scanBuf[0])) got = sizeof(g_scanBuf[0]);
+            if (!ChunkRead(buf, (const void *)((uint8_t *)mbi.BaseAddress + o),
+                           got))
+                continue;
+            for (k = 0; k + 8 <= got && g_scanLeft > 0; k += 8) {
+                uint64_t v;
+                int w;
+                memcpy(&v, buf + k, 8);
+                if ((uint32_t)v != VEH_KIND_HASH) continue;
+                EnterCriticalSection(&g_specLock);
+                if (g_scanLeft <= 0) {
+                    LeaveCriticalSection(&g_specLock);
+                    return 0;
+                }
+                for (w = 0; w < g_scanLeft; w++) {
+                    if (v != g_scanWants[w]) continue;
+                    {
+                        uint64_t base =
+                            (uint64_t)(uintptr_t)((uint8_t *)mbi.BaseAddress
+                                                  + o + k)
+                            - SPEC_HANDLE_OFF;
+                        if (ShReadQ(base) == SPEC_VTABLE) {
+                            g_specCache[g_scanIdx[w]] = base;
+                            g_scanWants[w] = g_scanWants[g_scanLeft - 1];
+                            g_scanIdx[w] = g_scanIdx[g_scanLeft - 1];
+                            g_scanLeft--;
+                            w--; /* recheck swapped entry */
+                        }
                     }
                 }
-                all = 1;
-                for (i = 0; i < VEHICLE_COUNT; i++) {
-                    (void)i;
-                    if (!g_specCache[i]) { all = 0; break; }
-                }
-                if (all) break;
+                LeaveCriticalSection(&g_specLock);
             }
         }
         scan = next;
     }
-    /* Every vehicle has now had its chance; do not walk again
-     * for the ones the engine has not loaded this session. */
-    {
-        int i;
-        for (i = 0; i < VEHICLE_COUNT; i++) g_specTried[i] = 1;
+    return 0;
+}
+
+static void FindAllSpecs(void) {
+    ScanSeg seg[SCAN_WORKERS];
+    HANDLE th[SCAN_WORKERS];
+    uintptr_t lo = 0x10000000, span;
+    int remaining, i, nTh = 0;
+
+    /* Already scanning (warm thread): wait for it and leave. The
+     * caller then re-checks the cache. */
+    if (InterlockedCompareExchange(&g_scanBusy, 1, 0)) {
+        while (InterlockedCompareExchange(&g_scanBusy, 0, 0))
+            Sleep(5);
+        return;
     }
+
+    EnterCriticalSection(&g_specLock);
+    /* Collect what is still unresolved. */
+    remaining = 0;
+    for (i = 0; i < VEHICLE_COUNT; i++) {
+        if (g_specCache[i] && ShReadQ(g_specCache[i]) == SPEC_VTABLE)
+            continue;
+        g_scanWants[remaining] = ((uint64_t)g_vehicles[i].id << 32)
+                               | VEH_KIND_HASH;
+        g_scanIdx[remaining] = i;
+        remaining++;
+    }
+    if (remaining == 0) {
+        for (i = 0; i < VEHICLE_COUNT; i++) g_specTried[i] = 1;
+        LeaveCriticalSection(&g_specLock);
+        InterlockedExchange(&g_scanBusy, 0);
+        return;
+    }
+    g_scanLeft = remaining;
     LeaveCriticalSection(&g_specLock);
+
+    /* Split the address space into worker ranges. */
+    span = (uintptr_t)0x800000000000ULL - lo;
+    for (i = 0; i < SCAN_WORKERS; i++) {
+        seg[i].lo = lo + span / SCAN_WORKERS * (uintptr_t)i;
+        seg[i].hi = lo + span / SCAN_WORKERS * (uintptr_t)(i + 1);
+        seg[i].id = i;
+        th[i] = CreateThread(NULL, 0, ScanWorker, &seg[i], 0, NULL);
+        if (th[i]) nTh++;
+    }
+    if (nTh == 0) {
+        /* Worker creation failed; do it inline as a fallback. */
+        seg[0].lo = lo;
+        seg[0].hi = (uintptr_t)0x800000000000ULL;
+        seg[0].id = 0;
+        ScanWorker(&seg[0]);
+    } else {
+        for (i = 0; i < SCAN_WORKERS; i++)
+            if (th[i]) {
+                WaitForSingleObject(th[i], INFINITE);
+                CloseHandle(th[i]);
+            }
+    }
+
+    EnterCriticalSection(&g_specLock);
+    remaining = g_scanLeft;
+    for (i = 0; i < VEHICLE_COUNT; i++) g_specTried[i] = 1;
+    LeaveCriticalSection(&g_specLock);
+    InterlockedExchange(&g_scanBusy, 0);
+    Log("spawn: spec scan done, %d unresolved", remaining);
 }
 
 static uint64_t SpecFor(uint32_t vehicleId) {
@@ -264,10 +370,11 @@ void ShSpawnInvalidate(void) {
     int i;
     EnsureLocks();
     EnterCriticalSection(&g_specLock);
-    for (i = 0; i < VEHICLE_COUNT; i++) {
-        g_specCache[i] = 0;
-        g_specTried[i] = 0;
-    }
+    /* Keep the cached addresses: a world reload usually leaves the
+     * spec objects where they were, so FindAllSpecs only rescans
+     * the entries whose vtable check fails. Clearing the cache here
+     * forced a full ~13s scan on every reload for no reason. */
+    for (i = 0; i < VEHICLE_COUNT; i++) g_specTried[i] = 0;
     LeaveCriticalSection(&g_specLock);
 }
 
@@ -425,10 +532,11 @@ uint64_t ShSpawnVehicle(uint32_t vehicleId, const ShVec3 *pos) {
 }
 
 /* Warm the spec cache on a background thread so the first spawn
- * does not have to scan the address space synchronously. Called
- * once the game is in the world; every subsequent call is a no-op.
- */
-static volatile LONG g_warmStarted = 0;
+ * does not have to scan the address space synchronously. The
+ * framework starts this when the world becomes playable; plugins
+ * may also call ShSpawnWarm() at any time. Every run only scans
+ * the specs still unresolved. */
+static volatile LONG g_warmRunning = 0;
 
 static DWORD WINAPI WarmThread(LPVOID p) {
     DWORD t0;
@@ -438,15 +546,20 @@ static DWORD WINAPI WarmThread(LPVOID p) {
     Log("warm: scanning for vehicle specs...");
     FindAllSpecs();
     Log("warm: done in %lu ms", (unsigned long)(GetTickCount() - t0));
+    InterlockedExchange(&g_warmRunning, 0);
     return 0;
 }
 
-SH_API void ShSpawnWarm(void) {
+void ShSpawnOnEnterPlaying(void) {
     HANDLE h;
 
     EnsureLocks();
-    if (InterlockedCompareExchange(&g_warmStarted, 1, 0)) return;
+    if (InterlockedCompareExchange(&g_warmRunning, 1, 0)) return;
     h = CreateThread(NULL, 0, WarmThread, NULL, 0, NULL);
-    if (!h) InterlockedExchange(&g_warmStarted, 0);
+    if (!h) InterlockedExchange(&g_warmRunning, 0);
     else CloseHandle(h);
+}
+
+SH_API void ShSpawnWarm(void) {
+    ShSpawnOnEnterPlaying();
 }
