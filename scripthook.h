@@ -610,6 +610,14 @@ SH_API int  ShMenuClear(uint32_t menu);
 SH_API int  ShMenuDestroy(uint32_t menu);
 /** The line under the items. Empty text removes it. */
 SH_API int  ShMenuStatus(uint32_t menu, const char *text);
+/** Set the status line from a printf template. The English
+ *  template is translated as the menu's own scope first, so the
+ *  [lang.<menu>] value keeps the same % placeholders and the
+ *  result is formatted once with the arguments. The language is
+ *  fixed at startup, so translating here matches the capture
+ *  path. The template and value must use the same conversion
+ *  specifications. */
+SH_API int  ShMenuStatusF(uint32_t menu, const char *fmt, ...);
 /** The hint shown under the title of this submenu, replacing the
  *  control hints the root menu shows. Empty text removes it. The
  *  text is translated as the menu's own scope, so it can be an

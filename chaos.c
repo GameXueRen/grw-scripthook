@@ -1154,7 +1154,6 @@ static void OnClearAll(uint32_t m, uint32_t it, int v, void *u) {
 }
 
 static DWORD WINAPI InitThread(LPVOID p) {
-    char line[64];
     (void)p;
 
     while (!ShGetVersion()) Sleep(500);
@@ -1168,8 +1167,7 @@ static DWORD WINAPI InitThread(LPVOID p) {
     ShMenuAction(g_menu, "Roll one now", OnNow, NULL);
     ShMenuAction(g_menu, "Clear active", OnClearAll, NULL);
 
-    snprintf(line, sizeof(line), "off, %d effects", FX_COUNT);
-    ShMenuStatus(g_menu, line);
+    ShMenuStatusF(g_menu, "off, %d effects", FX_COUNT);
 
     g_hudStack = ShHudCreate("chaos", SH_HUD_TOPRIGHT, 0);
     ShHudColour(g_hudStack, 0xFFCC33);

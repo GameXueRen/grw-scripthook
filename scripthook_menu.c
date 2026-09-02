@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdint.h>
 
 #define SH_BUILD 1
@@ -729,6 +730,33 @@ SH_API int ShMenuStatus(uint32_t menu, const char *text) {
     }
     Unlock();
     return 1;
+}
+
+/* The status line from a printf template: translate the English
+ * template in the menu's own scope, then format once and store the
+ * final text. The capture path translates m->status again, which
+ * is a no-op for the stored result, so this is safe.
+ */
+SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
+    char path[64];
+    char tmpl[96];
+    char text[96];
+    va_list ap;
+    Menu *m;
+
+    if (!fmt) return 0;
+
+    Lock();
+    m = MenuOf(menu);
+    if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
+    MenuPath(m, path, sizeof(path));
+    SafeCopy(tmpl, sizeof(tmpl), ShLangFor(path, fmt));
+    Unlock();
+
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), tmpl, ap);
+    va_end(ap);
+    return ShMenuStatus(menu, text);
 }
 
 /* The hint shown under the title of a submenu. The root menu always

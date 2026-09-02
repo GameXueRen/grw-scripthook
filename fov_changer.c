@@ -5,7 +5,6 @@
  * directly. See src/README.md for how that works.
  */
 #include <windows.h>
-#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -60,15 +59,12 @@ static int Push(void) {
 }
 
 static void Report(void) {
-    char line[96];
-
     if (g_on)
-        snprintf(line, sizeof(line), "%.0f deg, game default %.0f",
-                 g_deg, DefaultRad() * RAD2DEG);
+        ShMenuStatusF(g_menu, "%.0f deg, game default %.0f",
+                      g_deg, DefaultRad() * RAD2DEG);
     else
-        snprintf(line, sizeof(line), "off, game is %.0f deg",
-                 DefaultRad() * RAD2DEG);
-    ShMenuStatus(g_menu, line);
+        ShMenuStatusF(g_menu, "off, game is %.0f deg",
+                      DefaultRad() * RAD2DEG);
 }
 
 static void OnToggle(uint32_t menu, uint32_t item, int value,

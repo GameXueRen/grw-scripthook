@@ -5,8 +5,6 @@
  * directly instead, since the loader loads them from a
  * thread rather than from DllMain. */
 #include <windows.h>
-#include <stdio.h>
-#include <string.h>
 #include <stdint.h>
 
 #include "scripthook.h"
@@ -23,6 +21,7 @@ typedef int (*PlayerPos_t)(ShVec3 *);
 typedef uint32_t (*MenuCreate_t)(const char *);
 typedef int (*MenuAction_t)(uint32_t, const char *, ShMenuFn, void *);
 typedef int (*MenuStatus_t)(uint32_t, const char *);
+typedef int (*MenuStatusF_t)(uint32_t, const char *, ...);
 typedef int (*MenuHint_t)(uint32_t, const char *);
 
 static Count_t      g_count;
@@ -30,6 +29,7 @@ static At_t         g_at;
 static Spawn_t      g_spawn;
 static PlayerPos_t  g_playerPos;
 static MenuStatus_t g_status;
+static MenuStatusF_t g_statusF;
 static MenuHint_t   g_hint;
 
 static uint32_t g_menu = 0;
@@ -43,7 +43,6 @@ static void OnSpawn(uint32_t menu, uint32_t item, int value,
     const Vehicle *v = (const Vehicle *)user;
     ShVec3 pos;
     uint64_t ent;
-    char line[96];
 
     (void)item; (void)value;
     if (!v) return;
@@ -58,12 +57,10 @@ static void OnSpawn(uint32_t menu, uint32_t item, int value,
     ent = g_spawn(v->id, &pos);
     if (ent) {
         g_spawned++;
-        snprintf(line, sizeof(line), "spawned, %d this session",
-                 g_spawned);
+        g_statusF(menu, "spawned, %d this session", g_spawned);
     } else {
-        snprintf(line, sizeof(line), "nothing appeared");
+        g_status(menu, "nothing appeared");
     }
-    g_status(menu, line);
 }
 
 static DWORD WINAPI BindThread(LPVOID p) {
@@ -85,9 +82,12 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
+    *(FARPROC *)&g_statusF = GetProcAddress(m, "ShMenuStatusF");
     *(FARPROC *)&g_hint = GetProcAddress(m, "ShMenuHint");
     if (!g_count || !g_at || !g_spawn || !g_playerPos) return 1;
-    if (!menuCreate || !menuAction || !g_status || !g_hint) return 1;
+    if (!menuCreate || !menuAction || !g_status || !g_statusF ||
+        !g_hint)
+        return 1;
 
     /* The catalogue is static, so every vehicle becomes a
      * row once and the API scrolls them.
