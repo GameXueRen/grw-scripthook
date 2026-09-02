@@ -351,6 +351,35 @@ static void MenuPath(const Menu *m, char *out, int n) {
     out[n - 1] = 0;
 }
 
+/* strncpy truncates by bytes, which can split a UTF-8 sequence
+ * and leave the renderer with an invalid lead byte (it draws it
+ * as '?'). Copy then back up to the start of the last code point
+ * if the cut landed inside a multi-byte sequence. */
+static void SafeCopy(char *dst, size_t cap, const char *src) {
+    size_t n;
+    if (cap == 0) return;
+    n = strlen(src);
+    if (n >= cap) {
+        n = cap - 1;
+        memcpy(dst, src, n);
+        /* Walk back over any UTF-8 continuation bytes (0x80..0xBF). */
+        while (n > 0 && (unsigned char)dst[n-1] >= 0x80 &&
+               (unsigned char)dst[n-1] <  0xC0) n--;
+        /* The lead byte at n-1 (if any) starts a multi-byte sequence
+         * whose full length would extend past cap-1; drop it. */
+        if (n > 0) {
+            unsigned char b = (unsigned char)dst[n-1];
+            if (b >= 0xC2) {
+                int need = (b < 0xE0) ? 2 : (b < 0xF0) ? 3 : 4;
+                if ((size_t)(n - 1 + need) > cap - 1) dst[--n] = 0;
+            }
+        }
+        dst[n] = 0;
+    } else {
+        memcpy(dst, src, n + 1);
+    }
+}
+
 /* Snapshot the current menu for the overlay renderer. Labels,
  * values and the title are translated here (the model keeps the
  * English originals), then copied so the renderer can draw them
@@ -385,17 +414,17 @@ void ShMenuCaptureView(ShMenuView *v) {
                      ShLang("\xE2\x86\x91 \xE2\x86\x93 or W/S select, "
                             "\xE2\x86\x90 \xE2\x86\x92 or A/D adjust"));
         else if (m->hint[0])
-            strncpy(v->hint, ShLangFor(path, m->hint),
-                    sizeof(v->hint) - 1);
+            SafeCopy(v->hint, sizeof(v->hint),
+                     ShLangFor(path, m->hint));
 
-        strncpy(v->title, ShLangFor(parentPath, m->title),
-                sizeof(v->title) - 1);
-        strncpy(v->status, ShLangFor(path, m->status),
-                sizeof(v->status) - 1);
+        SafeCopy(v->title, sizeof(v->title),
+                 ShLangFor(parentPath, m->title));
+        SafeCopy(v->status, sizeof(v->status),
+                 ShLangFor(path, m->status));
         for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
             ShMenuRow *r = &v->row[v->rows];
-            strncpy(r->name, ShLangFor(path, m->items[i].label),
-                    sizeof(r->name) - 1);
+            SafeCopy(r->name, sizeof(r->name),
+                     ShLangFor(path, m->items[i].label));
             ValueText(path, &m->items[i], r->value, sizeof(r->value));
             r->selected = (i == m->sel);
             if (r->selected) v->sel = v->rows;

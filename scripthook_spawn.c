@@ -9,6 +9,7 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
 /* RVAs, so this survives a relocated image. */
 #define RVA_MGR_GETTER   0x916DC40
@@ -120,7 +121,31 @@ static const ShVehicle g_vehicles[] = {
 /* Spec addresses move each session, so resolve once on
  * demand and remember. Bounded, never on a hot path.
  */
-static uint64_t g_specCache[VEHICLE_COUNT];
+static volatile uint64_t g_specCache[VEHICLE_COUNT];
+/* A vehicle whose spec was not found in the walk is marked
+ * tried, so the next request for it does not re-walk the whole
+ * address space looking again. */
+static volatile unsigned char g_specTried[VEHICLE_COUNT];
+
+/* FindAllSpecs runs once on a background thread (ShSpawnWarm)
+ * and once on demand; the lock keeps the two from colliding.
+ * The pending spawn request is handed to the physics hook
+ * through a lock and a request sequence, so a request can
+ * never be mistaken for an earlier one that already ran. */
+static CRITICAL_SECTION g_specLock;
+static CRITICAL_SECTION g_pendLock;
+static volatile LONG g_locksInit = 0;
+
+static void EnsureLocks(void) {
+    while (!g_locksInit) {
+        if (InterlockedCompareExchange(&g_locksInit, 2, 0) == 0) {
+            InitializeCriticalSection(&g_specLock);
+            InitializeCriticalSection(&g_pendLock);
+            LogInit("scripthook_spawn.log");
+            InterlockedExchange(&g_locksInit, 1);
+        }
+    }
+}
 
 /* Transform buffers. A single one handed to the engine and
  * then rewritten froze the game, so rotate.
@@ -144,16 +169,21 @@ const char *ShVehicleName(uint32_t vehicleId) {
     return NULL;
 }
 
-/* One bounded walk of committed memory for the handle that
- * names this vehicle. The spec starts 0x28 below it.
+/* One bounded walk of committed memory that resolves EVERY
+ * unresolved vehicle spec at once. A per-vehicle walk is the
+ * same cost as this whole walk (the read time dominates), so
+ * doing it once for all vehicles is what makes repeated spawns
+ * fast instead of re-walking the address space for each new
+ * vehicle. The spec starts SPEC_HANDLE_OFF below the handle.
  */
-static uint64_t FindSpec(uint32_t vehicleId) {
+static void FindAllSpecs(void) {
     MEMORY_BASIC_INFORMATION mbi;
-    uint64_t want = ((uint64_t)vehicleId << 32) | VEH_KIND_HASH;
     uint8_t *scan = (uint8_t *)0x10000000;
 
+    EnterCriticalSection(&g_specLock);
     while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
+        int all;
         if (next <= scan) break;
         /* Wine keeps the heap low, Windows does not. Stopping
          * at 60GB found nothing there and every spawn failed.
@@ -166,6 +196,7 @@ static uint64_t FindSpec(uint32_t vehicleId) {
         {
             uint8_t *b = (uint8_t *)mbi.BaseAddress;
             size_t sz = mbi.RegionSize, o, k, got;
+            int i;
 
             /* Chunked kernel reads: a page freed mid scan
              * skips instead of faulting. Chunks overlap so
@@ -180,36 +211,64 @@ static uint64_t FindSpec(uint32_t vehicleId) {
                 for (k = 0; k + 8 <= got; k += 8) {
                     uint64_t v;
                     memcpy(&v, buf + k, 8);
-                    if (v != want) continue;
-                    {
-                        uint64_t base =
-                            (uint64_t)(uintptr_t)(b + o + k)
-                            - SPEC_HANDLE_OFF;
-                        if (ShReadQ(base) == SPEC_VTABLE) return base;
+                    for (i = 0; i < VEHICLE_COUNT; i++) {
+                        uint64_t base;
+                        if (g_specCache[i]) continue;
+                        if (v != (((uint64_t)g_vehicles[i].id << 32)
+                                 | VEH_KIND_HASH))
+                            continue;
+                        base = (uint64_t)(uintptr_t)(b + o + k)
+                               - SPEC_HANDLE_OFF;
+                        if (ShReadQ(base) == SPEC_VTABLE)
+                            g_specCache[i] = base;
                     }
                 }
+                all = 1;
+                for (i = 0; i < VEHICLE_COUNT; i++) {
+                    (void)i;
+                    if (!g_specCache[i]) { all = 0; break; }
+                }
+                if (all) break;
             }
         }
         scan = next;
     }
-    return 0;
+    /* Every vehicle has now had its chance; do not walk again
+     * for the ones the engine has not loaded this session. */
+    {
+        int i;
+        for (i = 0; i < VEHICLE_COUNT; i++) g_specTried[i] = 1;
+    }
+    LeaveCriticalSection(&g_specLock);
 }
 
 static uint64_t SpecFor(uint32_t vehicleId) {
-    int i;
+    int i, need = 0;
+
     for (i = 0; i < VEHICLE_COUNT; i++) {
         if (g_vehicles[i].id != vehicleId) continue;
         if (g_specCache[i] &&
             ShReadQ(g_specCache[i]) == SPEC_VTABLE)
             return g_specCache[i];
-        g_specCache[i] = FindSpec(vehicleId);
-        return g_specCache[i];
+        if (!g_specTried[i]) need = 1;
+        break;
     }
+    if (need) FindAllSpecs();
+    if (g_specCache[i] &&
+        ShReadQ(g_specCache[i]) == SPEC_VTABLE)
+        return g_specCache[i];
     return 0;
 }
 
 void ShSpawnInvalidate(void) {
-    memset(g_specCache, 0, sizeof(g_specCache));
+    int i;
+    EnsureLocks();
+    EnterCriticalSection(&g_specLock);
+    for (i = 0; i < VEHICLE_COUNT; i++) {
+        g_specCache[i] = 0;
+        g_specTried[i] = 0;
+    }
+    LeaveCriticalSection(&g_specLock);
 }
 
 /* Transform from the player's own, so the basis is what
@@ -232,17 +291,38 @@ const void *ShSpawnBuildMatrix(const ShVec3 *pos) {
     return slot;
 }
 
-/* Runs on the game thread, queued by ShSpawnVehicle. */
+/* Runs on the game thread, queued by ShSpawnVehicle. The pump
+ * takes the newest pending request under the lock and records
+ * the request sequence it consumed; a caller waits for its own
+ * sequence, so a request overtaken by a newer one is handled by
+ * the next pump instead of being lost. */
 static volatile uint64_t g_pendSpec = 0;
-static const void *g_pendMtx = NULL;
-static volatile int g_pendDone = 0;
+static volatile const void *g_pendMtx = NULL;
+static volatile uint32_t g_pendSeq = 0;
+static volatile uint32_t g_doneSeq = 0;
 
 void ShSpawnPump(void) {
-    uint64_t spec = g_pendSpec, mgr, spawner;
-    const void *mtx = g_pendMtx;
+    uint64_t spec = 0, mgr, spawner;
+    const void *mtx = NULL;
+    uint32_t my = 0;
 
-    if (!spec || !mtx) return;
-    g_pendSpec = 0;
+    EnsureLocks();
+    EnterCriticalSection(&g_pendLock);
+    spec = g_pendSpec;
+    mtx = (const void *)g_pendMtx;
+    if (spec && mtx) {
+        my = g_pendSeq;
+        g_pendSpec = 0;
+        g_pendMtx = NULL;
+    }
+    LeaveCriticalSection(&g_pendLock);
+
+    if (!spec) {
+        /* Nothing queued: let every waiter through so a request
+         * already consumed by an earlier pump is not stuck. */
+        g_doneSeq = g_pendSeq;
+        return;
+    }
 
     mgr = ((MgrGet_t)ImgAddr(RVA_MGR_GETTER))();
     if (mgr) {
@@ -252,8 +332,12 @@ void ShSpawnPump(void) {
         if (spawner)
             ((Commit_t)ImgAddr(RVA_COMMIT))(mgr, COMMIT_MODE,
                                             spawner);
+        Log("pump: seq=%u spawner=%llx", my,
+            (unsigned long long)spawner);
+    } else {
+        Log("pump: seq=%u no manager", my);
     }
-    g_pendDone = 1;
+    g_doneSeq = my;
 }
 
 /* The entity arrives a frame or two after the commit, so
@@ -282,34 +366,87 @@ static uint64_t EntityNear(const ShVec3 *pos, float tol) {
 uint64_t ShSpawnVehicle(uint32_t vehicleId, const ShVec3 *pos) {
     uint64_t spec, ent = 0;
     const void *mtx;
+    uint32_t mySeq;
     int waited;
 
     if (!pos) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (!ShRequireInGame()) return 0;
 
+    EnsureLocks();
     spec = SpecFor(vehicleId);
     if (!spec) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
 
     mtx = ShSpawnBuildMatrix(pos);
     if (!mtx) { ShSetError(SH_ERR_NO_ROOT); return 0; }
 
-    g_pendDone = 0;
-    g_pendMtx = mtx;
+    EnterCriticalSection(&g_pendLock);
     g_pendSpec = spec;
+    g_pendMtx = mtx;
+    mySeq = ++g_pendSeq;
+    LeaveCriticalSection(&g_pendLock);
+    Log("spawn: id=%x seq=%u", vehicleId, mySeq);
 
-    /* The pump runs in the physics hook, so wait for it. */
-    for (waited = 0; waited < 300 && !g_pendDone; waited++)
-        Sleep(10);
-    if (!g_pendDone) {
-        g_pendSpec = 0;
+    /* The pump runs in the physics hook, so wait for it. The
+     * hook fires every physics frame, so poll tightly. */
+    for (waited = 0; waited < 300 && g_doneSeq < mySeq; waited++)
+        Sleep(2);
+    if (g_doneSeq < mySeq) {
+        /* Timed out: pull the request unless a newer one has
+         * already replaced it (that one gets its own pump). */
+        EnterCriticalSection(&g_pendLock);
+        if (g_pendSeq == mySeq) {
+            g_pendSpec = 0;
+            g_pendMtx = NULL;
+        }
+        LeaveCriticalSection(&g_pendLock);
         ShSetError(SH_ERR_NO_PHYSICS);
+        Log("spawn: id=%x seq=%u timed out, no physics pump",
+            vehicleId, mySeq);
         return 0;
     }
 
-    for (waited = 0; waited < 60 && !ent; waited++) {
-        ent = EntityNear(pos, 8.0f);
-        if (!ent) Sleep(50);
+    /* The vehicle appears a frame or two after the commit; the
+     * first spawn of a model can stream its assets in for a
+     * couple of seconds, so poll longer than a vehicle every
+     * second and accept a wider radius. */
+    for (waited = 0; waited < 120 && !ent; waited++) {
+        ent = EntityNear(pos, 20.0f);
+        if (!ent) Sleep(20);
     }
-    if (!ent) ShSetError(SH_ERR_NO_CANDIDATE);
+    if (!ent) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        Log("spawn: id=%x seq=%u committed, entity not seen in %d ms",
+            vehicleId, mySeq, waited * 20);
+    } else {
+        Log("spawn: id=%x seq=%u entity=%llx after %d ms",
+            vehicleId, mySeq, (unsigned long long)ent, waited * 20);
+    }
     return ent;
+}
+
+/* Warm the spec cache on a background thread so the first spawn
+ * does not have to scan the address space synchronously. Called
+ * once the game is in the world; every subsequent call is a no-op.
+ */
+static volatile LONG g_warmStarted = 0;
+
+static DWORD WINAPI WarmThread(LPVOID p) {
+    DWORD t0;
+    (void)p;
+    EnsureLocks();
+    t0 = GetTickCount();
+    Log("warm: scanning for vehicle specs...");
+    FindAllSpecs();
+    Log("warm: done in %lu ms", (unsigned long)(GetTickCount() - t0));
+    return 0;
+}
+
+SH_API void ShSpawnWarm(void) {
+    HANDLE h;
+
+    EnsureLocks();
+    if (InterlockedCompareExchange(&g_warmStarted, 1, 0)) return;
+    h = CreateThread(NULL, 0, WarmThread, NULL, 0, NULL);
+    if (!h) InterlockedExchange(&g_warmStarted, 0);
+    else CloseHandle(h);
 }

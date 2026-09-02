@@ -336,6 +336,10 @@ SH_API const char *ShVehicleName(uint32_t vehicleId);
  */
 SH_API uint64_t ShSpawnVehicle(uint32_t vehicleId,
                                const ShVec3 *pos);
+/** Warm the spec cache on a background thread so the first
+ *  spawn does not scan the address space synchronously. Call
+ *  once after the world is loaded; later calls do nothing. */
+SH_API void ShSpawnWarm(void);
 SH_API void ShSpawnInvalidate(void);
 
 /** Guarded reads, for anything walking engine memory. They
@@ -617,7 +621,7 @@ SH_API void ShMenuOpen(int open);
 
 /** One row of the menu, copied for the overlay renderer. */
 typedef struct ShMenuRow {
-    char name[48];
+    char name[96];
     char value[32];
     int  selected;
 } ShMenuRow;
