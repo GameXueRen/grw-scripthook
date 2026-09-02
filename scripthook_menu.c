@@ -399,6 +399,50 @@ static void SafeCopy(char *dst, size_t cap, const char *src) {
     }
 }
 
+/* The [MenuOrder] weights reorder the ROOT menu's rows in the
+ * model itself, so navigation (which walks m->items) and the
+ * visible order always agree. The cursor follows its row across
+ * the sort. Unlisted rows use the default weight and keep their
+ * relative order (stable sort). A quick ordered check skips the
+ * sort once the rows are already in weight order. */
+static void ReorderRoot(Menu *m) {
+    int i, j, selPos = -1;
+    char selLabel[LABEL];
+
+    if (m->parent != 0 || m->count < 2) return;
+
+    for (i = 1; i < m->count; i++) {
+        int w0 = ShConfigGetInt("MenuOrder",
+                                m->items[i - 1].label, 1000);
+        int w1 = ShConfigGetInt("MenuOrder",
+                                m->items[i].label, 1000);
+        if (w0 > w1) break;
+    }
+    if (i >= m->count) return; /* already ordered */
+
+    strncpy(selLabel, m->items[m->sel].label, sizeof(selLabel) - 1);
+    selLabel[sizeof(selLabel) - 1] = 0;
+
+    for (i = 1; i < m->count; i++) {
+        Item it = m->items[i];
+        int wi = ShConfigGetInt("MenuOrder", it.label, 1000);
+        j = i;
+        while (j > 0) {
+            int wj = ShConfigGetInt("MenuOrder",
+                                    m->items[j - 1].label, 1000);
+            if (wj <= wi) break;
+            m->items[j] = m->items[j - 1];
+            j--;
+        }
+        m->items[j] = it;
+    }
+
+    for (i = 0; i < m->count; i++)
+        if (!strcmp(m->items[i].label, selLabel)) { selPos = i; break; }
+    if (selPos >= 0) m->sel = selPos;
+    if (m->top > m->sel) m->top = m->sel;
+}
+
 /* Snapshot the current menu for the overlay renderer. Labels,
  * values and the title are translated here (the model keeps the
  * English originals), then copied so the renderer can draw them
@@ -415,6 +459,10 @@ void ShMenuCaptureView(ShMenuView *v) {
     if (m) {
         char path[64], parentPath[64];
         Menu *pm = MenuOf(m->parent);
+
+        /* Keep the root's plugin rows ordered by [MenuOrder] in
+         * the model, so navigation matches what is on screen. */
+        if (m->parent == 0) ReorderRoot(m);
 
         /* The root's rows and the submenus' titles read from the
          * global table ([lang]), because MenuPath is empty for the
