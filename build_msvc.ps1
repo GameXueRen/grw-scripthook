@@ -199,6 +199,7 @@ Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')
 #Build-Plugin 'Reinforcement' 'reinf_boost.c' @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'chaos'        'chaos.c'        @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib', 'winmm.lib')
 Build-Plugin 'fov_changer'  'fov_changer.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
+Build-Plugin 'skipintro'     'skipintro.c'
 Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')
 Build-Plugin 'CrazyCars'    'crazycars.c'    @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')

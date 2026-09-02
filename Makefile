@@ -15,7 +15,7 @@ GAMEDIR = ../..
 # <gamedir>/logs at runtime.
 
 .PHONY: all roulette fling spawner crazycars freecam fov fps \
-        chaos sample docs clean
+        chaos sample skipintro docs clean
 
 sample: $(GAMEDIR)/scripts/ui_sample/ui_sample.asi
 
@@ -57,6 +57,12 @@ $(GAMEDIR)/scripts/chaos/chaos.asi: chaos.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ chaos.c \
 		-L. -lscripthook -lgdi32 -luser32 -lwinmm
+
+skipintro: $(GAMEDIR)/scripts/skipintro/skipintro.asi
+
+$(GAMEDIR)/scripts/skipintro/skipintro.asi: skipintro.c scripthook.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ skipintro.c
 
 fov: $(GAMEDIR)/scripts/fov_changer/fov_changer.asi
 
