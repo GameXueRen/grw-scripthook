@@ -1,32 +1,40 @@
 /* CPU core-count / affinity fix, backported into the ScriptHook
  * loader from https://github.com/kartalbas/wildlands-corecount-fix
  * (v4, MIT). AnvilNext (2017) dead-locks on the loading screen on
- * Intel hybrid CPUs (P-core + E-core): the engine sizes internal
- * structures from the reported logical-processor count AND then
- * spreads its own workers across every core via
+ * CPUs it sees as "too many" or hybrid: the engine sizes internal
+ * structures from the reported logical-processor count AND spreads
+ * its own workers across every core via
  * SetThreadAffinityMask(0xFFFFFFFF), so its load barrier waits on
- * threads parked on E-cores.
+ * threads that never finish. Reported triggers include Intel hybrid
+ * CPUs (P-core + E-core) and, in some cases, plain CPUs with SMT
+ * (Hyper-Threading) enabled.
  *
  * Enabled by:
  *
  *   [loader]
- *   cpu_core_fix=1         (0 = off, the default)
- *   cpu_cores=8            (fallback CPU count when auto-detect fails)
+ *   cpu_ecore_off=1        (0 = off, the default)
+ *   cpu_ht_off=1           (0 = off, the default; any CPU)
+ *   cpu_cores=8            (cap on the reported/clamped CPU count)
  *
- * On Intel 12th-gen+ hybrid CPUs the P-core set is auto-detected via
- * CPUID leaf 0x1A (Core Type) by pinning this thread to each logical
- * processor and reading its type. cpu_cores is the processor count the
- * game is told: of the detected P-cores the LOWEST cpu_cores logical
- * processors are kept (all P-cores when there are fewer than cpu_cores,
- * or when cpu_cores=0 is set), and every affinity call is clamped to
- * exactly those. When the CPU is not an Intel hybrid (AMD, pre-12th-gen,
- * or detection failure) the low cpu_cores logical CPUs are kept instead
- * (8 when cpu_cores is missing or 0).
+ * cpu_ht_off keeps one logical thread per PHYSICAL core (the SMT0 of
+ * each core) on ANY CPU -- Intel, AMD, hybrid or not. It is the
+ * general fix for "hangs even without E-cores, only with SMT on":
+ * the game then sees as many processors as there are physical cores.
  *
- * When off, not one API is touched and the game runs exactly as
- * before. When on, only this process is told the reduced processor
- * count and every affinity call is clamped to the P-cores -- no real
- * core is ever disabled or parked for the rest of the system.
+ * cpu_ecore_off targets Intel 12th-gen+ hybrid CPUs: the E-cores are
+ * dropped so the game only runs on the P-cores. The P-core set is
+ * auto-detected via CPUID leaf 0x1A (Core Type) by pinning this
+ * thread to each logical processor and reading its type.
+ *
+ * cpu_cores caps the final set: of the kept CPUs the LOWEST cpu_cores
+ * logical processors are reported/clamped to (all of them when there
+ * are fewer than cpu_cores, or when cpu_cores=0 is set). Missing or
+ * out-of-range cpu_cores falls back to 8.
+ *
+ * When both switches are off, not one API is touched and the game runs
+ * exactly as before. When on, only this process is told the reduced
+ * processor count and every affinity call is clamped -- no real core
+ * is ever disabled or parked for the rest of the system.
  *
  * Uses MinHook (third_party/minhook, MIT), compiled into dinput8.dll.
  */
@@ -160,6 +168,70 @@ static int detect_p_cores(ULONG_PTR *mask)
     if (count == 0 || count == total)
         return 0;                   /* no E-cores seen: not a hybrid */
     *mask = pm;
+    return 1;
+}
+
+/* One logical thread per physical core (SMT0 of each core): the
+ * affinity mask that makes the game see/use only physical cores,
+ * equivalent to disabling Hyper-Threading. CPU-agnostic -- works on
+ * Intel, AMD, with or without E-cores. Runs before any hook, so the
+ * real GetLogicalProcessorInformationEx is still in effect.
+ * Returns 1 and fills *mask, 0 when the topology cannot be read
+ * (single mask word cannot represent a machine with >64 CPUs). */
+static int detect_smt0_mask(ULONG_PTR *mask)
+{
+    DWORD len = 0;
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *buf = NULL, *rec;
+    ULONG_PTR m = 0;
+    DWORD off;
+    BOOL ok;
+
+    ok = GetLogicalProcessorInformationEx(RelationProcessorCore,
+                                          NULL, &len);
+    if (!ok || len == 0 || len > 0x100000)
+        return 0;
+    buf = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)malloc(len);
+    if (!buf)
+        return 0;
+    if (!GetLogicalProcessorInformationEx(RelationProcessorCore,
+                                          buf, &len)) {
+        free(buf);
+        return 0;
+    }
+
+    off = 0;
+    while (off + sizeof(*rec) <= len) {
+        ULONG_PTR any = 0, low;
+        WORD g;
+        rec = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)((BYTE *)buf + off);
+        if (rec->Size == 0 || off + rec->Size > len)
+            break;
+        if (rec->Relationship == RelationProcessorCore) {
+            /* Lowest-numbered logical processor of the core = its SMT0. */
+            for (g = 0; g < rec->Processor.GroupCount; g++) {
+                ULONG_PTR gm = rec->Processor.GroupMask[g].Mask;
+                if (g == 0) {
+                    if (gm) {
+                        low = 1;
+                        while (!(gm & low)) low <<= 1;
+                        any = low;
+                    }
+                } else if (gm) {
+                    /* Core lives in a group beyond word 0; the single
+                     * keepmask word cannot represent it, so bail. */
+                    free(buf);
+                    return 0;
+                }
+            }
+            if (any) m |= any;
+        }
+        off += rec->Size;
+    }
+    free(buf);
+
+    if (m == 0)
+        return 0;
+    *mask = m;
     return 1;
 }
 
@@ -415,11 +487,13 @@ static LONG WINAPI hook_NtSIP(HANDLE proc, ULONG cls, PVOID info, ULONG len)
 /* ========================================================================= */
 /* Configuration + installation.                                             */
 /* ========================================================================= */
-/* cpu_cores from the main scripthook.ini: the logical-processor count the
- * game is told (the report target).
+/* cpu_cores from the main scripthook.ini: the logical-processor count
+ * the game is told (the report target).
  *   - key missing / not a number  -> default 8
  *   - explicit 0                  -> keep every detected P-core (no trim)
  *   - 1..256                      -> that many
+ * The cpu_ecore_off / cpu_ht_off switches are read directly in
+ * ShCoreFixStartup; this function only parses cpu_cores.
  * (ShConfigGetInt with def=-1 tells the three apart: missing or junk
  * returns -1, a real "0" returns 0.) */
 static void load_config(void)
@@ -475,10 +549,12 @@ static int install_hooks(void)
 
 /* Called from loader DllMain after the real dinput8 is loaded and before
  * any plugin loads. Reads scripthook.ini itself so no ordering between
- * this and the loader thread matters. No-op unless cpu_core_fix=1. */
+ * this and the loader thread matters. No-op unless cpu_ecore_off=1
+ * or cpu_ht_off=1. */
 void ShCoreFixStartup(void)
 {
-    int want;
+    int wantEcore, wantHt;
+    ULONG_PTR keep = 0;
 
     if (InterlockedCompareExchange(&g_installed, 1, 0))
         return;
@@ -486,45 +562,63 @@ void ShCoreFixStartup(void)
     LogInit("scripthook_corefix.log");
 
     ShConfigInit();
-    want = ShConfigGetBool("loader", "cpu_core_fix", 0);
-    if (!want) {
-        Log("corefix: disabled (set [loader] cpu_core_fix=1 to enable)");
+    wantEcore = ShConfigGetBool("loader", "cpu_ecore_off", 0);
+    wantHt    = ShConfigGetBool("loader", "cpu_ht_off", 0);
+    if (!wantEcore && !wantHt) {
+        Log("corefix: disabled (set [loader] cpu_ecore_off=1 and/or "
+            "cpu_ht_off=1 to enable)");
         return;
     }
-
     load_config();
 
-    /* Auto-detect the Intel P-cores. The game is told cpu_cores
-     * processors, but those must all be P-cores, so when they are
-     * found we take the LOWEST cpu_cores P-core logical processors.
-     * With cpu_cores=0 every detected P-core is kept instead. If the
-     * machine has fewer P-core threads than cpu_cores, all of them are
-     * used and the reported count drops to match. */
-    {
-        ULONG_PTR pm = 0;
-        DWORD nP, want;
-        if (detect_p_cores(&pm)) {
-            nP = popcount_ptr(pm);
-            if (g_autoAll) {
-                want = nP;
-                Log("corefix: detected %lu P-core threads; keeping ALL of "
-                    "them (cpu_cores=0), mask 0x%zX",
-                    (unsigned long)nP, (size_t)pm);
-            } else {
-                want = g_max_cores < nP ? g_max_cores : nP;
-                Log("corefix: detected %lu P-core threads; reporting/clamping "
-                    "to lowest %lu of them (cpu_cores=%lu), mask 0x%zX",
-                    (unsigned long)nP, (unsigned long)want,
-                    (unsigned long)g_max_cores, (size_t)pm);
-            }
-            g_keepmask = keep_lowest_bits(pm, want);
-            g_max_cores = popcount_ptr(g_keepmask);
+    /* Two independent trims, applied in order:
+     *   1. cpu_ht_off    -> one logical thread per physical core (SMT0),
+     *                       works on any CPU (AMD included).
+     *   2. cpu_ecore_off -> Intel 12th-gen+ hybrid: keep only P-cores
+     *                       (the E-cores are hidden from the game).
+     * With both on, the result is P-core SMT0 threads (strictest).
+     * When no trim succeeds the low cpu_cores CPUs are the fallback.
+     * cpu_cores caps the final set (cpu_cores=0 keeps all of it). */
+    if (wantHt) {
+        ULONG_PTR sm = 0;
+        if (detect_smt0_mask(&sm)) {
+            keep = sm;
+            Log("corefix: ht_off: one thread per physical core, "
+                "mask 0x%zX", (size_t)sm);
         } else {
-            g_keepmask = lowmask(g_max_cores);
-            Log("corefix: no Intel hybrid detected, keeping low %lu "
-                "logical processors (cpu_cores)", (unsigned long)g_max_cores);
+            keep = lowmask(g_max_cores);
+            Log("corefix: ht_off: topology read failed, keeping low %lu "
+                "logical processors", (unsigned long)g_max_cores);
         }
     }
+    if (wantEcore) {
+        ULONG_PTR pm = 0;
+        if (detect_p_cores(&pm)) {
+            if (keep) keep &= pm;   /* both: SMT0 within P-cores */
+            else      keep = pm;
+            Log("corefix: ecore_off: P-core mask 0x%zX", (size_t)pm);
+        } else if (!keep) {
+            keep = lowmask(g_max_cores);
+            Log("corefix: ecore_off: no hybrid CPU detected, keeping "
+                "low %lu logical processors (cpu_cores)",
+                (unsigned long)g_max_cores);
+        }
+    }
+
+    /* cpu_cores caps the result; 0 means keep everything found. */
+    if (keep && !g_autoAll) {
+        DWORD n = popcount_ptr(keep);
+        if (n > g_max_cores) {
+            keep = keep_lowest_bits(keep, g_max_cores);
+            Log("corefix: capped to lowest %lu of the kept set "
+                "(cpu_cores)", (unsigned long)g_max_cores);
+        }
+    }
+    g_keepmask = keep ? keep : lowmask(g_max_cores);
+    g_max_cores = popcount_ptr(g_keepmask);
+    Log("corefix: final keep mask 0x%zX, reporting %lu processors",
+        (size_t)g_keepmask, (unsigned long)g_max_cores);
+
     {
         int ok = install_hooks();
         Log("corefix: affinity forced to 0x%zX, hooks=%s",

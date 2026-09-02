@@ -164,7 +164,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         /* CPU core-count/affinity fix. Must run before the
          * engine reads the processor count, so it goes here,
          * on the attach path, not in the loader thread.
-         * No-op unless scripthook.ini [loader] cpu_core_fix=1.
+         * No-op unless scripthook.ini [loader] cpu_ecore_off=1
+         * or cpu_ht_off=1.
          */
         ShCoreFixStartup();
         LoadRealDinput8();
