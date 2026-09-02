@@ -203,12 +203,31 @@ static void Fire(uint32_t menu, int idx, Item *it) {
     CallPush(it->fn, it->user, menu, (uint32_t)idx, v);
 }
 
+static unsigned char g_keyWas[256];
+
 static int Pressed(int vk) {
-    static unsigned char was[256];
     int d = (GetAsyncKeyState(vk) & 0x8000) != 0;
-    int hit = d && !was[vk & 0xFF];
-    was[vk & 0xFF] = (unsigned char)d;
+    int hit = d && !g_keyWas[vk & 0xFF];
+    g_keyWas[vk & 0xFF] = (unsigned char)d;
     return hit;
+}
+
+/* The menu keys are polled, so a background game window must not
+ * react to keys meant for the window in front. Forget held keys
+ * while unfocused so nothing fires when focus comes back. */
+static void ResetKeys(void) {
+    memset(g_keyWas, 0, sizeof(g_keyWas));
+}
+
+/* True while the game window has the focus. Any window of this
+ * process counts, which covers both windowed and borderless
+ * fullscreen; a backgrounded game reports the window in front. */
+static int WindowFocused(void) {
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    if (!fg) return 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
 }
 
 /* Selection scrolls with the cursor, so a long menu shows a
@@ -456,6 +475,13 @@ static DWORD WINAPI MenuThread(LPVOID p) {
         Sleep(TICK_MS);
 
         EscDeferTick();
+
+        /* Background window: the menu must not react to keys.
+         * Forget held keys too, so nothing fires on refocus. */
+        if (!WindowFocused()) {
+            ResetKeys();
+            continue;
+        }
 
         /* F4 first, on every tick, before any menu work that
          * could block: the toggle must never depend on the
