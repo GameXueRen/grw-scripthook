@@ -461,6 +461,8 @@ void ShMenuCaptureView(ShMenuView *v) {
         char path[64], parentPath[64];
         Menu *pm = MenuOf(m->parent);
 
+        v->isRoot = (m->parent == 0);
+
         /* Keep the root's plugin rows ordered by [MenuOrder] in
          * the model, so navigation matches what is on screen. */
         if (m->parent == 0) ReorderRoot(m);

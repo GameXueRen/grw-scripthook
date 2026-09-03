@@ -643,6 +643,7 @@ typedef struct ShMenuView {
     char footer[16];
     int  rows;
     int  sel;
+    int  isRoot;      /**< 1 when the root menu is being shown */
     ShMenuRow row[12];
 } ShMenuView;
 

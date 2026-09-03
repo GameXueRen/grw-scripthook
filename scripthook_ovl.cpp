@@ -154,6 +154,31 @@ void RenderMenu(const ShMenuView* v)
     float titleBy = CenteredBaseline(font, titleFs, y + PAD_TOP, TITLE_H);
     dl->AddText(font, titleFs, ImVec2(x + PAD, titleBy),
                 Col(0xFFD25Au), v->title);
+    // Root menu top-right credits: original author + this build.
+    if (v->isRoot) {
+        const float cFs1 = 14.0f, cFs2 = 14.0f, cGap = 1.0f;
+        const char* c1 = "原作者：Phiality · 魔改：GameXueRen";
+        const char* c2 = "版本：Beta1.0 · Q群：299177445";
+        ImFontBaked* b1 = font->GetFontBaked(cFs1);
+        ImFontBaked* b2 = font->GetFontBaked(cFs2);
+        if (!b1) b1 = font->GetFontBaked(font->LegacySize);
+        if (!b2) b2 = b1 ? b1 : font->GetFontBaked(font->LegacySize);
+        if (b1 && b2) {
+            ImVec2 s1 = font->CalcTextSizeA(cFs1, FLT_MAX, 0.0f, c1);
+            ImVec2 s2 = font->CalcTextSizeA(cFs2, FLT_MAX, 0.0f, c2);
+            float rightX = x + MENU_W - PAD;
+            float g1 = b1->Ascent - b1->Descent;
+            float g2 = b2->Ascent - b2->Descent;
+            float blockH = g1 + cGap + g2;
+            float t1 = y + PAD_TOP + (TITLE_H - blockH) * 0.5f;
+            float by1 = t1 + b1->Ascent;
+            float by2 = t1 + g1 + cGap + b2->Ascent;
+            dl->AddText(font, cFs1, ImVec2(rightX - s1.x, by1),
+                        Col(0xE6E6E6u), c1);
+            dl->AddText(font, cFs2, ImVec2(rightX - s2.x, by2),
+                        Col(0x8C9BA8u), c2);
+        }
+    }
     // Control hints, two small grey lines under the title.
     {
         float hy = y + PAD_TOP + TITLE_H + hintGap;
