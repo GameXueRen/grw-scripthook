@@ -1,296 +1,160 @@
-# GRW ScriptHook
+# GRW ScriptHook 魔改版（Beta1.0）
 
-A ScriptHookV equivalent for **Ghost Recon Wildlands** (Definitive
-Edition). It loads as a `dinput8.dll` proxy, exposes a plain C ABI,
-and loads `.asi` plugins the same way ScriptHookV does.
+《幽灵行动：荒野》（Ghost Recon Wildlands）的
+ScriptHookV 同类框架。以 `dinput8.dll` 代理形式随游戏加载，暴露
+C ABI，并按 ASI 插件约定加载 `plugins\` 下的 `.asi` 插件。
 
-Everything here was found by decompiling the game in Ghidra. The
-engine has no scripting layer, no console and no exported hooks, so
-each capability below is a specific function or field that had to be
-located and verified in a running game.
+> 本项目为原版 **grw-scripthook** 的中文魔改版，在原版框架之上
+> 重做了游戏内菜单、中文本地化，并新增了多项实用功能。
 
-Developed and tested under Proton on Linux, though nothing in it is
-Wine specific.
+---
 
-## Documentation
+### 原作者： **Phiality** | [grw-scripthook](https://github.com/PhialsBasement/grw-scripthook)
 
-The full API reference, generated from `scripthook.h`, lives at
-<https://phialsbasement.github.io/grw-scripthook/api/>. It covers
-every call, grouped the way the header is.
+### 魔改版QQ交流群： **299177445**
 
-[docs/plugins.md](docs/plugins.md) is the plugin author's guide:
-how loading works, which threads call you, and the rules that keep
-a plugin from crashing the game. [docs/ui.md](docs/ui.md) covers
-the native UI: scenes, widgets, properties, input and reloads.
+---
 
-## What works
+## 这是什么
 
-| Capability | Notes |
+原版是作者反编译《幽灵行动：荒野》逐步定位得到的引擎扩展框架。  
+游戏本身没有脚本层、没有控制台、没有可直接使用的API，因此框架的每一项能力都源于游戏引擎中一段被定位并验证过的函数或字段。
+
+魔改版在保留全部底层能力（载具、实体、相机、事件、原生UI 等）的前提下，重点改进了**F4 模组菜单**。  
+改为独立的 D3D11/ImGui 覆盖层渲染（原生支持中文字体），并对接入`scripthook.ini` 的翻译表，实现可高度自定义汉化的模组菜单界面。
+
+---
+
+## 魔改内容一览
+
+自魔改分支以来的主要变更（按功能归类，详见 Git 提交）：
+
+- **菜单渲染重构**：用 D3D11 + Dear ImGui 覆盖层重绘 F4 菜单，内置 CJK 字体，中文显示不再依赖原生 UI。
+- **插件目录与配置约定规范化**：各个插件统一放置到 `plugins\` 目录下对应的插件名目录，每个插件的 `.ini` 配置文件与其 `.asi` 插件文件，同目录同名放置。
+- **完整中文本地化**：对接 `scripthook.ini` 翻译表，并可自定义配置第三方插件的菜单翻译。
+- **菜单体验改进**：增加自定义配置菜单显示顺序、提示，优化菜单导航与交互。
+- **模组功能设置**：添加插件总开关、额外功能开关、各插件独立开关设置。
+- **增加 CPU 核心调度修复功能**：禁止小核（适配英特尔12代及以后的cpu）、关闭超线程、限制逻辑核心数，修复游戏可能的长时间卡启动logo/无限卡加载故障。
+- **载具与生成优化**：载具菜单汉化、生成载具时缓存预热，优化首次召唤载具的生成速度，且世界重载后不重复预热。
+- **跳过开场视频**：内置自写的skipintro插件，可跳过游戏启动时的 Nvidia/Ubisoft片头视频、存档提示/光敏警告视频。
+
+---
+
+## 功能完成状态
+
+> 状态：已完成 / 部分完成 / 计划中
+
+| 功能清单 | 状态 |
 | --- | --- |
-| Vehicle spawning | 65 vehicles, catalogued and named by hand |
-| Entity enumeration | Kind, position, health, components |
-| Entity visibility | Hide or show anything, optionally held |
-| Teleport | Verified 9.9km cross map, lands within 3m |
-| Health | Read and write through the game's obfuscated storage |
-| Ground queries | Uses the engine's own collision world |
-| Camera | Position, orientation, roll, fov, the view matrices |
-| OnHit events | Entity, position, normal, distance, shooter |
-| OnFire events | Muzzle, direction, yaw and pitch, shooter |
-| Native UI | The engine's own widgets, scenes per plugin, keys with focus |
-| Menu | One shared root, plugins add submenus |
-| Overlay | Slots that pack themselves, drawn by the game |
-| Game state | Menu, loading, in game, transitions |
+| D3D11/ImGui 覆盖层菜单（CJK 字体） | 已完成 |
+| 插件目录与配置 `plugins\` 规范化 | 已完成 |
+| 菜单中文本地化（`[zh_cn]` 翻译表） | 已完成 |
+| 适配第三方插件菜单的汉化框架（scripthook.ini） | 已完成 |
+| 载具生成与清单（65 种，已汉化） | 已完成 |
+| 第一人称相机与视野控制（含视角修复） | 已完成 |
+| 增加根菜单行排序功能（MenuOrder）与提示功能（MenuHints） | 已完成 |
+| 菜单内新增模组功能设置子菜单（scripthook.ini） | 已完成 |
+| 增加跳过游戏启动时的开场视频插件（skipintro） | 已完成 |
+| CPU 核心调度修复（禁止小核 / 关闭超线程） | 已实现，待大规模验证 |
+| Forge Mod Loader | 游戏资源侧载热替换模块，调试中 |
 
-Three example mods are included:
 
-- **hitfling** shoot a car, it launches into the air
-- **tpgun** shoot anywhere, you arrive there
-- **ui_sample** a window from the UI ABI alone: its own scene,
-  rows, a highlight bar, keys through the input callback, a
-  rebuild after a world reload (F7 toggles it)
+---
 
-## Building
+## 待完成功能计划
 
-**MinGW (Linux/Proton).** Requires a MinGW cross compiler. On
-Arch that is `mingw-w64-gcc`; on Debian,
-`gcc-mingw-w64-x86-64`.
+> 此表由维护者持续更新；欢迎在 Q 群提出建议。
 
-```sh
-make            # dinput8.dll and plugins/test_plugin/test_plugin.asi
-make fling      # plugins/hitfling/hitfling.asi
-make tpgun      # plugins/tpgun/tpgun.asi
-make sample     # plugins/ui_sample/ui_sample.asi
-make QUIET=1    # same, without the four benign warning families
-make docs       # the API reference into docs/api (doxygen)
-```
+| 功能清单 | 状态 | 备注 |
+| --- | --- | --- |
+| Forge Mod Loader支持载具皮肤替换 | 调试中 | 游戏资源文件免解包免重打包侧载热替换 |
+| Forge Mod Loader支持武器数据修改替换 | 验证中 |  |
+| 集成自动修复游戏麦识别故障方案 | 验证中 |  |
+| 集成修复新DLC闪退方案 | 计划中 |  |
+| 长按4键快速选择道具轮盘界面 | 计划中 |  |
+| 按V键快速选择载具召唤界面 | 计划中 |  |
+| 集成游戏无缝输入中文功能，支持全屏模式使用 | 计划中 |  |
+| 其他模式退回主菜单无需重启游戏 | 计划中 |  |
+| 全民公敌插件，反抗军也处于敌对状态 | 计划中 | 新插件开发 |
+| 敌人增援强化插件 | 计划中 | 新插件开发 |
+| 魅影模式不删档插件 | 计划中 | 新插件开发 |
+| 时间天气精细化控制插件 | 计划中 | 新插件开发，N网已有大佬发布 |
 
-**MSVC (Windows).** `build_msvc.ps1` builds the same outputs
-with the Visual Studio Build Tools x64 toolchain. It locates
-the game folder (a sibling of this repo's parent) or takes
-`-Gamedir`, and `-Clean` removes the built files.
 
-```powershell
-pwsh ./build_msvc.ps1            # auto-detected game folder
-pwsh ./build_msvc.ps1 -Gamedir "D:\Games\GRW"
-pwsh ./build_msvc.ps1 -Clean
-```
 
-The source is shared between the two compilers: the engine
-callbacks use `SH_MSABI`/`SH_ALIGNED` shims (GCC attributes,
-MSVC no-ops/`__declspec(align)`), the guard pad is emitted by
-inline asm on GCC and from `guard.asm` via ml64 on MSVC, and
-the proxy entry points are `__declspec(dllexport)` on GCC and
-listed in `proxy.def` on MSVC (where the SDK already declares
-two of them).
+---
 
-Output goes to `GAMEDIR`, set at the top of the Makefile (or
-auto-detected by `build_msvc.ps1`), which should be the folder
-containing `GRW.exe`. Each plugin lands in
-`plugins/<name>/<name>.asi`, the layout the loader scans for.
+## 安装
 
-## Installing
-
-Drop `dinput8.dll` next to `GRW.exe`. Plugins go into `plugins/`,
-one folder each, named after the plugin:
+1. 将 `dinput8.dll`、`plugins\`、`scripthook.ini` 放入游戏根目录（与 `GRW.exe` 同级）。
+2. 各种插件放入对应的路径 `plugins\<插件名>\<插件名>.asi`（每个插件一个文件夹）。
 
 ```
 Tom Clancy's Ghost Recon Wildlands/
 ├── GRW.exe
 ├── dinput8.dll
-├── scripthook.ini     main config, created on first launch
-├── logs/              every log file, timestamps on each line
-└── plugins/
-    └── firstperson/
-        ├── firstperson.asi
-        └── firstperson.ini    the plugin's own config
+├── scripthook.ini     主配置文件
+├── logs/              运行日志
+└── plugins/           插件目录（每个插件一个子文件夹）
 ```
 
-`scripthook.ini` controls the loader now (`[loader] load_plugins`,
-`[plugins] <name>=0` to disable one) and will hold the switches
-for the larger features. The proxy forwards every DirectInput8
-export to the real system DLL, so the game behaves normally with
-or without plugins present.
+---
 
-## Writing a mod
+## 主配置文件（scripthook.ini）说明
 
-A plugin is a DLL named `.asi`. The loader runs plugins from a
-worker thread rather than from `DllMain`, so a plugin can link
-`libscripthook.a` and call the API directly, or resolve it through
-`GetProcAddress` to also run on older loaders. The guide in
-[docs/plugins.md](docs/plugins.md) walks through both.
+```ini
+[loader]
+load_plugins=1          ; 0 = 启动时不加载任何插件
+cpu_ecore_off=0         ; 1 = 禁止小核（游戏仅调度使用大核，适配Intel 12代+）
+cpu_ht_off=0            ; 1 = 关闭超线程（游戏仅调度使用物理核心）
+cpu_cores=0             ; 可调度最大核心数上限（0 = 自动）
 
-The whole of the falling cars mod:
+[plugins]
+chaos=0                 ; 每个插件一行，1 启用 / 0 禁用
 
-```c
-static void OnHit(const ShHit *hit, void *user) {
-    ShVec3 up = hit->pos;
-    if (hit->kind != SH_KIND_VEHICLE) return;
-    up.z += 90.0f;
-    ShPlaceEntity(hit->root, &up, NULL);
-}
-
-while (!ShIsInGame() || !ShHitHookInstall()) Sleep(500);
-ShOnHit(OnHit, NULL, 0);
+[Settings]
+Languages=zh_cn,en      ; 设置菜单中可选的语言列表（逗号分隔）
+Language=zh_cn          ; 当前菜单语言
 ```
 
-Receivers are called on a worker thread the API owns, so any API
-call is legal inside one. `hit->root` is already resolved for you,
-because bullets usually strike a child part rather than the vehicle.
+### 插件菜单的汉化（翻译表用法示例）
 
-## The ABI
+框架菜单中的**每一个标签文本都是“翻译 key”**：显示前会先在当前语言（由 `[Settings] Language` 决定）的翻译表里查找，查不到就回退显示英文原文。  
+因此**插件无需任何改动**，只要在 `scripthook.ini` 里补上对应的翻译条目，就能把它的菜单汉化。
 
-`scripthook.h` is the only header a mod needs. Every call returns 1
-on success and 0 on failure, with `ShLastError` giving the reason.
+以 firstperson 插件（菜单标题 `First person`）为例：
 
-```
-player        ShGetPlayer ShGetPlayerPosition ShTeleportPlayer
-              ShTeleportPlayerHops ShTeleportPlayerToGround
-              ShIsInVehicle ShWalkToRoot
+**① 根菜单行标题** —— 加在全局表 `[zh_cn]` 下：
 
-entities      ShFindEntities ShGetEntityKind ShKindName
-              ShPlaceEntity ShGetComponents ShFindComponent
-              ShSetEntityVisible ShEntityNodeCount
-
-camera        ShGetCamera ShSetCamera ShCameraOrbit
-              ShCameraFree ShCameraAngles ShCameraApply
-              ShCameraMatrix ShCameraRelease
-
-menu          ShMenuCreate ShMenuSub ShMenuAction
-              ShMenuToggle ShMenuNumber ShMenuList
-              ShMenuStatus ShMenuSetKey ShMenuOpen
-
-overlay       ShHudCreate ShHudSet ShHudColour
-              ShHudShow ShHudDestroy
-
-vehicles      ShSpawnVehicle ShVehicleCount ShVehicleAt
-              ShVehicleName
-
-health        ShGetHealthPlayer ShSetHealthPlayer
-              ShSetGodModePlayer ShSetCannotDiePlayer
-              ShGetHealthEntity ShSetHealthEntity
-
-events        ShHitHookInstall ShOnHit ShOffHit ShGetHits
-              ShOnFire ShOffFire ShGetShots
-
-physics       ShPhysicsReady ShGroundHeight ShGroundHeightFrom
-              ShRayLog ShQueryRays ShRayFilterPlayer
-
-engine        ShQueueCall ShQueueResult ShGetGameState ShIsInGame
-
-ui            ShUiSceneCreate ShUiSceneSetOrder ShUiSceneShow
-              ShUiSceneDestroy ShUiCreateIn ShUiReparent
-              ShUiChildCount ShUiChildAt ShUiDestroy
-              ShUiSetF ShUiSetU ShUiSetV ShUiSetS ShUiGetF
-              ShUiGetU ShUiGetV ShUiGetS ShUiMeasure
-              ShUiSetAutoSize ShUiBegin ShUiCommit
-              ShUiCommitAsync ShUiSetReset ShUiSetInput
-              ShUiFocus ShUiTextureCreate ShUiSetDefaultFont
+```ini
+[zh_cn]
+First person = 第一人称
 ```
 
-### Events
+**② 该插件菜单内部的选项** —— 新建子节 `[zh_cn.First person]`
+（配置段名为菜单标题原文），键为菜单项原名，值为翻译后的名字：
 
-`ShOnHit(fn, user, flags)` delivers one event per bullet, at the
-impact that stopped it. Flags are opt in:
-
-- `SH_EVT_MINE_ONLY` only your own shots
-- `SH_EVT_NO_SELF` drop the graze on the firer's own body
-
-A projectile is stepped every frame and its hit list accumulates, so
-the API holds each bullet and reports its furthest hit once the
-projectile stops being stepped. That costs about 120ms of latency
-and is why acting on the first reported hit puts you on a fence post
-instead of the target.
-
-### Threads
-
-Engine calls that take locks deadlock from any thread but the game
-thread. `ShQueueCall` runs a call there and `ShQueueResult` collects
-it, usually on the next frame. The API uses this internally, so
-plugins rarely need it.
-
-## Hazards
-
-These are real, and each one cost a crash to find.
-
-- Two vehicles freeze the game if you enter them: an alpaca that the
-  engine classes as a vehicle, `0x40081214`, and an unused monster
-  truck, `0x40BA6E9D`. They are safe to spawn, not to ride.
-- Placing an entity outside the streamed region crashes the game.
-  Collision only exists within roughly 1500m of the player.
-- `ShPlaceEntity` carries riders on purpose, so moving a vehicle you
-  are sitting in takes you with it.
-
-## Addressing
-
-Every engine address is stored as an RVA and resolved against the
-module base at runtime, so ASLR is fine. `image.h` holds the helper.
-The game currently loads at its preferred base under Proton, which
-made pinned addresses easy to get away with and easy to get wrong.
-
-## Layout
-
-```
-loader.c              dinput8 proxy, loads the real DLL and the .asi files
-scripthook_config.c   game/plugins/logs paths, the main scripthook.ini
-scripthook_api.c      player, teleport, entity placement, errors
-scripthook_entity.c   enumeration, components, kinds, visibility
-scripthook_health.c   the obfuscated health storage
-scripthook_state.c    game flow state, pause detection
-scripthook_physics.c  ray hook, ground queries, game thread queue
-scripthook_spawn.c    vehicle catalogue and spawning
-scripthook_hit.c      OnHit and OnFire
-scripthook_camera.c   the camera hook, per field ownership
-scripthook_head.c     the head bone, position and orientation
-scripthook_fov.c      field of view, taken at its source
-scripthook_blur.c     the hidden close range blur, one byte
-scripthook_stat.c     the obfuscated stat storage
-scripthook_resource.c resources and skill points
-scripthook_stealth.c  detection visibility scale
-scripthook_ammo.c     ammo by weapon slot
-scripthook_weather.c  weather type and time of day
-scripthook_reflect.c  method tables by name, scenes, GameFlow objects
-scripthook_ui.c       native widgets, panels, labels, quads
-scripthook_scene.c    the phoenix scene of our own that hosts them
-scripthook_uiprop.c   widget properties by id from the engine's tables
-scripthook_uiinput.c  keys and pointer for the focused scene
-scripthook_dinput.c   the DirectInput keyboard wrapper, blocked keys
-scripthook_input.c    cursor freeze and the modifier poll stub
-scripthook_hud.c      overlay slots
-scripthook_menu.c     the shared F4 menu
-guard.c               landing pad for the spawn trampoline
-guard.asm             the same pad for MSVC (ml64)
-
-test_plugin.c         a REPL on port 9999, every debugging command
-hitfling.c tpgun.c    the example mods
-ui_sample.c           the native UI example
-build_msvc.ps1        MSVC build script (see Building)
-proxy.def             the proxy entry points for MSVC builds
+```ini
+[zh_cn.First person]
+Enabled = 第一人称
+Hide head = 隐藏头部
+Forward cm = 前后调整(cm)
+Height cm = 高低调整(cm)
+ADS settle ms = 开镜速度(ms)
+First-person view: hide head, adjust eye height and distance. = 第一人称视角，可隐藏头部，可调整视角前后高低
 ```
 
-`test_plugin.c` is large because it accumulated every experiment
-used to find the rest. It is a research tool, not an example.
+---
 
-## Credits
+## 构建
 
-The camera work stands on **Firejumper93's**
-[GhostReconWildlandsVR](https://github.com/Firejumper93/GhostReconWildlandsVR),
-MIT licensed and unusually well documented. Its notes gave us the
-camera struct layout, the fact that `Camera+0x000` is the transform
-the view builder actually consumes rather than one of the derived
-matrices, and this engine's yaw and pitch convention. Their build log
-also records the write to `+0x4A0` that quietly does nothing, which
-is exactly the wrong turn we would have taken.
+- **Windows（MSVC）**：`pwsh ./build_msvc.ps1`
+- **Linux / Proton（MinGW）**：`make`
 
-The addresses here are our own, since this build is newer than any in
-their table, but the reverse engineering that made them meaningful is
-theirs.
+构建后，输出 `dinput8.dll` 到游戏根目录、输入插件到以下目录 `plugins\<name>\`。
 
-## Licence
+---
 
-GPL-3.0. See `LICENSE`.
+## 许可
 
-You are free to use, modify and redistribute this, including
-commercially. What you cannot do is take it, add features, and ship
-that as a closed product: any derivative has to be released under
-the GPL with its source available. Sell builds if you like, but the
-improvements come back to everyone.
+GPL-3.0
