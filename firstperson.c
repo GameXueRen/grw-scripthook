@@ -67,8 +67,8 @@ static LogPath_t    g_logPath;
 
 /* Config convention, shared by every plugin: the .ini sits
  * beside the .asi and takes its base name, so
- * scripts\firstperson\firstperson.asi pairs with
- * scripts\firstperson\firstperson.ini. The name is read from
+ * plugins\firstperson\firstperson.asi pairs with
+ * plugins\firstperson\firstperson.ini. The name is read from
  * the module file rather than hardcoded, so the convention
  * holds for any plugin and survives a rename. */
 static HINSTANCE g_inst = NULL;
@@ -460,7 +460,7 @@ static DWORD WINAPI TickThread(LPVOID p) {
 }
 
 /* The plugin's own settings live in
- * scripts/firstperson/firstperson.ini, beside the .asi.
+ * plugins/firstperson/firstperson.ini, beside the .asi.
  * They are optional: the built-in defaults stand in. */
 static int  IniInt(const char *path, const char *key, int def) {
     return GetPrivateProfileIntA("Settings", key, def, path);
@@ -488,7 +488,7 @@ static float IniFloat(const char *path, const char *key, float def) {
     return (float)atof(buf);
 }
 
-/* Resolve <gamedir>\scripts\<name>\<name>.ini from the plugin's
+/* Resolve <gamedir>\plugins\<name>\<name>.ini from the plugin's
  * own file name and the loader's ShPluginIniPath, once. */
 static void ResolveIniPath(HMODULE m) {
     typedef int (*PluginIni_t)(const char *, char *, int);

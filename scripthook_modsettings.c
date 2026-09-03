@@ -3,7 +3,7 @@
  *
  * The engine reads every key it exposes here only at startup:
  *   - [loader] load_plugins / cpu_ecore_off / cpu_ht_off / cpu_cores
- *   - [plugins]  one toggle per scripts\<name>\<name>.asi
+ *   - [plugins]  one toggle per plugins\<name>\<name>.asi
  *   - [Settings] Language (menu language)
  * Each page carries a single hint line noting that changes need a
  * game restart to take effect, instead of marking every row.
@@ -108,23 +108,23 @@ static void OnLanguage(uint32_t menu, uint32_t item, int value,
 
 /* ---- plugin list ------------------------------------------------ */
 
-/* Scan scripts\ for <folder>\<folder>.asi, mirroring the loader's
+/* Scan plugins\ for <folder>\<folder>.asi, mirroring the loader's
  * own scan, and keep the names sorted. The names are borrowed by the
  * toggle rows (and used as ini keys), so they live in a static
  * buffer for the whole session. */
 static void ScanPlugins(void) {
-    char scriptsDir[MAX_PATH], asi[MAX_PATH];
+    char pluginsDir[MAX_PATH], asi[MAX_PATH];
     WIN32_FIND_DATAA fd;
     HANDLE h;
     int i;
 
     g_nplugins = 0;
-    if (!ShScriptsDir(scriptsDir, sizeof(scriptsDir))) return;
+    if (!ShPluginsDir(pluginsDir, sizeof(pluginsDir))) return;
     {
-        size_t n = strlen(scriptsDir);
-        if (n > 0 && scriptsDir[n - 1] == '\\') scriptsDir[n - 1] = 0;
+        size_t n = strlen(pluginsDir);
+        if (n > 0 && pluginsDir[n - 1] == '\\') pluginsDir[n - 1] = 0;
     }
-    snprintf(asi, sizeof(asi), "%s\\*", scriptsDir);
+    snprintf(asi, sizeof(asi), "%s\\*", pluginsDir);
 
     h = FindFirstFileA(asi, &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -135,7 +135,7 @@ static void ScanPlugins(void) {
         if (name[0] == '.') continue;
 
         snprintf(asi, sizeof(asi), "%s\\%s\\%s.asi",
-                 scriptsDir, name, name);
+                 pluginsDir, name, name);
         if (GetFileAttributesA(asi) == INVALID_FILE_ATTRIBUTES)
             continue;
         if (g_nplugins >= PLUGIN_MAX) break;

@@ -56,10 +56,10 @@ Arch that is `mingw-w64-gcc`; on Debian,
 `gcc-mingw-w64-x86-64`.
 
 ```sh
-make            # dinput8.dll and scripts/test_plugin/test_plugin.asi
-make fling      # scripts/hitfling/hitfling.asi
-make tpgun      # scripts/tpgun/tpgun.asi
-make sample     # scripts/ui_sample/ui_sample.asi
+make            # dinput8.dll and plugins/test_plugin/test_plugin.asi
+make fling      # plugins/hitfling/hitfling.asi
+make tpgun      # plugins/tpgun/tpgun.asi
+make sample     # plugins/ui_sample/ui_sample.asi
 make QUIET=1    # same, without the four benign warning families
 make docs       # the API reference into docs/api (doxygen)
 ```
@@ -86,11 +86,11 @@ two of them).
 Output goes to `GAMEDIR`, set at the top of the Makefile (or
 auto-detected by `build_msvc.ps1`), which should be the folder
 containing `GRW.exe`. Each plugin lands in
-`scripts/<name>/<name>.asi`, the layout the loader scans for.
+`plugins/<name>/<name>.asi`, the layout the loader scans for.
 
 ## Installing
 
-Drop `dinput8.dll` next to `GRW.exe`. Plugins go into `scripts/`,
+Drop `dinput8.dll` next to `GRW.exe`. Plugins go into `plugins/`,
 one folder each, named after the plugin:
 
 ```
@@ -99,7 +99,7 @@ Tom Clancy's Ghost Recon Wildlands/
 ├── dinput8.dll
 ├── scripthook.ini     main config, created on first launch
 ├── logs/              every log file, timestamps on each line
-└── scripts/
+└── plugins/
     └── firstperson/
         ├── firstperson.asi
         └── firstperson.ini    the plugin's own config
@@ -231,7 +231,7 @@ made pinned addresses easy to get away with and easy to get wrong.
 
 ```
 loader.c              dinput8 proxy, loads the real DLL and the .asi files
-scripthook_config.c   game/scripts/logs paths, the main scripthook.ini
+scripthook_config.c   game/plugins/logs paths, the main scripthook.ini
 scripthook_api.c      player, teleport, entity placement, errors
 scripthook_entity.c   enumeration, components, kinds, visibility
 scripthook_health.c   the obfuscated health storage

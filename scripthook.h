@@ -1291,7 +1291,7 @@ typedef int (*ShTeleportPlayerToGround_t)(float, float, float);
  *  ├── dinput8.dll
  *  ├── scripthook.ini        main config
  *  ├── logs/                 every log file
- *  └── scripts/<name>/
+ *  └── plugins/<name>/
  *      ├── <name>.asi
  *      └── <name>.ini        the plugin's own config
  *  ```
@@ -1331,20 +1331,26 @@ SH_API int  ShConfigSetBool(const char *section, const char *key,
 /** The folder containing GRW.exe, no trailing backslash. */
 SH_API int  ShGameDir(char *buf, int size);
 
-/** <gamedir>\scripts\ (with trailing backslash). */
+/** <gamedir>\plugins\ (with trailing backslash); every .asi
+ *  plugin lives in its own folder under it. */
+SH_API int  ShPluginsDir(char *buf, int size);
+
+/** Compatibility alias for ShPluginsDir: older third-party .asi
+ *  plugins resolve this name by GetProcAddress. It returns the same
+ *  plugins\ directory. New code should use ShPluginsDir. */
 SH_API int  ShScriptsDir(char *buf, int size);
 
 /** <gamedir>\logs\<name>; the logs directory is created if
  *  missing. Name may include a subfolder. */
 SH_API int  ShLogPath(const char *name, char *buf, int size);
 
-/** <gamedir>\scripts\<name>\<name>.ini, the config file that
+/** <gamedir>\plugins\<name>\<name>.ini, the config file that
  *  belongs beside a plugin of the same name.
  *
  *  Plugin config convention (follow this in every plugin):
  *  the .ini lives in the SAME folder as the .asi and uses the
- *  SAME base name, so scripts\foo\bar.asi reads and writes
- *  scripts\foo\bar.ini. Derive <name> from your own module
+ *  SAME base name, so plugins\foo\bar.asi reads and writes
+ *  plugins\foo\bar.ini. Derive <name> from your own module
  *  path rather than hardcoding it, so the pairing survives a
  *  rename: GetModuleFileNameA(instance, path, MAX_PATH), take
  *  the file part and strip the ".asi". */

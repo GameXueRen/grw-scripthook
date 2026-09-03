@@ -4,7 +4,7 @@ Build GRW ScriptHook with MSVC.
 
 Output mirrors the Makefile: dinput8.dll next to GRW.exe, the
 import library libscripthook.lib in the source folder, and every
-plugin in scripts\<name>\<name>.asi.
+plugin in plugins\<name>\<name>.asi.
 
 Usage:
   pwsh ./build_msvc.ps1
@@ -19,12 +19,12 @@ param(
     [string]$Gamedir = '',
 
     # When set, the currently deployed mod files (dinput8.dll,
-    # scripthook.ini and scripts\) are copied to
+    # scripthook.ini and plugins\) are copied to
     # $BackupDir\<yyMMdd_HHmmss>\ before anything is overwritten,
     # one unique folder per build.
     [string]$BackupDir = '',
 
-    # Remove the built dinput8.dll, scripts output and the
+    # Remove the built dinput8.dll, plugins output and the
     # import library instead of building.
     [switch]$Clean,
 
@@ -51,7 +51,7 @@ Write-Host "GAMEDIR: $Gamedir"
 if ($Clean) {
     Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $Gamedir 'dinput8.dll')
     Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $root 'libscripthook.lib')
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $Gamedir 'scripts')
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $Gamedir 'plugins')
     Write-Host "cleaned $Gamedir"
     return
 }
@@ -69,9 +69,9 @@ if ($BackupDir) {
         $src = Join-Path $Gamedir $rel
         if (Test-Path $src) { Copy-Item $src $dst -Force }
     }
-    $srcScripts = Join-Path $Gamedir 'scripts'
-    if (Test-Path $srcScripts) {
-        Copy-Item $srcScripts (Join-Path $dst 'scripts') -Recurse -Force
+    $srcPlugins = Join-Path $Gamedir 'plugins'
+    if (Test-Path $srcPlugins) {
+        Copy-Item $srcPlugins (Join-Path $dst 'plugins') -Recurse -Force
     }
     Write-Host "backed up old mod files to $dst"
 }
@@ -92,9 +92,9 @@ cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
 }
 
 $out     = Join-Path $Gamedir 'dinput8.dll'
-$scripts = Join-Path $Gamedir 'scripts'
+$plugins = Join-Path $Gamedir 'plugins'
 $tmp     = Join-Path $env:TEMP 'grw_msvc_build'
-New-Item -ItemType Directory -Force -Path $tmp, $scripts | Out-Null
+New-Item -ItemType Directory -Force -Path $tmp, $plugins | Out-Null
 
 # Shared flags for every compile unit.
 $c = @(
@@ -116,7 +116,7 @@ function Invoke-FrameworkBuild {
 
 function Build-Plugin {
     param([string]$Name, [string]$Source, [string[]]$LinkArgs)
-    $dir = Join-Path $scripts $Name
+    $dir = Join-Path $plugins $Name
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $dll = Join-Path $dir "$Name.asi"
     & cl @c (Join-Path $root $Source) "/Fe:$dll" /link $LinkArgs
@@ -208,8 +208,8 @@ Build-Plugin 'test_plugin'  'test_plugin.c'  @('ws2_32.lib', 'gdi32.lib', 'user3
 
 # cl generates a .lib/.exp beside any plugin that exports
 # symbols (chaos exports ChaosCount & friends). They are not
-# loaded by the game, so keep the scripts tree clean.
-Get-ChildItem $scripts -Recurse -Include *.lib, *.exp |
+# loaded by the game, so keep the plugins tree clean.
+Get-ChildItem $plugins -Recurse -Include *.lib, *.exp |
     Remove-Item -Force
 
 Write-Host 'build complete'

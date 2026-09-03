@@ -5,13 +5,13 @@
  *
  *   <gamedir>\scripthook.ini        main config
  *   <gamedir>\logs\                 every log file
- *   <gamedir>\scripts\<name>\       one folder per plugin
+ *   <gamedir>\plugins\<name>\       one folder per plugin
  *       <name>.asi
  *       <name>.ini                  the plugin's own config
  *
  * The main config is parsed once by the loader, before any
  * plugin loads. Plugins can query it as well, and keep their
- * own settings in scripts\<name>\<name>.ini (see
+ * own settings in plugins\<name>\<name>.ini (see
  * ShPluginIniPath).
  */
 #include <windows.h>
@@ -65,15 +65,25 @@ SH_API int ShGameDir(char *buf, int size) {
     return 1;
 }
 
-/** <gamedir>\scripts\, created if missing. */
-SH_API int ShScriptsDir(char *buf, int size) {
+/** <gamedir>\plugins\ (with trailing backslash), created if
+ *  missing. This is where .asi plugins live, one folder each. */
+SH_API int ShPluginsDir(char *buf, int size) {
     if (!buf || size <= 0) { ShSetError(SH_ERR_BAD_ARG); return 0; }
-    if (snprintf(buf, size, "%sscripts\\", GameDir()) < 0) {
+    if (snprintf(buf, size, "%splugins\\", GameDir()) < 0) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
     ShSetError(SH_OK);
     return 1;
+}
+
+/* Compatibility alias: the folder was historically called
+ * "scripts". The name lives on so third-party .asi plugins that
+ * resolve ShScriptsDir by GetProcAddress keep working; it returns
+ * the very same plugins\ directory. New code should call
+ * ShPluginsDir. */
+SH_API int ShScriptsDir(char *buf, int size) {
+    return ShPluginsDir(buf, size);
 }
 
 /** <gamedir>\logs\<name>, created if missing. The name may
@@ -98,14 +108,14 @@ SH_API int ShLogPath(const char *name, char *buf, int size) {
     return 1;
 }
 
-/** scripts\<name>\<name>.ini, the config file that belongs
+/** plugins\<name>\<name>.ini, the config file that belongs
  *  beside the plugin of the same name. */
 SH_API int ShPluginIniPath(const char *plugin, char *buf, int size) {
     if (!plugin || !buf || size <= 0) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
-    if (snprintf(buf, size, "%sscripts\\%s\\%s.ini",
+    if (snprintf(buf, size, "%splugins\\%s\\%s.ini",
                  GameDir(), plugin, plugin) < 0) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;

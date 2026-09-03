@@ -21,7 +21,7 @@
  *
  * Both groups are live switches, available from the F4 menu under
  * "Skip intro videos" and persisted to this plugin's own ini
- * scripts\skipintro\skipintro.ini:
+ * plugins\skipintro\skipintro.ini:
  *
  *   [Settings]
  *   skip_launch_videos=1   Nvidia / Ubisoft_Logo / VIDEO_* intros
@@ -340,7 +340,7 @@ static uint32_t g_menu = 0;
 static HINSTANCE g_inst = NULL;
 static char      g_iniPath[MAX_PATH];
 
-/* scripts\skipintro\skipintro.ini, from our own module file name. */
+/* plugins\skipintro\skipintro.ini, from our own module file name. */
 static void ResolveIniPath(void) {
     char mod[MAX_PATH];
     const char *dot;

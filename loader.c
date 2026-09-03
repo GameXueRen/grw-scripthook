@@ -59,23 +59,23 @@ extern void ShCrashStartup(void);
 extern void ShCoreFixStartup(void);
 extern void ShModSettingsStartup(void);
 
-/* Plugins live one folder each under scripts\, named after
+/* Plugins live one folder each under plugins\, named after
  * the plugin:
  *
- *   scripts/<name>/<name>.asi
- *   scripts/<name>/<name>.ini
+ *   plugins/<name>/<name>.asi
+ *   plugins/<name>/<name>.ini
  *
  * The folder scan means a plugin's assets, config and log
  * stay together and nothing from the game root is touched.
- * scripts\ is created if this is a fresh install.
+ * plugins\ is created if this is a fresh install.
  */
 static void LoadASIPlugins(void) {
-    char scriptsDir[MAX_PATH], pat[MAX_PATH], full[MAX_PATH];
+    char pluginsDir[MAX_PATH], pat[MAX_PATH], full[MAX_PATH];
     WIN32_FIND_DATAA fd;
     HANDLE h;
     int n = 0, nSkipped = 0;
 
-    if (!ShScriptsDir(scriptsDir, sizeof(scriptsDir))) {
+    if (!ShPluginsDir(pluginsDir, sizeof(pluginsDir))) {
         Log("cannot find the game directory");
         return;
     }
@@ -83,9 +83,9 @@ static void LoadASIPlugins(void) {
      * CreateDirectoryA dislikes the trailing backslash. */
     {
         char dir[MAX_PATH];
-        size_t len = strlen(scriptsDir);
-        if (len > 0 && scriptsDir[len - 1] == '\\') len--;
-        memcpy(dir, scriptsDir, len);
+        size_t len = strlen(pluginsDir);
+        if (len > 0 && pluginsDir[len - 1] == '\\') len--;
+        memcpy(dir, pluginsDir, len);
         dir[len] = 0;
         CreateDirectoryA(dir, NULL);
     }
@@ -95,10 +95,10 @@ static void LoadASIPlugins(void) {
         return;
     }
 
-    snprintf(pat, sizeof(pat), "%s*", scriptsDir);
+    snprintf(pat, sizeof(pat), "%s*", pluginsDir);
     h = FindFirstFileA(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) {
-        Log("no plugin folders in %s", scriptsDir);
+        Log("no plugin folders in %s", pluginsDir);
         return;
     }
     do {
@@ -109,9 +109,9 @@ static void LoadASIPlugins(void) {
         if (name[0] == '.') continue;
 
         snprintf(full, sizeof(full), "%s%s\\%s.asi",
-                 scriptsDir, name, name);
+                 pluginsDir, name, name);
         if (GetFileAttributesA(full) == INVALID_FILE_ATTRIBUTES) {
-            Log("scripts\\%s: no %s.asi, skipping", name, name);
+            Log("plugins\\%s: no %s.asi, skipping", name, name);
             nSkipped++;
             continue;
         }
@@ -121,7 +121,7 @@ static void LoadASIPlugins(void) {
             continue;
         }
         n++;
-        Log("loading plugin: scripts\\%s\\%s.asi", name, name);
+        Log("loading plugin: plugins\\%s\\%s.asi", name, name);
         HMODULE mod = LoadLibraryA(full);
         if (mod)
             Log("  loaded at %p", (void *)mod);
