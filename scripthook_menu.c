@@ -131,7 +131,12 @@ static void ValueText(const char *scope, const Item *it,
         snprintf(out, n, "[%s]", it->value ? ShLangFor(scope, "on")
                                            : ShLangFor(scope, "off"));
     else if (it->kind == IT_NUMBER)
-        snprintf(out, n, "< %.2f >", it->num);
+        /* Integer step with a whole current value renders as an
+         * integer (< 30 >); fractional steps keep two decimals. */
+        if (it->step >= 1.0f && it->num == (float)(int)it->num)
+            snprintf(out, n, "< %.0f >", it->num);
+        else
+            snprintf(out, n, "< %.2f >", it->num);
     else if (it->kind == IT_LIST && it->nopts)
         snprintf(out, n, "< %s >",
                  ShLangFor(scope, it->opts[it->value % it->nopts]));

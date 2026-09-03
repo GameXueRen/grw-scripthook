@@ -57,6 +57,7 @@ static void LoadRealDinput8(void) {
 extern void ShStateStartup(void);
 extern void ShCrashStartup(void);
 extern void ShCoreFixStartup(void);
+extern void ShModSettingsStartup(void);
 
 /* Plugins live one folder each under scripts\, named after
  * the plugin:
@@ -138,6 +139,12 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     (void)p;
     ShConfigInit();
     Log("config loaded from scripthook.ini");
+    /* Mod settings must be up before the plugin scan: it owns the
+     * very switches that gate the plugins, so it has to exist even
+     * when load_plugins=0 (otherwise nothing could turn them back on
+     * from inside the game). Its root row carries weight 0, so it
+     * sorts to the top no matter when the plugins register theirs. */
+    ShModSettingsStartup();
     LoadASIPlugins();
     return 0;
 }

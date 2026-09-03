@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #define SH_BUILD 1
 #include "scripthook.h"
@@ -165,13 +166,14 @@ static const char *DEFAULT_CONFIG =
     "; One line per plugin folder, 0 disables it.\n"
     "; firstperson=1\n"
     "\n"
-    "[logging]\n"
-    "; future: log level (none, error, warn, info, debug)\n"
-    "; level=info\n"
-    "\n"
     "[Settings]\n"
     "; Menu language: zh_cn = Chinese (default), en = English.\n"
     "Language=zh_cn\n"
+    "; Languages the menu language switch offers (comma separated;\n"
+    "; the order here is the order shown).\n"
+    "Languages=zh_cn,en\n"
+    "; Log level (reserved, not yet implemented): none/error/warn/info/debug\n"
+    "; LogLevel=info\n"
     "\n"
     "; ------------------------------------------------------------\n"
     "; Translation tables. One section per language (the [Settings]\n"
@@ -200,6 +202,9 @@ static const char *DEFAULT_CONFIG =
     "First person = 第一人称\n"
     "Free camera = 自由视角\n"
     "Vehicles = 召唤载具\n"
+    "; Display names of the selectable languages ([Settings] Languages).\n"
+    "zh_cn = 简体中文\n"
+    "en = English\n"
     "\n"
     "[zh_cn.Chaos]\n"
     "Enabled = 混沌开关\n"
@@ -414,7 +419,7 @@ static void ParseConfig(const char *text) {
  * section prefix. Language=zh reads [zh], [zh.xx], [zh.xx.xx]; a
  * Language=cn reads [cn], [cn.xx]... A section "[<lang>]" or
  * "[<lang>.<scope>]" belongs to the table for that language;
- * anything else (Settings, loader, plugins, logging) is config. */
+ * anything else (Settings, loader, plugins) is config. */
 #define LANGS_MAX       512
 
 typedef struct {
@@ -712,4 +717,326 @@ SH_API int ShConfigGetStr(const char *section, const char *key,
     out[n] = 0;
     ShSetError(SH_OK);
     return 1;
+}
+
+/* ---- write-back ---------------------------------------------- */
+
+/* Refresh or add one in-memory entry so later reads see the
+ * value that was just persisted. */
+static void SetEntry(const char *section, const char *key,
+                     const char *value) {
+    CfgEntry *e;
+    size_t i;
+
+    for (i = 0; i < (size_t)g_nentries; i++) {
+        if (!strcmp(g_entries[i].section, section) &&
+            !strcmp(g_entries[i].key, key)) {
+            strncpy(g_entries[i].value, value,
+                    sizeof(g_entries[i].value) - 1);
+            g_entries[i].value[sizeof(g_entries[i].value) - 1] = 0;
+            return;
+        }
+    }
+    if (g_nentries >= ENTRIES_MAX) return;
+    e = &g_entries[g_nentries++];
+    strncpy(e->section, section, sizeof(e->section) - 1);
+    e->section[sizeof(e->section) - 1] = 0;
+    strncpy(e->key, key, sizeof(e->key) - 1);
+    e->key[sizeof(e->key) - 1] = 0;
+    strncpy(e->value, value, sizeof(e->value) - 1);
+    e->value[sizeof(e->value) - 1] = 0;
+}
+
+/* Path of the main scripthook.ini. */
+static int IniPath(char *buf, int size) {
+    if (snprintf(buf, size, "%sscripthook.ini", GameDir()) < 0)
+        return 0;
+    return 1;
+}
+
+/* One source line: [start, start+contentLen) excludes the line
+ * ending. Keeps a pointer into the source buffer. */
+typedef struct {
+    const char *s;
+    size_t n;      /* content length (no CR/LF) */
+    size_t total;  /* content + its line ending */
+} IniLine;
+
+/* Append a printf-style line to the output buffer, growing it. */
+static int OutPrint(char **out, size_t *len, size_t *cap,
+                    const char *fmt, ...) {
+    va_list ap;
+    int need;
+    size_t grow;
+
+    va_start(ap, fmt);
+    need = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (need < 0) return 0;
+    if (*len + (size_t)need + 1 > *cap) {
+        grow = (size_t)need + 256;
+        {
+            char *np = (char *)realloc(*out, *cap + grow);
+            if (!np) return 0;
+            *out = np;
+            *cap += grow;
+        }
+    }
+    va_start(ap, fmt);
+    vsnprintf(*out + *len, *cap - *len, fmt, ap);
+    va_end(ap);
+    *len += (size_t)need;
+    return 1;
+}
+
+/* Collect the content and total span of one source line. */
+static void SplitLine(const char *text, const char *end,
+                      const char **lineEnd, IniLine *li) {
+    const char *nl = memchr(text, '\n', (size_t)(end - text));
+    const char *e = nl ? nl : end;
+    li->s = text;
+    li->n = (size_t)(e - text);
+    if (li->n > 0 && li->s[li->n - 1] == '\r') li->n--;
+    li->total = (size_t)((nl ? nl + 1 : e) - text);
+    *lineEnd = nl ? nl + 1 : end;
+}
+
+/* Leading whitespace of the key area. */
+static const char *SkipWs(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    return p;
+}
+
+/* Replace the value of key=... inside [section] in the on-disk
+ * scripthook.ini. Comments, blank lines and every other section
+ * survive byte for byte; a missing key is appended at the end of
+ * its section (the section itself is created if absent). The file
+ * is treated as opaque bytes, so UTF-8 content is preserved.
+ * Returns 1 when the file was rewritten. */
+static int IniWriteValue(const char *section, const char *key,
+                         const char *value) {
+    char path[GAME_DIR_MAX], tmp[GAME_DIR_MAX];
+    FILE *f;
+    long len;
+    char *whole;
+    const char *end, *p;
+    char curSec[48];
+    int curSecSet = 0;
+    int inSec = 0;
+    int replaced = 0;
+    int wrote = 0;
+    char *out = NULL;
+    size_t outLen = 0, outCap = 0;
+    int ok = 0;
+
+    if (!section || !key || !value) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    if (!IniPath(path, sizeof(path))) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+
+    f = fopen(path, "rb");
+    if (!f) {
+        /* A missing main ini means config was never parsed; let
+         * LoadConfig write the default first. */
+        LoadConfig();
+        f = fopen(path, "rb");
+        if (!f) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    }
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len < 0 || (unsigned long)len + 1u > CONFIG_MAX + 1u) {
+        fclose(f);
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    whole = (char *)malloc((size_t)len + 1);
+    if (!whole) {
+        fclose(f);
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    if (len > 0 && fread(whole, 1, (size_t)len, f) != (size_t)len) {
+        fclose(f);
+        free(whole);
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    fclose(f);
+    whole[len] = 0;
+
+    end = whole + len;
+    p = whole;
+
+    /* Single pass over the source lines:
+     *   - matching key inside the target section is replaced;
+     *   - a missing key is appended just before the header that ends
+     *     the section (or at the end of the file when the section is
+     *     the last thing in it). A never-seen section is created. */
+    if (!out && outCap == 0) {
+        /* Initial buffer: source plus room to grow. */
+        outCap = (size_t)len + 512;
+        out = (char *)malloc(outCap);
+        if (!out) {
+            free(whole);
+            ShSetError(SH_ERR_BAD_ARG);
+            return 0;
+        }
+    }
+
+    while (p < end) {
+        IniLine li;
+        const char *next;
+        const char *q;
+
+        SplitLine(p, end, &next, &li);
+        q = SkipWs(li.s, li.s + li.n);
+
+        if (q < li.s + li.n && *q == '[') {
+            /* A section header. If the section we are leaving was the
+             * target one and its key was never placed, append it here,
+             * at the very end of the target section. */
+            if (inSec && !replaced) {
+                OutPrint(&out, &outLen, &outCap, "%s=%s\n",
+                         key, value);
+                replaced = 1;
+                wrote = 1;
+            }
+            curSecSet = 1;
+            inSec = 0;
+            {
+                const char *close = memchr(q + 1, ']',
+                                           (size_t)((li.s + li.n) - (q + 1)));
+                if (close) {
+                    size_t n = (size_t)(close - (q + 1));
+                    if (n >= sizeof(curSec)) n = sizeof(curSec) - 1;
+                    memcpy(curSec, q + 1, n);
+                    curSec[n] = 0;
+                    inSec = (strcmp(curSec, section) == 0);
+                }
+            }
+        } else if (inSec && !replaced) {
+            /* Inside the target section, the key is still missing. */
+            if (q < li.s + li.n && *q != ';' && *q != '#') {
+                const char *eq = memchr(q, '=',
+                                        (size_t)((li.s + li.n) - q));
+                if (eq) {
+                    size_t klen = (size_t)(eq - q);
+                    while (klen > 0 &&
+                           (q[klen - 1] == ' ' || q[klen - 1] == '\t'))
+                        klen--;
+                    if (klen == strlen(key) && !strncmp(q, key, klen)) {
+                        /* Replace this line: key=value + its ending. */
+                        OutPrint(&out, &outLen, &outCap, "%s=%s",
+                                 key, value);
+                        if (li.s + li.n < p + li.total) {
+                            const char *nlp = li.s + li.n;
+                            size_t nlLen = (size_t)((p + li.total) - nlp);
+                            if (outLen + nlLen + 1 > outCap) {
+                                char *np = (char *)realloc(
+                                    out, outCap + nlLen + 1);
+                                if (!np) goto done;
+                                out = np;
+                                outCap += nlLen + 1;
+                            }
+                            memcpy(out + outLen, nlp, nlLen);
+                            outLen += nlLen;
+                        } else {
+                            out[outLen++] = '\n';
+                        }
+                        replaced = 1;
+                        wrote = 1;
+                        p = next;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        /* Verbatim copy of the line. */
+        if (outLen + li.total + 1 > outCap) {
+            char *np = (char *)realloc(out, outCap + li.total + 1);
+            if (!np) goto done;
+            out = np;
+            outCap += li.total + 1;
+        }
+        memcpy(out + outLen, p, li.total);
+        outLen += li.total;
+        p = next;
+    }
+
+    if (!replaced) {
+        /* The key was never placed: the target section was the last
+         * thing in the file, or it never appeared at all. */
+        if (outLen > 0 && out[outLen - 1] != '\n')
+            OutPrint(&out, &outLen, &outCap, "\n");
+        if (!curSecSet || !inSec) {
+            /* A new section must be created. */
+            if (outLen > 0)
+                OutPrint(&out, &outLen, &outCap, "\n");
+            OutPrint(&out, &outLen, &outCap, "[%s]\n", section);
+        }
+        OutPrint(&out, &outLen, &outCap, "%s=%s\n", key, value);
+        wrote = 1;
+    }
+
+    free(whole);
+    whole = NULL;
+
+    /* Write back via a temp file, then move it into place. */
+    if (!wrote) goto done;
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) < 0) goto done;
+    f = fopen(tmp, "wb");
+    if (!f) goto done;
+    if (outLen > 0 && fwrite(out, 1, outLen, f) != outLen) {
+        fclose(f);
+        remove(tmp);
+        goto done;
+    }
+    if (fclose(f) != 0) {
+        remove(tmp);
+        goto done;
+    }
+    if (!MoveFileExA(tmp, path,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        remove(tmp);
+        goto done;
+    }
+    ok = 1;
+
+done:
+    free(out);
+    if (whole) free(whole);
+    ShSetError(ok ? SH_OK : SH_ERR_BAD_ARG);
+    return ok;
+}
+
+/** Write a string value back to scripthook.ini and refresh the
+ *  in-memory table. */
+SH_API int ShConfigSetStr(const char *section, const char *key,
+                          const char *value) {
+    if (!section || !key || !value) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    LoadConfig();
+    if (!IniWriteValue(section, key, value)) return 0;
+    SetEntry(section, key, value);
+    return 1;
+}
+
+SH_API int ShConfigSetInt(const char *section, const char *key,
+                          int value) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", value);
+    return ShConfigSetStr(section, key, buf);
+}
+
+SH_API int ShConfigSetBool(const char *section, const char *key,
+                           int value) {
+    return ShConfigSetStr(section, key, value ? "1" : "0");
 }

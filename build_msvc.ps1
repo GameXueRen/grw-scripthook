@@ -147,7 +147,7 @@ $fwSources = @(
     'scripthook_scene.c', 'scripthook_uiprop.c',
     'scripthook_uiinput.c', 'scripthook_dinput.c',
     'scripthook_hud.c', 'scripthook_menu.c', 'guard.c',
-    'scripthook_corefix.c',
+    'scripthook_corefix.c', 'scripthook_modsettings.c',
     'third_party/minhook/src/buffer.c',
     'third_party/minhook/src/hook.c',
     'third_party/minhook/src/trampoline.c',

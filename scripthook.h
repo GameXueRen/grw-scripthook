@@ -1316,6 +1316,18 @@ SH_API int  ShConfigGetBool(const char *section, const char *key,
 SH_API int  ShConfigGetStr(const char *section, const char *key,
                            const char *def, char *out, int size);
 
+/** Write a value back to scripthook.ini. The on-disk file is
+ *  updated in place (comments and other sections preserved) and
+ *  the in-memory copy is refreshed, so later ShConfigGet*
+ *  calls see the new value. Most loader/plugins keys only take
+ *  effect on the next launch. */
+SH_API int  ShConfigSetStr(const char *section, const char *key,
+                           const char *value);
+SH_API int  ShConfigSetInt(const char *section, const char *key,
+                           int value);
+SH_API int  ShConfigSetBool(const char *section, const char *key,
+                            int value);
+
 /** The folder containing GRW.exe, no trailing backslash. */
 SH_API int  ShGameDir(char *buf, int size);
 
