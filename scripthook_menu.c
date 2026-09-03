@@ -523,18 +523,29 @@ void ShMenuCaptureView(ShMenuView *v) {
     Unlock();
 }
 
-/* Enter the root menu: order its rows by [MenuOrder] in the model
- * and start at the first row, so an F4 open is always top-left and
- * never lands on a row that moved during the sort. */
+/* Enter the root menu. The highlighted row is remembered across
+ * open/close: the selection already lives on the Menu between F4
+ * toggles, so reopening simply leaves it where it was. Two guards
+ * keep the state sane if rows changed while the menu was closed:
+ *   - the selection is clamped to a live row (a row can only have
+ *     disappeared while the menu was hidden);
+ *   - ReorderRoot keeps the highlight pinned to its own row through
+ *     the [MenuOrder] sort, and Scroll brings it back into view. */
 static void OpenRoot(void) {
     g_current = g_root;
     Lock();
     {
         Menu *r = MenuOf(g_root);
         if (r) {
+            if (r->count <= 0) {
+                r->sel = 0;
+                r->top = 0;
+            } else {
+                if (r->sel < 0 || r->sel >= r->count)
+                    r->sel = r->count - 1;
+            }
             ReorderRoot(r);
-            r->sel = 0;
-            r->top = 0;
+            Scroll(r);
         }
     }
     Unlock();
