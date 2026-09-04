@@ -76,6 +76,18 @@ static volatile int g_valid = 0;
 #define VEH_SETTLE_MAX  0.02f  /* slow/fast lag below this = settled
                                   per axis (stops mid-animation lock) */
 #define VEH_MAT_NEAR   60.0f   /* sanity: vehicle within this */
+/* Dismount detection: once the vehicle is slow and the eye
+ * has left the seat offset, the player is climbing out. The
+ * lock releases early so the exit animation is seen, instead
+ * of parking on the seat until the engine reports out. */
+#define VEH_EXIT_SPD    1.0f   /* m/s below which exit can begin */
+#define VEH_EXIT_DIST   0.45f  /* eye left the seat by this much */
+#define VEH_EXIT_FRAMES 5      /* sustained frames before unlock */
+#define VEH_EXIT_BIG    0.55f  /* one big jump unlocks at once: the
+                                  exit head travels progressively and
+                                  the rig may vanish mid animation,
+                                  so do not wait for a metre - half a
+                                  metre off the seat is already out */
 static uint64_t g_vehRoot = 0;    /* vehicle root entity */
 static uint64_t g_vehMountAt = 0; /* tick the mount began */
 static float   g_vehLocal[3];     /* eye offset in vehicle space */
@@ -89,6 +101,13 @@ static float   g_vehSlow[3];
 static float   g_vehFast[3];
 static int     g_vehLive = 0;   /* averages seeded */
 static int     g_vehSettled = 0;/* consecutive settled frames */
+/* Exit state: while true the anchor is held off so the exit
+ * animation's moving head is never re-locked. Cleared only
+ * when the engine reports the player out of the vehicle. */
+static int     g_vehExiting = 0;
+static float   g_vehLastO[3];          /* previous matrix origin */
+static uint64_t g_vehLastT = 0;        /* when that origin was read */
+static int     g_vehAway = 0;          /* frames eye away from seat */
 
 /* Resolving the skeleton walks the component list, which is
  * a VirtualQuery each. Idle frames must not pay that, so
@@ -225,7 +244,75 @@ static void VehAnchor(float *h) {
 
     now = GetTickCount64();
 
-    if (!g_vehLocked) {
+    if (g_vehLocked) {
+        /* Locked: keep watching the skeleton. If the vehicle is
+         * slow and the eye has left the measured seat offset, the
+         * player is climbing out - release the lock and let the
+         * skeleton drive the exit animation. Otherwise rebuild
+         * the eye from the chassis alone. */
+        float loc0, loc1, loc2, d0, d1, d2;
+        float spd = 0.0f;
+
+        if (g_vehLastT) {
+            float dt = (float)(now - g_vehLastT);
+            if (dt >= 5.0f && dt <= 150.0f) {
+                d0 = o[0] - g_vehLastO[0];
+                d1 = o[1] - g_vehLastO[1];
+                d2 = o[2] - g_vehLastO[2];
+                spd = sqrtf(d0*d0 + d1*d1 + d2*d2) /
+                      (dt * 0.001f);
+            } else {
+                spd = VEH_EXIT_SPD + 1.0f; /* unknown: hold lock */
+            }
+        }
+        g_vehLastO[0] = o[0];
+        g_vehLastO[1] = o[1];
+        g_vehLastO[2] = o[2];
+        g_vehLastT = now;
+
+        loc0 = dx*r[0] + dy*r[1] + dz*r[2];
+        loc1 = dx*f[0] + dy*f[1] + dz*f[2];
+        loc2 = dx*u[0] + dy*u[1] + dz*u[2];
+        d0 = loc0 - g_vehLocal[0];
+        d1 = loc1 - g_vehLocal[1];
+        d2 = loc2 - g_vehLocal[2];
+        if (spd < VEH_EXIT_SPD &&
+            sqrtf(d0*d0 + d1*d1 + d2*d2) > VEH_EXIT_DIST)
+            g_vehAway++;
+        else
+            g_vehAway = 0;
+
+        if (g_vehAway >= VEH_EXIT_FRAMES ||
+            (spd < VEH_EXIT_SPD &&
+             sqrtf(d0*d0 + d1*d1 + d2*d2) > VEH_EXIT_BIG)) {
+            /* Leaving the seat: hand the eye back to the
+             * skeleton so the exit animation plays, and hold
+             * the anchor off until the engine reports out. The
+             * one-frame big jump covers the case where the rig
+             * disappears mid animation and the counter starves. */
+            g_vehLocked = 0;
+            g_vehLive = 0;
+            g_vehSettled = 0;
+            g_vehAway = 0;
+            g_vehExiting = 1;
+            return;
+        }
+
+        h[0] = o[0] + g_vehLocal[0]*r[0]
+                    + g_vehLocal[1]*f[0] + g_vehLocal[2]*u[0];
+        h[1] = o[1] + g_vehLocal[0]*r[1]
+                    + g_vehLocal[1]*f[1] + g_vehLocal[2]*u[1];
+        h[2] = o[2] + g_vehLocal[0]*r[2]
+                    + g_vehLocal[1]*f[2] + g_vehLocal[2]*u[2];
+        return;
+    }
+
+    /* Not locked. A dismount in progress keeps the skeleton eye
+     * and never tries to re-measure the seat mid exit. */
+    if (g_vehExiting) return;
+
+    /* Unlocked: converge on the seat. */
+    {
         float loc[3];
         loc[0] = dx*r[0] + dy*r[1] + dz*r[2];
         loc[1] = dx*f[0] + dy*f[1] + dz*f[2];
@@ -269,16 +356,7 @@ static void VehAnchor(float *h) {
             g_vehLocal[2] = g_vehSlow[2];
             g_vehLocked = 1;
         }
-        return;
     }
-
-    /* Locked: build the eye from the chassis alone. */
-    h[0] = o[0] + g_vehLocal[0]*r[0]
-                + g_vehLocal[1]*f[0] + g_vehLocal[2]*u[0];
-    h[1] = o[1] + g_vehLocal[0]*r[1]
-                + g_vehLocal[1]*f[1] + g_vehLocal[2]*u[1];
-    h[2] = o[2] + g_vehLocal[0]*r[2]
-                + g_vehLocal[1]*f[2] + g_vehLocal[2]*u[2];
 }
 
 /* Everything expensive happens here, once. After this the
@@ -320,6 +398,21 @@ static int Resolve(void) {
     if (!ShReadableAddr(g_boneAt, 12)) return 0;
 
     g_ready = 1;
+    return 1;
+}
+
+/* While the seat lock is held a failed skeleton read must not
+ * drop the eye: keep the chassis-derived eye and stay valid.
+ * Returns 1 when the frame is handled as a locked fallback. */
+static int VehReadFallback(void) {
+    if (!(VEH_ANCHOR && g_vehRoot && g_vehLocked)) return 0;
+    VehAnchor(&g_head.x);
+    if (g_head.x == g_head.x && g_head.y == g_head.y &&
+        g_head.z == g_head.z) {
+        g_valid = 1;
+        return 1;
+    }
+    g_valid = 0;
     return 1;
 }
 
@@ -393,6 +486,9 @@ void ShHeadPump(void) {
                     g_vehLocked = 0;
                     g_vehLive = 0;
                     g_vehSettled = 0;
+                    g_vehExiting = 0;
+                    g_vehAway = 0;
+                    g_vehLastT = 0;
                     g_vehMountAt = now;
                 }
             } else {
@@ -400,23 +496,49 @@ void ShHeadPump(void) {
                 g_vehLocked = 0;
                 g_vehLive = 0;
                 g_vehSettled = 0;
+                g_vehExiting = 0;
+                g_vehAway = 0;
+                g_vehLastT = 0;
             }
         }
     }
 
-    /* Once the seat lock is taken the eye no longer needs
-     * the skeleton at all, so it is produced here, ahead of
-     * resolve. A vehicle that hides the soldier's rig cannot
-     * stall the camera. */
-    if (VEH_ANCHOR && g_vehRoot && g_vehLocked) {
-        float h[3];
-        h[0] = g_head.x; h[1] = g_head.y; h[2] = g_head.z;
-        VehAnchor(h);
-        if (h[0] == h[0] && h[1] == h[1] && h[2] == h[2]) {
-            g_head.x = h[0];
-            g_head.y = h[1];
-            g_head.z = h[2];
-            g_valid = 1;
+    /* Locked, but the rig is unavailable (a vehicle that hides
+     * the soldier's skeleton): rebuild the eye from the chassis
+     * alone so the camera never stalls, and keep retrying the
+     * resolve on the slow beat so the live skeleton head comes
+     * back when it does - the exit detection below needs it. */
+    if (VEH_ANCHOR && g_vehRoot && g_vehLocked && !g_ready) {
+        if (now - g_lastTry >= HEAD_RETRY_MS) {
+            g_lastTry = now;
+            if (Resolve()) {
+                /* rig back: fall through to the normal read */
+            } else {
+                float h[3];
+                h[0] = g_head.x; h[1] = g_head.y; h[2] = g_head.z;
+                VehAnchor(h);
+                if (h[0] == h[0] && h[1] == h[1] && h[2] == h[2]) {
+                    g_head.x = h[0];
+                    g_head.y = h[1];
+                    g_head.z = h[2];
+                    g_valid = 1;
+                    return;
+                }
+                g_valid = 0;
+                return;
+            }
+        } else {
+            float h[3];
+            h[0] = g_head.x; h[1] = g_head.y; h[2] = g_head.z;
+            VehAnchor(h);
+            if (h[0] == h[0] && h[1] == h[1] && h[2] == h[2]) {
+                g_head.x = h[0];
+                g_head.y = h[1];
+                g_head.z = h[2];
+                g_valid = 1;
+                return;
+            }
+            g_valid = 0;
             return;
         }
     }
@@ -429,9 +551,12 @@ void ShHeadPump(void) {
 
     /* Kernel reads: the rig can be freed on another thread
      * between any check and use, and these must not fault.
+     * A locked seat anchor falls back to the chassis eye
+     * instead of dropping the frame.
      */
     if (!ShReadMem(g_boneAt, b, 12) ||
         !ShReadMem(g_poseAt + POSE_FLAGS, &flags, 4)) {
+        if (VehReadFallback()) return;
         g_ready = 0;
         g_valid = 0;
         return;
@@ -439,6 +564,7 @@ void ShHeadPump(void) {
 
     if (flags & POSE_WORLD) {
         if (b[0] != b[0] || b[1] != b[1] || b[2] != b[2]) {
+            if (VehReadFallback()) return;
             g_ready = 0;
             g_valid = 0;
             return;
@@ -458,6 +584,7 @@ void ShHeadPump(void) {
      * signal to resolve again rather than to poll.
      */
     if (!(b[2] > 0.1f && b[2] < 2.5f)) {
+        if (VehReadFallback()) return;
         g_ready = 0;
         g_valid = 0;
         return;
@@ -465,6 +592,7 @@ void ShHeadPump(void) {
 
     if (!ShReadMem(g_originAt, org, 12) ||
         !ShReadMem(g_poseAt + POSE_ROOT_Q, rq, 16)) {
+        if (VehReadFallback()) return;
         g_ready = 0;
         g_valid = 0;
         return;
@@ -476,6 +604,7 @@ void ShHeadPump(void) {
     n = sqrtf(rq[0] * rq[0] + rq[1] * rq[1] +
               rq[2] * rq[2] + rq[3] * rq[3]);
     if (!(n > 1e-6f)) {
+        if (VehReadFallback()) return;
         g_ready = 0;
         g_valid = 0;
         return;
@@ -510,6 +639,7 @@ void ShHeadPump(void) {
         g_head.z != g_head.z ||
         fabsf(g_head.x) > 1e5f || fabsf(g_head.y) > 1e5f ||
         fabsf(g_head.z) > 1e5f) {
+        if (VehReadFallback()) return;
         g_ready = 0;
         g_valid = 0;
         return;
