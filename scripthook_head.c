@@ -35,6 +35,7 @@
 
 #define OFF_ENT_COMPS  0x78
 #define OFF_ENT_NCOMPS 0x82
+#define OFF_ENT_MATRIX 0x20
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern int ShReadMem(uint64_t addr, void *out, size_t len);
@@ -56,6 +57,38 @@ static uint64_t g_skelEnt = 0;
 static uint16_t g_bone = BONE_NONE;
 static ShVec3   g_head;
 static volatile int g_valid = 0;
+
+/* Seat anchor while riding. The skeleton is not welded to
+ * the chassis on the same clock: its origin moves on the
+ * render clock while the vehicle matrix is the physics
+ * body, so at speed the two drift apart by a frame's worth
+ * of travel. The eye reads that as the cabin shaking and
+ * even passing through the shell. The fix: after the mount
+ * settles, measure where the skeleton eye sits in the
+ * vehicle's own frame and lock that offset. From then on the
+ * eye is rebuilt from the vehicle matrix alone - a turn, a
+ * bump, a launch all move the matrix and the eye moves with
+ * it, so nothing relative can shake, lag or pass through. */
+#define VEH_ANCHOR     1
+#define VEH_SETTLE_MS  2000u   /* wait for the mount animation to end */
+#define VEH_LOCK_FRAMES 30     /* consecutive settled frames to lock */
+#define VEH_LOCK_MAX_MS 5000u  /* force the lock after this much */
+#define VEH_SETTLE_MAX  0.02f  /* slow/fast lag below this = settled
+                                  per axis (stops mid-animation lock) */
+#define VEH_MAT_NEAR   60.0f   /* sanity: vehicle within this */
+static uint64_t g_vehRoot = 0;    /* vehicle root entity */
+static uint64_t g_vehMountAt = 0; /* tick the mount began */
+static float   g_vehLocal[3];     /* eye offset in vehicle space */
+static int     g_vehLocked = 0;   /* anchor locked */
+/* Convergence: a slow and a fast average of the eye in the
+ * vehicle frame. While the mount animation moves the head the
+ * two lag different amounts; when it truly stops they meet.
+ * Thirty settled frames then lock, so the eye cannot be
+ * captured mid animation leaning on the door. */
+static float   g_vehSlow[3];
+static float   g_vehFast[3];
+static int     g_vehLive = 0;   /* averages seeded */
+static int     g_vehSettled = 0;/* consecutive settled frames */
 
 /* Resolving the skeleton walks the component list, which is
  * a VirtualQuery each. Idle frames must not pay that, so
@@ -95,6 +128,12 @@ void ShHeadOnEnterPlaying(void) {
     g_bone = BONE_NONE;
     g_lastTry = 0;
     g_offsLive = 0;
+    if (VEH_ANCHOR) {
+        g_vehRoot = 0;
+        g_vehLocked = 0;
+        g_vehLive = 0;
+        g_vehSettled = 0;
+    }
 }
 
 static uint64_t FindSkeleton(uint64_t entity) {
@@ -130,6 +169,116 @@ static uint16_t HeadBone(uint64_t skel) {
     boneOf = (BoneOf_t)(uintptr_t)BONE_LOOKUP;
     idx = boneOf(table, HASH_HEAD);
     return (idx < 512) ? idx : BONE_NONE;
+}
+
+/* Rebuild the eye from the vehicle matrix, when locked. The
+ * matrix is read raw (64 bytes): rows 0..2 are the chassis
+ * axes in world space, row 3 the origin. Once the lock is
+ * taken the eye is rebuilt purely from that matrix, so a
+ * turn, a bump or a launch moves matrix and eye together.
+ * Before the lock the head is still the skeleton's, so the
+ * mounting animation shows normally and then hands over.
+ */
+static void VehAnchor(float *h) {
+    float m[16];
+    float o[3], r[3], f[3], u[3];
+    float len, dx, dy, dz;
+    uint64_t now;
+    int i;
+
+    if (!g_vehRoot) return;
+    /* A failed read means the vehicle is gone: the player
+     * stepped out or a level swapped it. Release the lock so
+     * the pump falls back to the skeleton next frame instead
+     * of parking the eye on a freed matrix. */
+    if (!ShReadMem(g_vehRoot + OFF_ENT_MATRIX, m, 64)) {
+        g_vehRoot = 0;
+        g_vehLocked = 0;
+        g_vehLive = 0;
+        g_vehSettled = 0;
+        return;
+    }
+
+    o[0] = m[12]; o[1] = m[13]; o[2] = m[14];
+    for (i = 0; i < 3; i++) {
+        r[i] = m[i];
+        f[i] = m[4 + i];
+        u[i] = m[8 + i];
+    }
+    len = sqrtf(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+    if (!(len > 0.3f && len < 3.0f)) return;
+    for (i = 0; i < 3; i++) r[i] /= len;
+    len = sqrtf(f[0]*f[0] + f[1]*f[1] + f[2]*f[2]);
+    if (!(len > 0.3f && len < 3.0f)) return;
+    for (i = 0; i < 3; i++) f[i] /= len;
+    len = sqrtf(u[0]*u[0] + u[1]*u[1] + u[2]*u[2]);
+    if (!(len > 0.3f && len < 3.0f)) return;
+    for (i = 0; i < 3; i++) u[i] /= len;
+
+    /* Distance gate: the mount must be the vehicle we are in,
+     * not some wreck a block away after a cutscene. */
+    dx = h[0] - o[0];
+    dy = h[1] - o[1];
+    dz = h[2] - o[2];
+    if (dx*dx + dy*dy + dz*dz > VEH_MAT_NEAR * VEH_MAT_NEAR)
+        return;
+
+    now = GetTickCount64();
+
+    if (!g_vehLocked) {
+        float loc[3];
+        loc[0] = dx*r[0] + dy*r[1] + dz*r[2];
+        loc[1] = dx*f[0] + dy*f[1] + dz*f[2];
+        loc[2] = dx*u[0] + dy*u[1] + dz*u[2];
+        /* phase 0: mount animation, keep skeleton eye. */
+        if (now - g_vehMountAt < VEH_SETTLE_MS) {
+            g_vehLive = 0;
+            return;
+        }
+        /* The eye must sit above the seat floor, not be
+         * standing or wedged under the dash. */
+        if (loc[2] < 0.2f || loc[2] > 3.0f) {
+            g_vehLive = 0;
+            return;
+        }
+        if (!g_vehLive) {
+            g_vehSlow[0] = g_vehFast[0] = loc[0];
+            g_vehSlow[1] = g_vehFast[1] = loc[1];
+            g_vehSlow[2] = g_vehFast[2] = loc[2];
+            g_vehLive = 1;
+            g_vehSettled = 0;
+            return;
+        }
+        for (i = 0; i < 3; i++) {
+            g_vehSlow[i] += 0.10f * (loc[i] - g_vehSlow[i]);
+            g_vehFast[i] += 0.60f * (loc[i] - g_vehFast[i]);
+        }
+        if (fabsf(g_vehSlow[0] - g_vehFast[0]) < VEH_SETTLE_MAX &&
+            fabsf(g_vehSlow[1] - g_vehFast[1]) < VEH_SETTLE_MAX &&
+            fabsf(g_vehSlow[2] - g_vehFast[2]) < VEH_SETTLE_MAX)
+            g_vehSettled++;
+        else
+            g_vehSettled = 0;
+        if (g_vehSettled >= VEH_LOCK_FRAMES ||
+            now - g_vehMountAt > VEH_LOCK_MAX_MS) {
+            /* Lock the slow average: it is the converged eye
+             * once settled, and the least noisy fallback on
+             * the timeout. */
+            g_vehLocal[0] = g_vehSlow[0];
+            g_vehLocal[1] = g_vehSlow[1];
+            g_vehLocal[2] = g_vehSlow[2];
+            g_vehLocked = 1;
+        }
+        return;
+    }
+
+    /* Locked: build the eye from the chassis alone. */
+    h[0] = o[0] + g_vehLocal[0]*r[0]
+                + g_vehLocal[1]*f[0] + g_vehLocal[2]*u[0];
+    h[1] = o[1] + g_vehLocal[0]*r[1]
+                + g_vehLocal[1]*f[1] + g_vehLocal[2]*u[1];
+    h[2] = o[2] + g_vehLocal[0]*r[2]
+                + g_vehLocal[1]*f[2] + g_vehLocal[2]*u[2];
 }
 
 /* Everything expensive happens here, once. After this the
@@ -201,29 +350,74 @@ void ShHeadPump(void) {
 
     /* A death or a body swap frees the rig while the old
      * memory still reads as plausible, so the identity is
-     * rechecked on a timer rather than trusted. */
-    if (g_ready && now - g_lastCheck >= HEAD_RETRY_MS) {
+     * rechecked on a timer rather than trusted. The seat
+     * anchor needs the same peek, so the two share a beat. */
+    if (now - g_lastCheck >= HEAD_RETRY_MS) {
         ShPlayer p;
+        int inVeh;
+        uint64_t ent;
 
         g_lastCheck = now;
         memset(&p, 0, sizeof(p));
-
-        /* One bad answer can be a transient, and dropping
-         * on it flashes the engine camera. Two in a row is
-         * a real body change. */
-        if (!ShPeekPlayer(&p) ||
-            (p.entity ? p.entity : p.root) != g_skelEnt) {
-            if (++g_mismatch >= 2) {
+        if (!ShPeekPlayer(&p)) {
+            if (g_ready && ++g_mismatch >= 2) {
                 g_mismatch = 0;
                 g_ready = 0;
             }
+            inVeh = 0;
         } else {
-            g_mismatch = 0;
+            inVeh = ShInVehicleOf(p.entity);
+            if (g_ready) {
+                ent = p.entity ? p.entity : p.root;
+                if (ent != g_skelEnt) {
+                    if (++g_mismatch >= 2) {
+                        g_mismatch = 0;
+                        g_ready = 0;
+                    }
+                } else {
+                    g_mismatch = 0;
+                }
+            }
+        }
+        ShCameraVehicleHint(inVeh);
 
-            /* The camera's chase arm gate reads a cached
-             * hint, so it never looks the player up on
-             * the frame path. Refreshed here instead. */
-            ShCameraVehicleHint(ShInVehicleOf(p.entity));
+        /* Refresh the ride state for the seat anchor. A
+         * failed peek or stepping out drops the anchor and
+         * the eye falls back to the skeleton next frame.
+         * The convergence state is cleared on every transition
+         * so a fresh mount always re-measures the seat. */
+        if (VEH_ANCHOR) {
+            if (inVeh && p.root && p.root != p.entity) {
+                if (p.root != g_vehRoot) {
+                    g_vehRoot = p.root;
+                    g_vehLocked = 0;
+                    g_vehLive = 0;
+                    g_vehSettled = 0;
+                    g_vehMountAt = now;
+                }
+            } else {
+                g_vehRoot = 0;
+                g_vehLocked = 0;
+                g_vehLive = 0;
+                g_vehSettled = 0;
+            }
+        }
+    }
+
+    /* Once the seat lock is taken the eye no longer needs
+     * the skeleton at all, so it is produced here, ahead of
+     * resolve. A vehicle that hides the soldier's rig cannot
+     * stall the camera. */
+    if (VEH_ANCHOR && g_vehRoot && g_vehLocked) {
+        float h[3];
+        h[0] = g_head.x; h[1] = g_head.y; h[2] = g_head.z;
+        VehAnchor(h);
+        if (h[0] == h[0] && h[1] == h[1] && h[2] == h[2]) {
+            g_head.x = h[0];
+            g_head.y = h[1];
+            g_head.z = h[2];
+            g_valid = 1;
+            return;
         }
     }
 
@@ -252,6 +446,10 @@ void ShHeadPump(void) {
         g_head.x = b[0];
         g_head.y = b[1];
         g_head.z = b[2];
+        /* During the seat settle the eye stays the skeleton's
+         * so the mount animation shows; once locked, VehAnchor
+         * replaces it with the chassis-derived eye. */
+        VehAnchor(&g_head.x);
         g_valid = 1;
         return;
     }
@@ -316,6 +514,7 @@ void ShHeadPump(void) {
         g_valid = 0;
         return;
     }
+    VehAnchor(&g_head.x);
     g_valid = 1;
 }
 
