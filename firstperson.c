@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdarg.h>
 
 #include "scripthook.h"
 
@@ -43,7 +44,10 @@ typedef int (*FirstPerson_t)(float, float);
 typedef void (*Release_t)(uint32_t);
 typedef int (*SetBlur_t)(int);
 typedef int (*HeadNodes_t)(uint64_t, uint64_t *, int);
+typedef void (*HeadInvalidate_t)(void);
+typedef void (*HeadClearMiss_t)(void);
 typedef int (*SetVisible_t)(uint64_t, uint64_t, int, int);
+typedef int (*FpActive_t)(void);
 typedef uint32_t (*MenuCreate_t)(const char *);
 typedef int (*MenuToggle_t)(uint32_t, const char *, int,
                             ShMenuFn, void *);
@@ -81,7 +85,10 @@ static GetPlayer_t  g_getPlayer;
 static FirstPerson_t g_fp;
 static Release_t    g_release;
 static HeadNodes_t  g_headNodes;
+static HeadInvalidate_t g_headInvalidate;
+static HeadClearMiss_t g_headClearMiss;
 static SetVisible_t g_setVisible;
+static FpActive_t   g_fpActive;
 static MenuStatus_t g_status;
 static SetBlur_t    g_setBlur;
 static SceneCount_t  g_sceneCount;
@@ -106,6 +113,41 @@ static volatile int   g_settleMs = (int)SETTLE_DEF;
 static volatile int g_nScenes, g_nWidgets, g_nLabels, g_nText;
 static volatile int g_nSights;
 
+/* Diagnostic log: firstperson.log beside the game log folder.
+ * Written from the tick thread only, on state changes, so the
+ * menu return and stowed/parachute cases leave a trace of what
+ * the plugin saw instead of a guess. */
+static FILE *g_diag = NULL;
+static char  g_diagPath[MAX_PATH];
+
+static void Diag(const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    SYSTEMTIME st;
+
+    if (!g_diagPath[0]) {
+        if (g_logPath &&
+            g_logPath("firstperson.log", g_diagPath,
+                      sizeof(g_diagPath))) {
+        } else {
+            GetModuleFileNameA(NULL, g_diagPath,
+                               sizeof(g_diagPath));
+            { char *s = strrchr(g_diagPath, '\\');
+              if (s) s[1] = 0; }
+            strcat(g_diagPath, "firstperson.log");
+        }
+        g_diag = fopen(g_diagPath, "w");
+    }
+    if (!g_diag) return;
+    GetLocalTime(&st);
+    va_start(ap, fmt);
+    _vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    va_end(ap);
+    fprintf(g_diag, "[%02u:%02u:%02u.%03u] %s\n",
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+    fflush(g_diag);
+}
+
 static int Aiming(void);
 static void SaveIni(void);
 
@@ -113,13 +155,35 @@ static uint64_t g_root = 0;
 static uint64_t g_hideRoot = 0;
 static uint64_t g_parts[MAX_PARTS];
 static int      g_nparts = 0;
+/* The engine can take the camera away - a stowed weapon
+ * widens the view, a parachute pulls back, a drone flies.
+ * While that view is up, hiding the head shows a headless
+ * body in it. This is set while the camera is not ours so
+ * the hide is lifted until first person comes back. */
+static volatile int g_headAway = 0;
+/* The engine rebuilds the head group on an outfit change or
+ * a respawn, which drops the persistent hold and shows the
+ * head again. A periodic reapply catches that, so the hide
+ * self heals instead of relying on the one shot attempt.
+ * Finding a not yet existing group sweeps the heap, so the
+ * failure path is rate limited to its own beat. */
+#define REHIDE_MS       300u
+#define HIDE_RETRY_MS   500u
+static uint64_t g_hideAt = 0;   /* last successful hide tick */
+static uint64_t g_hideTry = 0;  /* last failed scan tick */
 
-static uint64_t PlayerRoot(void) {
+/* The head render nodes live on the soldier entity. The
+ * root re-parents to a vehicle on every mount, so resolving
+ * the head from the root would lose it each time (the head
+ * pump picks the entity for the same reason). The root is
+ * still read for body swap detection below.
+ */
+static uint64_t PlayerHeadEnt(void) {
     ShPlayer p;
 
     memset(&p, 0, sizeof(p));
     if (!g_getPlayer || !g_getPlayer(&p)) return 0;
-    return p.root ? p.root : p.entity;
+    return p.entity ? p.entity : p.root;
 }
 
 /* The eye follows the head bone inside the engine's own
@@ -179,6 +243,9 @@ static void Report(void) {
                  "on, no widget tree: update the ScriptHook");
     else if (!g_wantHide)
         snprintf(line, sizeof(line), "on, head left visible");
+    else if (g_headAway)
+        snprintf(line, sizeof(line),
+                 "on, head shown (view taken)");
     else if (g_nparts > 0)
         snprintf(line, sizeof(line), "on, head hidden (%d parts)",
                  g_nparts);
@@ -199,10 +266,12 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
     if (value) {
         g_on = 1;
         g_nparts = 0;
+        g_headAway = 0;
         Hold(1);
         if (g_setBlur) g_setBlur(0);
     } else {
         g_on = 0;
+        g_headAway = 0;
         ShowHead();
         if (g_setBlur) g_setBlur(1);
         Hold(0);
@@ -215,7 +284,10 @@ static void OnHide(uint32_t menu, uint32_t item, int value,
     (void)menu; (void)item; (void)user;
     g_wantHide = value;
     SaveIni();
-    if (!value) ShowHead();
+    if (!value) {
+        g_headAway = 0;
+        ShowHead();
+    }
     Report();
 }
 
@@ -413,16 +485,49 @@ static int Playing(void) {
  */
 static DWORD WINAPI TickThread(LPVOID p) {
     int said = 0, settle = 0;
+    int dPlay = -1, dFp = -1, prevAim = 0;
+    uint64_t lastBeat = 0;
     (void)p;
 
     for (;;) {
         uint64_t root;
+        int playing, aimNow;
+        uint64_t nowMs;
 
         Sleep(TICK_MS);
+        nowMs = GetTickCount64();
+        playing = Playing();
+        if (playing != dPlay) {
+            Diag("playing=%d", playing);
+            dPlay = playing;
+        }
+        /* Periodic summary so a menu round trip leaves a trace
+         * even when nothing changes: playing, held, wantHide,
+         * the head hide state, and where first person stands. */
+        if (nowMs - lastBeat >= 1000) {
+            lastBeat = nowMs;
+            Diag("beat: play=%d held=%d want=%d away=%d n=%d "
+                 "fp=%s root=%p",
+                 playing, g_held, g_wantHide, g_headAway, g_nparts,
+                 g_fpActive ? (g_fpActive() ? "yes" : "no") : "?",
+                 (void *)(uintptr_t)g_root);
+        }
         /* Give the camera back on every screen, not just on
          * the toggle, or the drone never gets it. */
-        if (!g_on || !Playing()) {
+        if (!g_on || !playing) {
             Hold(0);
+            /* A pause or equipment menu blurs the world behind
+             * it, so a head hidden for first person would show
+             * as a headless body in that backdrop - and on the
+             * frames right after the menu closes. Restore it
+             * while the game camera is away, the away check on
+             * the world frames hides it again when the eye is
+             * really back. */
+            if (g_on && g_wantHide && !g_headAway && g_nparts > 0) {
+                g_headAway = 1;
+                ShowHead();
+                Diag("headAway=1 (screen up)");
+            }
             continue;
         }
         /* The engine's aim camera owns iron sights, but
@@ -432,28 +537,137 @@ static DWORD WINAPI TickThread(LPVOID p) {
          * Alt switches mode with no transition at all. */
         /* So an already settled aim hands over the moment
          * the mode changes. Taking it back is immediate. */
-        if (Aiming()) {
+        aimNow = Aiming();
+        if (aimNow) {
             if (settle < g_settleMs) settle += TICK_MS;
         } else {
             settle = 0;
         }
         Hold(!(settle >= g_settleMs && IronSights()));
         if (!g_held) continue;
-
-        root = PlayerRoot();
-        if (!root) continue;
-        if (root != g_root) {
-            g_root = root;
-            g_nparts = 0;
-            said = 0;
-            PushCamera();
+        /* The head group is created the first time the game
+         * camera aims, so an aim that happens while the head
+         * is still visible (n==0) is the moment a missing
+         * group can finally appear. Drop only the remembered
+         * miss so the retry rescans for it - the found group
+         * for the player body stays cached, or a vehicle ride
+         * that passes through an aim wipes it and the body
+         * has to sweep the whole heap again when we get out. */
+        if (aimNow != prevAim) {
+            prevAim = aimNow;
+            if (g_wantHide && g_nparts == 0) {
+                if (g_headClearMiss) g_headClearMiss();
+                else if (g_headInvalidate) g_headInvalidate();
+                g_hideTry = 0;
+                Diag("aim edge %d -> retry hide (visible)", aimNow);
+            }
+        } else {
+            prevAim = aimNow;
         }
-        if (g_wantHide && g_nparts == 0 && HideHead(root)) {
-            Report();
-            said = 0;
+
+        /* Whether the first person eye is really on camera.
+         * This is answered by the camera hook measuring where
+         * the rendered camera sits, so it stays valid even
+         * while the player lookup below cannot resolve - a
+         * stowed weapon, a parachute, a drone, and the frames
+         * right after a menu closes all take the camera away,
+         * and on those the head must show again, not stay
+         * hidden behind a headless body.
+         *
+         * The check deliberately runs before the player lookup:
+         * menus leave the lookup on a heap scan backoff, and
+         * waiting for it delays showing the head for seconds.
+         */
+        if (g_wantHide) {
+            int fpOn = g_fpActive ? g_fpActive() : 1;
+            if (fpOn != dFp) {
+                Diag("fpOn=%d", fpOn);
+                dFp = fpOn;
+            }
+            if (!fpOn) {
+                if (!g_headAway) {
+                    g_headAway = 1;
+                    Diag("headAway=1 (fp lost)");
+                    ShowHead();
+                    Report();
+                    said = 0;
+                }
+                continue;
+            }
+            if (g_headAway) {
+                /* Back in first person: drop the away state and
+                 * hide the head again right away. */
+                g_headAway = 0;
+                g_nparts = 0;
+                g_hideTry = 0;
+                said = 0;
+                Diag("headAway=0 (fp back)");
+            }
         } else if (!said) {
             Report();
             said = 1;
+        }
+
+        /* The head nodes belong to the soldier entity; the
+         * root re-parents to a vehicle on mount, so chasing
+         * the root hides nothing in a car and, worse, ShowHead
+         * on the flip leaves the head visible until we step
+         * out. Track the soldier, whose entity only changes on
+         * a true body swap (respawn, new session). */
+        root = PlayerHeadEnt();
+        if (!root) continue;
+        if (root != g_root) {
+            /* A body swap - a respawn, a new session - leaves
+             * the old entity's persistent hide hold running:
+             * the pump keeps hiding its head nodes even though
+             * the view has moved on, and on the new entity the
+             * head group may not be found yet (it appears on
+             * the first aim). Drop the old hold first so the
+             * head is never stuck invisible behind a hold we no
+             * longer track. */
+            if (g_hideRoot && g_hideRoot != root)
+                ShowHead();
+            g_root = root;
+            g_nparts = 0;
+            g_hideAt = 0;
+            g_hideTry = 0;
+            said = 0;
+            PushCamera();
+            Diag("head ent changed to %p", (void *)(uintptr_t)root);
+        }
+        if (g_wantHide) {
+            uint64_t now = GetTickCount64();
+            if (g_nparts == 0) {
+                /* Not hidden yet (the head group appears the
+                 * first time the player aims). A miss sweeps
+                 * the heap, so only try on the slow beat. */
+                if (now >= g_hideTry) {
+                    g_hideTry = now + HIDE_RETRY_MS;
+                    if (HideHead(root)) {
+                        g_hideAt = now;
+                        Report();
+                        said = 0;
+                        Diag("hide ok n=%d", g_nparts);
+                    } else if (!said) {
+                        Report();
+                        said = 1;
+                        Diag("hide miss (head group absent)");
+                    }
+                }
+            } else if (now - g_hideAt >= REHIDE_MS) {
+                /* The engine can rebuild the head nodes under
+                 * us - an outfit swap, a new ADS state, a
+                 * respawn - which drops the persistent hold
+                 * and shows the head again. Re-apply on a slow
+                 * beat so the hide self heals. */
+                if (!HideHead(root)) {
+                    g_nparts = 0;
+                    g_hideTry = now + HIDE_RETRY_MS;
+                    said = 0;
+                    Report();
+                    Diag("rehide miss");
+                }
+            }
         }
     }
     return 0;
@@ -558,7 +772,15 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_release =
         GetProcAddress(m, "ShCameraReleaseFields");
     *(FARPROC *)&g_headNodes = GetProcAddress(m, "ShGetHeadNodes");
+    *(FARPROC *)&g_headInvalidate =
+        GetProcAddress(m, "ShHeadInvalidate");
+    *(FARPROC *)&g_headClearMiss =
+        GetProcAddress(m, "ShHeadClearMiss");
     *(FARPROC *)&g_setVisible = GetProcAddress(m, "ShSetVisible");
+    /* Optional: with an older dinput8 the camera can never be
+     * taken away from us, so the head stays hidden as asked. */
+    *(FARPROC *)&g_fpActive =
+        GetProcAddress(m, "ShCameraFirstPersonActive");
     /* Optional: an older dinput8 just keeps the blur. */
     *(FARPROC *)&g_setBlur = GetProcAddress(m, "ShSetCameraBlur");
     /* Optional: without the widget tree the camera is held
