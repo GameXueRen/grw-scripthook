@@ -63,6 +63,23 @@
 static volatile uint64_t g_cam = 0;
 static volatile uint64_t g_calls = 0;
 static volatile uint64_t g_writes = 0;
+/* The engine can take the camera away - a stowed weapon
+ * widens the view, a parachute pulls back, a drone flies off
+ * - and ApplyHead lets it go rather than fighting. A consumer
+ * (the first person plugin) reads this to know whether the
+ * hidden head is on camera or the player is in a view that
+ * should show it.
+ *
+ * Rather than trusting our own writes, this is measured from
+ * the camera the engine is actually rendering: when it sits
+ * on the player's head the view is first person, when it is
+ * pulled back it is the engine's own shoulder or cutscene
+ * camera. That stays true even when the engine never routes
+ * a frame through ApplyHead (a stowed weapon, a parachute),
+ * which is exactly when the head must come back. */
+static volatile uint64_t g_headNearAt = 0; /* last frame cam was on the head */
+#define HEAD_NEAR_DIST 1.0f   /* metres: first person eye to head bone */
+#define FP_LIVE_MS     250u   /* how stale "near" may be before we say away */
 
 /* Diagnostic only. Special views run mode 0 like the main
  * camera (measured: the drone), so mode gates nothing.
@@ -321,6 +338,24 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
     if (!ui) {
         if (g_apply & CAM_HEAD_BIT) ShHeadWant();
         ShHeadPump();
+
+        /* Whether the first person eye is really on camera,
+         * measured from the frame's own camera rather than
+         * from our write: a view the engine took (stowed
+         * weapon, parachute, drone) sits away from the head
+         * even on the frames our write path never ran. */
+        if (g_apply & CAM_HEAD_BIT) {
+            ShVec3 h;
+            float dx, dy, dz;
+            if (ShHeadCached(&h)) {
+                dx = f[12] - h.x;
+                dy = f[13] - h.y;
+                dz = f[14] - h.z;
+                if (dx * dx + dy * dy + dz * dz <=
+                    HEAD_NEAR_DIST * HEAD_NEAR_DIST)
+                    g_headNearAt = GetTickCount64();
+            }
+        }
         if (g_apply) ApplyFields(rcx);
     }
 }
@@ -549,6 +584,19 @@ void ShCameraOnEnterPlaying(void) {
 
 SH_API int ShCameraReady(void) {
     return g_camStub != NULL && g_cam != 0;
+}
+
+/* The eye counts as live only while the camera the engine is
+ * actually rendering has been sitting on the player's head.
+ * The measurement happens in the frame path, so a view the
+ * engine takes over (stowed weapon, parachute, drone) stops
+ * refreshing the timestamp and the eye goes stale, no matter
+ * whether our own write path was ever called for that frame.
+ */
+SH_API int ShCameraFirstPersonActive(void) {
+    if (!(g_apply & CAM_HEAD_BIT)) return 0;
+    if (!g_headNearAt) return 0;
+    return GetTickCount64() - g_headNearAt < FP_LIVE_MS;
 }
 
 SH_API uint64_t ShCameraCalls(void) { return g_calls; }

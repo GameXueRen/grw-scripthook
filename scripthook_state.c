@@ -220,6 +220,9 @@ static void OnStateChanged(uint32_t h) {
          * reload can move them, so drop the cache and rescan. */
         ShSpawnInvalidate();
         ShSpawnOnEnterPlaying();
+        /* A new body starts with no aim group yet, so drop the
+         * head group cache from the old session. */
+        ShHeadInvalidate();
     }
 }
 

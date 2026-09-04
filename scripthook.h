@@ -581,6 +581,16 @@ SH_API int  ShGetEntityNodes(uint64_t entity, uint64_t *out,
 SH_API int  ShGetHeadNodes(uint64_t entity, uint64_t *out,
                            int max);
 
+/** Drop the cached head group pointers. A new session, a
+ *  respawn, or the first aim of one can make the cached
+ *  controller stale; the next ShGetHeadNodes rescans.
+ */
+SH_API void ShHeadInvalidate(void);
+/** Clear only the "not found yet" note, keeping a controller
+ *  that was already found for the player body.
+ */
+SH_API void ShHeadClearMiss(void);
+
 /** @} */
 /** @defgroup menu Menu
  *  One root owned by the API; every plugin adds a submenu.
@@ -696,6 +706,14 @@ SH_API int  ShCameraHookInstall(void);
 SH_API int  ShCameraReady(void);
 SH_API uint64_t ShCameraCalls(void);
 SH_API uint64_t ShCameraWrites(void);
+
+/** True while the first person eye was written on a recent
+ *  world frame. A consumer that hides the head only while
+ *  first person is really on camera reads this, so the head
+ *  comes back when the engine takes the view away (a stowed
+ *  weapon widens it, a parachute pulls back, a drone flies).
+ */
+SH_API int  ShCameraFirstPersonActive(void);
 
 /** @} */
 /** @addtogroup state

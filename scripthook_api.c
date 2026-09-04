@@ -149,6 +149,19 @@ int ShReadMem(uint64_t addr, void *out, size_t len) {
     return got == len;
 }
 
+/* Same-process direct read. ReadProcessMemory goes through
+ * the kernel even for the owning process and copies at a
+ * fraction of memory bandwidth, so a whole-address-space
+ * sweep costs tens of seconds. The region was validated a
+ * line above; this only has to close the gap between that
+ * check and the copy, which a decommit lands either side
+ * of. The bulk scans in the entity code use this. */
+int ShReadFast(uint64_t addr, void *out, size_t len) {
+    if (!ShReadable(addr, len)) return 0;
+    memcpy(out, (const void *)(uintptr_t)addr, len);
+    return 1;
+}
+
 static uint64_t ShQ(uint64_t addr) {
     uint64_t v;
     if (!ShReadMem(addr, &v, 8)) return 0;
@@ -414,16 +427,23 @@ static int ShResolvePlayer(void) {
             uint8_t *b = (uint8_t *)mbi.BaseAddress;
             size_t sz = mbi.RegionSize, o, k, chunk;
 
-            /* Chunked kernel reads: a page freed mid scan
-             * skips instead of faulting. Chunks overlap so
-             * no candidate spans a seam. */
-            static uint8_t buf[0x10000];
+            /* Chunked reads: a page freed mid scan skips
+             * instead of faulting. Chunks overlap so no
+             * candidate spans a seam.
+             *
+             * ReadProcessMemory copies at a fraction of memory
+             * bandwidth even inside one process, which made a
+             * whole address space sweep take tens of seconds.
+             * The region was validated above; a direct read
+             * only races a decommit, and that skips the chunk
+             * rather than faulting. */
+            static uint8_t buf[0x200000];
 
             for (o = 0; o + 0x60 <= sz; o += sizeof(buf) - 0x60) {
                 chunk = sz - o;
                 if (chunk > sizeof(buf)) chunk = sizeof(buf);
-                if (!ShReadMem((uint64_t)(uintptr_t)(b + o), buf,
-                               chunk))
+                if (!ShReadFast((uint64_t)(uintptr_t)(b + o), buf,
+                                chunk))
                     continue;
                 for (k = 0; k + 0x60 <= chunk; k += 8) {
                     uint64_t vt;

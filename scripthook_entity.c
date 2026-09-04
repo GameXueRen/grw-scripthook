@@ -27,6 +27,7 @@
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern int ShReadMem(uint64_t addr, void *out, size_t len);
+extern int ShReadFast(uint64_t addr, void *out, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
 extern void ShSetError(int err);
 extern int ShRequireInGame(void);
@@ -265,26 +266,40 @@ static int SetNodesHidden(uint64_t entity, int hidden, int *seen) {
 
 static uint64_t g_headEnt = 0;
 static uint64_t g_headCtrl = 0;
+/* A failed sweep is cached too: the group is only created
+ * the first time the player aims, so until then the answer
+ * for an entity stays "no group". Re-sweeping the whole
+ * address space every tick for an entity that still has no
+ * group wastes the frame budget, so a miss is remembered
+ * and re-used for a short while. */
+static uint64_t g_headMissEnt = 0;
+static uint64_t g_headMissAt = 0;
+#define HEAD_MISS_MS  700u
 
-/* Both arrays land in two kernel reads and compare
- * locally. A syscall per element multiplied out to tens
- * of ms per candidate and lagged the whole frame. */
+/* Both arrays land in a few direct reads and compare
+ * locally. ReadProcessMemory per element multiplied out to
+ * tens of ms per candidate, so these use the validated
+ * direct read path like the sweep above. */
 static int OwnsAnyNode(uint64_t ctrl, uint64_t entity) {
     uint64_t nodes[64], comps[512];
     uint64_t arr, carr;
     uint16_t n = 0, cn = 0, i, j;
 
     arr = ShReadQ(ctrl + CTRL_NODES);
-    if (!arr || !ShReadMem(ctrl + CTRL_COUNT, &n, 2)) return 0;
+    if (!arr || !ShReadableAddr(ctrl + CTRL_COUNT, 2)) return 0;
+    memcpy(&n, (void *)(uintptr_t)(ctrl + CTRL_COUNT), 2);
     if (!n || n > 64) return 0;
 
     carr = ShReadQ(entity + OFF_ENT_COMPS);
-    if (!carr || !ShReadMem(entity + OFF_ENT_NCOMPS, &cn, 2))
+    if (!carr || !ShReadableAddr(entity + OFF_ENT_NCOMPS, 2))
         return 0;
+    memcpy(&cn, (void *)(uintptr_t)(entity + OFF_ENT_NCOMPS), 2);
     if (!cn || cn > 512) return 0;
 
-    if (!ShReadMem(arr, nodes, (size_t)n * 8)) return 0;
-    if (!ShReadMem(carr, comps, (size_t)cn * 8)) return 0;
+    if (!ShReadableAddr(arr, (size_t)n * 8)) return 0;
+    memcpy(nodes, (void *)(uintptr_t)arr, (size_t)n * 8);
+    if (!ShReadableAddr(carr, (size_t)cn * 8)) return 0;
+    memcpy(comps, (void *)(uintptr_t)carr, (size_t)cn * 8);
 
     for (i = 0; i < n; i++) {
         if (!nodes[i]) continue;
@@ -305,14 +320,34 @@ static int CtrlAlive(uint64_t ctrl, uint64_t entity) {
 static uint64_t FindHeadGroup(uint64_t entity) {
     MEMORY_BASIC_INFORMATION mbi;
     uint8_t *scan = (uint8_t *)0x10000;
+    uint64_t now = GetTickCount64();
 
     /* These are freed and recycled, so a cached pointer is
      * verified before it is trusted.
      */
     if (g_headEnt == entity && CtrlAlive(g_headCtrl, entity))
         return g_headCtrl;
-    g_headEnt = 0;
-    g_headCtrl = 0;
+    /* A very recent miss for this exact entity: the group has
+     * not appeared yet, so trust it and avoid the sweep. A
+     * reset of the miss (a new session via ShHeadInvalidate,
+     * an ADS via ShHeadClearMiss) clears this. */
+    if (g_headMissEnt == entity &&
+        now - g_headMissAt < HEAD_MISS_MS)
+        return 0;
+    /* The head group belongs to the player's body entity. The
+     * camera re-parents on aim, a parachute, a stowed weapon -
+     * those transient roots never own the head nodes, and a
+     * sweep for them costs seconds. If we already hold a live
+     * group for another entity, that one is the body: answer
+     * "no group" for anything else without sweeping, and keep
+     * the cached group so the body hides the moment the root
+     * comes back. */
+    if (g_headCtrl && g_headEnt && g_headEnt != entity &&
+        CtrlAlive(g_headCtrl, g_headEnt)) {
+        g_headMissEnt = entity;
+        g_headMissAt = now;
+        return 0;
+    }
 
     while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
@@ -325,17 +360,24 @@ static uint64_t FindHeadGroup(uint64_t entity) {
             uint8_t *b = (uint8_t *)mbi.BaseAddress;
             size_t sz = mbi.RegionSize, o, k, got;
 
-            /* Chunked kernel reads: a region decommitted
-             * mid scan skips instead of faulting. Chunks
-             * overlap so no candidate spans a seam. */
-            static uint8_t buf[0x10000];
+            /* Chunked reads: a region decommitted mid scan
+             * skips instead of faulting. Chunks overlap so
+             * no candidate spans a seam.
+             *
+             * ReadProcessMemory copies at a fraction of memory
+             * bandwidth even inside one process, which made a
+             * whole address space sweep take tens of seconds.
+             * The region was validated above; a direct read
+             * only races a decommit, and that skips the chunk
+             * rather than faulting. */
+            static uint8_t buf[0x200000];
 
             for (o = 0; o + 0x50 <= sz;
                  o += sizeof(buf) - 0x50) {
                 got = sz - o;
                 if (got > sizeof(buf)) got = sizeof(buf);
-                if (!ShReadMem((uint64_t)(uintptr_t)(b + o),
-                               buf, got))
+                if (!ShReadFast((uint64_t)(uintptr_t)(b + o),
+                                buf, got))
                     continue;
                 for (k = 0; k + 0x50 <= got; k += 8) {
                     uint64_t vt;
@@ -347,12 +389,15 @@ static uint64_t FindHeadGroup(uint64_t entity) {
                         continue;
                     g_headEnt = entity;
                     g_headCtrl = (uint64_t)(uintptr_t)(b + o + k);
+                    g_headMissEnt = 0;
                     return g_headCtrl;
                 }
             }
         }
         scan = next;
     }
+    g_headMissEnt = entity;
+    g_headMissAt = now;
     return 0;
 }
 
@@ -574,6 +619,28 @@ SH_API int ShGetHeadNodes(uint64_t entity, uint64_t *out, int max) {
         if (nodes[i]) out[w++] = nodes[i];
     ShSetError(SH_OK);
     return w;
+}
+
+/** Drop the cached head controller and any remembered miss.
+ *  A respawn, an outfit change, or a new session can all
+ *  make the cache stale; the next ShGetHeadNodes rescans
+ *  from scratch. */
+SH_API void ShHeadInvalidate(void) {
+    g_headEnt = 0;
+    g_headCtrl = 0;
+    g_headMissEnt = 0;
+    g_headMissAt = 0;
+}
+
+/** Clear only the "no group yet" note, keeping a controller
+ *  that was already found. An aim edge may signal that a
+ *  missing group has just appeared, but the player body and
+ *  its group did not change, so the positive cache must stay
+ *  or the body rescans the whole heap after every vehicle
+ *  ride. */
+SH_API void ShHeadClearMiss(void) {
+    g_headMissEnt = 0;
+    g_headMissAt = 0;
 }
 
 /** How many render nodes an entity has, 0 if none. */
