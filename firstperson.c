@@ -55,7 +55,11 @@ typedef int (*MenuToggle_t)(uint32_t, const char *, int,
                             ShMenuFn, void *);
 typedef int (*MenuNumber_t)(uint32_t, const char *, float, float,
                             float, float, ShMenuFn, void *);
+typedef int (*MenuList_t)(uint32_t, const char *, const char **,
+                          int, int, ShMenuFn, void *);
+typedef int (*MenuSetValue_t)(uint32_t, const char *, int);
 typedef int (*MenuStatus_t)(uint32_t, const char *);
+typedef int (*MenuIsOpen_t)(void);
 typedef int (*MenuAction_t)(uint32_t, const char *, ShMenuFn, void *);
 typedef int (*MenuHint_t)(uint32_t, const char *);
 typedef int (*SceneCount_t)(void);
@@ -92,6 +96,8 @@ static HeadClearMiss_t g_headClearMiss;
 static SetVisible_t g_setVisible;
 static FpActive_t   g_fpActive;
 static InputCtx_t   g_inputCtx;
+static MenuIsOpen_t g_menuIsOpen;
+static MenuSetValue_t g_menuSetValue;
 static MenuStatus_t g_status;
 static SetBlur_t    g_setBlur;
 static SceneCount_t  g_sceneCount;
@@ -108,6 +114,24 @@ static uint32_t g_menu = 0;
 static volatile int   g_on = 0;
 static volatile int   g_wantHide = 1;
 static volatile int   g_settleMs = (int)SETTLE_DEF;
+
+/* A hotkey flips first/third person while playing: the same
+ * toggle as the menu's Enabled row. The key edge is polled on
+ * its own thread - hiding the head can sweep the whole heap
+ * for tens of seconds (a group that only appears on the first
+ * aim), and the flip must stay live through that. Index 0 is
+ * "None", meaning the hotkey is off. */
+#define HOTKEYS     4
+static const int g_hotVk[HOTKEYS] = {
+    0,             /* None: hotkey disabled */
+    VK_OEM_PLUS,   /* = */
+    VK_F2,
+    VK_F3
+};
+static const char *g_hotName[HOTKEYS] = {
+    "None", "Equal (=)", "F2", "F3"
+};
+static volatile int g_hotKey = 0;   /* index into g_hotVk, 0 = off */
 
 /* The eye offset can differ per stance or vehicle: a motorbike
  * leans, a helicopter seat sits higher, a passenger looks out
@@ -315,16 +339,13 @@ static void Report(void) {
     g_status(g_menu, line);
 }
 
-/* The callbacks must not touch the player: resolving it and
- * hiding the head can each fall back to a full address space
- * scan, which would stall the menu callback thread for
- * seconds. The tick thread does that work on its own clock.
+/* Turn first person on or off. Runs on both the menu worker
+ * (Enabled toggle) and the tick thread (hotkey), so it must
+ * not touch the player: resolving it can fall back to a heap
+ * scan. Everything here is camera state and deferred calls.
  */
-static void OnToggle(uint32_t menu, uint32_t item, int value,
-                     void *user) {
-    (void)menu; (void)item; (void)user;
-
-    if (value) {
+static void SetFp(int on) {
+    if (on) {
         g_on = 1;
         g_nparts = 0;
         g_headAway = 0;
@@ -343,6 +364,32 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
         if (g_setBlur) g_setBlur(1);
         Hold(0);
     }
+    /* The Enabled row shows the state a hotkey may have just
+     * changed behind the menu's back; sync it so the next
+     * capture renders the truth. */
+    if (g_menuSetValue && g_menu)
+        g_menuSetValue(g_menu, "Enabled", g_on);
+    Report();
+}
+
+/* The callbacks must not touch the player: resolving it and
+ * hiding the head can each fall back to a full address space
+ * scan, which would stall the menu callback thread for
+ * seconds. The tick thread does that work on its own clock.
+ */
+static void OnToggle(uint32_t menu, uint32_t item, int value,
+                     void *user) {
+    (void)menu; (void)item; (void)user;
+    SetFp(value);
+}
+
+/* Hotkey row: pick which key flips the view. Index 0 is
+ * "None", which disables the hotkey entirely. */
+static void OnHotKey(uint32_t menu, uint32_t item, int value,
+                     void *user) {
+    (void)menu; (void)item; (void)user;
+    if (value >= 0 && value < HOTKEYS) g_hotKey = value;
+    SaveIni();
     Report();
 }
 
@@ -720,10 +767,14 @@ static DWORD WINAPI TickThread(LPVOID p) {
         if (g_wantHide) {
             uint64_t now = GetTickCount64();
             if (g_nparts == 0) {
-                /* Not hidden yet (the head group appears the
-                 * first time the player aims). A miss sweeps
-                 * the heap, so only try on the slow beat. */
-                if (now >= g_hideTry) {
+                /* Not hidden yet. The head group appears the
+                 * first time the player aims, so before any
+                 * aim it cannot exist - and hunting for it
+                 * sweeps the whole heap, which can block this
+                 * thread (and with it the flip hotkey) for
+                 * tens of seconds. Only try while aiming,
+                 * when the group can actually be found. */
+                if (aimNow && now >= g_hideTry) {
                     g_hideTry = now + HIDE_RETRY_MS;
                     if (HideHead(root)) {
                         g_hideAt = now;
@@ -750,6 +801,40 @@ static DWORD WINAPI TickThread(LPVOID p) {
                     Diag("rehide miss");
                 }
             }
+        }
+    }
+    return 0;
+}
+
+/* The flip hotkey lives on its own thread. Hiding the head
+ * can sweep the whole heap while the group the game creates
+ * on the first aim has not appeared yet - tens of seconds in
+ * which the tick thread is stuck - and the flip must answer
+ * regardless. SetFp is safe from here: it only flips g_on
+ * and queues camera/visibility state for the game thread.
+ */
+static DWORD WINAPI HotkeyThread(LPVOID p) {
+    int down, prev = 0;
+    uint64_t at = 0;
+    (void)p;
+
+    for (;;) {
+        Sleep(30);
+        /* Playing state, not in the ScriptHook menu. The game's
+         * own pause screens keep playing true, so the camera
+         * check in the tick thread covers those. */
+        if (g_hotKey > 0 && Playing() &&
+            (!g_menuIsOpen || !g_menuIsOpen())) {
+            down = (GetAsyncKeyState(g_hotVk[g_hotKey]) &
+                    0x8000) != 0;
+            if (down && !prev && GetTickCount64() - at >= 300u) {
+                at = GetTickCount64();
+                Diag("hotkey flip -> fp=%d", !g_on);
+                SetFp(!g_on);
+            }
+            prev = down;
+        } else {
+            prev = 0;
         }
     }
     return 0;
@@ -824,6 +909,7 @@ static void CatKey(char *key, size_t n, int cat, int isUp) {
 static void LoadIni(void) {
     int i;
     char key[40];
+    char legacy[16];
 
     ResetCatDefaults();
     if (!g_iniPath[0]) return;
@@ -835,6 +921,18 @@ static void LoadIni(void) {
         g_up[i] = IniFloat(g_iniPath, key, UP_DEF);
     }
     g_settleMs = IniInt(g_iniPath, "settle_ms", g_settleMs);
+    /* One hotkey row: hotkey_key is 0 (None)..3. An ini saved
+     * by the two-row build has hotkey_on plus an old hotkey_key
+     * that started at "="; migrate it so "on" keeps working. */
+    if (GetPrivateProfileStringA("Settings", "hotkey_on", "",
+                                 legacy, sizeof(legacy), g_iniPath) > 0) {
+        int k = IniInt(g_iniPath, "hotkey_key", 0);
+        g_hotKey = legacy[0] == '1' ? k + 1 : 0;
+        if (g_hotKey >= HOTKEYS) g_hotKey = HOTKEYS - 1;
+    } else {
+        g_hotKey = IniInt(g_iniPath, "hotkey_key", g_hotKey);
+        if (g_hotKey < 0 || g_hotKey >= HOTKEYS) g_hotKey = 0;
+    }
 }
 
 /* Write the current settings back to <name>.ini. "Enabled" is
@@ -857,6 +955,10 @@ static void SaveIni(void) {
     }
     snprintf(buf, sizeof(buf), "%d", g_settleMs);
     WritePrivateProfileStringA("Settings", "settle_ms", buf, g_iniPath);
+    snprintf(buf, sizeof(buf), "%d", g_hotKey);
+    WritePrivateProfileStringA("Settings", "hotkey_key", buf, g_iniPath);
+    /* Remove the legacy two-row key so it cannot migrate twice. */
+    WritePrivateProfileStringA("Settings", "hotkey_on", NULL, g_iniPath);
 }
 
 static DWORD WINAPI BindThread(LPVOID p) {
@@ -903,11 +1005,14 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_widgetPropType =
         GetProcAddress(m, "ShWidgetPropType");
     *(FARPROC *)&g_inputCtx = GetProcAddress(m, "ShInputContext");
+    *(FARPROC *)&g_menuIsOpen = GetProcAddress(m, "ShMenuIsOpen");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuSub = GetProcAddress(m, "ShMenuSub");
     *(FARPROC *)&menuToggle = GetProcAddress(m, "ShMenuToggle");
     *(FARPROC *)&menuNumber = GetProcAddress(m, "ShMenuNumber");
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
+    *(FARPROC *)&g_menuSetValue =
+        GetProcAddress(m, "ShMenuSetValue");
     if (!g_inGame || !g_getPlayer || !g_fp || !g_release) return 1;
     if (!g_headNodes || !g_setVisible) return 1;
     if (!menuCreate || !menuToggle || !menuNumber || !g_status)
@@ -917,6 +1022,16 @@ static DWORD WINAPI BindThread(LPVOID p) {
     LoadIni();
     g_menu = menuCreate("First person");
     menuToggle(g_menu, "Enabled", 0, OnToggle, NULL);
+    /* One row picks the flip key: None (=off), =, F2 or F3.
+     * The row's label is the English lookup key, translated by
+     * the [zh_cn.First person] table. */
+    {
+        MenuList_t menuList;
+        *(FARPROC *)&menuList = GetProcAddress(m, "ShMenuList");
+        if (menuList)
+            menuList(g_menu, "View toggle hotkey", g_hotName,
+                     HOTKEYS, g_hotKey, OnHotKey, NULL);
+    }
     menuToggle(g_menu, "Hide head", g_wantHide, OnHide, NULL);
     /* One submenu per category: its own Forward/Height pair.
      * Each row carries the category and axis so a slider knows
@@ -963,6 +1078,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
     Report();
 
     CreateThread(NULL, 0, TickThread, NULL, 0, NULL);
+    CreateThread(NULL, 0, HotkeyThread, NULL, 0, NULL);
     return 0;
 }
 

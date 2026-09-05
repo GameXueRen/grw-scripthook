@@ -748,6 +748,41 @@ SH_API int ShMenuList(uint32_t menu, const char *label,
     return it != NULL;
 }
 
+/* Sync an existing row's displayed value without firing its
+ * callback: a plugin changed the state behind the menu's back
+ * (a hotkey flip), and the next capture must show it. Matches
+ * on the row label inside that one menu, so identical labels
+ * in different submenus do not collide. No-op on IT_NUMBER
+ * rows, whose state only the slider owns. */
+SH_API int ShMenuSetValue(uint32_t menu, const char *label,
+                          int value) {
+    Menu *m;
+    int i;
+
+    Lock();
+    m = MenuOf(menu);
+    if (!m || !label) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
+    for (i = 0; i < m->count; i++) {
+        Item *it = &m->items[i];
+        if (strcmp(it->label, label) != 0) continue;
+        if (it->kind == IT_TOGGLE) {
+            it->value = value ? 1 : 0;
+            Unlock();
+            ShSetError(SH_OK);
+            return 1;
+        }
+        if (it->kind == IT_LIST && it->nopts > 0) {
+            it->value = value % it->nopts;
+            Unlock();
+            ShSetError(SH_OK);
+            return 1;
+        }
+    }
+    Unlock();
+    ShSetError(SH_ERR_NO_CANDIDATE);
+    return 0;
+}
+
 /* The line under the items, for whatever the last action
  * has to report. Empty text removes it.
  */

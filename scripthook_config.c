@@ -337,7 +337,7 @@ static void ParseConfig(const char *text) {
     PeekLanguage(text);
     while (*p) {
         char line[512];
-        char *s, *e, *eq;
+        char *s, *e, *eq, *key;
         size_t i = 0;
 
         while (*p && *p != '\n' && *p != '\r' && i < sizeof(line) - 1)
@@ -365,9 +365,50 @@ static void ParseConfig(const char *text) {
             continue;
         }
 
-        eq = strchr(s, '=');
+        /* Find the '=' that separates key and value. The first
+         * '=' in an unquoted language key may belong to the key
+         * itself ("Equal (=)"), so split those on " = " instead.
+         * A quoted key ("\"Equal (=)\"") reads verbatim up to its
+         * closing quote, so no '=' inside it is ever mistaken for
+         * the separator. Plain config rows keep the simple rule. */
+        eq = NULL;
+        if (IsLangSection(section)) {
+            char *qs = s, q = 0;
+            while (*qs == ' ' || *qs == '\t') qs++;
+            if (*qs == '"' || *qs == '\'') {
+                char *c;
+                q = *qs;
+                c = strchr(qs + 1, q);
+                if (c) {
+                    char *p = c + 1;
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p == '=') {
+                        /* Closing quote ends the key; s moves to
+                         * the text inside the quotes and eq points
+                         * at the real separator. */
+                        s = qs + 1;
+                        *c = 0;
+                        eq = p;
+                    }
+                }
+            }
+            if (!eq) {
+                /* Unquoted key: split on " = " (space-equals-space)
+                 * so an '=' inside the key is not the separator. */
+                char *sp = strstr(s, " = ");
+                if (sp) eq = sp + 1;
+                else    eq = strchr(s, '=');
+            }
+        } else {
+            eq = strchr(s, '=');
+        }
         if (!eq) continue;
         *eq = 0;
+
+        /* key is whatever s points at now: the text after the
+         * opening quote for a quoted key, the raw key otherwise.
+         * Save it before s is reused for the value below. */
+        key = s;
 
         /* trim the key */
         e = s + strlen(s);
@@ -388,22 +429,18 @@ static void ParseConfig(const char *text) {
 
         if (!*s) continue;
 
-        /* eq points at '='; the key is line..eq-1, value is s.
+        /* eq points at '='; the key is key..eq-1, value is s.
          * Language sections never touch the main entry table, so
          * a large translation set cannot crowd the config out. */
-        {
-            char *k = line;
-            while (*k == ' ' || *k == '\t') k++;
-            if (IsLangSection(section)) {
-                AddLangEntry(section, k, s);
-                continue;
-            }
-            i = strlen(k);
-            if (i >= sizeof(g_entries[g_nentries].key))
-                i = sizeof(g_entries[g_nentries].key) - 1;
-            memcpy(g_entries[g_nentries].key, k, i);
-            g_entries[g_nentries].key[i] = 0;
+        if (IsLangSection(section)) {
+            AddLangEntry(section, key, s);
+            continue;
         }
+        i = strlen(key);
+        if (i >= sizeof(g_entries[g_nentries].key))
+            i = sizeof(g_entries[g_nentries].key) - 1;
+        memcpy(g_entries[g_nentries].key, key, i);
+        g_entries[g_nentries].key[i] = 0;
 
         if (g_nentries >= ENTRIES_MAX) continue;
 

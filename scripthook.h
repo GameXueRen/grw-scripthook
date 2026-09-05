@@ -613,6 +613,12 @@ SH_API int  ShMenuNumber(uint32_t menu, const char *label,
 SH_API int  ShMenuList(uint32_t menu, const char *label,
                        const char **opts, int n, int initial,
                        ShMenuFn fn, void *user);
+/** Sync a toggle/list row's displayed value without firing its
+ *  callback. A plugin that changed the state behind the menu's
+ *  back (a hotkey flip) calls this so the next capture shows
+ *  the truth. Matches on the label inside that one menu. */
+SH_API int  ShMenuSetValue(uint32_t menu, const char *label,
+                           int value);
 /** Drop a menu's items, keeping the row, so a plugin can
  *  rebuild its own menu without stacking duplicates. */
 SH_API int  ShMenuClear(uint32_t menu);
