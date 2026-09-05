@@ -905,6 +905,36 @@ SH_API int  ShGetGameStateName(char *buf, int len);
 typedef int (*ShGetGameState_t)(void);
 typedef int (*ShIsInGame_t)(void);
 
+/** What the player is doing, from the engine's own input
+ *  context dispatcher (AnvilNext notes, file 12). One index
+ *  is active at a time and covers on foot, driving, riding,
+ *  flying and menus. Read cheap, no engine call.
+ */
+enum ShInputContextIdx {
+    SH_CTX_EMPTY = 0,
+    SH_CTX_ONFOOT,
+    SH_CTX_FASTTUNING,
+    SH_CTX_BINOCULARS,
+    SH_CTX_VEHICLE_PASSENGER,
+    SH_CTX_VEHICLE,
+    SH_CTX_HELICOPTER,
+    SH_CTX_AIRPLANE,
+    SH_CTX_DRONE,
+    SH_CTX_SQUADTACTICS,
+    SH_CTX_MENU,
+    SH_CTX_POPUP
+};
+
+/** The active input context index, or -1 when it cannot be
+ *  read (not in game, engine objects not up). A consumer
+ *  that changes behaviour per stance or per vehicle reads
+ *  this: OnFoot for walking, Vehicle for ground vehicles,
+ *  Helicopter/Airplane while flying, VehiclePassenger while
+ *  riding along, Menu for the pause screens.
+ */
+SH_API int  ShInputContext(void);
+typedef int (*ShInputContext_t)(void);
+
 /** @} */
 /** @addtogroup ground
  *  @{ */

@@ -18,6 +18,15 @@
 #define OFF_STATE_OWNER 0x018
 #define OFF_CURSTATE    0x260
 
+/* The active input context: what the player is doing right
+ * now, one of the twelve indices in ShInputContextIdx.
+ * Read from the InputContextDispatcher singleton, derived in
+ * the AnvilNext notes (file 12). The root global 0x4D84E98
+ * is shared with the player slot lookup in scripthook_api.c.
+ */
+#define OFF_CTX_DISPATCHER 0x258
+#define OFF_CTX_ACTIVE     0x9C0
+
 /* vt+0x30 returns the class descriptor, hash at +0x24. */
 #define VT_GETDESC      0x30
 #define OFF_DESC_HASH   0x24
@@ -202,6 +211,28 @@ SH_API int ShGetGameStateName(char *buf, int len) {
     else snprintf(buf, len, "class_%08x", h);
     ShSetError(SH_OK);
     return 1;
+}
+
+/* The root global below is the local player's controller,
+ * shared with the slot index lookup. dispatcher + 0x9C0 is
+ * the int32 active context. Wine maps the dispatcher high,
+ * so read through the direct VirtualQuery path. */
+#define SH_INPUT_ROOT SH_IMG(0x4D84E98)
+
+SH_API int ShInputContext(void) {
+    uint64_t root, disp;
+    int32_t idx = -1;
+
+    if (!Readable(SH_INPUT_ROOT, 8)) return -1;
+    root = ReadQ(SH_INPUT_ROOT);
+    if (!Sane(root)) return -1;
+    if (!Readable(root + OFF_CTX_DISPATCHER, 8)) return -1;
+    disp = ReadQ(root + OFF_CTX_DISPATCHER);
+    if (!Sane(disp)) return -1;
+    if (!Readable(disp + OFF_CTX_ACTIVE, 4)) return -1;
+    memcpy(&idx, (void *)(uintptr_t)(disp + OFF_CTX_ACTIVE), 4);
+    if (idx < SH_CTX_EMPTY || idx > SH_CTX_POPUP) return -1;
+    return (int)idx;
 }
 
 /* Everything cached belongs to the old session, and the
