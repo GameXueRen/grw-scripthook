@@ -40,6 +40,7 @@
 typedef int (*IsInGame_t)(void);
 typedef int (*GameState_t)(void);
 typedef int (*GetPlayer_t)(ShPlayer *);
+typedef int (*InputCtx_t)(void);
 typedef int (*FirstPerson_t)(float, float);
 typedef void (*Release_t)(uint32_t);
 typedef int (*SetBlur_t)(int);
@@ -49,6 +50,7 @@ typedef void (*HeadClearMiss_t)(void);
 typedef int (*SetVisible_t)(uint64_t, uint64_t, int, int);
 typedef int (*FpActive_t)(void);
 typedef uint32_t (*MenuCreate_t)(const char *);
+typedef uint32_t (*MenuSub_t)(uint32_t, const char *);
 typedef int (*MenuToggle_t)(uint32_t, const char *, int,
                             ShMenuFn, void *);
 typedef int (*MenuNumber_t)(uint32_t, const char *, float, float,
@@ -89,6 +91,7 @@ static HeadInvalidate_t g_headInvalidate;
 static HeadClearMiss_t g_headClearMiss;
 static SetVisible_t g_setVisible;
 static FpActive_t   g_fpActive;
+static InputCtx_t   g_inputCtx;
 static MenuStatus_t g_status;
 static SetBlur_t    g_setBlur;
 static SceneCount_t  g_sceneCount;
@@ -104,9 +107,60 @@ static WidgetPropType_t g_widgetPropType;
 static uint32_t g_menu = 0;
 static volatile int   g_on = 0;
 static volatile int   g_wantHide = 1;
-static volatile float g_fwd = FWD_DEF;
-static volatile float g_up = UP_DEF;
 static volatile int   g_settleMs = (int)SETTLE_DEF;
+
+/* The eye offset can differ per stance or vehicle: a motorbike
+ * leans, a helicopter seat sits higher, a passenger looks out
+ * from a different place. Every category has its own forward
+ * and height, chosen by the player. On foot lumps every stance
+ * together; ground vehicles lump cars, bikes and boats. */
+enum {
+    CAT_FOOT = 0,    /* on foot, any stance */
+    CAT_LAND,        /* ground vehicle (car, motorbike, boat) */
+    CAT_PLANE,       /* airplane */
+    CAT_HELI,        /* helicopter */
+    CAT_RIDER,       /* riding along as a passenger */
+    CAT_COUNT
+};
+
+/* Menu titles and ini suffixes, per category. */
+static const char *g_catName[CAT_COUNT] = {
+    "On foot", "Ground vehicle", "Airplane",
+    "Helicopter", "Passenger"
+};
+static const char *g_catTag[CAT_COUNT] = {
+    "foot", "land", "plane", "heli", "rider"
+};
+
+/* cm, per category. Active at any time is g_cat, driven by
+ * the engine input context: OnFoot, Vehicle, Airplane,
+ * Helicopter or VehiclePassenger. The array holds the menu
+ * defaults for categories without an ini entry yet. */
+static volatile float g_fwd[CAT_COUNT];
+static volatile float g_up[CAT_COUNT];
+static volatile int   g_cat = CAT_FOOT;
+
+static void ResetCatDefaults(void) {
+    int i;
+    for (i = 0; i < CAT_COUNT; i++) {
+        g_fwd[i] = FWD_DEF;
+        g_up[i] = UP_DEF;
+    }
+}
+
+/* The engine input context names what the player is doing.
+ * Menu, drone and pause contexts carry no category; those
+ * keep whatever was current. */
+static int CatFromCtx(int ctx) {
+    switch (ctx) {
+    case SH_CTX_ONFOOT:            return CAT_FOOT;
+    case SH_CTX_VEHICLE:           return CAT_LAND;
+    case SH_CTX_AIRPLANE:          return CAT_PLANE;
+    case SH_CTX_HELICOPTER:        return CAT_HELI;
+    case SH_CTX_VEHICLE_PASSENGER: return CAT_RIDER;
+    default:                       return -1;
+    }
+}
 
 /* Counted so the status line can say where the walk got
  * to, rather than only whether it matched. */
@@ -187,10 +241,12 @@ static uint64_t PlayerHeadEnt(void) {
 }
 
 /* The eye follows the head bone inside the engine's own
- * frame, so nothing here runs per frame.
+ * frame, so nothing here runs per frame. The active category
+ * owns the offsets; every camera push reads it so a category
+ * switch that lands mid aim applies the right seat.
  */
 static void PushCamera(void) {
-    if (g_fp) g_fp(g_fwd / 100.0f, g_up / 100.0f);
+    if (g_fp) g_fp(g_fwd[g_cat] / 100.0f, g_up[g_cat] / 100.0f);
 }
 
 /* The hook reapplies the eye every frame until it is given
@@ -234,6 +290,7 @@ static int HideHead(uint64_t root) {
 
 static void Report(void) {
     char line[96];
+    size_t used;
 
     if (!g_status) return;
     if (!g_on)
@@ -251,6 +308,10 @@ static void Report(void) {
                  g_nparts);
     else
         snprintf(line, sizeof(line), "on, aim once to hide the head");
+    used = strlen(line);
+    if (g_on && g_cat >= 0 && g_cat < CAT_COUNT)
+        snprintf(line + used, sizeof(line) - used, " [%s]",
+                 g_catName[g_cat]);
     g_status(g_menu, line);
 }
 
@@ -267,6 +328,12 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
         g_on = 1;
         g_nparts = 0;
         g_headAway = 0;
+        /* Start on the category the engine input context says
+         * we are in, not on whatever the last session left. */
+        if (g_inputCtx) {
+            int c = CatFromCtx(g_inputCtx());
+            if (c >= 0) g_cat = c;
+        }
         Hold(1);
         if (g_setBlur) g_setBlur(0);
     } else {
@@ -291,22 +358,20 @@ static void OnHide(uint32_t menu, uint32_t item, int value,
     Report();
 }
 
-static void OnForward(uint32_t menu, uint32_t item, int value,
-                      void *user) {
-    (void)menu; (void)item; (void)user;
-    g_fwd = (float)value;
+/* Each category owns its own sliders; user carries the
+ * category and the axis (cat*2 + 0 forward, +1 height). */
+static void OnCatSlide(uint32_t menu, uint32_t item, int value,
+                       void *user) {
+    int code = (int)(intptr_t)user;
+    int cat = code >> 1, up = code & 1;
+    (void)menu; (void)item;
+    if (cat < 0 || cat >= CAT_COUNT) return;
+    if (up) g_up[cat] = (float)value;
+    else    g_fwd[cat] = (float)value;
     SaveIni();
     /* Only while we already own it, or adjusting a slider
      * would take the camera back during a screen. */
-    if (g_on && g_held) PushCamera();
-}
-
-static void OnUp(uint32_t menu, uint32_t item, int value,
-                 void *user) {
-    (void)menu; (void)item; (void)user;
-    g_up = (float)value;
-    SaveIni();
-    if (g_on && g_held) PushCamera();
+    if (g_on && g_held && cat == g_cat) PushCamera();
 }
 
 /* 0 hands the camera over the instant iron sights come up,
@@ -503,14 +568,17 @@ static DWORD WINAPI TickThread(LPVOID p) {
         }
         /* Periodic summary so a menu round trip leaves a trace
          * even when nothing changes: playing, held, wantHide,
-         * the head hide state, and where first person stands. */
+         * the head hide state, and where first person stands.
+         * The engine input context (ctx) shows what the player
+         * is doing, which picks the eye offset category. */
         if (nowMs - lastBeat >= 1000) {
+            int ctx = g_inputCtx ? g_inputCtx() : -1;
             lastBeat = nowMs;
             Diag("beat: play=%d held=%d want=%d away=%d n=%d "
-                 "fp=%s root=%p",
+                 "fp=%s cat=%d ctx=%d root=%p",
                  playing, g_held, g_wantHide, g_headAway, g_nparts,
                  g_fpActive ? (g_fpActive() ? "yes" : "no") : "?",
-                 (void *)(uintptr_t)g_root);
+                 g_cat, ctx, (void *)(uintptr_t)g_root);
         }
         /* Give the camera back on every screen, not just on
          * the toggle, or the drone never gets it. */
@@ -544,6 +612,20 @@ static DWORD WINAPI TickThread(LPVOID p) {
             settle = 0;
         }
         Hold(!(settle >= g_settleMs && IronSights()));
+        /* Follow the engine input context: on foot, a ground
+         * vehicle, a plane, a helicopter or riding along each
+         * get their own eye offset. Menus and drones carry no
+         * category and leave the current one in place. */
+        if (g_inputCtx && g_on) {
+            int cat = CatFromCtx(g_inputCtx());
+            if (cat >= 0 && cat != g_cat) {
+                Diag("cat %d -> %d (%s)", g_cat, cat,
+                     g_catName[cat]);
+                g_cat = cat;
+                if (g_held) PushCamera();
+                Report();
+            }
+        }
         if (!g_held) continue;
         /* The head group is created the first time the game
          * camera aims, so an aim that happens while the head
@@ -728,11 +810,30 @@ static void ResolveIniPath(HMODULE m) {
         g_iniPath[0] = 0;
 }
 
+/* The FOOT category keeps the historic keys so an old config
+ * file still reads; every category also gets its own key so
+ * each stance or vehicle can be tuned separately. */
+static void CatKey(char *key, size_t n, int cat, int isUp) {
+    if (cat == CAT_FOOT)
+        snprintf(key, n, isUp ? "height_cm" : "forward_cm");
+    else
+        snprintf(key, n, isUp ? "up_%s_cm" : "fwd_%s_cm",
+                 g_catTag[cat]);
+}
+
 static void LoadIni(void) {
+    int i;
+    char key[40];
+
+    ResetCatDefaults();
     if (!g_iniPath[0]) return;
     g_wantHide = IniBool(g_iniPath, "hide_head", g_wantHide);
-    g_fwd      = IniFloat(g_iniPath, "forward_cm", g_fwd);
-    g_up       = IniFloat(g_iniPath, "height_cm", g_up);
+    for (i = 0; i < CAT_COUNT; i++) {
+        CatKey(key, sizeof(key), i, 0);
+        g_fwd[i] = IniFloat(g_iniPath, key, FWD_DEF);
+        CatKey(key, sizeof(key), i, 1);
+        g_up[i] = IniFloat(g_iniPath, key, UP_DEF);
+    }
     g_settleMs = IniInt(g_iniPath, "settle_ms", g_settleMs);
 }
 
@@ -740,15 +841,20 @@ static void LoadIni(void) {
  * a live state, not a setting, so it is deliberately not saved
  * and always starts off. */
 static void SaveIni(void) {
-    char buf[64];
+    char buf[64], key[40];
+    int i;
 
     if (!g_iniPath[0]) return;
     snprintf(buf, sizeof(buf), "%d", g_wantHide);
     WritePrivateProfileStringA("Settings", "hide_head", buf, g_iniPath);
-    snprintf(buf, sizeof(buf), "%.1f", g_fwd);
-    WritePrivateProfileStringA("Settings", "forward_cm", buf, g_iniPath);
-    snprintf(buf, sizeof(buf), "%.1f", g_up);
-    WritePrivateProfileStringA("Settings", "height_cm", buf, g_iniPath);
+    for (i = 0; i < CAT_COUNT; i++) {
+        CatKey(key, sizeof(key), i, 0);
+        snprintf(buf, sizeof(buf), "%.1f", g_fwd[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+        CatKey(key, sizeof(key), i, 1);
+        snprintf(buf, sizeof(buf), "%.1f", g_up[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+    }
     snprintf(buf, sizeof(buf), "%d", g_settleMs);
     WritePrivateProfileStringA("Settings", "settle_ms", buf, g_iniPath);
 }
@@ -756,6 +862,7 @@ static void SaveIni(void) {
 static DWORD WINAPI BindThread(LPVOID p) {
     HMODULE m = NULL;
     MenuCreate_t menuCreate;
+    MenuSub_t   menuSub;
     MenuToggle_t menuToggle;
     MenuNumber_t menuNumber;
     (void)p;
@@ -795,7 +902,9 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_sceneName = GetProcAddress(m, "ShGameSceneName");
     *(FARPROC *)&g_widgetPropType =
         GetProcAddress(m, "ShWidgetPropType");
+    *(FARPROC *)&g_inputCtx = GetProcAddress(m, "ShInputContext");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
+    *(FARPROC *)&menuSub = GetProcAddress(m, "ShMenuSub");
     *(FARPROC *)&menuToggle = GetProcAddress(m, "ShMenuToggle");
     *(FARPROC *)&menuNumber = GetProcAddress(m, "ShMenuNumber");
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
@@ -809,10 +918,32 @@ static DWORD WINAPI BindThread(LPVOID p) {
     g_menu = menuCreate("First person");
     menuToggle(g_menu, "Enabled", 0, OnToggle, NULL);
     menuToggle(g_menu, "Hide head", g_wantHide, OnHide, NULL);
-    menuNumber(g_menu, "Forward cm", g_fwd, FWD_MIN, FWD_MAX,
-               FWD_STEP, OnForward, NULL);
-    menuNumber(g_menu, "Height cm", g_up, UP_MIN, UP_MAX,
-               UP_STEP, OnUp, NULL);
+    /* One submenu per category: its own Forward/Height pair.
+     * Each row carries the category and axis so a slider knows
+     * where it writes, and entering a category's submenu shows
+     * that category's current values. */
+    if (menuSub) {
+        int i;
+        for (i = 0; i < CAT_COUNT; i++) {
+            uint32_t sub = menuSub(g_menu, g_catName[i]);
+            if (!sub) continue;
+            menuNumber(sub, "Forward cm", g_fwd[i],
+                       FWD_MIN, FWD_MAX, FWD_STEP, OnCatSlide,
+                       (void *)(intptr_t)(i * 2 + 0));
+            menuNumber(sub, "Height cm", g_up[i],
+                       UP_MIN, UP_MAX, UP_STEP, OnCatSlide,
+                       (void *)(intptr_t)(i * 2 + 1));
+        }
+    } else {
+        /* No submenus in an older ScriptHook: keep the single
+         * on foot pair on the root. */
+        menuNumber(g_menu, "Forward cm", g_fwd[CAT_FOOT],
+                   FWD_MIN, FWD_MAX, FWD_STEP, OnCatSlide,
+                   (void *)(intptr_t)(CAT_FOOT * 2 + 0));
+        menuNumber(g_menu, "Height cm", g_up[CAT_FOOT],
+                   UP_MIN, UP_MAX, UP_STEP, OnCatSlide,
+                   (void *)(intptr_t)(CAT_FOOT * 2 + 1));
+    }
     menuNumber(g_menu, "ADS settle ms", (float)g_settleMs,
                SETTLE_MIN, SETTLE_MAX, SETTLE_STEP, OnSettle, NULL);
     {
@@ -827,7 +958,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
         if (menuHint)
             menuHint(g_menu,
                      "First-person view: hide head, adjust eye height "
-                     "and distance.");
+                     "and distance per stance or vehicle.");
     }
     Report();
 
