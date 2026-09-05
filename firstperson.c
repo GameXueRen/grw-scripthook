@@ -156,6 +156,34 @@ static const char *g_catTag[CAT_COUNT] = {
     "foot", "land", "plane", "heli", "rider"
 };
 
+/* Custom presets: a saved pair of offsets the player can apply
+ * on top of any state. The five categories auto-switch on the
+ * engine input context, but a stance or vehicle that has no
+ * category of its own (or a look the player simply wants to
+ * reuse everywhere) can be covered by picking a preset. The
+ * preset list row is 0 = Auto (follow the categories), 1..N =
+ * force that preset's pair regardless of the current category. */
+enum {
+    PRESET_AUTO = -1,  /* follow g_cat as usual */
+    PRESET_1,          /* index 0 of the preset arrays */
+    PRESET_2,
+    PRESET_3,
+    PRESET_4,
+    PRESET_COUNT       /* number of custom presets */
+};
+static const char *g_presetName[PRESET_COUNT] = {
+    "Custom 1", "Custom 2", "Custom 3", "Custom 4"
+};
+static const char *g_presetTag[PRESET_COUNT] = {
+    "preset1", "preset2", "preset3", "preset4"
+};
+
+/* cm, per preset. Active choice is g_presetSel: -1 = auto
+ * (category based), 0..N-1 = force that preset. */
+static volatile float g_presFwd[PRESET_COUNT];
+static volatile float g_presUp[PRESET_COUNT];
+static volatile int   g_presetSel = PRESET_AUTO;
+
 /* cm, per category. Active at any time is g_cat, driven by
  * the engine input context: OnFoot, Vehicle, Airplane,
  * Helicopter or VehiclePassenger. The array holds the menu
@@ -169,6 +197,10 @@ static void ResetCatDefaults(void) {
     for (i = 0; i < CAT_COUNT; i++) {
         g_fwd[i] = FWD_DEF;
         g_up[i] = UP_DEF;
+    }
+    for (i = 0; i < PRESET_COUNT; i++) {
+        g_presFwd[i] = FWD_DEF;
+        g_presUp[i] = UP_DEF;
     }
 }
 
@@ -267,10 +299,17 @@ static uint64_t PlayerHeadEnt(void) {
 /* The eye follows the head bone inside the engine's own
  * frame, so nothing here runs per frame. The active category
  * owns the offsets; every camera push reads it so a category
- * switch that lands mid aim applies the right seat.
+ * switch that lands mid aim applies the right seat. A forced
+ * custom preset (g_presetSel >= 0) overrides the category's
+ * own pair entirely.
  */
 static void PushCamera(void) {
-    if (g_fp) g_fp(g_fwd[g_cat] / 100.0f, g_up[g_cat] / 100.0f);
+    if (!g_fp) return;
+    if (g_presetSel >= 0 && g_presetSel < PRESET_COUNT)
+        g_fp(g_presFwd[g_presetSel] / 100.0f,
+             g_presUp[g_presetSel] / 100.0f);
+    else
+        g_fp(g_fwd[g_cat] / 100.0f, g_up[g_cat] / 100.0f);
 }
 
 /* The hook reapplies the eye every frame until it is given
@@ -333,9 +372,14 @@ static void Report(void) {
     else
         snprintf(line, sizeof(line), "on, aim once to hide the head");
     used = strlen(line);
-    if (g_on && g_cat >= 0 && g_cat < CAT_COUNT)
-        snprintf(line + used, sizeof(line) - used, " [%s]",
-                 g_catName[g_cat]);
+    if (g_on) {
+        if (g_presetSel >= 0 && g_presetSel < PRESET_COUNT)
+            snprintf(line + used, sizeof(line) - used, " [%s]",
+                     g_presetName[g_presetSel]);
+        else if (g_cat >= 0 && g_cat < CAT_COUNT)
+            snprintf(line + used, sizeof(line) - used, " [%s]",
+                     g_catName[g_cat]);
+    }
     g_status(g_menu, line);
 }
 
@@ -419,6 +463,36 @@ static void OnCatSlide(uint32_t menu, uint32_t item, int value,
     /* Only while we already own it, or adjusting a slider
      * would take the camera back during a screen. */
     if (g_on && g_held && cat == g_cat) PushCamera();
+}
+
+/* Preset list row: 0 = Auto (follow the categories), 1..N =
+ * force that custom preset. Applying takes effect immediately
+ * on the camera, then sticks for the session and is saved. */
+static void OnPresetList(uint32_t menu, uint32_t item, int value,
+                         void *user) {
+    (void)menu; (void)item; (void)user;
+    g_presetSel = value - 1;   /* -1 = Auto, 0.. = preset */
+    if (g_presetSel < PRESET_AUTO) g_presetSel = PRESET_AUTO;
+    if (g_presetSel >= PRESET_COUNT) g_presetSel = PRESET_COUNT - 1;
+    SaveIni();
+    if (g_on && g_held) PushCamera();
+    Report();
+}
+
+/* Each preset owns its own sliders; user carries the preset and
+ * the axis (preset*2 + 0 forward, +1 height). */
+static void OnPresetSlide(uint32_t menu, uint32_t item, int value,
+                          void *user) {
+    int code = (int)(intptr_t)user;
+    int idx = code >> 1, up = code & 1;
+    (void)menu; (void)item;
+    if (idx < 0 || idx >= PRESET_COUNT) return;
+    if (up) g_presUp[idx] = (float)value;
+    else    g_presFwd[idx] = (float)value;
+    SaveIni();
+    /* Live preview only while we already own the camera and this
+     * preset is the one in force. */
+    if (g_on && g_held && g_presetSel == idx) PushCamera();
 }
 
 /* 0 hands the camera over the instant iron sights come up,
@@ -906,6 +980,11 @@ static void CatKey(char *key, size_t n, int cat, int isUp) {
                  g_catTag[cat]);
 }
 
+static void PresetKey(char *key, size_t n, int idx, int isUp) {
+    snprintf(key, n, isUp ? "%s_up_cm" : "%s_fwd_cm",
+             g_presetTag[idx]);
+}
+
 static void LoadIni(void) {
     int i;
     char key[40];
@@ -919,6 +998,19 @@ static void LoadIni(void) {
         g_fwd[i] = IniFloat(g_iniPath, key, FWD_DEF);
         CatKey(key, sizeof(key), i, 1);
         g_up[i] = IniFloat(g_iniPath, key, UP_DEF);
+    }
+    for (i = 0; i < PRESET_COUNT; i++) {
+        PresetKey(key, sizeof(key), i, 0);
+        g_presFwd[i] = IniFloat(g_iniPath, key, FWD_DEF);
+        PresetKey(key, sizeof(key), i, 1);
+        g_presUp[i] = IniFloat(g_iniPath, key, UP_DEF);
+    }
+    /* preset_active: 0 = Auto (default), 1..N = force preset N. */
+    {
+        int p = IniInt(g_iniPath, "preset_active", 0);
+        g_presetSel = p <= 0 ? PRESET_AUTO : p - 1;
+        if (g_presetSel >= PRESET_COUNT)
+            g_presetSel = PRESET_AUTO;
     }
     g_settleMs = IniInt(g_iniPath, "settle_ms", g_settleMs);
     /* One hotkey row: hotkey_key is 0 (None)..3. An ini saved
@@ -953,6 +1045,18 @@ static void SaveIni(void) {
         snprintf(buf, sizeof(buf), "%.1f", g_up[i]);
         WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
     }
+    for (i = 0; i < PRESET_COUNT; i++) {
+        PresetKey(key, sizeof(key), i, 0);
+        snprintf(buf, sizeof(buf), "%.1f", g_presFwd[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+        PresetKey(key, sizeof(key), i, 1);
+        snprintf(buf, sizeof(buf), "%.1f", g_presUp[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+    }
+    snprintf(buf, sizeof(buf), "%d",
+             g_presetSel >= 0 ? g_presetSel + 1 : 0);
+    WritePrivateProfileStringA("Settings", "preset_active", buf,
+                               g_iniPath);
     snprintf(buf, sizeof(buf), "%d", g_settleMs);
     WritePrivateProfileStringA("Settings", "settle_ms", buf, g_iniPath);
     snprintf(buf, sizeof(buf), "%d", g_hotKey);
@@ -1033,12 +1137,29 @@ static DWORD WINAPI BindThread(LPVOID p) {
                      HOTKEYS, g_hotKey, OnHotKey, NULL);
     }
     menuToggle(g_menu, "Hide head", g_wantHide, OnHide, NULL);
-    /* One submenu per category: its own Forward/Height pair.
-     * Each row carries the category and axis so a slider knows
-     * where it writes, and entering a category's submenu shows
-     * that category's current values. */
     if (menuSub) {
+        MenuList_t menuList;
         int i;
+        /* ADS settle ms sits above the Preset row (View preset). */
+        menuNumber(g_menu, "ADS settle ms", (float)g_settleMs,
+                   SETTLE_MIN, SETTLE_MAX, SETTLE_STEP, OnSettle, NULL);
+        /* Custom presets: a pick row (Auto / Custom 1..4) above the
+         * category list. Selecting a preset forces its pair on every
+         * state; Auto hands control back to the category list. */
+        {
+            static const char *opts[PRESET_COUNT + 1];
+            opts[0] = "Auto";
+            for (i = 0; i < PRESET_COUNT; i++)
+                opts[i + 1] = g_presetName[i];
+            *(FARPROC *)&menuList = GetProcAddress(m, "ShMenuList");
+            if (menuList)
+                menuList(g_menu, "Preset", opts, PRESET_COUNT + 1,
+                         g_presetSel + 1, OnPresetList, NULL);
+        }
+        /* One submenu per category: its own Forward/Height pair.
+         * Each row carries the category and axis so a slider knows
+         * where it writes, and entering a category's submenu shows
+         * that category's current values. */
         for (i = 0; i < CAT_COUNT; i++) {
             uint32_t sub = menuSub(g_menu, g_catName[i]);
             if (!sub) continue;
@@ -1049,18 +1170,30 @@ static DWORD WINAPI BindThread(LPVOID p) {
                        UP_MIN, UP_MAX, UP_STEP, OnCatSlide,
                        (void *)(intptr_t)(i * 2 + 1));
         }
+        /* Editable presets follow the category list, so the category
+         * submenus stay contiguous after Passenger. */
+        for (i = 0; i < PRESET_COUNT; i++) {
+            uint32_t sub = menuSub(g_menu, g_presetName[i]);
+            if (!sub) continue;
+            menuNumber(sub, "Forward cm", g_presFwd[i],
+                       FWD_MIN, FWD_MAX, FWD_STEP, OnPresetSlide,
+                       (void *)(intptr_t)(i * 2 + 0));
+            menuNumber(sub, "Height cm", g_presUp[i],
+                       UP_MIN, UP_MAX, UP_STEP, OnPresetSlide,
+                       (void *)(intptr_t)(i * 2 + 1));
+        }
     } else {
         /* No submenus in an older ScriptHook: keep the single
-         * on foot pair on the root. */
+         * on foot pair and ADS settle on the root. */
         menuNumber(g_menu, "Forward cm", g_fwd[CAT_FOOT],
                    FWD_MIN, FWD_MAX, FWD_STEP, OnCatSlide,
                    (void *)(intptr_t)(CAT_FOOT * 2 + 0));
         menuNumber(g_menu, "Height cm", g_up[CAT_FOOT],
                    UP_MIN, UP_MAX, UP_STEP, OnCatSlide,
                    (void *)(intptr_t)(CAT_FOOT * 2 + 1));
+        menuNumber(g_menu, "ADS settle ms", (float)g_settleMs,
+                   SETTLE_MIN, SETTLE_MAX, SETTLE_STEP, OnSettle, NULL);
     }
-    menuNumber(g_menu, "ADS settle ms", (float)g_settleMs,
-               SETTLE_MIN, SETTLE_MAX, SETTLE_STEP, OnSettle, NULL);
     {
         MenuAction_t menuAction;
         *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
