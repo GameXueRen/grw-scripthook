@@ -29,8 +29,9 @@ param(
     [switch]$Clean,
 
     # Dear ImGui source folder (imgui.h / imgui.cpp / backends\),
-    # compiled into dinput8.dll for the menu overlay.
-    [string]$Imgui = (Join-Path $PSScriptRoot '..\..\GitHub\imgui-1.92.7')
+    # compiled into dinput8.dll for the menu overlay. Vendored under
+    # third_party/imgui; -Imgui overrides for a newer checkout.
+    [string]$Imgui = (Join-Path $PSScriptRoot 'third_party\imgui')
 )
 
 $ErrorActionPreference = 'Stop'
