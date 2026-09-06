@@ -459,7 +459,7 @@ static uint64_t __attribute__((ms_abi)) CreateJob(uint64_t sid, uint64_t b,
     ((Fn1)F_SCENE_CTOR)(scene);
     s->vt = RQ(scene);
     priv = RQ(scene + 8);
-    if (!priv) return 0;
+    if (!priv) goto fail;
     ((Scene3)F_SCENE_SETCTX)(scene, &res, (uint64_t)(uintptr_t)&g_localizer);
     /* the game's name resolver passes texture names through */
     g_resolver.vt = VT_GAME_RESOLVER;
@@ -467,13 +467,16 @@ static uint64_t __attribute__((ms_abi)) CreateJob(uint64_t sid, uint64_t b,
     ((Scene2)F_SCENE_RESIZE)(scene, &res);
     root = RQ(priv + SP_ROOT);
     rootP = RQ(root + 0x20);
-    if (!root || !rootP) return 0;
+    if (!root || !rootP) goto fail;
     if (RQ(rootP + 0x130) != scene)
         ((Fn3)F_ATTACH)(rootP, scene, 0);
     idx = *(uint8_t *)(uintptr_t)(priv + SP_IDX);
     *(uint8_t *)(uintptr_t)(priv + SP_STATE + idx) = STATE_LIVE;
 
-    if (!InstallHook()) { Log("scene: hook install failed"); return 0; }
+    if (!InstallHook()) {
+        Log("scene %llu: hook install failed", (unsigned long long)sid);
+        goto fail;
+    }
     s->handle = scene; s->priv = priv;
     s->rootH = root; s->rootP = rootP;
     s->flippedFrame = -1;
@@ -483,6 +486,15 @@ static uint64_t __attribute__((ms_abi)) CreateJob(uint64_t sid, uint64_t b,
         (unsigned long long)priv, (unsigned long long)root,
         (unsigned long long)rootP, s->order);
     return 1;
+
+fail:
+    /* A half-built scene must not stay in the engine pool: undo the
+     * ctor exactly the way a teardown would. */
+    Log("scene %llu: create failed, freeing %llx",
+        (unsigned long long)sid, (unsigned long long)scene);
+    DestroyEngineScene(scene);
+    s->vt = 0;
+    return 0;
 }
 
 static uint64_t __attribute__((ms_abi)) DestroyJob(uint64_t sid, uint64_t b,
