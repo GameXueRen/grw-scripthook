@@ -478,6 +478,21 @@ static void ImeMirrorMsg(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 }
 
+/* Live while a pinyin composition or its candidate list is on
+ * screen.  The chat poll thread reads this to keep its hands off
+ * Enter / Esc / Backspace: during composition those keys belong to
+ * the IME (shorten pinyin, commit letters, cancel), and acting on
+ * them here as well is what deleted committed Chinese from the
+ * buffer while Backspace was only trimming pinyin letters. */
+int ShChatComposing(void)
+{
+    int on;
+    ImeLock();
+    on = g_ime.active || g_ime.candOpen;
+    ImeUnlock();
+    return on;
+}
+
 static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     /* Chat box just opened: one IME-enable attempt per session. */

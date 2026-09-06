@@ -283,6 +283,8 @@ static volatile int g_cfgCand    = 0;   /* default overlay-drawn */
 static DWORD WINAPI ChatThread(LPVOID arg) {
     (void)arg;
     int tDown = 0;
+    int compLatch = 0;   /* just left a composition; see below   */
+    DWORD backNext = 0;  /* when a held Backspace repeats next  */
     for (;;) {
         Sleep(POLL_MS);
 
@@ -302,6 +304,7 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
         }
 
         if (!g_chat.open) {
+            compLatch = 0;
             if (!IsPlaying() || !WindowFocused()) {
                 memset(g_keyWas, 0, sizeof(g_keyWas));
                 tDown = 0;
@@ -329,12 +332,44 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
             memset(g_keyWas, 0, sizeof(g_keyWas));
             continue;
         }
+        /* While a pinyin composition is live the command keys belong
+         * to the IME: Backspace shortens the pinyin, Enter commits
+         * its letters, Esc cancels it.  Acting on them here as well
+         * is what wiped committed Chinese when Backspace was only
+         * trimming pinyin letters. */
+        if (ShChatComposing()) {
+            compLatch = 1;
+            continue;
+        }
+        if (compLatch) {
+            /* Just left a composition.  The very press that ended it
+             * (typically the Backspace that ate the last letter) is
+             * usually still down - or lands inside one poll gap -
+             * by the time we get here, and our edge detector has not
+             * seen it yet, so it would fire again against the
+             * buffer.  Swallow the command keys until they come up
+             * once; only the next full press reaches the text. */
+            if (KeyDown(VK_BACK) || KeyDown(VK_ESCAPE) ||
+                KeyDown(VK_RETURN)) {
+                memset(g_keyWas, 0, sizeof(g_keyWas));
+                continue;
+            }
+            compLatch = 0;
+        }
         if (Pressed(VK_ESCAPE)) {
             Lock(); g_chat.cmd = 2; Unlock();
         } else if (Pressed(VK_RETURN)) {
             Lock(); g_chat.cmd = 1; Unlock();
         } else if (Pressed(VK_BACK)) {
             Lock(); TextBackLocked(); Unlock();
+            backNext = GetTickCount() + 350;
+        } else if (KeyDown(VK_BACK) && g_keyWas[VK_BACK & 0xFF] &&
+                   (int)(GetTickCount() - backNext) >= 0) {
+            /* Held past the initial delay: keep deleting just like
+             * a native text field (the IME already auto-repeats
+             * while trimming pinyin, this covers the buffer). */
+            Lock(); TextBackLocked(); Unlock();
+            backNext = GetTickCount() + 40;
         } else if (CtrlHeld() && Pressed('V')) {
             PasteClipboard();
         }

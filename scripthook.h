@@ -710,6 +710,11 @@ void ShChatClose(void);
  *  box exactly like it would a native Edit. */
 int  ShChatWndMsg(uint64_t hwnd, uint32_t msg,
                   uint64_t wp, uint64_t lp);
+/** Internal: true while an IME composition (pinyin) or its candidate
+ *  list is live on the game window.  The chat poll thread must leave
+ *  Enter / Esc / Backspace to the IME in that state - they edit the
+ *  composition, not the committed text buffer. */
+int  ShChatComposing(void);
 
 /** Internal: chat feature runtime configuration (mod settings page).
  *  Enabled defaults off; the start key must match the game's own text
