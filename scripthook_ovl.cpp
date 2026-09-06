@@ -564,17 +564,22 @@ namespace {
 
 const float MENU_X  = 16.0f;
 const float MENU_Y  = 16.0f;
-const float MENU_W  = 400.0f;
+const float MENU_W  = 520.0f;
 const float PAD     = 16.0f;  // horizontal + bottom padding
 const float PAD_TOP = 0.0f;
-const float TITLE_H = 32.0f;
-const float ROW_H   = 28.0f;
-// Highlight bar. Empirical: msyh.ttc rendered glyphs sit ~13px below
-// what baked->Ascent/Descent predict. Text visual centre is at ry+27
-// and BAR_DY=16 keeps the bar (BAR_H=22) centred on it.
-const float BAR_DY  = 16.0f;
-const float BAR_H   = 22.0f;
-const float VALUE_W = 150.0f;
+const float TITLE_H = 40.0f;
+const float ROW_H   = 34.0f;
+// Selection bar: centred on the row's text box (see RenderMenu), no
+// manual offset - same scheme as the chat candidate rows.
+const float BAR_H   = 26.0f;
+const float VALUE_W = 130.0f;
+// Menu text uses the same bold CJK font as the chat box, ~24px.
+const float MENU_FS       = 24.0f;  /* row text  */
+const float MENU_TITLE_FS = 28.0f;  /* title     */
+const float MENU_HINT_FS  = 17.0f;  /* hints     */
+const float MENU_HINT_LH  = 24.0f;
+const float MENU_HINT_GAP = 6.0f;
+const float MENU_CREDIT_FS = 14.0f;
 
 // 0xRRGGBB -> ImU32 (0xAABBGGRR)
 ImU32 Col(uint32_t rgb, int a = 255)
@@ -585,23 +590,15 @@ ImU32 Col(uint32_t rgb, int a = 255)
 // Text layout helpers.
 //
 // IMPORTANT: in this ImGui version ImDrawList::AddText() treats pos.y as
-// the TOP of the text line, not the baseline - glyph.Y0 is stored as an
-// offset from the line top and is ~0 for the first row (see the glyph
-// data comment in imgui_draw.cpp: "x0/y0 ... offset from the character
-// upper-left layout position").  So to vertically centre one line of
-// text inside a box you position the line's TOP, and a caret / highlight
-// must use that same top rather than an imagined baseline.
-
-// Layout note: ImDrawList::AddText treats pos.y as the TOP of the text
-// line (the glyph data is stored relative to the line's upper-left, so
-// glyph.Y0 ~ 0 for the top row), and ImGui advances lines by exactly
-// `font_size`.  So one visual text box is [top, top + font_size].  To
-// centre that box in a row [ry, ry + row_h], top = ry + (row_h - fs)/2.
-// A caret or a selection bar that must line up with the glyphs uses the
-// same box, NOT an imagined baseline offset.
-static float TextLineHeight(ImFont* font, float font_size)
+// the TOP of the text line, not the baseline (glyph.Y0 is stored as an
+// offset from the line top and is ~0 for the first row).  A visual text
+// box is [top, top + font_size].  To centre that box in a row
+// [ry, ry + row_h] use TextTopForRow; a caret or a selection bar that
+// must line up with the glyphs is centred on that same box, NOT on an
+// imagined baseline.  The chat box, its candidate list and the menu all
+// share this scheme.
+static float TextLineHeight(ImFont*, float font_size)
 {
-    (void)font;
     return font_size;
 }
 
@@ -611,33 +608,13 @@ static float TextTopForRow(ImFont*, float font_size, float ry, float row_h)
     return ry + (row_h - font_size) * 0.5f;
 }
 
-// Vertical centre of that same text box, for a caret or a bar.
-static float TextMidForRow(ImFont*, float font_size, float ry, float row_h)
-{
-    return ry + row_h * 0.5f;
-}
-
-// The legacy menu renderer was tuned empirically around the assumption
-// that AddText pos.y was a baseline (see the msyh "sits ~13px below"
-// notes).  Keep it as-is so the menu keeps its proven look; new drawing
-// code must use TextTopForRow/TextMidForRow and treat AddText pos.y as
-// the text TOP.
-static float CenteredBaseline(ImFont* font, float font_size, float ry, float row_h)
-{
-    ImFontBaked* baked = font->GetFontBaked(font_size);
-    if (!baked) baked = font->GetFontBaked(font->LegacySize);
-    if (!baked) return ry + row_h * 0.5f;
-    float ascent  = baked->Ascent;   // >=0 (pixels above baseline)
-    float descent = baked->Descent;  // <=0 (pixels below baseline)
-    return ry + row_h * 0.5f + (ascent + descent) * 0.5f;
-}
-
 void RenderMenu(const ShMenuView* v)
 {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
-    ImFont* font = ImGui::GetFont();
-    const float fs = 16.0f, titleFs = 18.0f, hintFs = 14.0f;
-    const float hintLh = 18.0f, hintGap = 5.0f;
+    // Same bold CJK font as the chat box; falls back to the default.
+    ImFont* font = g_chatFont ? g_chatFont : ImGui::GetFont();
+    const float fs = MENU_FS, titleFs = MENU_TITLE_FS, hintFs = MENU_HINT_FS;
+    const float hintLh = MENU_HINT_LH, hintGap = MENU_HINT_GAP;
     const float x = MENU_X, y = MENU_Y;
     int i;
 
@@ -650,17 +627,11 @@ void RenderMenu(const ShMenuView* v)
         hl++;
     }
     if (hintLines > 2) hintLines = 2;
-    // hintH must reach down to the actual glyph bottom of the last
-    // hint line, not just hintGap + hintLh * lines. msyh's line
-    // height at 14px is ~15px, so hintLh=18 leaves a visible gap
-    // between the hint block and the first row. Measure descent
-    // from the font and use it.
+    // Each hint line occupies a hintFs-tall text box; the first row
+    // starts just below the last hint line's box.
     float hintH = 0.0f;
-    if (hintLines) {
-        ImFontBaked* hb = font->GetFontBaked(hintFs);
-        float descent = hb ? -hb->Descent : 3.0f;
-        hintH = hintGap + hintLh * (float)(hintLines - 1) + descent;
-    }
+    if (hintLines)
+        hintH = hintGap + (float)(hintLines - 1) * hintLh + hintFs;
 
     float h = PAD_TOP + TITLE_H + hintH + ROW_H * (float)v->rows + PAD;
     if (v->footer[0]) h += ROW_H;
@@ -669,36 +640,41 @@ void RenderMenu(const ShMenuView* v)
     // Panel: translucent rounded quad.
     dl->AddRectFilled(ImVec2(x, y), ImVec2(x + MENU_W, y + h),
                       IM_COL32(0, 0, 0, 204), 6.0f);
-    // Title.
-    float titleBy = CenteredBaseline(font, titleFs, y + PAD_TOP, TITLE_H);
-    dl->AddText(font, titleFs, ImVec2(x + PAD, titleBy),
+    // Root menu top-right credits keep their own width; the title is
+    // shrunk (never below 18px) if it would otherwise run into them.
+    float rightX = x + MENU_W - PAD;
+    float creditW = 0.0f, cFs = MENU_CREDIT_FS, cGap = 2.0f;
+    ImVec2 s1, s2;
+    if (v->isRoot) {
+        const char* c1 = "原作者：Phiality · 魔改：GameXueRen";
+        const char* c2 = "版本：Beta1.0 · Q群：299177445";
+        s1 = font->CalcTextSizeA(cFs, FLT_MAX, 0.0f, c1);
+        s2 = font->CalcTextSizeA(cFs, FLT_MAX, 0.0f, c2);
+        creditW = s1.x > s2.x ? s1.x : s2.x;
+    }
+    float tFs = titleFs;
+    float tLimit = creditW > 0.0f ? rightX - creditW - 10.0f
+                                  : rightX - PAD;
+    while (tFs > 18.0f &&
+           font->CalcTextSizeA(tFs, FLT_MAX, 0.0f, v->title).x > tLimit)
+        tFs -= 2.0f;
+    // Title, vertically centred in the title band by its text TOP
+    // (AddText pos.y is the line top, same convention as the chat box).
+    float ttop = TextTopForRow(font, tFs, y + PAD_TOP, TITLE_H);
+    dl->AddText(font, tFs, ImVec2(x + PAD, ttop),
                 Col(0xFFD25Au), v->title);
     // Root menu top-right credits: original author + this build.
     if (v->isRoot) {
-        const float cFs1 = 14.0f, cFs2 = 14.0f, cGap = 1.0f;
         const char* c1 = "原作者：Phiality · 魔改：GameXueRen";
         const char* c2 = "版本：Beta1.0 · Q群：299177445";
-        ImFontBaked* b1 = font->GetFontBaked(cFs1);
-        ImFontBaked* b2 = font->GetFontBaked(cFs2);
-        if (!b1) b1 = font->GetFontBaked(font->LegacySize);
-        if (!b2) b2 = b1 ? b1 : font->GetFontBaked(font->LegacySize);
-        if (b1 && b2) {
-            ImVec2 s1 = font->CalcTextSizeA(cFs1, FLT_MAX, 0.0f, c1);
-            ImVec2 s2 = font->CalcTextSizeA(cFs2, FLT_MAX, 0.0f, c2);
-            float rightX = x + MENU_W - PAD;
-            float g1 = b1->Ascent - b1->Descent;
-            float g2 = b2->Ascent - b2->Descent;
-            float blockH = g1 + cGap + g2;
-            float t1 = y + PAD_TOP + (TITLE_H - blockH) * 0.5f;
-            float by1 = t1 + b1->Ascent;
-            float by2 = t1 + g1 + cGap + b2->Ascent;
-            dl->AddText(font, cFs1, ImVec2(rightX - s1.x, by1),
-                        Col(0xE6E6E6u), c1);
-            dl->AddText(font, cFs2, ImVec2(rightX - s2.x, by2),
-                        Col(0x8C9BA8u), c2);
-        }
+        float blockH = cFs + cGap + cFs;
+        float bTop = y + PAD_TOP + (TITLE_H - blockH) * 0.5f;
+        dl->AddText(font, cFs, ImVec2(rightX - s1.x, bTop),
+                    Col(0xE6E6E6u), c1);
+        dl->AddText(font, cFs, ImVec2(rightX - s2.x, bTop + cFs + cGap),
+                    Col(0x8C9BA8u), c2);
     }
-    // Control hints, two small grey lines under the title.
+    // Control hints, small grey lines under the title.
     {
         float hy = y + PAD_TOP + TITLE_H + hintGap;
         const char* hl = v->hint;
@@ -719,67 +695,44 @@ void RenderMenu(const ShMenuView* v)
     }
     // Row area starts below the title and the hints.
     const float top = y + PAD_TOP + TITLE_H + hintH;
-    // Selection bar behind the selected row (centred on row centre).
+    // Selection bar behind the selected row, centred on that row's text
+    // box - the same scheme as the chat candidate rows, no manual
+    // offset, so text and highlight always sit on the same centre line.
     if (v->rows > 0) {
         float sy = top + ROW_H * (float)v->sel;
-        dl->AddRectFilled(ImVec2(x + PAD * 0.5f, sy + BAR_DY),
-                          ImVec2(x + MENU_W - PAD * 0.5f, sy + BAR_DY + BAR_H),
+        float rTop = TextTopForRow(font, fs, sy, ROW_H);
+        float hc = rTop + TextLineHeight(font, fs) * 0.5f;
+        dl->AddRectFilled(ImVec2(x + PAD * 0.5f, hc - BAR_H * 0.5f),
+                          ImVec2(x + MENU_W - PAD * 0.5f, hc + BAR_H * 0.5f),
                           Col(0x28465Au, 230), 3.0f);
     }
     // Rows: name left, value right-aligned in its column.
     for (i = 0; i < v->rows; i++) {
         const ShMenuRow* r = &v->row[i];
         float ry = top + ROW_H * (float)i;
+        float rTop = TextTopForRow(font, fs, ry, ROW_H);
         ImU32 c = r->selected ? Col(0x8CF0FFu) : Col(0xD2D2D2u);
-        float by = CenteredBaseline(font, fs, ry, ROW_H);
-        dl->AddText(font, fs, ImVec2(x + PAD + 8.0f, by), c, r->name);
+        dl->AddText(font, fs, ImVec2(x + PAD + 8.0f, rTop), c, r->name);
         if (r->value[0]) {
             ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r->value);
             dl->AddText(font, fs,
                         ImVec2(x + MENU_W - PAD - VALUE_W +
-                               (VALUE_W - sz.x), by),
+                               (VALUE_W - sz.x), rTop),
                         c, r->value);
         }
     }
     // Footer and status lines.
     float fy = top + ROW_H * (float)v->rows;
     if (v->footer[0]) {
-        float fby = CenteredBaseline(font, fs, fy, ROW_H);
-        dl->AddText(font, fs, ImVec2(x + PAD, fby),
+        float fTop = TextTopForRow(font, fs, fy, ROW_H);
+        dl->AddText(font, fs, ImVec2(x + PAD, fTop),
                     Col(0x8C8C8Cu), v->footer);
         fy += ROW_H;
     }
     if (v->status[0]) {
-        float sby = CenteredBaseline(font, fs, fy, ROW_H);
-        dl->AddText(font, fs, ImVec2(x + PAD, sby),
+        float sTop = TextTopForRow(font, fs, fy, ROW_H);
+        dl->AddText(font, fs, ImVec2(x + PAD, sTop),
                     Col(0xA0E6A0u), v->status);
-    }
-
-    // One-shot diagnostics: log the actual font metrics and where
-    // the centred baseline lands for this row geometry so we can
-    // verify alignment against the cursor.
-    {
-        static bool logged = false;
-        if (!logged)
-        {
-            logged = true;
-            ImFontBaked* b16 = font->GetFontBaked(fs);
-            ImFontBaked* b18 = font->GetFontBaked(titleFs);
-            OvlLog("font metrics: legacy=%.2f baked16 a=%.2f d=%.2f sz=%.2f | baked18 a=%.2f d=%.2f sz=%.2f",
-                   font->LegacySize,
-                   b16 ? b16->Ascent : -1.f, b16 ? b16->Descent : -1.f, b16 ? b16->Size : -1.f,
-                   b18 ? b18->Ascent : -1.f, b18 ? b18->Descent : -1.f, b18 ? b18->Size : -1.f);
-            float sampleRy = 0.0f;
-            float by  = CenteredBaseline(font, fs, sampleRy, ROW_H);
-            float by18 = CenteredBaseline(font, titleFs, sampleRy, TITLE_H);
-            OvlLog("layout: ROW_H=%.0f BAR_DY=%.0f BAR_H=%.0f | row baseline offset=%.2f (text spans %.2f..%.2f, centre=%.2f) | title offset=%.2f",
-                   ROW_H, BAR_DY, BAR_H,
-                   by, by - (b16 ? b16->Ascent : 0.f),
-                   by - (b16 ? b16->Descent : 0.f),
-                   (by - (b16 ? b16->Ascent : 0.f) + by - (b16 ? b16->Descent : 0.f)) * 0.5f,
-                   by18);
-            OvlLog("hint: bar should overlap text bbox; if bar looks high, raise BAR_DY; if low, lower it");
-        }
     }
 }
 
