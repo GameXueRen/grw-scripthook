@@ -469,6 +469,21 @@ static BOOL CALLBACK ImeForeignEnum(HWND h, LPARAM lp)
     g_imeForeign[slot].cand = cand;
     g_imeForeign[slot].orig = (WNDPROC)SetWindowLongPtrW(
         h, GWLP_WNDPROC, (LONG_PTR)ImeForeignProc);
+    /* A first-seen window was created AND shown by the IME before we
+     * ever subclassed it - that is the one native candidate flash in
+     * the bottom right corner on the very first composition.  The
+     * subclass only steers FUTURE moves, so a window that is already
+     * visible must be parked right now, or it stays on screen until
+     * the IME happens to move it again.  The async flags post the
+     * change to the window's own thread, so this is safe from any
+     * thread; the move passes through our own WM_WINDOWPOSCHANGING
+     * handler, which parks it anyway in self-drawn mode. */
+    if (ShChatGetCandMode() == 0) {
+        SetWindowPos(h, NULL, -32000, -32000, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                     SWP_ASYNCWINDOWPOS);
+        ShowWindowAsync(h, SW_HIDE);
+    }
     return TRUE;
 }
 
@@ -480,10 +495,19 @@ static BOOL CALLBACK ImeForeignEnum(HWND h, LPARAM lp)
  * with each WM_WINDOWPOSCHANGING depends on the candidate mode (see
  * ImeForeignProc); both modes need the subclass installed, so this runs
  * in CandMode = 0 AND CandMode = 1. */
+/* One scan at a time: both the window thread (on IME composition
+ * messages) and the render thread (periodic backstop) call this, and
+ * two concurrent passes would double-subclass a window - the second
+ * SetWindowLongPtrW would record ImeForeignProc itself as the
+ * original, breaking the restore chain in ImeProbeDisable. */
+static volatile LONG g_imeScanBusy = 0;
+
 static void ImeHideForeignWindows(void)
 {
+    if (InterlockedCompareExchange(&g_imeScanBusy, 1, 0)) return;
     ImeUpdateAnchor();
     EnumWindows(ImeForeignEnum, 0);
+    InterlockedExchange(&g_imeScanBusy, 0);
 }
 
 /* Undo everything ImeProbeEnable and the foreign-window subclass
@@ -613,6 +637,7 @@ static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
             return DefWindowProcW(hWnd, msg, wParam, lParam);
         case WM_IME_COMPOSITION:
             if (!selfDrawn) ImeApplyAnchor(hWnd);
+            else ImeHideForeignWindows();
             ImeMirrorMsg(hWnd, msg, wParam, lParam);
             /* DefWindowProc's GCS_RESULTSTR handling turns the final
              * text into WM_IME_CHAR for our chat buffer. */
