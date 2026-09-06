@@ -21,8 +21,10 @@
 #include <dxgi.h>
 #include <string.h>
 #include <imm.h>
+#include <psapi.h>
 #include <vector>
 #pragma comment(lib, "imm32.lib")
+#pragma comment(lib, "psapi.lib")
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
@@ -34,6 +36,13 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+/* Leak-probe counters supplied by the C modules (see scripthook_ui.c /
+ * scripthook_scene.c).  Called from the 5s render heartbeat below. */
+extern "C" {
+int ShUiLeakProbe(int *widgets, int *zombies, int *textures);
+int ShSceneLeakProbe(int *used, int *live, int *dead);
+}
 
 #define OVL_LOG "scripthook_ovl.log"
 static void OvlLog(const char* fmt, ...)
@@ -1072,6 +1081,37 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
         {
             lastOpen = open;
             OvlLog("menu %s", open ? "OPEN" : "closed");
+        }
+    }
+
+    // 5s heartbeat: process memory + module object counts.  Runs on the
+    // render thread unconditionally so a long session shows whether
+    // private memory, UI widgets/zombies/textures or scene slots grow.
+    if (g_ready)
+    {
+        static DWORD leakAt = GetTickCount();
+        if ((int)(GetTickCount() - leakAt) > 5000)
+        {
+            int uw = -1, uz = -1, ut = -1, su = -1, sl = -1, sd = -1;
+            PROCESS_MEMORY_COUNTERS_EX pmc;
+            leakAt = GetTickCount();
+            memset(&pmc, 0, sizeof(pmc));
+            pmc.cb = sizeof(pmc);
+            /* The EX struct keeps PrivateUsage; GetProcessMemoryInfo
+             * fills what the passed size asks for. */
+            if (GetProcessMemoryInfo(GetCurrentProcess(),
+                                     (PROCESS_MEMORY_COUNTERS *)&pmc,
+                                     sizeof(pmc)))
+            {
+                ShUiLeakProbe(&uw, &uz, &ut);
+                ShSceneLeakProbe(&su, &sl, &sd);
+                OvlLog("leak: priv=%llu ws=%llu page=%llu"
+                       " ui(w=%d z=%d t=%d) scene(u=%d l=%d d=%d)",
+                       (unsigned long long)pmc.PrivateUsage,
+                       (unsigned long long)pmc.WorkingSetSize,
+                       (unsigned long long)pmc.PagefileUsage,
+                       uw, uz, ut, su, sl, sd);
+            }
         }
     }
 

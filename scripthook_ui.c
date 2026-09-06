@@ -1630,6 +1630,26 @@ SH_API uint32_t ShUiTextureCreate(int w, int h, const uint8_t *rgba,
     return id;
 }
 
+/* Leak probe: counts for the 5s overlay heartbeat (see ovl).  Callers
+ * are on the render thread; the UI lock is held only for the scan, so a
+ * long-running session can watch whether widgets (alive/zombie) or
+ * engine textures (alive, never recycled - see ShUiTextureCreate) grow. */
+int ShUiLeakProbe(int *widgets, int *zombies, int *textures) {
+    int i, w = 0, z = 0, t = 0;
+    Lock();
+    for (i = 0; i < MAX_UI; i++) {
+        if (g_w[i].alive) w++;
+        if (g_w[i].zombie) z++;
+    }
+    for (i = 0; i < MAX_TEX; i++)
+        if (g_tex[i].alive) t++;
+    Unlock();
+    if (widgets) *widgets = w;
+    if (zombies) *zombies = z;
+    if (textures) *textures = t;
+    return 0;
+}
+
 /* Shows a texture on an image widget or a panel's plate. */
 SH_API int ShUiImageSet(uint32_t id, uint32_t texture) {
     TexCall tc;

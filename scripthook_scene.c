@@ -667,3 +667,22 @@ void ShSceneLock(uint64_t priv) {
 void ShSceneUnlock(uint64_t priv) {
     if (priv) ((Fn1)F_UNLOCK)(priv + 0x370);
 }
+
+/* Leak probe: counts for the 5s overlay heartbeat (see ovl).  A live
+ * slot holds an engine scene; dead slots are scenes invalidated by a
+ * world reload that are only destroyed on the next ensure.  Watch for
+ * live/dead never returning to zero after leaving the world. */
+int ShSceneLeakProbe(int *used, int *live, int *dead) {
+    int i, u = 0, l = 0, d = 0;
+    SLock();
+    for (i = 0; i < MAX_SCENES; i++) {
+        if (g_s[i].used) u++;
+        if (g_s[i].live) l++;
+        if (g_s[i].dead) d++;
+    }
+    SUnlock();
+    if (used) *used = u;
+    if (live) *live = l;
+    if (dead) *dead = d;
+    return 0;
+}
