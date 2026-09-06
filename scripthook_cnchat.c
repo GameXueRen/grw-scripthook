@@ -312,6 +312,13 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
 
         /* Box open: poll the editing keys (the game window does not
          * deliver keyboard messages to us, so nothing else works). */
+        if (!WindowFocused()) {
+            /* Focus went elsewhere: the keys typed out there belong
+             * to that window, so ignore them and keep the text for
+             * when the game comes back to the front. */
+            memset(g_keyWas, 0, sizeof(g_keyWas));
+            continue;
+        }
         if (Pressed(VK_ESCAPE)) {
             Lock(); g_chat.cmd = 2; Unlock();
         } else if (Pressed(VK_RETURN)) {

@@ -40,11 +40,26 @@ static int Escapes(int vk) {
 static volatile int g_capture;
 static int Install(void);
 
+/* Our window is the foreground one. While the game is in the
+ * background it must see no keys at all, like any unfocused app:
+ * the machine's keyboard belongs to whatever window is active. */
+static int GameFocused(void) {
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (!fg) return 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+}
+
 /* one rule for the poll stub and the DirectInput wrapper */
 static int Suppressed(int vk) {
     uint32_t b = g_block;
 
     if (vk <= 0 || vk >= 256) return 0;
+    /* Deactivated game: hand back nothing. This sits above the
+     * escape list on purpose - pausing and alt-tabbing are OS
+     * actions that never needed the game to receive the keys. */
+    if (!GameFocused()) return 1;
     /* An explicitly blocked key wins over the escape list, so
      * a mod menu can claim ESC while it is open. Escapes still
      * pass when nothing claims them, so pause and alt-tab
