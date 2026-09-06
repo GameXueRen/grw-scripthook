@@ -549,18 +549,40 @@ SH_API int ShPhysicsReady(void) {
 
 /* Called on the transition into Playing, so the world is
  * ready before any plugin asks for it.
+ *
+ * The cold resolve is a whole-address-space scan and can take
+ * tens of seconds on a first spawn, and TrackState runs this on
+ * whoever polled the state first - in practice the chat poll
+ * thread at 15ms, which then missed every T press for that whole
+ * time. The wait/scan loop therefore runs on a worker, like the
+ * spawn module's warm thread; until it lands, WorldValid() is
+ * simply false and callers see "no world yet".
  */
-void ShPhysicsOnEnterPlaying(void) {
+static volatile LONG g_warmRunning = 0;
+
+static DWORD WINAPI WorldWarmThread(LPVOID p) {
     int spins;
 
-    g_A = 0;
-    g_B = 0;
-    if (!InstallHook()) return;
+    (void)p;
     for (spins = 0; spins < 40 && !WorldValid(); spins++) {
         if (g_ctx) ResolveWorld(g_ctx);
         if (WorldValid()) break;
         Sleep(250);
     }
+    InterlockedExchange(&g_warmRunning, 0);
+    return 0;
+}
+
+void ShPhysicsOnEnterPlaying(void) {
+    HANDLE h;
+
+    g_A = 0;
+    g_B = 0;
+    if (!InstallHook()) return;
+    if (InterlockedCompareExchange(&g_warmRunning, 1, 0)) return;
+    h = CreateThread(NULL, 0, WorldWarmThread, NULL, 0, NULL);
+    if (!h) InterlockedExchange(&g_warmRunning, 0);
+    else CloseHandle(h);
 }
 
 
