@@ -89,13 +89,39 @@ static ImFont* g_chatFont = nullptr;
 /* The game disabled the IME on its window (DirectInput keyboard), which
  * is why no IME text ever reached it.  While the chat box is up we undo
  * that once per session: (re)associate a default IME input context with
- * the window and force the IME open, so composition messages arrive. */
+ * the window and force the IME open, so composition messages arrive.
+ *
+ * KNOWN ISSUE (not ours, documented 2026-09): after playing with Sogou
+ * Pinyin and exiting, Ubisoft Connect keeps reporting the game as
+ * running until the "搜狗拼音输入法 工具" (SGTool) process is killed.
+ * GRW.exe itself is gone; killing the Sogou tool process is what makes
+ * Ubisoft notice.  The evidence points at Sogou: its tool process holds
+ * a handle to the game, which keeps the (exited) process object alive,
+ * and Ubisoft's running check is fooled by that zombie.  Our code has
+ * no cross-process footprint at all - no SetWindowsHookEx injection,
+ * no OpenProcess/DuplicateHandle, no named objects; the only windows
+ * we touch (SoPY_* / CiceroUIWndFrame) are ones Sogou itself created
+ * INSIDE the game process, and they die with it.  ImeProbeDisable
+ * below restores the whole IME stack at session end as a best-effort
+ * mitigation (it also cancels a composition the IME may still hold
+ * when the box is closed for us); it did NOT stop the Ubisoft hang in
+ * testing, so the fix lives on the Sogou side (e.g. disable its game
+ * panel) or nowhere. */
 static int g_imeProbed = 0;   /* one attempt per chat session */
+/* What the IME looked like before ImeProbeEnable touched it, so
+ * ImeProbeDisable can put it back once the chat session ends. */
+static int g_imeOpenWas = 0;  /* ImmGetOpenStatus before forcing */
+static int g_imeCtxMade = 0;  /* we manufactured the context     */
+static HIMC g_imeMadeCtx = NULL; /* the context we manufactured  */
 
 static void ImeProbeEnable(HWND hWnd)
 {
     HIMC hImc;
     DWORD err;
+
+    g_imeOpenWas = 0;
+    g_imeCtxMade = 0;
+    g_imeMadeCtx = NULL;
 
     /* 1. Make sure the window owns an input context.  IACE_DEFAULT
      * (re)installs the thread default context on this window. */
@@ -111,6 +137,8 @@ static void ImeProbeEnable(HWND hWnd)
         hImc = ImmCreateContext();
         if (hImc) {
             ImmAssociateContext(hWnd, hImc);
+            g_imeCtxMade = 1;
+            g_imeMadeCtx = hImc;
             OvlLog("ime probe: created fresh context %p", (void*)hImc);
         } else {
             err = GetLastError();
@@ -120,6 +148,7 @@ static void ImeProbeEnable(HWND hWnd)
     }
 
     /* 2. Force the IME open on that context. */
+    g_imeOpenWas = ImmGetOpenStatus(hImc) ? 1 : 0;
     if (!ImmSetOpenStatus(hImc, TRUE)) {
         err = GetLastError();
         OvlLog("ime probe: ImmSetOpenStatus failed err=%u", err);
@@ -457,6 +486,38 @@ static void ImeHideForeignWindows(void)
     EnumWindows(ImeForeignEnum, 0);
 }
 
+/* Undo everything ImeProbeEnable and the foreign-window subclass
+ * did, once the chat session is over: cancel any composition the
+ * IME still holds, put the open status back, detach the context
+ * and un-subclass the IME windows.  When the game later exits
+ * nothing of ours is left touching the IME stack. */
+static void ImeProbeDisable(HWND hWnd)
+{
+    HIMC hImc;
+    int i;
+
+    if (hWnd && (hImc = ImmGetContext(hWnd)) != NULL) {
+        ImmNotifyIME(hImc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+        ImmSetOpenStatus(hImc, g_imeOpenWas);
+        ImmReleaseContext(hWnd, hImc);
+    }
+    if (hWnd) ImmAssociateContextEx(hWnd, NULL, 0);
+    if (g_imeCtxMade && g_imeMadeCtx) {
+        ImmDestroyContext(g_imeMadeCtx);
+        g_imeCtxMade = 0;
+        g_imeMadeCtx = NULL;
+    }
+    for (i = 0; i < IMEFOREIGN_MAX; i++) {
+        if (g_imeForeign[i].wnd && IsWindow(g_imeForeign[i].wnd) &&
+            g_imeForeign[i].orig)
+            SetWindowLongPtrW(g_imeForeign[i].wnd, GWLP_WNDPROC,
+                              (LONG_PTR)g_imeForeign[i].orig);
+        g_imeForeign[i].wnd = NULL;
+        g_imeForeign[i].orig = NULL;
+    }
+    OvlLog("ime probe disabled (session over)");
+}
+
 static void ImeMirrorMsg(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -568,7 +629,13 @@ static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
             break;
         }
     } else {
-        g_imeProbed = 0;   /* re-arm for the next chat session */
+        /* Chat session just ended (any path: sent, cancelled, menu
+         * opened, feature switched off): put the IME stack back the
+         * way the game had it, exactly once. */
+        if (g_imeProbed) {
+            ImeProbeDisable(hWnd);
+            g_imeProbed = 0;
+        }
         HideCaret(hWnd);
         if (g_ime.active || g_ime.candOpen) ImeStateReset();
     }
