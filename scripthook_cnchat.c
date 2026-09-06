@@ -202,14 +202,24 @@ int ShChatWndMsg(uint64_t hwnd, uint32_t msg,
 /* ---- open / close --------------------------------------------------- */
 
 static void OpenChat(void) {
+    HWND hwnd;
     Lock();
     g_chat.len = 0;
     g_chat.text[0] = 0;
     g_chat.cmd = 0;
-    g_chat.hwnd = (uint64_t)(uintptr_t)GetForegroundWindow();
+    hwnd = GetForegroundWindow();
+    g_chat.hwnd = (uint64_t)(uintptr_t)hwnd;
     g_chat.open = 1;
     Unlock();
     TakeKeys();
+    /* Nudge the window thread so the overlay's IME probe (the one
+     * that re-associates the input context) runs right now.  Left to
+     * itself it waits for the window's next message, which is the
+     * first letter's keydown - and that keydown was already routed
+     * past the IME by the system, so it lands in the box as plain
+     * English.  A harmless WM_NULL gets the probe done while the
+     * box opens, well before typing starts. */
+    if (hwnd) PostMessageW(hwnd, WM_NULL, 0, 0);
     /* The game already saw the full T press (it opened its chat box);
      * we only grab the keyboard from here on. */
 }
