@@ -613,6 +613,11 @@ SH_API int  ShMenuNumber(uint32_t menu, const char *label,
 SH_API int  ShMenuList(uint32_t menu, const char *label,
                        const char **opts, int n, int initial,
                        ShMenuFn fn, void *user);
+/** A key-bind row: shows the current key; pressing Enter on it waits
+ *  for the next key press, which becomes the row's value (a VK code).
+ *  Esc cancels. The callback fires with the new VK. */
+SH_API int  ShMenuKeyBind(uint32_t menu, const char *label,
+                          int initial, ShMenuFn fn, void *user);
 /** Sync a toggle/list row's displayed value without firing its
  *  callback. A plugin that changed the state behind the menu's
  *  back (a hotkey flip) calls this so the next capture shows
@@ -668,6 +673,55 @@ void ShMenuCaptureView(ShMenuView *v);
 /** Internal: tell the menu the overlay can render now. */
 void ShMenuSetOverlayReady(int ready);
 
+/** @} */
+/** @defgroup cnchat Chinese chat input
+ *  In-game Chinese text input: the game's own chat box cannot take
+ *  IME composition, so this built-in module shows an ImGui input
+ *  box and sends the finished text into the game's chat field by
+ *  PostMessage WM_CHAR (the method verified to work on GRW by the
+ *  external GRW-CNChat AutoHotkey tool).  The game window opens its
+ *  chat box when the module injects the chat hotkey ("T"); while the
+ *  ImGui box is up the game's keyboard is captured so the two never
+ *  fight.
+ *  @{ */
+
+#define SH_CHAT_TEXT_MAX 512
+
+/** One frame of the chat input box, captured for the overlay. */
+typedef struct ShChatView {
+    int   open;                     /**< input box visible           */
+    int   phase;                    /**< 0 idle 1 typing 2 sending   */
+    char  text[SH_CHAT_TEXT_MAX];   /**< current text (UTF-8)        */
+    char  hint[96];                 /**< status / hint line          */
+} ShChatView;
+
+/** Internal: start the chat thread (loader calls once). */
+void ShChatStartup(void);
+/** Internal: is the chat input box on screen right now? */
+int  ShChatIsOpen(void);
+/** Internal: capture a frame for the overlay renderer. */
+void ShChatCapture(ShChatView *out);
+/** Internal: drop the input box (menu opened over it, etc). */
+void ShChatClose(void);
+/** Internal: feed one window message from the subclassed game window
+ *  while the box is open.  Called by the overlay's SubWndProc for
+ *  keyboard messages; return 1 when consumed (game must not see it).
+ *  Text arrives as WM_CHAR / WM_IME_CHAR so the system IME feeds the
+ *  box exactly like it would a native Edit. */
+int  ShChatWndMsg(uint64_t hwnd, uint32_t msg,
+                  uint64_t wp, uint64_t lp);
+
+/** Internal: chat feature runtime configuration (mod settings page).
+ *  Enabled defaults off; the start key must match the game's own text
+ *  chat key; candMode 0 = overlay-drawn candidate window (default),
+ *  1 = the input method's own candidate window. */
+void ShChatMenuRegister(uint32_t parent);
+int  ShChatGetEnabled(void);
+void ShChatSetEnabled(int on);
+int  ShChatGetStartKey(void);
+void ShChatSetStartKey(int vk);
+int  ShChatGetCandMode(void);
+void ShChatSetCandMode(int mode);
 /** @} */
 /** @defgroup hud HUD
  *  Drawn by the engine's own UI; slots pack per corner.
@@ -1265,6 +1319,19 @@ SH_API uint32_t ShUiFocused(void);
 SH_API int      ShBlockKey(int vk, int on);
 /** Every key but the escapes hidden, focus uses this. */
 SH_API int      ShCaptureKeys(int on);
+
+/** Queue full press/release taps of a virtual key into the game's
+ *  DirectInput keyboard reports.  The phases advance in real time
+ *  (60 ms per phase), so the engine sees a human-length press. */
+SH_API void     ShFakeKey(int vk, int taps);
+/** Same, but phases advance per GetState report with no wall-clock
+ *  delay, so N taps burst as fast as the engine polls the device. */
+SH_API void     ShFakeKeyFast(int vk, int taps);
+/** 1 while a fake-key tap sequence is still in flight. */
+SH_API int      ShFakeKeyBusy(void);
+/** Diag: what the game last saw on this keyboard device, or -1
+ *  before any report was captured. */
+SH_API int      ShKeyState(int vk);
 
 /** The game's UI state, from the scenes it drew last frame.
  *  Names are the scene's own; the common ones below. */

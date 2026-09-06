@@ -25,7 +25,8 @@
 #define TICK_MS     40
 #define OPTS        12
 
-enum { IT_ACTION = 0, IT_SUB, IT_TOGGLE, IT_NUMBER, IT_LIST };
+enum { IT_ACTION = 0, IT_SUB, IT_TOGGLE, IT_NUMBER, IT_LIST,
+       IT_KEYBIND };
 
 typedef struct {
     int      used;
@@ -60,6 +61,10 @@ static volatile int g_key = VK_F4;
 static volatile int g_started = 0;
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
+
+/* ---- key-bind capture state (used by ValueText below) ------------- */
+static volatile int g_capActive = 0;   /* a capture is waiting        */
+static const Item *g_capItem = NULL;   /* the row waiting for a key  */
 
 extern void ShSetError(int err);
 
@@ -120,6 +125,52 @@ static Item *NewItem(Menu *m, int kind, const char *label,
     return it;
 }
 
+/* ---- key-bind rows ------------------------------------------------
+ * A row that stores a virtual key (Item.value = VK code).  Pressing
+ * Enter on it arms a capture: the menu thread then ignores normal
+ * navigation and waits for the player to press one key (Esc cancels).
+ * The captured VK is stored back and the row's callback fires, so a
+ * "change this hotkey" row is a single key press away.
+ * ------------------------------------------------------------------ */
+#define VK_NONE 0
+
+/* Render the friendly name of a virtual key into out (>= n bytes). */
+static void VkName(int vk, char *out, int n) {
+    char *p = out;
+    int left = n;
+#define PUSH1(c)   do { if (left > 1) { *p++ = (c); left--; } } while (0)
+#define PUSH2(a,b) do { PUSH1(a); PUSH1(b); } while (0)
+    if (n <= 0) return;
+    out[0] = 0;
+    if (vk == VK_NONE) { PUSH2('?', '?'); }
+    else if (vk >= '0' && vk <= '9') PUSH1((char)vk);
+    else if (vk >= 'A' && vk <= 'Z') PUSH1((char)vk);
+    else if (vk >= VK_F1 && vk <= VK_F24) {
+        PUSH1('F');
+        if (vk - VK_F1 + 1 >= 10) PUSH1((char)('0' + (vk - VK_F1 + 1) / 10));
+        PUSH1((char)('0' + (vk - VK_F1 + 1) % 10));
+    }
+    else switch (vk) {
+    case VK_ESCAPE:   memcpy(p, "Esc", 4); break;
+    case VK_RETURN:   memcpy(p, "Enter", 6); break;
+    case VK_TAB:      memcpy(p, "Tab", 4); break;
+    case VK_BACK:     memcpy(p, "Bksp", 5); break;
+    case VK_SPACE:    memcpy(p, "Space", 6); break;
+    case VK_UP:       memcpy(p, "Up", 3); break;
+    case VK_DOWN:     memcpy(p, "Down", 5); break;
+    case VK_LEFT:     memcpy(p, "Left", 5); break;
+    case VK_RIGHT:    memcpy(p, "Right", 6); break;
+    case VK_HOME:     memcpy(p, "Home", 5); break;
+    case VK_END:      memcpy(p, "End", 4); break;
+    case VK_DELETE:   memcpy(p, "Del", 4); break;
+    case VK_INSERT:   memcpy(p, "Ins", 4); break;
+    default:          snprintf(out, n - 1, "VK%02X", vk); return;
+    }
+#undef PUSH1
+#undef PUSH2
+    out[n - 1] = 0;
+}
+
 /* Rendered text for the value side of a row. Fixed words and list
  * options are translated in the menu's scope; number and arrow
  * formats are language-neutral. */
@@ -140,6 +191,15 @@ static void ValueText(const char *scope, const Item *it,
     else if (it->kind == IT_LIST && it->nopts)
         snprintf(out, n, "< %s >",
                  ShLangFor(scope, it->opts[it->value % it->nopts]));
+    else if (it->kind == IT_KEYBIND) {
+        if (g_capActive && it == g_capItem) {
+            snprintf(out, n, "< ... >");   /* waiting for a key */
+        } else {
+            char kn[16];
+            VkName(it->value, kn, sizeof(kn));
+            snprintf(out, n, "< %s >", kn);
+        }
+    }
 }
 
 /* A plugin callback can be heavy (a heap scan, a node walk,
@@ -225,6 +285,70 @@ static void ResetKeys(void) {
     memset(g_keyWas, 0, sizeof(g_keyWas));
 }
 
+/* ---- key-bind capture ---------------------------------------------
+ * Enter on an IT_KEYBIND row arms a capture: normal navigation is
+ * paused and the next key press becomes the row's value.  The old
+ * value stays in place until a new one is chosen, so cancelling just
+ * clears the capture flag.  Menu state is only touched from the menu
+ * thread while it holds the lock, so these helpers are called there. */
+static uint32_t g_capMenu = 0;
+static int  g_capRow = -1;
+static unsigned char g_capPrev[256];
+
+/* Keys that may be bound: no mouse buttons, no bare modifiers, and
+ * no keys the menu itself needs (Enter arms the capture, Esc cancels,
+ * the menu hotkey closes the menu). */
+static int CapBindable(int vk) {
+    if (vk <= 0x06 || vk >= 0xFE) return 0;
+    if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ||
+        vk == VK_LWIN || vk == VK_RWIN) return 0;
+    if (vk == VK_RETURN || vk == VK_ESCAPE || vk == g_key) return 0;
+    return 1;
+}
+
+static void CapClear(void) {
+    g_capActive = 0;
+    g_capItem = NULL;
+    g_capRow = -1;
+}
+
+/* Poll one capture tick.  Runs under the menu lock.  Returns 1 when
+ * capture ended (bound or cancelled), 0 while still waiting. */
+static int CapTickLocked(void) {
+    Menu *m;
+    Item *it;
+    int vk;
+
+    if (!g_capActive || g_capRow < 0) { CapClear(); return 1; }
+    m = MenuOf(g_capMenu);
+    if (!m || g_capRow >= m->count) { CapClear(); return 1; }
+    it = &m->items[g_capRow];
+    if (it->kind != IT_KEYBIND) { CapClear(); return 1; }
+
+    /* Esc cancels the capture (checked before the bindable scan). */
+    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) &&
+        !g_capPrev[VK_ESCAPE]) {
+        g_keyWas[VK_ESCAPE & 0xFF] = 1;
+        CapClear();
+        return 1;
+    }
+    for (vk = 1; vk < 256; vk++) {
+        int d = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (!d || g_capPrev[vk] || !CapBindable(vk)) continue;
+        /* A fresh press of a bindable key. */
+        it->value = vk;                                 /* bind */
+        g_keyWas[vk & 0xFF] = 1;        /* consume the press */
+        CapClear();
+        Fire(g_capMenu, (uint32_t)(it - m->items), it);
+        return 1;
+    }
+    /* No new key yet: track what is held so a release+repress of a
+     * key already down when capture armed is not treated as fresh. */
+    for (vk = 1; vk < 256; vk++)
+        g_capPrev[vk] = (GetAsyncKeyState(vk) & 0x8000) ? 1 : 0;
+    return 0;
+}
+
 /* True while the game window has the focus. Any window of this
  * process counts, which covers both windowed and borderless
  * fullscreen; a backgrounded game reports the window in front. */
@@ -280,6 +404,18 @@ static void Navigate(void) {
         } else if (it->kind == IT_TOGGLE) {
             it->value = !it->value;
             Fire(g_current, m->sel, it);
+        } else if (it->kind == IT_KEYBIND) {
+            /* Arm a capture: pause navigation and take the next key
+             * press as this row's new value.  Snapshot the keys that
+             * are already down (Enter armed it) so a held key is not
+             * mistaken for the new one. */
+            g_capMenu = g_current;
+            g_capRow = m->sel;
+            g_capItem = it;
+            g_capActive = 1;
+            for (int i = 1; i < 256; i++)
+                g_capPrev[i] =
+                    (GetAsyncKeyState(i) & 0x8000) ? 1 : 0;
         } else {
             Fire(g_current, m->sel, it);
         }
@@ -563,6 +699,7 @@ static DWORD WINAPI MenuThread(LPVOID p) {
         /* Background window: the menu must not react to keys.
          * Forget held keys too, so nothing fires on refocus. */
         if (!WindowFocused()) {
+            if (g_capActive) CapClear();
             ResetKeys();
             continue;
         }
@@ -572,10 +709,17 @@ static DWORD WINAPI MenuThread(LPVOID p) {
          * menu having rendered. */
         if (Pressed(g_key)) {
             g_open = !g_open;
-            if (g_open) OpenRoot();
+            if (g_open) {
+                /* The Chinese chat box must yield the keyboard
+                 * (it captured it to type); the menu owns the
+                 * capture while it is up. */
+                ShChatClose();
+                OpenRoot();
+            }
         }
 
         if (!g_open) {
+            if (g_capActive) CapClear();
             MenuCapture(0);
             continue;
         }
@@ -589,7 +733,8 @@ static DWORD WINAPI MenuThread(LPVOID p) {
         }
 
         Lock();
-        Navigate();
+        if (g_capActive) CapTickLocked();
+        else             Navigate();
         Unlock();
 
         /* Only a menu that is actually on screen takes the
@@ -744,6 +889,22 @@ SH_API int ShMenuList(uint32_t menu, const char *label,
         it->nopts = n;
         it->value = (n > 0) ? (initial % n) : 0;
     }
+    Unlock();
+    return it != NULL;
+}
+
+/* A key-bind row: shows the current key and, when the player presses
+ * Enter on it, captures the next key press as the new value.  initial
+ * is a VK code (VK_NONE = unset).  The callback fires with the new
+ * VK.  The displayed key name is language-neutral.
+ */
+SH_API int ShMenuKeyBind(uint32_t menu, const char *label,
+                         int initial, ShMenuFn fn, void *user) {
+    Item *it;
+
+    Lock();
+    it = NewItem(MenuOf(menu), IT_KEYBIND, label, fn, user);
+    if (it) it->value = initial;
     Unlock();
     return it != NULL;
 }

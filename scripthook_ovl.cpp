@@ -20,6 +20,9 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <string.h>
+#include <imm.h>
+#include <vector>
+#pragma comment(lib, "imm32.lib")
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
@@ -59,11 +62,494 @@ static HWND   g_hwnd = nullptr;
 static WNDPROC g_origWndProc = nullptr;
 static volatile LONG g_ready = 0;
 
+// Bold CJK font used for the chat UI (input text, composition, hints
+// and the candidate list).  Loaded next to the default font; falls back
+// to the normal font when no bold variant exists.
+static ImFont* g_chatFont = nullptr;
+
 // ---------------------------------------------------------------------------
 // WndProc subclass: feed messages to ImGui while the menu is open
 // ---------------------------------------------------------------------------
+
+/* The game disabled the IME on its window (DirectInput keyboard), which
+ * is why no IME text ever reached it.  While the chat box is up we undo
+ * that once per session: (re)associate a default IME input context with
+ * the window and force the IME open, so composition messages arrive. */
+static int g_imeProbed = 0;   /* one attempt per chat session */
+
+static void ImeProbeEnable(HWND hWnd)
+{
+    HIMC hImc;
+    DWORD err;
+
+    /* 1. Make sure the window owns an input context.  IACE_DEFAULT
+     * (re)installs the thread default context on this window. */
+    if (!ImmAssociateContextEx(hWnd, HIMC(0), IACE_DEFAULT)) {
+        err = GetLastError();
+        OvlLog("ime probe: ImmAssociateContextEx failed err=%u", err);
+    }
+    hImc = ImmGetContext(hWnd);
+    if (!hImc) {
+        /* No context even after the default association: manufacture a
+         * fresh one (a game that called ImmDisableIME still accepts a
+         * context created explicitly and attached to the window). */
+        hImc = ImmCreateContext();
+        if (hImc) {
+            ImmAssociateContext(hWnd, hImc);
+            OvlLog("ime probe: created fresh context %p", (void*)hImc);
+        } else {
+            err = GetLastError();
+            OvlLog("ime probe: ImmCreateContext failed err=%u", err);
+            return;
+        }
+    }
+
+    /* 2. Force the IME open on that context. */
+    if (!ImmSetOpenStatus(hImc, TRUE)) {
+        err = GetLastError();
+        OvlLog("ime probe: ImmSetOpenStatus failed err=%u", err);
+    }
+    OvlLog("ime probe: context=%p open=%d probed=1",
+           (void*)hImc, (int)ImmGetOpenStatus(hImc));
+    ImmReleaseContext(hWnd, hImc);
+}
+
+/* ---- Self-drawn IME UI (Dear ImGui with IMM32, adapted) -------------
+ * The game window never drew IME UI, so the system candidate window
+ * floats at a default spot and fights the game's own fullscreen.  We
+ * therefore suppress the system candidate/composition windows (clear
+ * the ISC_SHOWUI* bits on WM_IME_SETCONTEXT) and read the IME state
+ * through IMM32 instead, then draw it ourselves in the ImGui overlay.
+ *
+ * Threading: WM_IME_* arrive on the window-message thread (SubWndProc)
+ * which updates g_ime; the overlay render thread snapshots it under a
+ * lock once per frame. */
+#define IME_CAND_MAX 16
+#define IME_CAND_TXT 64
+struct ImeState {
+    int   active;                /* composing */
+    int   candOpen;              /* candidate list visible */
+    int   candCount;             /* total candidates */
+    int   candSel;               /* absolute selected index */
+    int   candPage;              /* page start index */
+    int   candShow;              /* number of stored entries */
+    char  comp[192];             /* full composition, UTF-8 */
+    char  cand[IME_CAND_MAX][IME_CAND_TXT]; /* page, UTF-8 */
+    int   gen;
+};
+static CRITICAL_SECTION g_imeLock;
+static volatile int g_imeLockReady = 0;
+static ImeState g_ime;
+static int g_imeResetGen = 0;
+
+static void ImeLock(void)   { if (g_imeLockReady) EnterCriticalSection(&g_imeLock); }
+static void ImeUnlock(void) { if (g_imeLockReady) LeaveCriticalSection(&g_imeLock); }
+
+static void ImeStateReset(void)
+{
+    ImeLock();
+    memset(&g_ime, 0, sizeof(g_ime));
+    g_ime.gen = ++g_imeResetGen;
+    ImeUnlock();
+}
+
+/* The system caret is what IMM/TSF IMEs anchor their own candidate and
+ * composition windows to.  We draw the composition and the candidate
+ * list ourselves inside the ImGui overlay, so the IMEs must not draw
+ * any native UI.  Some IMEs (MS Pinyin, TSF) honour the cleared
+ * ISC_SHOWUI* bits; others (Sogou) position their own window by the
+ * system caret and draw it anyway.  With no caret at all there is
+ * nothing for them to anchor to, so they have to give up. */
+static void ImePlaceCaret(HWND hWnd)
+{
+    (void)hWnd;
+    DestroyCaret();
+}
+
+/* ---- anchor for the input method's own candidate window -------------
+ * When CandMode = 1 the IME draws its own candidate / composition
+ * windows.  IMM IMEs place them where ImmSetCompositionWindow /
+ * ImmSetCandidateWindow says; TSF IMEs follow the window's system
+ * caret.  The chat input box is drawn at a fixed spot - horizontally
+ * centred, top at 72% of the client height, CHAT_H tall - so on the
+ * first composition message we move the caret and point both IMM
+ * windows at the spot just below the box.  This runs on the window
+ * thread with coordinates derived from GetClientRect, so it is always
+ * correct (no cross-thread async race that would leave them at 0,0).
+ * The caret is deliberately made tiny and hidden: only its position
+ * matters to the IME, the overlay draws its own cursor. */
+
+#define CHAT_ANCHOR_Y_RATIO 0.72f
+#define CHAT_ANCHOR_H       56.0f   /* CHAT_H, same as the render box */
+#define CHAT_ANCHOR_GAP     6.0f    /* px below the box */
+
+static void ImeApplyAnchor(HWND hWnd)
+{
+    HIMC hImc;
+    POINT pt;
+    RECT rc;
+    LONG cx, cy;
+
+    if (!hWnd || !IsWindow(hWnd)) return;
+    if (!GetClientRect(hWnd, &rc)) return;
+
+    cx = (rc.right - rc.left) / 2;
+    cy = (LONG)((rc.bottom - rc.top) * CHAT_ANCHOR_Y_RATIO)
+         + (LONG)CHAT_ANCHOR_H + (LONG)CHAT_ANCHOR_GAP;
+
+    /* NULL bitmap = solid caret; tiny and hidden below.  Only the
+     * position matters to the IME. */
+    CreateCaret(hWnd, NULL, 1, 1);
+    SetCaretPos(cx, cy);
+    HideCaret(hWnd);
+
+    pt.x = cx;
+    pt.y = cy;
+    ClientToScreen(hWnd, &pt);
+    hImc = ImmGetContext(hWnd);
+    if (hImc) {
+        COMPOSITIONFORM cf;
+        memset(&cf, 0, sizeof(cf));
+        cf.dwStyle = CFS_POINT;
+        cf.ptCurrentPos = pt;
+        ImmSetCompositionWindow(hImc, &cf);
+
+        CANDIDATEFORM cdf;
+        memset(&cdf, 0, sizeof(cdf));
+        cdf.dwIndex = 0;
+        cdf.dwStyle = CFS_CANDIDATEPOS;
+        cdf.ptCurrentPos = pt;
+        ImmSetCandidateWindow(hImc, &cdf);
+        ImmReleaseContext(hWnd, hImc);
+    }
+    OvlLog("ime anchor: client=%dx%d caret=(%ld,%ld) screen=(%ld,%ld) imc=%p",
+           rc.right - rc.left, rc.bottom - rc.top,
+           cx, cy, (long)pt.x, (long)pt.y, (void*)hImc);
+}
+
+/* Screen-space anchor under the chat input box (horizontal centre),
+ * used to steer IME candidate windows that place themselves at a
+ * screen corner.  Refreshed on the RENDER thread while the chat box is
+ * up (see ImeHideForeignWindows), so it always matches the game window
+ * position; other threads only read it, no cross-thread geometry. */
+static LONG g_imeAnchorX = -32000;
+static LONG g_imeAnchorY = -32000;
+
+static void ImeUpdateAnchor(void)
+{
+    RECT rc;
+    POINT pt;
+    if (!g_hwnd || !IsWindow(g_hwnd)) return;
+    if (!GetClientRect(g_hwnd, &rc)) return;
+    pt.x = (rc.right - rc.left) / 2;
+    pt.y = (LONG)((rc.bottom - rc.top) * CHAT_ANCHOR_Y_RATIO)
+           + (LONG)CHAT_ANCHOR_H + (LONG)CHAT_ANCHOR_GAP;
+    ClientToScreen(g_hwnd, &pt);
+    g_imeAnchorX = pt.x;
+    g_imeAnchorY = pt.y;
+}
+
+/* UTF-16 -> UTF-8 into dst (dstSize bytes, NUL terminated). */
+static void W2U8(const wchar_t *w, char *dst, int dstSize)
+{
+    if (!w || !dst || dstSize <= 0) return;
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, dst, dstSize, NULL, NULL);
+}
+
+/* Read the IME composition string and current candidate page. */
+static void ImeReadState(HWND hWnd)
+{
+    HIMC hImc;
+    if (!hWnd || !IsWindow(hWnd)) return;
+    hImc = ImmGetContext(hWnd);
+    if (!hImc) return;
+
+    /* --- composition string --- */
+    {
+        LONG n = ImmGetCompositionStringW(hImc, GCS_COMPSTR, NULL, 0);
+        if (n > 0) {
+            int wn = (int)(n / sizeof(wchar_t)) + 1;
+            wchar_t *buf = (wchar_t *)malloc((size_t)wn * sizeof(wchar_t));
+            if (buf) {
+                ImmGetCompositionStringW(hImc, GCS_COMPSTR, buf,
+                                         (DWORD)(wn * sizeof(wchar_t)));
+                buf[wn - 1] = 0;
+                ImeLock();
+                W2U8(buf, g_ime.comp, sizeof(g_ime.comp));
+                g_ime.active = 1;
+                g_ime.gen++;
+                ImeUnlock();
+                free(buf);
+            }
+        }
+    }
+
+    /* --- candidate list --- */
+    {
+        DWORD sz = ImmGetCandidateListW(hImc, 0, NULL, 0);
+        if (sz >= sizeof(CANDIDATELIST)) {
+            std::vector<char> raw(sz);
+            if (ImmGetCandidateListW(hImc, 0, (LPCANDIDATELIST)raw.data(),
+                                     (DWORD)raw.size()) != 0)
+            {
+                const CANDIDATELIST *cl = (const CANDIDATELIST *)raw.data();
+                int count = (int)cl->dwCount;
+                int page  = (int)cl->dwPageStart;
+                int sel   = (int)cl->dwSelection;
+                int pageSize = (int)cl->dwPageSize;
+                if (pageSize <= 0 || pageSize > count - page)
+                    pageSize = count - page;
+                if (pageSize > IME_CAND_MAX) pageSize = IME_CAND_MAX;
+
+                ImeLock();
+                g_ime.candOpen = 1;
+                g_ime.candCount = count;
+                g_ime.candSel = sel;
+                g_ime.candPage = page;
+                g_ime.candShow = pageSize;
+                for (int i = 0; i < pageSize; i++) {
+                    DWORD ofs = cl->dwOffset[page + i];
+                    const wchar_t *w = (const wchar_t *)(raw.data() + ofs);
+                    W2U8(w, g_ime.cand[i], sizeof(g_ime.cand[i]));
+                }
+                g_ime.gen++;
+                ImeUnlock();
+            }
+        }
+    }
+    ImmReleaseContext(hWnd, hImc);
+}
+
+/* Mirror one IME message into g_ime while the chat box is open.  All
+ * these messages are still forwarded to DefWindowProcW afterwards so
+ * the IMM32 state machine keeps advancing (WM_IME_COMPOSITION with
+ * GCS_RESULTSTR is what turns committed text into WM_IME_CHAR). */
+/* Third-party IMEs (Sogou) inject their candidate window into the game
+ * process (diagnosed: class "SoPY_Comp" = candidate list, "SoPY_Status"
+ * = the status bar) and ignore the ISC_SHOWUI* bits.  We draw our own
+ * candidate list, so while the chat box is open those windows must not
+ * appear.  Merely ShowWindow(SW_HIDE)-ing them every message makes the
+ * IME and us fight (it re-shows, we re-hide) = flicker.  Instead we
+ * subclass each such window once: every WM_WINDOWPOSCHANGING parks it
+ * off screen and strips the SWP_SHOWWINDOW flag, so the IME may move
+ * and resize it freely but it can never become visible. */
+#define IMEFOREIGN_MAX 8
+/* cand: 1 = candidate window (must follow the chat anchor), 0 = status
+ * bar / language indicator (must stay where the IME puts it). */
+struct ImeForeignSlot { HWND wnd; WNDPROC orig; int cand; };
+static ImeForeignSlot g_imeForeign[IMEFOREIGN_MAX];
+
+static LRESULT CALLBACK ImeForeignProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    int i, cand = 0;
+    WNDPROC orig = NULL;
+    for (i = 0; i < IMEFOREIGN_MAX; i++)
+        if (g_imeForeign[i].wnd == h) {
+            orig = g_imeForeign[i].orig;
+            cand = g_imeForeign[i].cand;
+            break;
+        }
+
+    /* This subclass lives for the whole session once installed, so it
+     * must respect the current candidate mode:
+     *   - overlay-drawn (CandMode = 0): park every IME window off
+     *     screen, the overlay draws the candidate list itself;
+     *   - input method's own window (CandMode = 1): candidate windows
+     *     are the feature - but MS Pinyin's TSF window (CiceroUIWndFrame,
+     *     diagnosed in the log) anchors itself to screen (0,0) because
+     *     the game exposes no TSF document, and Sogou's SoPY_Comp does
+     *     the same.  Rewrite each move to sit under the chat box.
+     *     Status bars (cand = 0) keep whatever spot the IME chose. */
+    if (m == WM_WINDOWPOSCHANGING) {
+        WINDOWPOS *wp = (WINDOWPOS *)l;
+        if (wp) {
+            if (ShChatGetCandMode() == 0) {
+                /* Force to a point that can never be seen, and strip
+                 * the show flag so it cannot appear where it asked. */
+                wp->x = -32000;
+                wp->y = -32000;
+                wp->flags &= ~SWP_SHOWWINDOW;
+            }
+            else if (cand && g_imeAnchorX > -30000) {
+                /* Horizontally centre the candidate window under the
+                 * chat box.  wp->cx may be 0 on a pure move, fall back
+                 * to the window's current width. */
+                int w = wp->cx;
+                RECT rc;
+                if (w <= 0 && GetWindowRect(h, &rc))
+                    w = rc.right - rc.left;
+                wp->x = g_imeAnchorX - w / 2;
+                wp->y = g_imeAnchorY;
+            }
+        }
+        return orig ? CallWindowProcW(orig, h, m, w, l)
+                    : DefWindowProcW(h, m, w, l);
+    }
+    return orig ? CallWindowProcW(orig, h, m, w, l)
+                : DefWindowProcW(h, m, w, l);
+}
+
+static BOOL CALLBACK ImeForeignEnum(HWND h, LPARAM lp)
+{
+    char cls[80];
+    DWORD pid = 0;
+    int i, slot = -1, cand = 0;
+    if (IsWindowVisible(h) == FALSE) return TRUE;
+    /* IME UI windows that run in a different process cannot be
+     * subclassed safely (SetWindowLongPtrW would fail there); only the
+     * windows the text service created inside this process matter. */
+    GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId()) return TRUE;
+    if (GetClassNameA(h, cls, sizeof(cls)) == 0) return TRUE;
+    /* Sogou: "SoPY_Comp" candidate / "SoPY_Status" status bar; MS
+     * Pinyin (TSF): "CiceroUIWndFrame" candidate.  QQ-style IMEs use
+     * QQ_*.  Class names ending in Comp/Candidate are candidate
+     * windows; everything else is a status bar. */
+    if (!(strncmp(cls, "CiceroUIWndFrame", 16) == 0 ||
+          strncmp(cls, "SoPY_", 5) == 0 ||
+          strncmp(cls, "QQ_", 3) == 0))
+        return TRUE;
+    cand = (strncmp(cls, "CiceroUIWndFrame", 16) == 0 ||
+            strstr(cls, "Comp") != NULL);
+    for (i = 0; i < IMEFOREIGN_MAX; i++) {
+        if (g_imeForeign[i].wnd == h) {
+            g_imeForeign[i].cand = cand;  /* class is stable, keep it */
+            return TRUE;
+        }
+        if (g_imeForeign[i].wnd && !IsWindow(g_imeForeign[i].wnd))
+            g_imeForeign[i].wnd = NULL;              /* stale slot */
+        if (slot < 0 && !g_imeForeign[i].wnd) slot = i;
+    }
+    if (slot < 0) return TRUE;
+    g_imeForeign[slot].wnd = h;
+    g_imeForeign[slot].cand = cand;
+    g_imeForeign[slot].orig = (WNDPROC)SetWindowLongPtrW(
+        h, GWLP_WNDPROC, (LONG_PTR)ImeForeignProc);
+    return TRUE;
+}
+
+/* Find and subclass IME candidate/status windows (Sogou SoPY_*, MS
+ * Pinyin TSF CiceroUIWndFrame, QQ_*).  Runs on the RENDER thread - NOT
+ * on the window-message thread, where touching another thread's window
+ * can block the game's message pump.  SetWindowLongPtrW itself does not
+ * send messages, so it is safe from any thread.  What the subclass does
+ * with each WM_WINDOWPOSCHANGING depends on the candidate mode (see
+ * ImeForeignProc); both modes need the subclass installed, so this runs
+ * in CandMode = 0 AND CandMode = 1. */
+static void ImeHideForeignWindows(void)
+{
+    ImeUpdateAnchor();
+    EnumWindows(ImeForeignEnum, 0);
+}
+
+static void ImeMirrorMsg(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_COMPOSITION:
+        ImeReadState(hWnd);
+        break;
+    case WM_IME_ENDCOMPOSITION:
+        ImeStateReset();
+        break;
+    case WM_IME_NOTIFY:
+        if (wp == IMN_OPENCANDIDATE || wp == IMN_CHANGECANDIDATE) {
+            ImeReadState(hWnd);
+        }
+        else if (wp == IMN_CLOSECANDIDATE) {
+            ImeLock();
+            g_ime.candOpen = 0;
+            g_ime.gen++;
+            ImeUnlock();
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    /* Chat box just opened: one IME-enable attempt per session. */
+    if (g_ready && ShChatIsOpen()) {
+        int selfDrawn = (ShChatGetCandMode() == 0); /* 0=overlay-drawn */
+
+        if (!g_imeProbed) {
+            g_imeProbed = 1;
+            ImeProbeEnable(hWnd);
+            if (selfDrawn) ImePlaceCaret(hWnd);
+            else ImeApplyAnchor(hWnd);
+        }
+
+        /* Every IME message must keep advancing the IMM state machine,
+         * so both modes go through DefWindowProcW (its GCS_RESULTSTR
+         * handling is what turns the final text into WM_IME_CHAR for
+         * the chat buffer).  The modes only differ in what is drawn:
+         *   - overlay-drawn (default): swallow WM_IME_STARTCOMPOSITION
+         *     so no system composition window ever appears, hide the
+         *     IME's own windows, and draw the composition + candidate
+         *     list ourselves;
+         *   - input method's own window (CandMode=1): the IME's own
+         *     UI is the feature.  The ISC_SHOWUI* bits must survive so
+         *     the IME renders its full candidate list - clearing them
+         *     makes MS Pinyin draw only the thin pinyin bar without
+         *     any candidate words.  Instead of suppressing its windows
+         *     we subclass them (ImeForeignProc) and force every move
+         *     to the anchor under the chat box. */
+        switch (msg)
+        {
+        case WM_IME_SETCONTEXT:
+            /* Overlay-drawn mode only: clear the "draw your own
+             * composition/candidate UI" bits so the system UI never
+             * appears.  In CandMode = 1 keep them intact and anchor
+             * the IME's windows under the chat box. */
+            if (selfDrawn)
+                lParam &= ~(ISC_SHOWUICOMPOSITIONWINDOW | ISC_SHOWUIALL);
+            else
+                ImeApplyAnchor(hWnd);
+            ImeMirrorMsg(hWnd, msg, wParam, lParam);
+            return DefWindowProcW(hWnd, msg, wParam, lParam);
+        case WM_IME_STARTCOMPOSITION:
+            ImeApplyAnchor(hWnd);
+            ImeMirrorMsg(hWnd, msg, wParam, lParam);
+            if (selfDrawn) {
+                /* Swallow: this is the message that makes DefWindowProc
+                 * create its default composition window.  We draw the
+                 * composition ourselves, so it must never appear. */
+                return 1;
+            }
+            return DefWindowProcW(hWnd, msg, wParam, lParam);
+        case WM_IME_COMPOSITION:
+            if (!selfDrawn) ImeApplyAnchor(hWnd);
+            ImeMirrorMsg(hWnd, msg, wParam, lParam);
+            /* DefWindowProc's GCS_RESULTSTR handling turns the final
+             * text into WM_IME_CHAR for our chat buffer. */
+            return DefWindowProcW(hWnd, msg, wParam, lParam);
+        case WM_IME_ENDCOMPOSITION:
+            ImeMirrorMsg(hWnd, msg, wParam, lParam);
+            return DefWindowProcW(hWnd, msg, wParam, lParam);
+        case WM_IME_NOTIFY:
+            if (!selfDrawn && wParam == IMN_OPENCANDIDATE)
+                ImeApplyAnchor(hWnd);
+            ImeMirrorMsg(hWnd, msg, wParam, lParam);
+            return DefWindowProcW(hWnd, msg, wParam, lParam);
+        default:
+            break;
+        }
+    } else {
+        g_imeProbed = 0;   /* re-arm for the next chat session */
+        HideCaret(hWnd);
+        if (g_ime.active || g_ime.candOpen) ImeStateReset();
+    }
+
+    /* The Chinese chat box consumes the keyboard while it is up:
+     * WM_CHAR/WM_IME_CHAR feed its text buffer, navigation keys are
+     * swallowed so the game's own chat field never sees them. */
+    if (g_ready && ShChatIsOpen() &&
+        ShChatWndMsg((uint64_t)(uintptr_t)hWnd, (uint32_t)msg,
+                     (uint64_t)wParam, (uint64_t)lParam))
+        return 1;
     if (g_ready && ShMenuIsOpen() &&
         ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
         return 1;
@@ -96,13 +582,46 @@ ImU32 Col(uint32_t rgb, int a = 255)
     return IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, a);
 }
 
-// Compute the baseline Y that vertically centres the glyph bbox of
-// text rendered at `font_size` within a row of height `row_h` that
-// starts at `ry`. ImGui 1.92 keeps per-size metrics on ImFontBaked
-// (Ascent is positive: baseline->glyph top; Descent is negative:
-// baseline->glyph bottom). AddText uses pos.y as the baseline, so
-// the glyph bbox [pos.y - Ascent, pos.y - Descent] is centred when
-// pos.y = ry + row_h/2 + (Ascent + Descent)/2.
+// Text layout helpers.
+//
+// IMPORTANT: in this ImGui version ImDrawList::AddText() treats pos.y as
+// the TOP of the text line, not the baseline - glyph.Y0 is stored as an
+// offset from the line top and is ~0 for the first row (see the glyph
+// data comment in imgui_draw.cpp: "x0/y0 ... offset from the character
+// upper-left layout position").  So to vertically centre one line of
+// text inside a box you position the line's TOP, and a caret / highlight
+// must use that same top rather than an imagined baseline.
+
+// Layout note: ImDrawList::AddText treats pos.y as the TOP of the text
+// line (the glyph data is stored relative to the line's upper-left, so
+// glyph.Y0 ~ 0 for the top row), and ImGui advances lines by exactly
+// `font_size`.  So one visual text box is [top, top + font_size].  To
+// centre that box in a row [ry, ry + row_h], top = ry + (row_h - fs)/2.
+// A caret or a selection bar that must line up with the glyphs uses the
+// same box, NOT an imagined baseline offset.
+static float TextLineHeight(ImFont* font, float font_size)
+{
+    (void)font;
+    return font_size;
+}
+
+// The top Y to pass to AddText so the text box is centred in a row.
+static float TextTopForRow(ImFont*, float font_size, float ry, float row_h)
+{
+    return ry + (row_h - font_size) * 0.5f;
+}
+
+// Vertical centre of that same text box, for a caret or a bar.
+static float TextMidForRow(ImFont*, float font_size, float ry, float row_h)
+{
+    return ry + row_h * 0.5f;
+}
+
+// The legacy menu renderer was tuned empirically around the assumption
+// that AddText pos.y was a baseline (see the msyh "sits ~13px below"
+// notes).  Keep it as-is so the menu keeps its proven look; new drawing
+// code must use TextTopForRow/TextMidForRow and treat AddText pos.y as
+// the text TOP.
 static float CenteredBaseline(ImFont* font, float font_size, float ry, float row_h)
 {
     ImFontBaked* baked = font->GetFontBaked(font_size);
@@ -264,6 +783,149 @@ void RenderMenu(const ShMenuView* v)
     }
 }
 
+// Chinese chat input box: a single-line field, lower middle.
+// The text comes from scripthook_cnchat.c (already UTF-8); this
+// only draws the snapshot plus a blinking caret at the end.
+// Larger bold font for readability: the chat UI uses g_chatFont
+// (msyh bold) and a 24px body size.
+const float CHAT_W_MAX = 720.0f;
+const float CHAT_H     = 56.0f;
+const float CHAT_PAD   = 14.0f;
+const float CHAT_FS    = 24.0f;   /* input text size                */
+const float HINT_FS    = 17.0f;   /* hint line above the box        */
+
+// IME UI metrics: candidate rows below the input box.
+const float CAND_FS   = 22.0f;
+const float CAND_ROW  = 34.0f;
+const float CAND_PADX = 12.0f;
+
+/* Snapshot the IME state for one frame of drawing. */
+static void ImeSnapshot(ImeState* out)
+{
+    memset(out, 0, sizeof(*out));
+    ImeLock();
+    *out = g_ime;
+    ImeUnlock();
+}
+
+void RenderChat(const ShChatView* v)
+{
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    // Chat text uses the bold CJK font (falls back to the default).
+    ImFont* font = g_chatFont ? g_chatFont : ImGui::GetFont();
+    const float fs = CHAT_FS;
+    const float wpx = ImGui::GetIO().DisplaySize.x;
+    const float hpx = ImGui::GetIO().DisplaySize.y;
+
+    if (!v || !v->open) return;
+
+    /* IME composition string (the pinyin/characters not committed yet)
+     * renders right after the confirmed text so the user sees both.
+     * Only in overlay-drawn mode: with the input method's own window
+     * the system IME draws its composition and candidate UI itself. */
+    ImeState ime;
+    ImeSnapshot(&ime);
+    bool selfDrawn = (ShChatGetCandMode() == 0);
+    const char* comp = (selfDrawn && ime.active) ? ime.comp : "";
+
+    // Width hugs text + composition, capped.
+    ImVec2 tsz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, v->text);
+    ImVec2 csz = comp[0] ? font->CalcTextSizeA(fs, FLT_MAX, 0.0f, comp)
+                         : ImVec2(0, 0);
+    float tw = tsz.x + csz.x + CHAT_PAD * 2.0f;
+    if (tw < 240.0f) tw = 240.0f;
+    if (tw > CHAT_W_MAX) tw = CHAT_W_MAX;
+
+    float y = hpx * 0.72f;
+    float x = (wpx - tw) * 0.5f;
+
+    // Panel: translucent rounded quad centred horizontally.
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + tw, y + CHAT_H),
+                      IM_COL32(0, 0, 0, 210), 6.0f);
+
+    // Hint line above the field text (same bold font, smaller size).
+    if (v->hint[0]) {
+        dl->AddText(font, HINT_FS, ImVec2(x + CHAT_PAD, y - HINT_FS - 10.0f),
+                    Col(0x8CF0FFu), v->hint);
+    }
+
+    // Text sits vertically centred in the box by its TOP (AddText's
+    // pos.y is the text top in this ImGui, not a baseline).  The caret
+    // is drawn from the same top so text and caret line up.
+    float ttop = TextTopForRow(font, fs, y, CHAT_H);
+    float tlh  = TextLineHeight(font, fs);
+    dl->AddText(font, fs, ImVec2(x + CHAT_PAD, ttop),
+                Col(0xF0F0F0u), v->text);
+
+    // Composition string in a brighter tone right after the text.
+    float compX = x + CHAT_PAD + tsz.x;
+    if (comp[0])
+        dl->AddText(font, fs, ImVec2(compX, ttop),
+                    Col(0xA8EFC0u), comp);
+
+    // Caret: after text + composition, same height as the text box.
+    bool on = ((GetTickCount() / 400) & 1) != 0;
+    if (on) {
+        float cx = x + CHAT_PAD + tsz.x + csz.x + 2.0f;
+        if (cx < x + tw - 4.0f)
+            dl->AddRectFilled(ImVec2(cx, ttop + 1.0f),
+                              ImVec2(cx + 2.5f, ttop + tlh - 1.0f),
+                              Col(0x8CF0FFu));
+    }
+
+    // Candidate list below the box, self-drawn (system IME UI is off).
+    // Skipped when the input method draws its own candidate window.
+    if (selfDrawn && ime.candOpen && ime.candShow > 0) {
+        int n = ime.candShow;
+        float cw = 240.0f;
+        float maxw = 0.0f;
+        char num[8];
+        for (int i = 0; i < n; i++) {
+            snprintf(num, sizeof(num), "%d.", i + 1);
+            ImVec2 a = font->CalcTextSizeA(CAND_FS, FLT_MAX, 0.0f, num);
+            ImVec2 b = font->CalcTextSizeA(CAND_FS, FLT_MAX, 0.0f,
+                                           ime.cand[i]);
+            float row = a.x + b.x + CAND_PADX * 2.0f;
+            if (row > maxw) maxw = row;
+        }
+        cw = maxw + 28.0f;
+        if (cw < 220.0f) cw = 220.0f;
+        if (cw > CHAT_W_MAX) cw = CHAT_W_MAX;
+
+        float cy = y + CHAT_H + 8.0f;
+        float cx0 = (wpx - cw) * 0.5f;
+        float chh = CAND_ROW * (float)n + 10.0f;
+        if (cy + chh > hpx - 8.0f) cy = y - chh - 8.0f; /* flip above */
+
+        dl->AddRectFilled(ImVec2(cx0, cy), ImVec2(cx0 + cw, cy + chh),
+                          IM_COL32(16, 18, 22, 235), 6.0f);
+        for (int i = 0; i < n; i++) {
+            int absIdx = ime.candPage + i;
+            bool sel = (absIdx == ime.candSel);
+            float ry = cy + 5.0f + CAND_ROW * (float)i;
+            /* Candidate text is centred in its row by its TOP, and the
+             * highlight bar is drawn around that same centred box. */
+            float ctop = TextTopForRow(font, CAND_FS, ry, CAND_ROW);
+            if (sel) {
+                float clh = TextLineHeight(font, CAND_FS);
+                float hc  = ctop + clh * 0.5f;          /* text centre */
+                float hh  = CAND_ROW - 8.0f;            /* bar height  */
+                dl->AddRectFilled(ImVec2(cx0 + 4.0f, hc - hh * 0.5f),
+                                  ImVec2(cx0 + cw - 4.0f, hc + hh * 0.5f),
+                                  IM_COL32(0x28, 0x46, 0x5A, 220), 3.0f);
+            }
+            snprintf(num, sizeof(num), "%d.", i + 1);
+            dl->AddText(font, CAND_FS,
+                        ImVec2(cx0 + CAND_PADX, ctop),
+                        sel ? Col(0x8CF0FFu) : Col(0x9AA4B0u), num);
+            dl->AddText(font, CAND_FS,
+                        ImVec2(cx0 + CAND_PADX + 32.0f, ctop),
+                        sel ? Col(0xFFFFFFu) : Col(0xD8D8D8u),
+                        ime.cand[i]);
+        }
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -279,18 +941,42 @@ static void LoadCjkFont()
         "C:\\Windows\\Fonts\\simhei.ttf", // 黑体
         "C:\\Windows\\Fonts\\simsun.ttc", // 宋体
     };
+    /* Bold variant preferred for the chat UI.  msyhbd.ttc ships with
+     * the YaHei family on every supported Windows release. */
+    static const char* kBoldCandidates[] = {
+        "C:\\Windows\\Fonts\\msyhbd.ttc", // 微软雅黑 Bold
+        "C:\\Windows\\Fonts\\msyhbd.ttf",
+    };
+    ImFont* base = nullptr;
     for (const char* path : kCandidates)
     {
-        ImFont* f = io.Fonts->AddFontFromFileTTF(
+        base = io.Fonts->AddFontFromFileTTF(
             path, 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-        if (f)
+        if (base)
         {
-            io.FontDefault = f;
+            io.FontDefault = base;
             OvlLog("font loaded: %s", path);
+            break;
+        }
+    }
+    if (!base)
+    {
+        OvlLog("WARNING: no CJK font loaded, Chinese text will not render");
+        return;
+    }
+    for (const char* path : kBoldCandidates)
+    {
+        ImFont* b = io.Fonts->AddFontFromFileTTF(
+            path, 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
+        if (b)
+        {
+            g_chatFont = b;
+            OvlLog("chat bold font loaded: %s", path);
             return;
         }
     }
-    OvlLog("WARNING: no CJK font loaded, Chinese text will not render");
+    OvlLog("no bold font variant, chat UI falls back to normal weight");
+    g_chatFont = base;
 }
 
 // ---------------------------------------------------------------------------
@@ -338,62 +1024,89 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
         }
     }
 
-    if (g_ready && ShMenuIsOpen())
     {
-        // Bind the swapchain back buffer as the render target so
-        // the menu is drawn on the surface that gets presented,
-        // whatever the game left bound.
-        ID3D11Texture2D* back = nullptr;
-        ID3D11RenderTargetView* rtv = nullptr;
-        DXGI_SWAP_CHAIN_DESC desc = {};
-        if (SUCCEEDED(pSwap->GetDesc(&desc)) &&
-            SUCCEEDED(pSwap->GetBuffer(0, __uuidof(ID3D11Texture2D),
-                                       (void**)&back)))
-        {
-            g_pd3dDevice->CreateRenderTargetView(back, nullptr, &rtv);
-            back->Release();
+        bool drawMenu = ShMenuIsOpen() ? true : false;
+        bool drawChat = drawMenu ? false
+                                 : (ShChatIsOpen() ? true : false);
+        /* While the chat box is up, periodically grab any candidate /
+         * status window an IME creates in our process.  This runs on
+         * the render thread: EnumWindows + SetWindowLongPtrW here never
+         * blocks the game's message pump (unlike on the WndProc thread). */
+        if (drawChat) {
+            /* Periodically grab any candidate / status window an IME
+             * creates in this process and steer it according to the
+             * candidate mode (park off screen, or follow the chat
+             * anchor - see ImeForeignProc). */
+            static DWORD lastImeScan = 0;
+            DWORD now = GetTickCount();
+            if ((int)(now - lastImeScan) > 120) {
+                lastImeScan = now;
+                ImeHideForeignWindows();
+            }
         }
-        if (rtv)
+        if (g_ready && (drawMenu || drawChat))
         {
-            g_pd3dContext->OMSetRenderTargets(1, &rtv, nullptr);
-            D3D11_VIEWPORT vp;
-            vp.TopLeftX = 0; vp.TopLeftY = 0;
-            vp.Width = (float)desc.BufferDesc.Width;
-            vp.Height = (float)desc.BufferDesc.Height;
-            vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
-            g_pd3dContext->RSSetViewports(1, &vp);
-        }
+            // Bind the swapchain back buffer as the render target so
+            // the overlay is drawn on the surface that gets
+            // presented, whatever the game left bound.
+            ID3D11Texture2D* back = nullptr;
+            ID3D11RenderTargetView* rtv = nullptr;
+            DXGI_SWAP_CHAIN_DESC desc = {};
+            if (SUCCEEDED(pSwap->GetDesc(&desc)) &&
+                SUCCEEDED(pSwap->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                           (void**)&back)))
+            {
+                g_pd3dDevice->CreateRenderTargetView(back, nullptr, &rtv);
+                back->Release();
+            }
+            if (rtv)
+            {
+                g_pd3dContext->OMSetRenderTargets(1, &rtv, nullptr);
+                D3D11_VIEWPORT vp;
+                vp.TopLeftX = 0; vp.TopLeftY = 0;
+                vp.Width = (float)desc.BufferDesc.Width;
+                vp.Height = (float)desc.BufferDesc.Height;
+                vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+                g_pd3dContext->RSSetViewports(1, &vp);
+            }
 
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        // The swapchain size is authoritative for the draw area.
-        ImGuiIO& io = ImGui::GetIO();
-        io.DisplaySize = ImVec2((float)desc.BufferDesc.Width,
-                                (float)desc.BufferDesc.Height);
-        ImGui::NewFrame();
+            ImGui_ImplDX11_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            // The swapchain size is authoritative for the draw area.
+            ImGuiIO& io = ImGui::GetIO();
+            io.DisplaySize = ImVec2((float)desc.BufferDesc.Width,
+                                    (float)desc.BufferDesc.Height);
+            ImGui::NewFrame();
 
-        ShMenuView v;
-        ShMenuCaptureView(&v);
-        RenderMenu(&v);
+            if (drawMenu) {
+                ShMenuView v;
+                ShMenuCaptureView(&v);
+                RenderMenu(&v);
+            } else {
+                ShChatView v;
+                ShChatCapture(&v);
+                RenderChat(&v);
+            }
 
-        ImGui::Render();
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+            ImGui::Render();
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        if (rtv)
-        {
-            g_pd3dContext->OMSetRenderTargets(0, nullptr, nullptr);
-            rtv->Release();
-        }
+            if (rtv)
+            {
+                g_pd3dContext->OMSetRenderTargets(0, nullptr, nullptr);
+                rtv->Release();
+            }
 
-        static DWORD logAt = GetTickCount();
-        ImDrawData* dd = ImGui::GetDrawData();
-        if ((int)(GetTickCount() - logAt) > 5000)
-        {
-            logAt = GetTickCount();
-            OvlLog("frame: display %.0fx%.0f vtx=%d idx=%d",
-                   io.DisplaySize.x, io.DisplaySize.y,
-                   dd ? dd->TotalVtxCount : -1,
-                   dd ? dd->TotalIdxCount : -1);
+            static DWORD logAt = GetTickCount();
+            ImDrawData* dd = ImGui::GetDrawData();
+            if ((int)(GetTickCount() - logAt) > 5000)
+            {
+                logAt = GetTickCount();
+                OvlLog("frame: display %.0fx%.0f vtx=%d idx=%d",
+                       io.DisplaySize.x, io.DisplaySize.y,
+                       dd ? dd->TotalVtxCount : -1,
+                       dd ? dd->TotalIdxCount : -1);
+            }
         }
     }
 
@@ -558,6 +1271,10 @@ static DWORD WINAPI InitThread(LPVOID)
 
     OvlLog("init thread: hwnd=%llx client %dx%d",
            (unsigned long long)g_hwnd, g_foundW, g_foundH);
+    if (!g_imeLockReady) {
+        InitializeCriticalSection(&g_imeLock);
+        g_imeLockReady = 1;
+    }
     if (g_hwnd)
     {
         g_origWndProc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC,

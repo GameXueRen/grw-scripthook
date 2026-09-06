@@ -48,6 +48,134 @@ static int DikToVk(DWORD dik) {
     return (int)vk;
 }
 
+/* Reverse map for the fake-key injector. */
+static DWORD VkToDik(int vk) {
+    if (vk >= '1' && vk <= '9')
+        return 0x02u + (DWORD)(vk - '1');   /* DIK_1=2 .. DIK_9=10 */
+    if (vk == '0') return 0x0Bu;            /* DIK_0 = 11 */
+    switch (vk) {
+    case VK_ESCAPE: return 0x01;
+    case VK_RETURN: return 0x1C;
+    case VK_SPACE:  return 0x39;
+    case VK_TAB:    return 0x0F;
+    case VK_LSHIFT: return 0x2A;
+    case VK_RSHIFT: return 0x36;
+    case VK_LCONTROL:return 0x1D;
+    case VK_UP:     return 0xC8;
+    case VK_DOWN:   return 0xD0;
+    case VK_LEFT:   return 0xCB;
+    case VK_RIGHT:  return 0xCD;
+    default: {
+        UINT sc = MapVirtualKeyA((UINT)vk, MAPVK_VK_TO_VSC);
+        if (sc) return sc;
+    }
+    }
+    return 0;
+}
+
+/* ---- fake key injector --------------------------------------------
+ * The game reads its keyboard here, so a synthetic press is nothing
+ * more than driving the reported key state through down -> held ->
+ * up a set number of times.  Two drivers:
+ *   - TIME based: each phase lasts HOLD_MS/REL_MS real time.  Used
+ *     when the game needs a human-length press to register.
+ *   - FAST based: each phase lasts a couple of GetState reports, no
+ *     wall-clock delay.  Used to burst N cycles in one go; the game
+ *     only samples this device once per frame, so two reports is a
+ *     full frame of pressed state. */
+#define TAP_HOLD_MS 60
+#define TAP_REL_MS  60
+#define TAP_HOLD_F  2
+#define TAP_REL_F   2
+static volatile LONG   g_tapDik  = 0;   /* DIK being faked, 0 = none */
+static volatile LONG   g_tapLeft = 0;   /* taps still to deliver      */
+static volatile LONG   g_tapPh   = 0;   /* 0 = pressing, 1 = releasing */
+static volatile DWORD  g_tapAt   = 0;   /* when the current phase began */
+static volatile LONG   g_tapFrm  = 0;   /* reports spent in this phase */
+static volatile LONG   g_tapFast = 0;   /* 1 = frame based, no delay  */
+static DWORD  g_tapLast = 0;            /* last log tick               */
+
+static void StepTap(uint8_t *k, int nbytes) {
+    LONG dik, left, ph;
+    DWORD now = GetTickCount();
+
+    if (!k || nbytes <= 0) return;
+    dik  = g_tapDik;
+    left = g_tapLeft;
+    if (!dik || left <= 0) return;
+    ph  = g_tapPh;
+
+    if (dik < (LONG)nbytes) {
+        if (g_tapFast) {
+            /* frame driven: advance one report per call */
+            if (ph == 0) {
+                k[dik] = 0x80;
+                if (++g_tapFrm >= TAP_HOLD_F) { ph = 1; g_tapFrm = 0; }
+            } else {
+                k[dik] = 0;
+                if (++g_tapFrm >= TAP_REL_F) {
+                    ph = 0; g_tapFrm = 0;
+                    left--;
+                    if (left <= 0) dik = 0;
+                }
+            }
+        } else {
+            /* time driven */
+            if (ph == 0) {
+                k[dik] = 0x80;
+                if ((int)(now - g_tapAt) >= TAP_HOLD_MS) { ph = 1; g_tapAt = now; }
+            } else {
+                k[dik] = 0;
+                if ((int)(now - g_tapAt) >= TAP_REL_MS) {
+                    ph = 0; g_tapAt = now;
+                    left--;
+                    if (left <= 0) dik = 0;
+                }
+            }
+        }
+    }
+    g_tapPh   = ph;
+    g_tapLeft = left;
+    g_tapDik  = dik;
+
+    /* progress log, at most once per 100 ms */
+    if (dik && (int)(now - g_tapLast) >= 100) {
+        g_tapLast = now;
+        Log("dinput: tap progress dik=%d left=%d phase=%d fast=%d",
+            dik, left, ph, g_tapFast);
+    }
+}
+
+/* Queue `taps` full press/release cycles of the virtual key. */
+SH_API void ShFakeKey(int vk, int taps) {
+    DWORD dik = VkToDik(vk);
+    if (!dik || taps <= 0) return;
+    g_tapDik  = (LONG)dik;
+    g_tapLeft = taps;
+    g_tapPh   = 0;
+    g_tapFrm  = 0;
+    g_tapAt   = GetTickCount();
+    g_tapFast = 0;
+    Log("dinput: fake key vk=%d dik=%u taps=%d (time)", vk, dik, taps);
+}
+
+/* Burst driver: no wall-clock delay, phases measured in reports. */
+SH_API void ShFakeKeyFast(int vk, int taps) {
+    DWORD dik = VkToDik(vk);
+    if (!dik || taps <= 0) return;
+    g_tapDik  = (LONG)dik;
+    g_tapLeft = taps;
+    g_tapPh   = 0;
+    g_tapFrm  = 0;
+    g_tapAt   = GetTickCount();
+    g_tapFast = 1;
+    Log("dinput: fake key vk=%d dik=%u taps=%d (fast)", vk, dik, taps);
+}
+
+int ShFakeKeyBusy(void) {
+    return g_tapDik && g_tapLeft > 0;
+}
+
 static int Suppressed(DWORD dik) {
     int vk;
     if (dik == 0 || dik > 255) return 0;
@@ -72,6 +200,9 @@ static int DevIndex(void *dev) {
     return -1;
 }
 
+static uint8_t g_lastState[256];       /* last report handed to game   */
+static volatile LONG g_lastGot = 0;    /* 1 once a report was captured */
+
 static HRESULT WINAPI HookGetState(void *dev, DWORD cb, void *data) {
     int i = DevIndex(dev);
     HRESULT hr;
@@ -80,9 +211,22 @@ static HRESULT WINAPI HookGetState(void *dev, DWORD cb, void *data) {
     if (SUCCEEDED(hr) && cb == 256 && data) {
         uint8_t *k = (uint8_t *)data;
         DWORD d;
+        static int logged;
+        if (!logged) { logged = 1; Log("dinput: game reads GetDeviceState"); }
+        for (d = 0; d < 256; d++) g_lastState[d] = k[d];
+        g_lastGot = 1;
         for (d = 1; d < 256; d++) if (k[d] && Suppressed(d)) k[d] = 0;
+        /* Fake key injection rides on the same report. */
+        StepTap(k, 256);
     }
     return hr;
+}
+
+/* Diag: what the game last saw on this keyboard device. */
+int ShKeyState(int vk) {
+    DWORD dik = VkToDik(vk);
+    if (!dik || dik >= 256 || !g_lastGot) return -1;
+    return g_lastState[dik] ? 1 : 0;
 }
 
 static HRESULT WINAPI HookGetData(void *dev, DWORD cb, void *data,
@@ -92,6 +236,8 @@ static HRESULT WINAPI HookGetData(void *dev, DWORD cb, void *data,
     if (i < 0) return E_FAIL;
     hr = g_origData[i](dev, cb, data, inout, flags);
     if (SUCCEEDED(hr) && data && inout && cb) {
+        static int logged;
+        if (!logged) { logged = 1; Log("dinput: game reads GetDeviceData"); }
         uint8_t *p = (uint8_t *)data;
         DWORD n = *inout, src, dst = 0;
         for (src = 0; src < n; src++) {

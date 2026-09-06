@@ -136,7 +136,7 @@ static int  IsLangSection(const char *sec);
 static void AddLangEntry(const char *section, const char *key,
                          const char *value);
 
-#define CONFIG_MAX  16384u
+#define CONFIG_MAX  65536u
 #define ENTRIES_MAX 256
 
 typedef struct {

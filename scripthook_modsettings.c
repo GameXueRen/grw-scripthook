@@ -281,6 +281,12 @@ void ShModSettingsStartup(void) {
     BuildPluginMenu();
     BuildLanguageRow(g_modMenu);
 
+    /* Chinese chat input (built-in): its own page under Mod settings.
+     * Registered after the rows above so it sorts right under them;
+     * ShChatStartup may not have run yet (it runs after this module),
+     * but the page reads the ini directly, so that does not matter. */
+    ShChatMenuRegister(g_modMenu);
+
     /* One hint per page is enough: loader and plugins rows only act
      * on the next launch, as does the language switch. The loader
      * page adds a second line: the core-count cap does nothing on its

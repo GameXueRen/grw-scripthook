@@ -111,7 +111,8 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
                         scripthook_reflect.c scripthook_ui.c \
                         scripthook_scene.c scripthook_uiprop.c \
                         scripthook_uiinput.c scripthook_dinput.c \
-                        scripthook_hud.c scripthook_menu.c guard.c scripthook.h log.h \
+                        scripthook_hud.c scripthook_menu.c scripthook_cnchat.c \
+                        guard.c scripthook.h log.h \
                         scripthook_corefix.c scripthook_modsettings.c \
                         third_party/minhook/src/buffer.c \
                         third_party/minhook/src/hook.c \
@@ -131,7 +132,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
 		scripthook_reflect.c scripthook_ui.c \
 		scripthook_scene.c scripthook_uiprop.c \
 		scripthook_uiinput.c scripthook_dinput.c \
-		scripthook_hud.c scripthook_menu.c guard.c \
+		scripthook_hud.c scripthook_menu.c scripthook_cnchat.c guard.c \
 		scripthook_corefix.c scripthook_modsettings.c \
 		third_party/minhook/src/buffer.c \
 		third_party/minhook/src/hook.c \

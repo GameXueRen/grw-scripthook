@@ -58,6 +58,7 @@ extern void ShStateStartup(void);
 extern void ShCrashStartup(void);
 extern void ShCoreFixStartup(void);
 extern void ShModSettingsStartup(void);
+extern void ShChatStartup(void);
 
 /* Plugins live one folder each under plugins\, named after
  * the plugin:
@@ -145,6 +146,9 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
      * from inside the game). Its root row carries weight 0, so it
      * sorts to the top no matter when the plugins register theirs. */
     ShModSettingsStartup();
+    /* Chinese chat input: in-process version of the GRW-CNChat
+     * AutoHotkey tool (the game's own chat field cannot take IME). */
+    ShChatStartup();
     LoadASIPlugins();
     return 0;
 }
