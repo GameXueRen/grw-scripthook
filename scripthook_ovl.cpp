@@ -71,6 +71,12 @@ static HWND   g_hwnd = nullptr;
 static WNDPROC g_origWndProc = nullptr;
 static volatile LONG g_ready = 0;
 
+/* [loader] leak_probe: the 5s leak-hunting heartbeat is opt-in.
+ * Resolved once on the render thread when ImGui becomes ready
+ * (the loader has parsed the ini long before the first Present);
+ * disabled it costs one branch per frame and nothing else. */
+static int g_leakProbe = 0;
+
 // Bold CJK font used for the chat UI (input text, composition, hints
 // and the candidate list).  Loaded next to the default font; falls back
 // to the normal font when no bold variant exists.
@@ -985,11 +991,15 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
             {
                 LoadCjkFont();
                 ShMenuSetOverlayReady(1);
+                g_leakProbe = ShConfigGetBool("loader", "leak_probe", 0)
+                            ? 1 : 0;
                 InterlockedExchange(&g_ready, 1);
                 OvlLog("imgui ready: hwnd=%llx device=%llx font=%p",
                        (unsigned long long)g_hwnd,
                        (unsigned long long)g_pd3dDevice,
                        (void*)ImGui::GetFont());
+                OvlLog("leak probe %s ([loader] leak_probe)",
+                       g_leakProbe ? "on" : "off");
             }
             else
             {
@@ -1099,10 +1109,12 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
         }
     }
 
-    // 5s heartbeat: process memory + module object counts.  Runs on the
-    // render thread unconditionally so a long session shows whether
-    // private memory, UI widgets/zombies/textures or scene slots grow.
-    if (g_ready)
+    // 5s heartbeat: process memory + module object counts.  Opt-in
+    // through [loader] leak_probe (default off) so a normal session
+    // pays a single branch per frame.  When on, it runs on the render
+    // thread so a long session shows whether private memory, UI
+    // widgets/zombies/textures or scene slots grow.
+    if (g_ready && g_leakProbe)
     {
         static DWORD leakAt = GetTickCount();
         if ((int)(GetTickCount() - leakAt) > 5000)
