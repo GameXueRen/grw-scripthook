@@ -223,9 +223,124 @@ static void ImePlaceCaret(HWND hWnd)
  * The caret is deliberately made tiny and hidden: only its position
  * matters to the IME, the overlay draws its own cursor. */
 
+// ---------------------------------------------------------------------------
+// UI metrics, scaled by the game resolution ([Settings] MenuScale*).
+// The values below are the 1080p baseline (= scale 1.0); ApplyUiScale()
+// rewrites them from the same literals whenever the resolved scale
+// changes, so re-applying never compounds.  Everything the menu and the
+// chat box draw derives from these, so scaling them scales the UI.
+// ---------------------------------------------------------------------------
+
+// proportional, never scaled
 #define CHAT_ANCHOR_Y_RATIO 0.72f
-#define CHAT_ANCHOR_H       56.0f   /* CHAT_H, same as the render box */
-#define CHAT_ANCHOR_GAP     6.0f    /* px below the box */
+
+namespace {
+
+float MENU_X = 16.0f, MENU_Y = 16.0f, MENU_W = 520.0f;
+float PAD = 16.0f, PAD_TOP = 0.0f;
+float TITLE_H = 40.0f, ROW_H = 34.0f, BAR_H = 26.0f, VALUE_W = 130.0f;
+// Menu text uses the same bold CJK font as the chat box, ~24px.
+float MENU_FS = 24.0f, MENU_TITLE_FS = 28.0f;
+float MENU_HINT_FS = 17.0f, MENU_HINT_LH = 24.0f, MENU_HINT_GAP = 6.0f;
+float MENU_CREDIT_FS = 14.0f;
+// Title auto-shrink (root menu only): floor and step, scaled too.
+float TITLE_MIN_FS = 18.0f, TITLE_STEP_FS = 2.0f, TITLE_CREDIT_GAP = 10.0f;
+
+float CHAT_W_MAX = 720.0f, CHAT_H = 56.0f, CHAT_PAD = 14.0f;
+float CHAT_FS = 24.0f, HINT_FS = 17.0f;
+float CAND_FS = 22.0f, CAND_ROW = 34.0f, CAND_PADX = 12.0f;
+// IME anchor: the caret sits CHAT_ANCHOR_H below the 72% line - same
+// value as CHAT_H so the candidate windows track the drawn box.
+float CHAT_ANCHOR_H = 56.0f, CHAT_ANCHOR_GAP = 6.0f;
+
+// ---- scale resolution ------------------------------------------------
+
+static float g_menuScaleCfg = 0.0f;  // [Settings] MenuScale, 0 = auto
+static float g_menuScaleMin = 0.75f; // [Settings] MenuScaleMin
+static float g_menuScaleMax = 3.0f;  // [Settings] MenuScaleMax
+static float g_uiScale = 1.0f;       // last applied
+static unsigned g_scaleW = 0, g_scaleH = 0;
+
+static float ParseFloat(const char *s, float def)
+{
+    char *end = nullptr;
+    float v;
+    if (!s || !*s) return def;
+    v = strtof(s, &end);
+    return (end && *end == 0) ? v : def;
+}
+
+// Read [Settings] MenuScale / MenuScaleMin / MenuScaleMax once.
+// Min/max clamp the FINAL scale in both auto and fixed modes; an
+// inverted pair is swapped.  Called from HookPresent's init branch.
+static void MenuScaleLoadConfig(void)
+{
+    char buf[64];
+    ShConfigGetStr("Settings", "MenuScale", "0", buf, sizeof(buf));
+    g_menuScaleCfg = ParseFloat(buf, 0.0f);
+    /* NaN survives the float compare chain untouched, so a "nan"
+     * value in the ini would poison every metric through
+     * ApplyUiScale - any non-positive parse means auto. */
+    if (!(g_menuScaleCfg > 0.0f)) g_menuScaleCfg = 0.0f;
+    ShConfigGetStr("Settings", "MenuScaleMin", "0.75", buf, sizeof(buf));
+    g_menuScaleMin = ParseFloat(buf, 0.75f);
+    if (!(g_menuScaleMin >= 0.25f)) g_menuScaleMin = 0.25f;
+    ShConfigGetStr("Settings", "MenuScaleMax", "3.0", buf, sizeof(buf));
+    g_menuScaleMax = ParseFloat(buf, 3.0f);
+    if (!(g_menuScaleMax >= 0.25f)) g_menuScaleMax = 3.0f;
+    if (g_menuScaleMin < 0.25f) g_menuScaleMin = 0.25f;
+    if (g_menuScaleMax > 6.0f)  g_menuScaleMax = 6.0f;
+    if (g_menuScaleMin > g_menuScaleMax) {
+        float t = g_menuScaleMin; g_menuScaleMin = g_menuScaleMax;
+        g_menuScaleMax = t;
+    }
+    OvlLog("menu scale cfg: MenuScale=%.2f Min=%.2f Max=%.2f "
+           "([Settings])", g_menuScaleCfg, g_menuScaleMin,
+           g_menuScaleMax);
+}
+
+static void ApplyUiScale(float s)
+{
+    g_uiScale = s;
+    MENU_X  = 16.0f * s;  MENU_Y  = 16.0f * s;  MENU_W  = 520.0f * s;
+    PAD     = 16.0f * s;  PAD_TOP = 0.0f;
+    TITLE_H = 40.0f * s;  ROW_H  = 34.0f * s;   BAR_H   = 26.0f * s;
+    VALUE_W = 130.0f * s;
+    MENU_FS = 24.0f * s;  MENU_TITLE_FS = 28.0f * s;
+    MENU_HINT_FS = 17.0f * s; MENU_HINT_LH = 24.0f * s;
+    MENU_HINT_GAP = 6.0f * s; MENU_CREDIT_FS = 14.0f * s;
+    TITLE_MIN_FS = 18.0f * s; TITLE_STEP_FS = 2.0f * s;
+    TITLE_CREDIT_GAP = 10.0f * s;
+    CHAT_W_MAX = 720.0f * s;  CHAT_H  = 56.0f * s;
+    CHAT_PAD   = 14.0f * s;   CHAT_FS = 24.0f * s;
+    HINT_FS    = 17.0f * s;
+    CAND_FS    = 22.0f * s;   CAND_ROW = 34.0f * s;
+    CAND_PADX  = 12.0f * s;
+    CHAT_ANCHOR_H = 56.0f * s; CHAT_ANCHOR_GAP = 6.0f * s;
+}
+
+// Recompute the scale when the swapchain size changed.  Auto mode is
+// the buffer height over the 1080p baseline; a fixed MenuScale>0 wins.
+// Runs on the render thread right after GetDesc, before any drawing.
+static void MaybeRescale(unsigned w, unsigned h)
+{
+    float s;
+    if (!w || !h) return;
+    if (w == g_scaleW && h == g_scaleH) return;
+    g_scaleW = w;
+    g_scaleH = h;
+    s = (g_menuScaleCfg > 0.0f) ? g_menuScaleCfg
+                                : (float)h / 1080.0f;
+    if (s < g_menuScaleMin) s = g_menuScaleMin;
+    if (s > g_menuScaleMax) s = g_menuScaleMax;
+    if (s != g_uiScale) {
+        ApplyUiScale(s);
+        OvlLog("ui scale %.2f (res %ux%u, cfg %.2f)",
+               s, w, h, g_menuScaleCfg);
+    }
+}
+
+} // namespace
 
 static void ImeApplyAnchor(HWND hWnd)
 {
@@ -688,24 +803,8 @@ static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 // ---------------------------------------------------------------------------
 namespace {
 
-const float MENU_X  = 16.0f;
-const float MENU_Y  = 16.0f;
-const float MENU_W  = 520.0f;
-const float PAD     = 16.0f;  // horizontal + bottom padding
-const float PAD_TOP = 0.0f;
-const float TITLE_H = 40.0f;
-const float ROW_H   = 34.0f;
-// Selection bar: centred on the row's text box (see RenderMenu), no
-// manual offset - same scheme as the chat candidate rows.
-const float BAR_H   = 26.0f;
-const float VALUE_W = 130.0f;
-// Menu text uses the same bold CJK font as the chat box, ~24px.
-const float MENU_FS       = 24.0f;  /* row text  */
-const float MENU_TITLE_FS = 28.0f;  /* title     */
-const float MENU_HINT_FS  = 17.0f;  /* hints     */
-const float MENU_HINT_LH  = 24.0f;
-const float MENU_HINT_GAP = 6.0f;
-const float MENU_CREDIT_FS = 14.0f;
+// Menu geometry lives in the scaled-metrics block near the top of the
+// file (MENU_*, TITLE_*, see ApplyUiScale).
 
 // 0xRRGGBB -> ImU32 (0xAABBGGRR)
 ImU32 Col(uint32_t rgb, int a = 255)
@@ -742,6 +841,7 @@ void RenderMenu(const ShMenuView* v)
     const float fs = MENU_FS, titleFs = MENU_TITLE_FS, hintFs = MENU_HINT_FS;
     const float hintLh = MENU_HINT_LH, hintGap = MENU_HINT_GAP;
     const float x = MENU_X, y = MENU_Y;
+    const float s = g_uiScale;   // for the few inline pixel values
     int i;
 
     // Control hints under the title: up to two \n-separated lines.
@@ -765,11 +865,11 @@ void RenderMenu(const ShMenuView* v)
 
     // Panel: translucent rounded quad.
     dl->AddRectFilled(ImVec2(x, y), ImVec2(x + MENU_W, y + h),
-                      IM_COL32(0, 0, 0, 204), 6.0f);
+                      IM_COL32(0, 0, 0, 204), 6.0f * s);
     // Root menu top-right credits keep their own width; the title is
-    // shrunk (never below 18px) if it would otherwise run into them.
+    // shrunk (never below TITLE_MIN_FS) if it would run into them.
     float rightX = x + MENU_W - PAD;
-    float creditW = 0.0f, cFs = MENU_CREDIT_FS, cGap = 2.0f;
+    float creditW = 0.0f, cFs = MENU_CREDIT_FS, cGap = 2.0f * s;
     ImVec2 s1, s2;
     if (v->isRoot) {
         const char* c1 = "原作者：Phiality · 魔改：GameXueRen";
@@ -779,11 +879,11 @@ void RenderMenu(const ShMenuView* v)
         creditW = s1.x > s2.x ? s1.x : s2.x;
     }
     float tFs = titleFs;
-    float tLimit = creditW > 0.0f ? rightX - creditW - 10.0f
+    float tLimit = creditW > 0.0f ? rightX - creditW - TITLE_CREDIT_GAP
                                   : rightX - PAD;
-    while (tFs > 18.0f &&
+    while (tFs > TITLE_MIN_FS &&
            font->CalcTextSizeA(tFs, FLT_MAX, 0.0f, v->title).x > tLimit)
-        tFs -= 2.0f;
+        tFs -= TITLE_STEP_FS;
     // Title, vertically centred in the title band by its text TOP
     // (AddText pos.y is the line top, same convention as the chat box).
     float ttop = TextTopForRow(font, tFs, y + PAD_TOP, TITLE_H);
@@ -830,7 +930,7 @@ void RenderMenu(const ShMenuView* v)
         float hc = rTop + TextLineHeight(font, fs) * 0.5f;
         dl->AddRectFilled(ImVec2(x + PAD * 0.5f, hc - BAR_H * 0.5f),
                           ImVec2(x + MENU_W - PAD * 0.5f, hc + BAR_H * 0.5f),
-                          Col(0x28465Au, 230), 3.0f);
+                          Col(0x28465Au, 230), 3.0f * s);
     }
     // Rows: name left, value right-aligned in its column.
     for (i = 0; i < v->rows; i++) {
@@ -838,7 +938,7 @@ void RenderMenu(const ShMenuView* v)
         float ry = top + ROW_H * (float)i;
         float rTop = TextTopForRow(font, fs, ry, ROW_H);
         ImU32 c = r->selected ? Col(0x8CF0FFu) : Col(0xD2D2D2u);
-        dl->AddText(font, fs, ImVec2(x + PAD + 8.0f, rTop), c, r->name);
+        dl->AddText(font, fs, ImVec2(x + PAD + 8.0f * s, rTop), c, r->name);
         if (r->value[0]) {
             ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r->value);
             dl->AddText(font, fs,
@@ -866,17 +966,8 @@ void RenderMenu(const ShMenuView* v)
 // The text comes from scripthook_cnchat.c (already UTF-8); this
 // only draws the snapshot plus a blinking caret at the end.
 // Larger bold font for readability: the chat UI uses g_chatFont
-// (msyh bold) and a 24px body size.
-const float CHAT_W_MAX = 720.0f;
-const float CHAT_H     = 56.0f;
-const float CHAT_PAD   = 14.0f;
-const float CHAT_FS    = 24.0f;   /* input text size                */
-const float HINT_FS    = 17.0f;   /* hint line above the box        */
-
-// IME UI metrics: candidate rows below the input box.
-const float CAND_FS   = 22.0f;
-const float CAND_ROW  = 34.0f;
-const float CAND_PADX = 12.0f;
+// (msyh bold) and a 24px body size.  All metrics are the scaled
+// globals from the top-of-file block (CHAT_*, CAND_*).
 
 /* Snapshot the IME state for one frame of drawing. */
 static void ImeSnapshot(ImeState* out)
@@ -895,6 +986,7 @@ void RenderChat(const ShChatView* v)
     const float fs = CHAT_FS;
     const float wpx = ImGui::GetIO().DisplaySize.x;
     const float hpx = ImGui::GetIO().DisplaySize.y;
+    const float s = g_uiScale;   // for the few inline pixel values
 
     if (!v || !v->open) return;
 
@@ -912,7 +1004,7 @@ void RenderChat(const ShChatView* v)
     ImVec2 csz = comp[0] ? font->CalcTextSizeA(fs, FLT_MAX, 0.0f, comp)
                          : ImVec2(0, 0);
     float tw = tsz.x + csz.x + CHAT_PAD * 2.0f;
-    if (tw < 240.0f) tw = 240.0f;
+    if (tw < 240.0f * s) tw = 240.0f * s;
     if (tw > CHAT_W_MAX) tw = CHAT_W_MAX;
 
     float y = hpx * 0.72f;
@@ -920,11 +1012,12 @@ void RenderChat(const ShChatView* v)
 
     // Panel: translucent rounded quad centred horizontally.
     dl->AddRectFilled(ImVec2(x, y), ImVec2(x + tw, y + CHAT_H),
-                      IM_COL32(0, 0, 0, 210), 6.0f);
+                      IM_COL32(0, 0, 0, 210), 6.0f * s);
 
     // Hint line above the field text (same bold font, smaller size).
     if (v->hint[0]) {
-        dl->AddText(font, HINT_FS, ImVec2(x + CHAT_PAD, y - HINT_FS - 10.0f),
+        dl->AddText(font, HINT_FS,
+                    ImVec2(x + CHAT_PAD, y - HINT_FS - 10.0f * s),
                     Col(0x8CF0FFu), v->hint);
     }
 
@@ -945,10 +1038,10 @@ void RenderChat(const ShChatView* v)
     // Caret: after text + composition, same height as the text box.
     bool on = ((GetTickCount() / 400) & 1) != 0;
     if (on) {
-        float cx = x + CHAT_PAD + tsz.x + csz.x + 2.0f;
-        if (cx < x + tw - 4.0f)
+        float cx = x + CHAT_PAD + tsz.x + csz.x + 2.0f * s;
+        if (cx < x + tw - 4.0f * s)
             dl->AddRectFilled(ImVec2(cx, ttop + 1.0f),
-                              ImVec2(cx + 2.5f, ttop + tlh - 1.0f),
+                              ImVec2(cx + 2.5f * s, ttop + tlh - 1.0f),
                               Col(0x8CF0FFu));
     }
 
@@ -956,7 +1049,7 @@ void RenderChat(const ShChatView* v)
     // Skipped when the input method draws its own candidate window.
     if (selfDrawn && ime.candOpen && ime.candShow > 0) {
         int n = ime.candShow;
-        float cw = 240.0f;
+        float cw = 240.0f * s;
         float maxw = 0.0f;
         char num[8];
         for (int i = 0; i < n; i++) {
@@ -967,38 +1060,41 @@ void RenderChat(const ShChatView* v)
             float row = a.x + b.x + CAND_PADX * 2.0f;
             if (row > maxw) maxw = row;
         }
-        cw = maxw + 28.0f;
-        if (cw < 220.0f) cw = 220.0f;
+        cw = maxw + 28.0f * s;
+        if (cw < 220.0f * s) cw = 220.0f * s;
         if (cw > CHAT_W_MAX) cw = CHAT_W_MAX;
 
-        float cy = y + CHAT_H + 8.0f;
+        float cy = y + CHAT_H + 8.0f * s;
         float cx0 = (wpx - cw) * 0.5f;
-        float chh = CAND_ROW * (float)n + 10.0f;
-        if (cy + chh > hpx - 8.0f) cy = y - chh - 8.0f; /* flip above */
+        float chh = CAND_ROW * (float)n + 10.0f * s;
+        if (cy + chh > hpx - 8.0f * s)
+            cy = y - chh - 8.0f * s; /* flip above */
 
         dl->AddRectFilled(ImVec2(cx0, cy), ImVec2(cx0 + cw, cy + chh),
-                          IM_COL32(16, 18, 22, 235), 6.0f);
+                          IM_COL32(16, 18, 22, 235), 6.0f * s);
         for (int i = 0; i < n; i++) {
             int absIdx = ime.candPage + i;
             bool sel = (absIdx == ime.candSel);
-            float ry = cy + 5.0f + CAND_ROW * (float)i;
+            float ry = cy + 5.0f * s + CAND_ROW * (float)i;
             /* Candidate text is centred in its row by its TOP, and the
              * highlight bar is drawn around that same centred box. */
             float ctop = TextTopForRow(font, CAND_FS, ry, CAND_ROW);
             if (sel) {
                 float clh = TextLineHeight(font, CAND_FS);
                 float hc  = ctop + clh * 0.5f;          /* text centre */
-                float hh  = CAND_ROW - 8.0f;            /* bar height  */
-                dl->AddRectFilled(ImVec2(cx0 + 4.0f, hc - hh * 0.5f),
-                                  ImVec2(cx0 + cw - 4.0f, hc + hh * 0.5f),
-                                  IM_COL32(0x28, 0x46, 0x5A, 220), 3.0f);
+                float hh  = CAND_ROW - 8.0f * s;        /* bar height  */
+                dl->AddRectFilled(ImVec2(cx0 + 4.0f * s, hc - hh * 0.5f),
+                                  ImVec2(cx0 + cw - 4.0f * s,
+                                         hc + hh * 0.5f),
+                                  IM_COL32(0x28, 0x46, 0x5A, 220),
+                                  3.0f * s);
             }
             snprintf(num, sizeof(num), "%d.", i + 1);
             dl->AddText(font, CAND_FS,
                         ImVec2(cx0 + CAND_PADX, ctop),
                         sel ? Col(0x8CF0FFu) : Col(0x9AA4B0u), num);
             dl->AddText(font, CAND_FS,
-                        ImVec2(cx0 + CAND_PADX + 32.0f, ctop),
+                        ImVec2(cx0 + CAND_PADX + 32.0f * s, ctop),
                         sel ? Col(0xFFFFFFu) : Col(0xD8D8D8u),
                         ime.cand[i]);
         }
@@ -1096,6 +1192,7 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                        (void*)ImGui::GetFont());
                 OvlLog("leak probe %s ([loader] leak_probe)",
                        g_leakProbe ? "on" : "off");
+                MenuScaleLoadConfig();
             }
             else
             {
@@ -1152,6 +1249,9 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                 vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
                 g_pd3dContext->RSSetViewports(1, &vp);
             }
+            // Resolution-driven UI scale: recompute before drawing so
+            // a resolution change applies the same frame it is seen.
+            MaybeRescale(desc.BufferDesc.Width, desc.BufferDesc.Height);
 
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
