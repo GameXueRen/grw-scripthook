@@ -699,6 +699,11 @@ typedef struct ShChatView {
 void ShChatStartup(void);
 /** Internal: is the chat input box on screen right now? */
 int  ShChatIsOpen(void);
+/** Internal: true while the box is injecting text into the native chat
+ *  field.  The window hook must keep swallowing the user's physical
+ *  keys during this window - a leaked Enter keyup would make the game
+ *  submit before the injection finished (tail truncation). */
+int  ShChatIsSending(void);
 /** Internal: capture a frame for the overlay renderer. */
 void ShChatCapture(ShChatView *out);
 /** Internal: drop the input box (menu opened over it, etc). */

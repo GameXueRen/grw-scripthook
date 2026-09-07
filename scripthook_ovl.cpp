@@ -667,8 +667,12 @@ static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 
     /* The Chinese chat box consumes the keyboard while it is up:
      * WM_CHAR/WM_IME_CHAR feed its text buffer, navigation keys are
-     * swallowed so the game's own chat field never sees them. */
-    if (g_ready && ShChatIsOpen() &&
+     * swallowed so the game's own chat field never sees them.  While
+     * the box is injecting (sending) the hook must stay active too, so
+     * the user's physical Enter keyup cannot leak through and submit
+     * early - but the injected WM_CHAR characters must fall through to
+     * the game window procedure (ShChatWndMsg returns 0 for those). */
+    if (g_ready && (ShChatIsOpen() || ShChatIsSending()) &&
         ShChatWndMsg((uint64_t)(uintptr_t)hWnd, (uint32_t)msg,
                      (uint64_t)wParam, (uint64_t)lParam))
         return 1;

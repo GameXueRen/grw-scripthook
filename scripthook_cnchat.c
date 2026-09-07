@@ -30,6 +30,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "log.h"
 
 #define VK_CHAT     0x54            /* 'T' */
 #define POLL_MS     15
@@ -39,7 +40,7 @@
  * for the optional WM_CHAR path that some window modes may deliver,
  * so the buffer is guarded by a critical section.  The overlay
  * render thread reads a snapshot under the same lock. */
-#define TEXT_MAX    256             /* UTF-16 code units */
+#define TEXT_MAX    400             /* UTF-16 code units (DIAG: 400) */
 typedef struct {
     volatile int open;              /* box visible / typing           */
     volatile int cmd;               /* 0 none 1 commit 2 cancel       */
@@ -51,6 +52,7 @@ typedef struct {
 static ChatState g_chat;
 static volatile int g_started = 0;
 static volatile int g_ownsKeys = 0;
+static volatile int g_sending = 0;   /* injecting into the native box */
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
 static unsigned char g_keyWas[256];
@@ -178,28 +180,89 @@ static void ReleaseKeys(void) {
 int ShChatWndMsg(uint64_t hwnd, uint32_t msg,
                  uint64_t wp, uint64_t lp) {
     (void)lp;
-    if (!g_chat.open) return 0;
+    if (!g_chat.open && !g_sending) return 0;
     if (msg == WM_CHAR || msg == WM_IME_CHAR) {
         g_chat.hwnd = hwnd;
-        if (wp >= 0x20 && wp != 0x7F && wp < 0x10000) {
+        /* While typing (open) the char feeds our own buffer; while
+         * sending it MUST fall through to the game window procedure -
+         * that is the injection channel. */
+        if (g_chat.open && wp >= 0x20 && wp != 0x7F && wp < 0x10000) {
             Lock();
             TextAppendLocked((unsigned)wp);
             Unlock();
+            return 1;
         }
-        return 1;
+        return 0;
     }
-    /* Swallow the rest of the keyboard while the box is up so no key
-     * leaks into the game's open chat box - except Tab, which the game
-     * uses to switch its chat channel (the hint says so). */
+    /* Swallow the rest of the keyboard while the box is up (typing) OR
+     * while we are injecting (sending).  A physical Enter keyup that
+     * leaks through during the injection makes the game submit before
+     * the injected characters have all landed - the tail-truncation
+     * bug.  Tab still reaches the game while typing (channel switch). */
     if (msg == WM_KEYDOWN || msg == WM_KEYUP ||
         msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
-        if ((uint32_t)wp == VK_TAB) return 0;   /* let the game see it */
+        if ((uint32_t)wp == VK_TAB && g_chat.open) return 0;
         return 1;
     }
     return 0;
 }
 
+int ShChatIsSending(void) { return g_sending; }
+
+/* ---- diagnostics (TEMPORARY, for the truncation bug hunt) ---------- */
+
+static int g_cnLog = 0;
+static void CnLog(const char *fmt, ...) {
+    va_list ap;
+    if (!g_cnLog) { LogInit("scripthook_cnchat.log"); g_cnLog = 1; }
+    if (!g_logFile) return;
+    va_start(ap, fmt);
+    Logv(fmt, ap);
+    va_end(ap);
+}
+
+/* DIAG: ms between WM_CHAR posts while feeding the game's chat box.
+ * Read from [chat] SendDelayMs at startup; see HandleDone. */
+static volatile int g_cfgDelay = 3;
+/* DIAG: extra ms to wait AFTER the last WM_CHAR and BEFORE the Enter,
+ * letting the game's engine-side input buffer drain into the chat
+ * field.  Read from [chat] EnterDelayMs.  Hypothesis: Enter is handled
+ * on a faster path than the buffered WM_CHAR characters, so characters
+ * still in flight when Enter lands are dropped (tail truncation). */
+static volatile int g_cfgEnterDelay = 0;
+
 /* ---- open / close --------------------------------------------------- */
+
+/* Real key injection.  The game reads chat-submit keys through
+ * DirectInput, which ignores PostMessage'd WM_KEYDOWN/WM_KEYUP (that is
+ * why the simulated Enter never submitted and the native box stayed
+ * open).  SendInput lands in the hardware input queue DirectInput sees.
+ * Observed in game: the native chat box submits on Enter RELEASE, and
+ * characters still buffered when Enter goes down are flushed while it
+ * is held - so submit must be a down -> hold -> up sequence, exactly
+ * like holding the physical key until the text has fully arrived.
+ */
+static void InjectKeyDown(WORD vk) {
+    INPUT in;
+    memset(&in, 0, sizeof(in));
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = vk;
+    SendInput(1, &in, sizeof(in));
+}
+
+static void InjectKeyUp(WORD vk) {
+    INPUT in;
+    memset(&in, 0, sizeof(in));
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = vk;
+    in.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &in, sizeof(in));
+}
+
+static void InjectKey(WORD vk) {
+    InjectKeyDown(vk);
+    InjectKeyUp(vk);
+}
 
 static void OpenChat(void) {
     HWND hwnd;
@@ -242,22 +305,59 @@ static void HandleDone(void) {
     g_chat.len = 0;
     g_chat.text[0] = 0;
     Unlock();
-    ReleaseKeys();
+    /* Keep the keyboard CAPTURED while injecting.  Releasing it here
+     * (the old behaviour) let the user's own physical Enter keyup leak
+     * through to the game, which submitted immediately - before the
+     * injected characters had all landed (tail truncation; how much
+     * was lost depended on how fast the user released Enter).  The
+     * capture is released after the injection instead. */
+    g_sending = 1;
+
+    CnLog("done: send=%d hwnd=%p len=%d delay=%d", send, (void*)hwnd,
+          len, (int)g_cfgDelay);
 
     if (send && hwnd && txt[0]) {
         /* Feed the text into the game's open chat box, then submit
-         * with Enter - the exact channel GRW-CNChat uses. */
+         * with Enter - the exact channel GRW-CNChat uses.
+         * Single send loop: an earlier edit accidentally kept BOTH
+         * this loop and the experimental one, so every message went
+         * out twice (the "text appears doubled" bug). */
+        int fails = 0;
+        DWORD t0 = GetTickCount();
         for (i = 0; i < len; i++) {
-            PostMessageW(hwnd, WM_CHAR, (WPARAM)txt[i], 1);
-            Sleep(3);
+            if (!PostMessageW(hwnd, WM_CHAR, (WPARAM)txt[i], 1)) fails++;
+            if (g_cfgDelay > 0) Sleep((DWORD)g_cfgDelay);
         }
-        PostMessageW(hwnd, WM_KEYDOWN, VK_RETURN, 1);
-        PostMessageW(hwnd, WM_KEYUP,   VK_RETURN, 1);
-    } else if (hwnd) {
+        CnLog("chars: len=%d posted=%d fails=%d delay=%d ms=%u",
+              len, len - fails, fails, (int)g_cfgDelay,
+              (unsigned)(GetTickCount() - t0));
+        /* Submit with a real Enter (the game reads it through
+         * DirectInput, posted WM_KEYDOWN never submits).  DI is
+         * un-blocked right after the burst (this exact sequence was
+         * verified stable on short texts); the press is held 500ms so
+         * the down state survives even the stretched frames that
+         * follow a long character burst (long texts occasionally
+         * missed an 80ms hold). */
+        ReleaseKeys();
+        Sleep(60);   /* DI re-attach after the capture comes off */
+        InjectKeyDown(VK_RETURN);
+        Sleep(500);
+        InjectKeyUp(VK_RETURN);
+        CnLog("send: len=%d delay=%d hold=%d ms=%u tail=%04x%04x",
+              len, (int)g_cfgDelay, (int)g_cfgEnterDelay,
+              (unsigned)(GetTickCount() - t0),
+              len >= 1 ? (unsigned)txt[len - 1] : 0u,
+              len >= 2 ? (unsigned)txt[len - 2] : 0u);
+    } else {
         /* Cancelled: close the game's chat box too. */
-        PostMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 1);
-        PostMessageW(hwnd, WM_KEYUP,   VK_ESCAPE, 1);
+        ReleaseKeys();
+        if (hwnd) {
+            InjectKey(VK_ESCAPE);
+            CnLog("cancel: hwnd=%p", (void*)hwnd);
+        }
     }
+    g_sending = 0;
+    ReleaseKeys();
 }
 
 /* ---- runtime configuration ------------------------------------------
@@ -273,6 +373,8 @@ static void HandleDone(void) {
 #define CFG_KEY_CFG  "Enabled"
 #define CFG_KEY_KEY  "StartKey"
 #define CFG_KEY_CAND "CandMode"
+#define CFG_KEY_DLY  "SendDelayMs"      /* DIAG: ms between WM_CHAR */
+#define CFG_KEY_EDLY "EnterDelayMs"     /* DIAG: ms before Enter     */
 
 static volatile int g_cfgEnabled = 0;   /* default off */
 static volatile int g_cfgKey     = VK_CHAT; /* 'T' */
@@ -387,6 +489,12 @@ static void ChatCfgLoad(void) {
     g_cfgKey = ShConfigGetInt(CFG_SECTION, CFG_KEY_KEY, VK_CHAT);
     if (g_cfgKey < 1 || g_cfgKey > 0xFE) g_cfgKey = VK_CHAT;
     g_cfgCand = ShConfigGetInt(CFG_SECTION, CFG_KEY_CAND, 0) ? 1 : 0;
+    g_cfgDelay = ShConfigGetInt(CFG_SECTION, CFG_KEY_DLY, 3);
+    if (g_cfgDelay < 0) g_cfgDelay = 0;
+    if (g_cfgDelay > 1000) g_cfgDelay = 1000;   /* DIAG cap */
+    g_cfgEnterDelay = ShConfigGetInt(CFG_SECTION, CFG_KEY_EDLY, 0);
+    if (g_cfgEnterDelay < 0) g_cfgEnterDelay = 0;
+    if (g_cfgEnterDelay > 5000) g_cfgEnterDelay = 5000; /* DIAG cap */
 }
 
 int ShChatGetEnabled(void)   { return g_cfgEnabled; }
