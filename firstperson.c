@@ -444,28 +444,56 @@ static void Report(void) {
  * scan. Everything here is camera state and deferred calls.
  */
 /* ---- what the bar says -------------------------------------------
- * One line across the top of the screen, so a flip never has to be
- * guessed at from the view alone. Only a state that changed is
- * said: a scan can run for seconds and must not announce itself on
- * every one of those ticks.
+ * One line across the top of the screen, so nothing here has to be
+ * guessed at from the view alone. Only a state that changed is said,
+ * so a wait that runs for seconds does not announce itself on every
+ * one of those ticks.
+ *
+ * A wait stays up until it is over (ms 0) - that is the whole point:
+ * a scan can run for tens of seconds, and a line that left after two
+ * of them is exactly what makes the wait look like a hang. A result -
+ * head hidden, third person - is said briefly instead.
  */
 enum {
     SAY_NONE = 0,
-    SAY_FP_SCANNING,   /* first person on, still looking for it */
-    SAY_FP_HIDDEN,     /* first person on, head hidden */
-    SAY_FP_NOHIDE,     /* first person on, hide head is off */
-    SAY_TP             /* third person */
+    SAY_FP_SCANNING,   /* looking for the head group            wait */
+    SAY_FP_SCANHINT,   /* nothing yet: what would end it        wait */
+    SAY_FP_SWAP,       /* a new body: hiding it again           wait */
+    SAY_FP_REHIDE,     /* the head came back: hiding it again   wait */
+    SAY_FP_WAITING,    /* waiting for first person to come back wait */
+    SAY_FP_PAUSED,     /* a screen is up: it comes back         wait */
+    SAY_FP_ENGINE,     /* the engine owns the view             wait */
+    SAY_FP_HIDDEN,     /* head hidden                         brief */
+    SAY_FP_NOHIDE,     /* first person on, hide head is off   brief */
+    SAY_TP             /* third person                        brief */
 };
-static volatile int g_said = SAY_NONE;
-static uint32_t     g_toastId = 0;
+static volatile int      g_said = SAY_NONE;
+static uint32_t          g_toastId = 0;
 
-/* Amber while something is still being looked for, green once it is
- * done, plain white for a plain change of view. */
+/* When the wait now running started, for the step that says what
+ * would end it. 0 = no wait is being timed. */
+static volatile uint64_t g_waitFrom = 0;
+
+/* How long a scan may run before it says what would unstick it. The
+ * head group is the engine's and appears on the first aim, so this
+ * is the one wait the player can end - which is why it is the one
+ * that gets told how. */
+#define SAY_HINT_AFTER_MS 6000u
+
+/* A wait is said for at most this long. Waiting is worth saying, but
+ * a line that nothing ever moves on from and that nobody can dismiss
+ * is worse than no line, so eventually it goes on its own. */
+#define SAY_WAIT_MS 60000u
+
+/* Amber while something is being waited for, green once it is done,
+ * plain white for a plain change of view. */
 #define SAY_RGB_BUSY  0xFFD24Au
 #define SAY_RGB_DONE  0x7CFF8Au
 #define SAY_RGB_PLAIN 0xFFFFFFu
 
-static void Say(int state, const char *text, uint32_t rgb) {
+/* ms 0 keeps the line up until the state moves on. */
+static void Say(int state, const char *text, uint32_t rgb,
+                uint32_t ms) {
     if (g_said == state) return;
     g_said = state;
     if (!g_toastEx) return;
@@ -474,9 +502,19 @@ static void Say(int state, const char *text, uint32_t rgb) {
      * is up is gone and cannot be set, so it is simply made again -
      * not noticing that lost every message after the first one. */
     if (g_toastId && g_toastSet &&
-        g_toastSet(g_toastId, text, rgb, SH_TOAST_MS_DEFAULT))
+        g_toastSet(g_toastId, text, rgb, ms))
         return;
-    g_toastId = g_toastEx(text, rgb, SH_TOAST_MS_DEFAULT);
+    g_toastId = g_toastEx(text, rgb, ms);
+}
+
+/* Start timing a wait, unless one is already being timed: a wait
+ * that is already running keeps its own clock. */
+static void WaitFrom(uint64_t now) {
+    if (!g_waitFrom) g_waitFrom = now;
+}
+
+static void WaitEnd(void) {
+    g_waitFrom = 0;
 }
 
 static void SetFp(int on) {
@@ -499,12 +537,18 @@ static void SetFp(int on) {
         if (g_setBlur) g_setBlur(0);
         /* The head group is the engine's and it only makes it the
          * first time the player aims, so say what is happening
-         * rather than leave a head on screen with no word for it. */
-        if (g_wantHide)
-            Say(SAY_FP_SCANNING, "第一人称已开启，正在扫描头部",
-                SAY_RGB_BUSY);
-        else
-            Say(SAY_FP_NOHIDE, "第一人称已开启", SAY_RGB_PLAIN);
+         * rather than leave a head on screen with no word for it.
+         * The wait for that group can run for tens of seconds - it
+         * stays said until the head is actually gone. */
+        WaitEnd();
+        if (g_wantHide) {
+            WaitFrom(GetTickCount64());
+            Say(SAY_FP_SCANNING, "第一人称已开启，正在扫描头部并隐藏…",
+                SAY_RGB_BUSY, SAY_WAIT_MS);
+        } else {
+            Say(SAY_FP_NOHIDE, "第一人称已开启", SAY_RGB_PLAIN,
+                SH_TOAST_MS_DEFAULT);
+        }
     } else {
         g_on = 0;
         g_headAway = 0;
@@ -515,7 +559,9 @@ static void SetFp(int on) {
         ShowHead();
         if (g_setBlur) g_setBlur(1);
         Hold(0);
-        Say(SAY_TP, "第三人称已开启", SAY_RGB_PLAIN);
+        WaitEnd();
+        Say(SAY_TP, "第三人称已开启", SAY_RGB_PLAIN,
+            SH_TOAST_MS_DEFAULT);
     }
     /* The Enabled row shows the state a hotkey may have just
      * changed behind the menu's back; sync it so the next
@@ -554,6 +600,16 @@ static void OnHide(uint32_t menu, uint32_t item, int value,
     if (!value) {
         g_headAway = 0;
         ShowHead();
+        /* Nothing is being waited for any more, so the wait and its
+         * line both go. */
+        WaitEnd();
+        if (g_on)
+            Say(SAY_FP_NOHIDE, "第一人称已开启", SAY_RGB_PLAIN,
+                SH_TOAST_MS_DEFAULT);
+    } else if (g_on) {
+        WaitFrom(GetTickCount64());
+        Say(SAY_FP_SCANNING, "第一人称已开启，正在扫描头部并隐藏…",
+            SAY_RGB_BUSY, SAY_WAIT_MS);
     }
     Report();
 }
@@ -788,6 +844,19 @@ static int HoldThroughScreens(void) {
     return s == SH_STATE_INGAME || s == SH_STATE_PAUSED;
 }
 
+/* Views the engine drives itself - a drone, the binoculars, a
+ * cutscene. The camera is genuinely not ours there and the head is
+ * meant to show, so this is not a wait that ends on its own: it is
+ * the answer to "why am I not in first person".
+ */
+static int EngineView(void) {
+    int s;
+    if (!g_state) return 0;
+    s = g_state();
+    return s == SH_STATE_DRONE || s == SH_STATE_BINOCULAR ||
+           s == SH_STATE_CINEMATIC;
+}
+
 /* A new body means the old parts are gone, so the hold is
  * dropped and armed again on the new one.
  */
@@ -854,6 +923,19 @@ static DWORD WINAPI TickThread(LPVOID p) {
                 ShowHead();
                 Diag("headAway=1 (screen up)");
             }
+            /* The camera is not ours here and it comes back on its
+             * own, so say that: a head showing up with no word for
+             * it is what reads as something having gone wrong. */
+            if (g_on && g_wantHide) {
+                if (EngineView())
+                    Say(SAY_FP_ENGINE, "过场视角中，头部已自动显示",
+                        SAY_RGB_BUSY, SAY_WAIT_MS);
+                else
+                    /* A result, not a wait: nothing is pending here,
+                     * the view simply is not ours right now. */
+                    Say(SAY_FP_PAUSED, "非游玩画面，返回后自动恢复",
+                        SAY_RGB_BUSY, SH_TOAST_MS_DEFAULT);
+            }
             continue;
         }
         /* The engine's aim camera owns iron sights, but
@@ -910,6 +992,10 @@ static DWORD WINAPI TickThread(LPVOID p) {
                 if (g_headClearMiss) g_headClearMiss();
                 else if (g_headInvalidate) g_headInvalidate();
                 g_hideTry = 0;
+                /* The aim is what makes the group appear, so the
+                 * wait for it starts again from here. */
+                WaitEnd();
+                WaitFrom(GetTickCount64());
                 Diag("aim edge %d -> retry hide (visible)", aimNow);
             }
         } else {
@@ -953,6 +1039,20 @@ static DWORD WINAPI TickThread(LPVOID p) {
                     Report();
                     said = 0;
                 }
+                /* Say why the view is not first person and whether
+                 * it is coming back. This is the wait that used to
+                 * be silent - a menu left, a cutscene, the frames
+                 * an eye takes to come back - and a silent wait is
+                 * indistinguishable from a hang. */
+                if (!playing)
+                    Say(SAY_FP_PAUSED, "非游玩画面，返回后自动恢复",
+                        SAY_RGB_BUSY, SH_TOAST_MS_DEFAULT);
+                else if (EngineView())
+                    Say(SAY_FP_ENGINE, "过场视角中，头部已自动显示",
+                        SAY_RGB_BUSY, SAY_WAIT_MS);
+                else
+                    Say(SAY_FP_WAITING, "正在恢复第一人称…",
+                        SAY_RGB_BUSY, SAY_WAIT_MS);
                 continue;
             }
             if (g_headAway) {
@@ -986,6 +1086,7 @@ static DWORD WINAPI TickThread(LPVOID p) {
         root = PlayerHeadEnt();
         if (!root) continue;
         if (root != g_root) {
+            uint64_t wasRoot = g_root;   /* 0 for the first body */
             /* A body swap - a respawn, a new session - leaves
              * the old entity's persistent hide hold running:
              * the pump keeps hiding its head nodes even though
@@ -1008,6 +1109,16 @@ static DWORD WINAPI TickThread(LPVOID p) {
             said = 0;
             PushCamera();
             Diag("head ent changed to %p", (void *)(uintptr_t)root);
+            /* A new body has to be scanned for all over again, and
+             * that wait is the one that looks like a hang. The first
+             * body of a session is not a respawn, so it says
+             * nothing. */
+            if (g_wantHide && wasRoot) {
+                WaitEnd();
+                WaitFrom(GetTickCount64());
+                Say(SAY_FP_SWAP, "已重生，正在重新隐藏头部…",
+                    SAY_RGB_BUSY, SAY_WAIT_MS);
+            }
         }
         if (g_wantHide) {
             uint64_t now = GetTickCount64();
@@ -1021,6 +1132,19 @@ static DWORD WINAPI TickThread(LPVOID p) {
                  * not guessed: a cheap try (the body's group is
                  * known, it just was not there) comes back at once,
                  * a sweep does not. */
+                /* Say what is being waited for, and once the wait
+                 * has run long enough, what would end it: the group
+                 * is the engine's, it appears on the first aim, and
+                 * until then this is the one wait here the player
+                 * can finish. */
+                WaitFrom(now);
+                if (now - g_waitFrom >= SAY_HINT_AFTER_MS)
+                    Say(SAY_FP_SCANHINT, "未扫描到头部，请按1次右键瞄准",
+                        SAY_RGB_BUSY, SAY_WAIT_MS);
+                else
+                    Say(SAY_FP_SCANNING,
+                        "第一人称已开启，正在扫描头部并隐藏…",
+                        SAY_RGB_BUSY, SAY_WAIT_MS);
                 if (now >= g_hideTry) {
                     uint64_t cost = 0;
                     int ok = HideHeadTimed(root, &cost);
@@ -1033,8 +1157,11 @@ static DWORD WINAPI TickThread(LPVOID p) {
                         Report();
                         said = 0;
                         Diag("hide ok n=%d", g_nparts);
-                        Say(SAY_FP_HIDDEN, "第一人称已开启，已隐藏头部",
-                            SAY_RGB_DONE);
+                        /* The wait is over, so the line stops
+                         * standing there and becomes a result. */
+                        WaitEnd();
+                        Say(SAY_FP_HIDDEN, "第一人称已开启，头部已隐藏",
+                            SAY_RGB_DONE, SH_TOAST_MS_DEFAULT);
                         /* The hide took a while (a first-time
                          * sweep can run for seconds); the user
                          * may have turned it off meanwhile, and
@@ -1072,12 +1199,14 @@ static DWORD WINAPI TickThread(LPVOID p) {
                         said = 0;
                         Report();
                         Diag("rehide miss (%ums)", (unsigned)cost);
-                        /* It came back, so the scan is running
-                         * again and the line has to say so. */
-                        if (g_wantHide)
-                            Say(SAY_FP_SCANNING,
-                                "第一人称已开启，正在扫描头部",
-                                SAY_RGB_BUSY);
+                        /* It came back, so the hide is being looked
+                         * for again and the line has to say so. */
+                        if (g_wantHide) {
+                            WaitEnd();
+                            WaitFrom(now);
+                            Say(SAY_FP_REHIDE, "头部重现，正在重新隐藏…",
+                                SAY_RGB_BUSY, SAY_WAIT_MS);
+                        }
                     } else {
                         /* Parts stayed non-zero without this, so the
                          * branch re-fired every tick (~16/s) instead
