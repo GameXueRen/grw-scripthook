@@ -836,6 +836,62 @@ static float TextTopForRow(ImFont*, float font_size, float ry, float row_h)
     return ry + (row_h - font_size) * 0.5f;
 }
 
+// Status toasts (see scripthook_hud.c): a short line across the top of
+// the screen, a little below the edge, that a plugin put up for a
+// moment - "first person on, scanning for the head".
+//
+// Drawn on the foreground list like the menu and the chat box, so it
+// costs nothing of the engine's own UI: that one takes tens of seconds
+// to come up after a load and charges a widget per line, which is why
+// the toasts are here and not there.
+//
+// The text arrives already faded - ShToastView::alpha carries the fade
+// in and out - so this only has to place it.
+static const float TOAST_Y = 56.0f;   // below the top edge, unscaled
+
+void RenderToasts(const ShToastView* v, int n)
+{
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImFont* font = g_chatFont ? g_chatFont : ImGui::GetFont();
+    const ImGuiIO& io = ImGui::GetIO();
+    const float s = g_uiScale;
+    const float fs = MENU_FS;
+    const float padX = 18.0f * s, padY = 9.0f * s;
+    const float gap = 8.0f * s;
+    const float radius = 9.0f * s;
+    float y = TOAST_Y * s;
+    int i;
+
+    for (i = 0; i < n; i++)
+    {
+        const ShToastView& t = v[i];
+        int a = t.alpha;
+        ImVec2 sz;
+        float w, h, x;
+
+        if (!t.text[0] || a <= 0) continue;
+        sz = font->CalcTextSizeA(fs, 10000.0f, 0.0f, t.text);
+        w = sz.x + padX * 2.0f + 7.0f * s;
+        h = sz.y + padY * 2.0f;
+        x = (io.DisplaySize.x - w) * 0.5f;
+
+        // A dark plate so the line reads over any scene, a faint edge
+        // to lift it off a bright sky, and a bar in the line's own
+        // colour as the state cue.
+        dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h),
+                          IM_COL32(8, 10, 14, 178 * a / 255), radius);
+        dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h),
+                    IM_COL32(255, 255, 255, 40 * a / 255),
+                    radius, 0, 1.2f * s);
+        dl->AddRectFilled(ImVec2(x + 5.0f * s, y + 5.0f * s),
+                          ImVec2(x + 8.0f * s, y + h - 5.0f * s),
+                          Col(t.rgb, a), 1.5f * s);
+        dl->AddText(font, fs, ImVec2(x + padX + 7.0f * s, y + padY),
+                    Col(t.rgb, a), t.text);
+        y += h + gap;
+    }
+}
+
 void RenderMenu(const ShMenuView* v)
 {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -1226,6 +1282,12 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
         bool drawMenu = ShMenuIsOpen() ? true : false;
         bool drawChat = drawMenu ? false
                                  : (ShChatIsOpen() ? true : false);
+        /* Status toasts. Taking the snapshot is also what retires a
+         * line whose time is up, so it is taken every frame, before
+         * the "is ImGui up" test - otherwise a toast said while the
+         * overlay is still starting would never leave. */
+        ShToastView toasts[SH_TOAST_MAX];
+        int toastN = ShHudToastSnapshot(toasts, SH_TOAST_MAX);
         /* While the chat box is up, periodically grab any candidate /
          * status window an IME creates in our process.  This runs on
          * the render thread: EnumWindows + SetWindowLongPtrW here never
@@ -1242,7 +1304,7 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                 ImeHideForeignWindows();
             }
         }
-        if (g_ready && (drawMenu || drawChat))
+        if (g_ready && (drawMenu || drawChat || toastN > 0))
         {
             // Bind the swapchain back buffer as the render target so
             // the overlay is drawn on the surface that gets
@@ -1294,11 +1356,12 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                 ShMenuView v;
                 ShMenuCaptureView(&v);
                 RenderMenu(&v);
-            } else {
+            } else if (drawChat) {
                 ShChatView v;
                 ShChatCapture(&v);
                 RenderChat(&v);
             }
+            if (toastN > 0) RenderToasts(toasts, toastN);
 
             ImGui::Render();
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());

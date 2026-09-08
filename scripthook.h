@@ -741,17 +741,79 @@ enum {
     SH_HUD_TOPLEFT = 0,
     SH_HUD_TOPRIGHT,
     SH_HUD_BOTTOMLEFT,
-    SH_HUD_BOTTOMRIGHT
+    SH_HUD_BOTTOMRIGHT,
+    /** Top centre, a little below the top edge. Several lines
+     *  stack downwards from there, each centred on its own. */
+    SH_HUD_TOPCENTER
 };
 
 /** Register a line. Lower priority sits nearer the edge. */
 SH_API uint32_t ShHudCreate(const char *name, int anchor,
                             int priority);
-/** Text may hold newlines. Empty text hides the slot. */
+/** Text may hold newlines. Empty text hides the slot. The line
+ *  stays until it is changed or hidden. */
 SH_API int  ShHudSet(uint32_t hud, const char *text);
+/** As ShHudSet, but the line hides itself after ms milliseconds.
+ *  ms 0 keeps it until it is changed or hidden. */
+SH_API int  ShHudFlash(uint32_t hud, const char *text, uint32_t ms);
 SH_API int  ShHudColour(uint32_t hud, uint32_t rgb);
 SH_API int  ShHudShow(uint32_t hud, int visible);
 SH_API void ShHudDestroy(uint32_t hud);
+
+/* ---- status toast -------------------------------------------------
+ * A short line across the top of the screen that a plugin puts up
+ * for a moment and then forgets about: "first person on, looking
+ * for the head", "third person on". It leaves on its own after a
+ * couple of seconds, or after however long the caller asked for.
+ *
+ * These say what to show and for how long, and nothing about
+ * where or how it is drawn, so the layer underneath can change
+ * without a plugin noticing.
+ */
+
+/** How long a toast stays up when the caller does not say. */
+#define SH_TOAST_MS_DEFAULT 2500u
+
+/** Show text for SH_TOAST_MS_DEFAULT, or replace the text of the
+ *  toast last shown. Returns the toast id, 0 when none is free. */
+SH_API uint32_t ShToast(const char *text);
+
+/** As ShToast with a colour (0xRRGGBB) and a duration. ms 0
+ *  keeps it up until it is changed or hidden. */
+SH_API uint32_t ShToastEx(const char *text, uint32_t rgb,
+                          uint32_t ms);
+
+/** Change the text of a toast already up and start its time
+ *  again. This is how a state moves on - "scanning" to "hidden" -
+ *  without a second line appearing. */
+SH_API int  ShToastSet(uint32_t id, const char *text, uint32_t rgb,
+                       uint32_t ms);
+
+/** Take a toast down now and free it. */
+SH_API int  ShToastHide(uint32_t id);
+
+/** Take every toast down. */
+SH_API void ShToastClear(void);
+
+/** How many toasts can be up at once. Enough for a drawer's array. */
+#define SH_TOAST_MAX 4
+
+/** One toast line as whoever draws it reads it. rgb is 0xRRGGBB;
+ *  alpha is 0..255 and already carries the fade in and out, so a
+ *  drawer only has to put it on screen as it is. */
+#define SH_TOAST_TEXT 256
+typedef struct {
+    char     text[SH_TOAST_TEXT];
+    uint32_t rgb;
+    int      alpha;
+} ShToastView;
+
+/** The lines to draw now: how many there are, and up to max of them
+ *  written into out. Taking the snapshot is also what retires a line
+ *  whose time is up, so this is called once a frame by the drawer
+ *  and nothing else has to keep time.
+ */
+SH_API int  ShHudToastSnapshot(ShToastView *out, int max);
 
 /** @} */
 /** @defgroup camera Camera
