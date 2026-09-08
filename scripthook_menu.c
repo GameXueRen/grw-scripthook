@@ -17,6 +17,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "log.h"
 
 #define MENUS       24
 #define ITEMS       96
@@ -59,7 +60,7 @@ static uint32_t g_root = 0;
 static volatile uint32_t g_current = 0;
 static volatile int g_open = 0;
 static volatile int g_key = VK_F4;
-static volatile int g_started = 0;
+static volatile LONG g_started = 0;
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
 
@@ -240,7 +241,8 @@ static void ValueText(const char *owner, const char *scope,
     else if (it->kind == IT_LIST && it->nopts)
         snprintf(out, n, "< %s >",
                  ShLangForOwned(owner, scope,
-                                it->opts[it->value % it->nopts]));
+                                it->opts[((it->value % it->nopts) +
+                                          it->nopts) % it->nopts]));
     else if (it->kind == IT_KEYBIND) {
         if (g_capActive && it == g_capItem) {
             snprintf(out, n, "< ... >");   /* waiting for a key */
@@ -288,6 +290,11 @@ static void CallPush(ShMenuFn fn, void *user, uint32_t menu,
         g_call[g_callHead].item = item;
         g_call[g_callHead].value = value;
         g_callHead = next;
+    } else {
+        /* The row's value already flipped in the model, so a drop
+         * desyncs plugin state from the UI - leave a trace. */
+        Log("menu: callback queue full, dropped menu=%u item=%u",
+            (unsigned)menu, (unsigned)item);
     }
     Unlock();
     if (!g_callThread)
@@ -600,8 +607,18 @@ static void SafeCopy(char *dst, size_t cap, const char *src) {
 static void ReorderRoot(Menu *m) {
     int i, j, selPos = -1;
     char selLabel[LABEL];
+    /* ShConfigGetInt is a table scan; without this guard it ran on
+     * the menu thread's every capture (~25/s) for an order that only
+     * changes when the root's row set changes. */
+    static uint32_t lastMenu = 0;
+    static int lastCount = -1;
 
     if (m->parent != 0 || m->count < 2) return;
+    if (lastMenu == (uint32_t)(m - g_menus) + 1 &&
+        lastCount == m->count)
+        return;
+    lastMenu = (uint32_t)(m - g_menus) + 1;
+    lastCount = m->count;
 
     for (i = 1; i < m->count; i++) {
         int w0 = ShConfigGetInt("MenuOrder",
@@ -806,12 +823,19 @@ static DWORD WINAPI MenuThread(LPVOID p) {
 }
 
 static void EnsureMenu(void) {
-    if (g_started) return;
-    g_started = 1;
-    InitializeCriticalSection(&g_lock);
-    g_lockReady = 1;
-    g_root = NewMenu("SCRIPTHOOK", 0, NULL);
-    CreateThread(NULL, 0, MenuThread, NULL, 0, NULL);
+    for (;;) {
+        LONG s = InterlockedCompareExchange(&g_started, 0, 0);
+        if (s == 1) return;
+        if (s == 2) { Sleep(0); continue; }
+        if (InterlockedCompareExchange(&g_started, 2, 0)) continue;
+        LogInit("scripthook_menu.log");
+        InitializeCriticalSection(&g_lock);
+        g_lockReady = 1;              /* lock live before the thread */
+        g_root = NewMenu("SCRIPTHOOK", 0, NULL);
+        CreateThread(NULL, 0, MenuThread, NULL, 0, NULL);
+        InterlockedExchange(&g_started, 1);
+        return;
+    }
 }
 
 SH_API uint32_t ShMenuCreate(const char *title) {
@@ -954,7 +978,9 @@ SH_API int ShMenuList(uint32_t menu, const char *label,
     if (it) {
         for (i = 0; i < n; i++) it->opts[i] = opts[i];
         it->nopts = n;
-        it->value = (n > 0) ? (initial % n) : 0;
+        /* C % keeps the sign of the dividend: a negative initial from
+         * an ini read would index opts[-1] at the next capture. */
+        it->value = (n > 0) ? ((initial % n) + n) % n : 0;
     }
     Unlock();
     return it != NULL;
@@ -1000,7 +1026,8 @@ SH_API int ShMenuSetValue(uint32_t menu, const char *label,
             return 1;
         }
         if (it->kind == IT_LIST && it->nopts > 0) {
-            it->value = value % it->nopts;
+            /* Same sign rule as ShMenuList: normalize negatives. */
+            it->value = ((value % it->nopts) + it->nopts) % it->nopts;
             Unlock();
             ShSetError(SH_OK);
             return 1;

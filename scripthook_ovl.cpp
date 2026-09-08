@@ -654,6 +654,10 @@ static void ImeProbeDisable(HWND hWnd)
         g_imeForeign[i].wnd = NULL;
         g_imeForeign[i].orig = NULL;
     }
+    /* The caret created by ImeApplyAnchor must not survive the
+     * session: a leftover caret keeps anchoring IME windows to a
+     * dead spot and grows the show-caret count per message. */
+    DestroyCaret();
     OvlLog("ime probe disabled (session over)");
 }
 
@@ -776,7 +780,6 @@ static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
             ImeProbeDisable(hWnd);
             g_imeProbed = 0;
         }
-        HideCaret(hWnd);
         if (g_ime.active || g_ime.candOpen) ImeStateReset();
     }
 
@@ -1161,6 +1164,12 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
 {
     if (!g_ready)
     {
+        static DWORD retryAt = 0;   /* back off after a failed init */
+        DWORD now = GetTickCount();
+        if (retryAt && (int)(now - retryAt) < 1000) {
+            /* fall through: skip re-init attempts this frame */
+        }
+        else {
         ID3D11Device* dev = nullptr;
         if (SUCCEEDED(pSwap->GetDevice(__uuidof(ID3D11Device), (void**)&dev)) && dev)
         {
@@ -1186,6 +1195,7 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                 g_leakProbe = ShConfigGetBool("loader", "leak_probe", 0)
                             ? 1 : 0;
                 InterlockedExchange(&g_ready, 1);
+                retryAt = 0;
                 OvlLog("imgui ready: hwnd=%llx device=%llx font=%p",
                        (unsigned long long)g_hwnd,
                        (unsigned long long)g_pd3dDevice,
@@ -1196,11 +1206,19 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
             }
             else
             {
-                OvlLog("imgui init FAILED");
+                OvlLog("imgui init FAILED (retry in 1s)");
                 ImGui_ImplDX11_Shutdown();
                 ImGui_ImplWin32_Shutdown();
                 ImGui::DestroyContext();
+                /* Drop the COM references so a retry starts clean
+                 * instead of stacking leaked device/context refs. */
+                if (g_pd3dContext) g_pd3dContext->Release();
+                if (g_pd3dDevice)  g_pd3dDevice->Release();
+                g_pd3dContext = nullptr;
+                g_pd3dDevice = nullptr;
+                retryAt = now;
             }
+        }
         }
     }
 
@@ -1232,12 +1250,23 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
             ID3D11Texture2D* back = nullptr;
             ID3D11RenderTargetView* rtv = nullptr;
             DXGI_SWAP_CHAIN_DESC desc = {};
-            if (SUCCEEDED(pSwap->GetDesc(&desc)) &&
+            HRESULT dhr = pSwap->GetDesc(&desc);
+            if (SUCCEEDED(dhr) &&
                 SUCCEEDED(pSwap->GetBuffer(0, __uuidof(ID3D11Texture2D),
                                            (void**)&back)))
             {
                 g_pd3dDevice->CreateRenderTargetView(back, nullptr, &rtv);
                 back->Release();
+            }
+            // A failed GetDesc would leave desc zeroed and the whole
+            // frame blank while the menu still swallows every key -
+            // the "frozen game with an invisible menu" state.  Skip
+            // the frame; keys reach the game until the desc returns.
+            if (!SUCCEEDED(dhr) || desc.BufferDesc.Width == 0 ||
+                desc.BufferDesc.Height == 0)
+            {
+                if (rtv) rtv->Release();
+                return g_origPresent(pSwap, sync, flags);
             }
             if (rtv)
             {

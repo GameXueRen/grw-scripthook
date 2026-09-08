@@ -170,6 +170,22 @@ static volatile int g_qFloat = 0;
 static volatile int g_qSix = 0;
 static volatile float g_qF[3];
 
+/* Multi-producer safety: the slot is claimed by CAS, every job gets
+ * a sequence number, and ShQueueResult only reports the sequence the
+ * CALLING THREAD submitted (tracked per thread id).  Completed
+ * results rest in a small ring keyed by sequence, so the next
+ * submitter can no longer steal or invalidate an earlier waiter's
+ * answer.  The per-thread table has 8 slots - more than 8 threads
+ * queuing simultaneously would recycle an entry, far beyond real
+ * usage. */
+#define QDONE_MAX 8
+static volatile LONG g_qClaim = 0;
+static volatile LONG g_qSeqIssued = 0;
+static volatile LONG g_qSeqCur = 0;
+static volatile LONG g_qDoneSeq[QDONE_MAX];
+static uint64_t g_qDoneRet[QDONE_MAX];
+static struct { DWORD tid; LONG seq; } g_qTls[8];
+
 typedef uint64_t (__attribute__((ms_abi)) *ShQFnF_t)(uint64_t,
                                                      uint64_t,
                                                      float, float,
@@ -181,32 +197,51 @@ typedef uint64_t (__attribute__((ms_abi)) *ShQFn6_t)(uint64_t,
                                                      uint64_t,
                                                      uint64_t);
 
+/* Claim the slot, remember this thread's sequence, fill everything
+ * and publish the pending flag LAST so the pump never sees a
+ * half-filled job. */
+static LONG QueueBegin(void) {
+    DWORD tid = GetCurrentThreadId();
+    LONG seq;
+    int i;
+
+    if (InterlockedCompareExchange(&g_qClaim, 1, 0)) return 0;
+    seq = InterlockedIncrement(&g_qSeqIssued);
+    g_qSeqCur = seq;
+    for (i = 0; i < 8; i++) {
+        if (!g_qTls[i].tid || g_qTls[i].tid == tid) {
+            g_qTls[i].tid = tid;
+            g_qTls[i].seq = seq;
+            break;
+        }
+    }
+    return seq;
+}
+
 /* Six integer arguments; the fifth and sixth go on the
  * stack, which the four argument path cannot reach. */
 SH_API int ShQueueCall6(uint64_t fn, const uint64_t *args) {
     int i;
-    if (!fn || !args || g_qPending) return 0;
+    if (!fn || !args) return 0;
+    if (!QueueBegin()) return 0;
     for (i = 0; i < 6; i++) g_qArg[i] = args[i];
     g_qFloat = 0;
     g_qSix = 1;
-    g_qRet = 0;
-    g_qDone = 0;
     g_qFn = fn;
-    g_qPending = 1;
+    InterlockedExchange(&g_qPending, 1);
     return 1;
 }
 
 SH_API int ShQueueCall(uint64_t fn, uint64_t a0, uint64_t a1,
                        uint64_t a2, uint64_t a3) {
-    if (!fn || g_qPending) return 0;
+    if (!fn) return 0;
+    if (!QueueBegin()) return 0;
     g_qArg[0] = a0; g_qArg[1] = a1;
     g_qArg[2] = a2; g_qArg[3] = a3;
     g_qFloat = 0;
     g_qSix = 0;
-    g_qRet = 0;
-    g_qDone = 0;
     g_qFn = fn;
-    g_qPending = 1;
+    InterlockedExchange(&g_qPending, 1);
     return 1;
 }
 
@@ -215,22 +250,32 @@ SH_API int ShQueueCall(uint64_t fn, uint64_t a0, uint64_t a1,
  * those, so the call goes through its own signature. */
 SH_API int ShQueueCallF(uint64_t fn, uint64_t a0, uint64_t a1,
                         float f2, float f3, float f4) {
-    if (!fn || g_qPending) return 0;
+    if (!fn) return 0;
+    if (!QueueBegin()) return 0;
     g_qArg[0] = a0; g_qArg[1] = a1;
     g_qF[0] = f2; g_qF[1] = f3; g_qF[2] = f4;
     g_qFloat = 1;
     g_qSix = 0;
-    g_qRet = 0;
-    g_qDone = 0;
     g_qFn = fn;
-    g_qPending = 1;
+    InterlockedExchange(&g_qPending, 1);
     return 1;
 }
 
 SH_API int ShQueueResult(uint64_t *outRet) {
-    if (!g_qDone) return 0;
-    if (outRet) *outRet = g_qRet;
-    return 1;
+    DWORD tid = GetCurrentThreadId();
+    LONG seq = 0;
+    int i;
+
+    for (i = 0; i < 8; i++)
+        if (g_qTls[i].tid == tid) { seq = g_qTls[i].seq; break; }
+    if (!seq) return 0;
+    for (i = 0; i < QDONE_MAX; i++) {
+        if (g_qDoneSeq[i] == seq) {
+            if (outRet) *outRet = g_qDoneRet[i];
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* Every ray the engine casts passes through here, bullet
@@ -421,11 +466,20 @@ RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
         uint64_t a4 = g_qArg[4], a5 = g_qArg[5];
         int isF = g_qFloat, isSix = g_qSix;
         float f2 = g_qF[0], f3 = g_qF[1], f4 = g_qF[2];
+        LONG seq = g_qSeqCur;
 
-        g_qPending = 0;
+        /* Snapshot taken; release the claim so the next submitter
+         * can fill the slot while this job runs. */
+        InterlockedExchange(&g_qPending, 0);
+        InterlockedExchange(&g_qClaim, 0);
         if (isF)        g_qRet = ((ShQFnF_t)f)(a0, a1, f2, f3, f4);
         else if (isSix) g_qRet = ((ShQFn6_t)f)(a0, a1, a2, a3, a4, a5);
         else            g_qRet = ((ShQFn_t)f)(a0, a1, a2, a3);
+        {
+            int slot = (int)(seq % QDONE_MAX);
+            g_qDoneRet[slot] = g_qRet;
+            InterlockedExchange(&g_qDoneSeq[slot], seq);
+        }
         g_qDone = 1;
     }
     if (!g_req || g_busy || !g_B) return;

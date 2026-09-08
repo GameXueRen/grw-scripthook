@@ -51,7 +51,7 @@ static HudSlot g_slots[HUD_SLOTS];
 static HudView g_view[HUD_SLOTS];
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
-static volatile int g_started = 0;
+static volatile LONG g_started = 0;
 static volatile int g_rev = 0;
 
 extern void ShSetError(int err);
@@ -256,11 +256,17 @@ static DWORD WINAPI HudThread(LPVOID p) {
 }
 
 static void EnsureHud(void) {
-    if (g_started) return;
-    g_started = 1;
-    InitializeCriticalSection(&g_lock);
-    g_lockReady = 1;
-    CreateThread(NULL, 0, HudThread, NULL, 0, NULL);
+    for (;;) {
+        LONG s = InterlockedCompareExchange(&g_started, 0, 0);
+        if (s == 1) return;
+        if (s == 2) { Sleep(0); continue; }
+        if (InterlockedCompareExchange(&g_started, 2, 0)) continue;
+        InitializeCriticalSection(&g_lock);
+        g_lockReady = 1;
+        CreateThread(NULL, 0, HudThread, NULL, 0, NULL);
+        InterlockedExchange(&g_started, 1);
+        return;
+    }
 }
 
 SH_API uint32_t ShHudCreate(const char *name, int anchor,

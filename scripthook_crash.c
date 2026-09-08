@@ -160,7 +160,7 @@ static void Report(EXCEPTION_POINTERS *ep, int fatal) {
      * addresses stand out, which is enough to place the
      * fault in a call chain without unwind data. */
     for (i = 0; i < CRASH_STACK_N &&
-                n < (int)sizeof(g_buf) - 128; i++) {
+                n < (int)sizeof(g_buf) - 200; i++) {
         uint64_t v = 0;
 
         if (!ShReadMem(c->Rsp + (uint64_t)i * 8, &v, 8)) break;
@@ -171,6 +171,10 @@ static void Report(EXCEPTION_POINTERS *ep, int fatal) {
                       (unsigned long long)v,
                       strchr(site, '+') ? site : "");
     }
+    /* n accumulates the "intended" lengths from snprintf returns;
+     * the writes were bounded by sizeof(g_buf) but the counter can
+     * exceed it - keep the copy inside g_first. */
+    if (n > (int)sizeof(g_buf) - 1) n = (int)sizeof(g_buf) - 1;
 
     if (!g_haveFirst) {
         memcpy(g_first, g_buf, (size_t)n);

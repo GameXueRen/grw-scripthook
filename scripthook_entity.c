@@ -114,13 +114,50 @@ static const struct {
 
 /* vtable +0x30 thunks to a getter returning the class
  * descriptor, whose +0x24 holds the class hash.
- */
+ *
+ * The answer never changes for a given object, but the decode
+ * costs ~8 kernel reads - and KindIndex runs it over every
+ * component of every candidate entity during a find.  A small
+ * open-addressed cache keyed by the object pointer removes the
+ * repeat cost; ShInvalidate clears it with the rest. */
+#define CLS_CACHE 512
+#define CLS_NONE  0xFFFFFFFFu
+static struct { uint64_t obj; uint32_t hash; } g_clsCache[CLS_CACHE];
+
+static void ClsCachePut(uint64_t obj, uint32_t hash) {
+    uint32_t m = (uint32_t)(obj >> 4) % CLS_CACHE;
+    int i;
+    for (i = 0; i < 8; i++) {
+        uint32_t s = (m + (uint32_t)i) % CLS_CACHE;
+        if (!g_clsCache[s].obj || g_clsCache[s].obj == obj) {
+            g_clsCache[s].obj = obj;
+            g_clsCache[s].hash = hash;
+            return;
+        }
+    }
+}
+
+static uint32_t ClsCacheGet(uint64_t obj) {
+    uint32_t m = (uint32_t)(obj >> 4) % CLS_CACHE;
+    int i;
+    for (i = 0; i < 8; i++) {
+        uint32_t s = (m + (uint32_t)i) % CLS_CACHE;
+        if (!g_clsCache[s].obj) return CLS_NONE;
+        if (g_clsCache[s].obj == obj) return g_clsCache[s].hash;
+    }
+    return CLS_NONE;
+}
+
 static uint32_t ClassHashOf(uint64_t obj) {
     uint64_t vt, thunk, tgt, desc;
     uint8_t b[16];
     int32_t rel, disp;
-    uint32_t hash = 0;
+    uint32_t hash;
     int i;
+
+    if (!obj) return 0;
+    hash = ClsCacheGet(obj);
+    if (hash != CLS_NONE) return hash;
 
     if (!ShReadableAddr(obj, 8)) return 0;
     vt = ShReadQ(obj);
@@ -133,6 +170,7 @@ static uint32_t ClassHashOf(uint64_t obj) {
     tgt = thunk + 5 + rel;
     if (!ShReadableAddr(tgt, 16)) return 0;
     memcpy(b, (void *)(uintptr_t)tgt, 16);
+    hash = 0;
     for (i = 0; i + 7 <= 16; i++) {
         if (b[i] == 0x48 && b[i + 1] == 0x8B && b[i + 2] == 0x05) {
             memcpy(&disp, b + i + 3, 4);
@@ -140,10 +178,11 @@ static uint32_t ClassHashOf(uint64_t obj) {
             if (ShReadableAddr(desc + OFF_DESC_HASH, 4))
                 memcpy(&hash, (void *)(uintptr_t)
                        (desc + OFF_DESC_HASH), 4);
-            return hash;
+            break;
         }
     }
-    return 0;
+    ClsCachePut(obj, hash);
+    return hash;
 }
 
 static int KindIndex(uint64_t entity) {
@@ -270,11 +309,50 @@ static uint64_t g_headCtrl = 0;
  * the first time the player aims, so until then the answer
  * for an entity stays "no group". Re-sweeping the whole
  * address space every tick for an entity that still has no
- * group wastes the frame budget, so a miss is remembered
- * and re-used for a short while. */
-static uint64_t g_headMissEnt = 0;
-static uint64_t g_headMissAt = 0;
+ * group wastes the frame budget, so misses are remembered
+ * and re-used for a short while.  Several entries: two
+ * callers alternating between two groupless entities used to
+ * evict each other's miss and re-sweep every tick. */
+#define HEAD_MISS_SLOTS 8
+static struct {
+    uint64_t ent;
+    uint64_t at;
+} g_headMiss[HEAD_MISS_SLOTS];
 #define HEAD_MISS_MS  700u
+
+static int HeadMissHit(uint64_t entity, uint64_t now) {
+    int i;
+    for (i = 0; i < HEAD_MISS_SLOTS; i++)
+        if (g_headMiss[i].ent == entity &&
+            now - g_headMiss[i].at < HEAD_MISS_MS)
+            return 1;
+    return 0;
+}
+
+static void HeadMissRemember(uint64_t entity, uint64_t now) {
+    int i, slot = 0;
+    uint64_t oldest = 0;
+    for (i = 0; i < HEAD_MISS_SLOTS; i++) {
+        if (g_headMiss[i].ent == entity) {
+            g_headMiss[i].at = now;
+            return;
+        }
+        if (!g_headMiss[i].ent) { slot = i; break; }
+        if (!g_headMiss[i].ent || g_headMiss[i].at <= oldest) { oldest = g_headMiss[i].at; slot = i; }
+    }
+    g_headMiss[slot].ent = entity;
+    g_headMiss[slot].at = now;
+}
+
+static void HeadMissClear(uint64_t entity) {
+    int i;
+    for (i = 0; i < HEAD_MISS_SLOTS; i++)
+        if (g_headMiss[i].ent == entity) g_headMiss[i].ent = 0;
+}
+
+static void HeadMissClearAll(void) {
+    memset(g_headMiss, 0, sizeof(g_headMiss));
+}
 
 /* Both arrays land in a few direct reads and compare
  * locally. ReadProcessMemory per element multiplied out to
@@ -331,8 +409,7 @@ static uint64_t FindHeadGroup(uint64_t entity) {
      * not appeared yet, so trust it and avoid the sweep. A
      * reset of the miss (a new session via ShHeadInvalidate,
      * an ADS via ShHeadClearMiss) clears this. */
-    if (g_headMissEnt == entity &&
-        now - g_headMissAt < HEAD_MISS_MS)
+    if (HeadMissHit(entity, now))
         return 0;
     /* The head group belongs to the player's body entity. The
      * camera re-parents on aim, a parachute, a stowed weapon -
@@ -344,8 +421,7 @@ static uint64_t FindHeadGroup(uint64_t entity) {
      * comes back. */
     if (g_headCtrl && g_headEnt && g_headEnt != entity &&
         CtrlAlive(g_headCtrl, g_headEnt)) {
-        g_headMissEnt = entity;
-        g_headMissAt = now;
+        HeadMissRemember(entity, now);
         return 0;
     }
 
@@ -389,15 +465,14 @@ static uint64_t FindHeadGroup(uint64_t entity) {
                         continue;
                     g_headEnt = entity;
                     g_headCtrl = (uint64_t)(uintptr_t)(b + o + k);
-                    g_headMissEnt = 0;
+                    HeadMissClear(entity);
                     return g_headCtrl;
                 }
             }
         }
         scan = next;
     }
-    g_headMissEnt = entity;
-    g_headMissAt = now;
+    HeadMissRemember(entity, now);
     return 0;
 }
 
@@ -628,8 +703,7 @@ SH_API int ShGetHeadNodes(uint64_t entity, uint64_t *out, int max) {
 SH_API void ShHeadInvalidate(void) {
     g_headEnt = 0;
     g_headCtrl = 0;
-    g_headMissEnt = 0;
-    g_headMissAt = 0;
+    HeadMissClearAll();
 }
 
 /** Clear only the "no group yet" note, keeping a controller
@@ -639,8 +713,15 @@ SH_API void ShHeadInvalidate(void) {
  *  or the body rescans the whole heap after every vehicle
  *  ride. */
 SH_API void ShHeadClearMiss(void) {
-    g_headMissEnt = 0;
-    g_headMissAt = 0;
+    HeadMissClearAll();
+}
+
+/** Class hashes die with the heap layout: a respawn can hand
+ *  the same address to a different class, so the cache must
+ *  not outlive a session invalidation. */
+void ShEntityCacheClear(void) {
+    memset(g_clsCache, 0, sizeof(g_clsCache));
+    HeadMissClearAll();
 }
 
 /** How many render nodes an entity has, 0 if none. */

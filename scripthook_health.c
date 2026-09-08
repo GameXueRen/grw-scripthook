@@ -32,6 +32,8 @@ extern int ShRequireInGame(void);
 
 static uint64_t g_comp = 0;
 static uint64_t g_compOwner = 0;
+static uint64_t g_compFailOwner = 0;
+static DWORD g_compFailAt = 0;
 
 /* The protected int codec lives in scripthook_stat.c now,
  * exposed as a general stat API. Health is one caller.
@@ -84,14 +86,18 @@ static int EngineComponent(uint64_t owner, uint64_t *out) {
     if (!n || n > 512) return 0;
 
     /* Holder classes differ per entity type, so match the
-     * structure instead: a sub component owning us.
-     */
+     * structure instead: a sub component owning us.  One kernel
+     * read per holder instead of 64: the old per-qword loop made
+     * every entity cost milliseconds. */
     for (i = 0; i < n; i++) {
         uint64_t c = ShReadQ(arr + (uint64_t)i * 8);
         uint64_t o;
+        uint8_t win[SUB_WINDOW];
         if (!c || !ShReadableAddr(c, SUB_WINDOW)) continue;
+        if (!ShReadMem(c, win, sizeof(win))) continue;
         for (o = 0; o + 8 <= SUB_WINDOW; o += 8) {
-            uint64_t comp = ShReadQ(c + o);
+            uint64_t comp;
+            memcpy(&comp, win + o, 8);
             if (!comp) continue;
             if (CompValid(comp, owner)) {
                 *out = comp;
@@ -193,6 +199,8 @@ static int EntityComponent(uint64_t entity, uint64_t *out) {
     if (!entity) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (!ShWalkToRoot(entity, &root)) return 0;
     if (EngineComponent(root, out)) {
+        g_comp = *out;
+        g_compOwner = root;
         ShSetError(SH_OK);
         return 1;
     }
@@ -200,10 +208,26 @@ static int EntityComponent(uint64_t entity, uint64_t *out) {
         *out = g_comp;
         return 1;
     }
-    if (!FindComponent(root, out)) {
+    /* Negative cache: doors, mines and the like have no SUB
+     * component, so FindComponent means a full heap pass - do
+     * not repeat it for the same root within 2s. */
+    if (root == g_compFailOwner &&
+        (int)(GetTickCount() - g_compFailAt) < 2000) {
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;
     }
+    if (!FindComponent(root, out)) {
+        g_compFailOwner = root;
+        g_compFailAt = GetTickCount();
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
+    /* Cache the find: the full heap pass is the "tens of
+     * seconds" path, so repeating it per query for the same
+     * root must not happen. */
+    g_compFailOwner = 0;
+    g_comp = *out;
+    g_compOwner = root;
     ShSetError(SH_OK);
     return 1;
 }
@@ -250,8 +274,18 @@ SH_API int ShSetGodModeEntity(uint64_t entity, int on) {
         ShSetError(SH_ERR_UNWRITABLE);
         return 0;
     }
-    *(uint8_t *)(uintptr_t)(comp + OFF_GODMODE) = v;
-    *(uint8_t *)(uintptr_t)(comp + OFF_NODAMAGE) = v;
+    /* Kernel-mediated: the check above and a plain store do not
+     * close over an engine free, and a store to a freed page
+     * faults the process. */
+    if (!WriteProcessMemory(GetCurrentProcess(),
+                            (void *)(uintptr_t)(comp + OFF_GODMODE),
+                            &v, 1, NULL) ||
+        !WriteProcessMemory(GetCurrentProcess(),
+                            (void *)(uintptr_t)(comp + OFF_NODAMAGE),
+                            &v, 1, NULL)) {
+        ShSetError(SH_ERR_UNWRITABLE);
+        return 0;
+    }
     ShSetError(SH_OK);
     return 1;
 }
@@ -294,8 +328,16 @@ SH_API int ShSetGodModePlayer(int on) {
         ShSetError(SH_ERR_UNWRITABLE);
         return 0;
     }
-    *(uint8_t *)(uintptr_t)(comp + OFF_GODMODE) = v;
-    *(uint8_t *)(uintptr_t)(comp + OFF_NODAMAGE) = v;
+    /* Kernel-mediated - see ShSetGodModeEntity. */
+    if (!WriteProcessMemory(GetCurrentProcess(),
+                            (void *)(uintptr_t)(comp + OFF_GODMODE),
+                            &v, 1, NULL) ||
+        !WriteProcessMemory(GetCurrentProcess(),
+                            (void *)(uintptr_t)(comp + OFF_NODAMAGE),
+                            &v, 1, NULL)) {
+        ShSetError(SH_ERR_UNWRITABLE);
+        return 0;
+    }
     ShSetError(SH_OK);
     return 1;
 }

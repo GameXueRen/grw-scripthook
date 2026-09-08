@@ -149,17 +149,29 @@ int ShReadMem(uint64_t addr, void *out, size_t len) {
     return got == len;
 }
 
-/* Same-process direct read. ReadProcessMemory goes through
- * the kernel even for the owning process and copies at a
- * fraction of memory bandwidth, so a whole-address-space
- * sweep costs tens of seconds. The region was validated a
- * line above; this only has to close the gap between that
- * check and the copy, which a decommit lands either side
- * of. The bulk scans in the entity code use this. */
+/* Same-process read. ReadProcessMemory goes through the kernel even
+ * for the owning process and copies at a fraction of memory
+ * bandwidth, so a whole-address-space sweep over pure RPM costs
+ * tens of seconds - the bulk scans in the entity code need the
+ * direct copy.
+ *
+ * The direct copy is only safe where the mapping cannot vanish
+ * under us: the module image (lifetime = process).  Heap addresses
+ * go through ReadProcessMemory instead - the check above and the
+ * copy below do not atomically close over a page the engine can
+ * decommit in between, and a plain memcpy there faults the process
+ * (self-RPM fails cleanly instead).  This closes the gap where it
+ * is real without giving up scan speed on static data. */
 int ShReadFast(uint64_t addr, void *out, size_t len) {
+    if (!len) return 1;
     if (!ShReadable(addr, len)) return 0;
-    memcpy(out, (const void *)(uintptr_t)addr, len);
-    return 1;
+    if (ShInImage(addr) && ShInImage(addr + len - 1)) {
+        memcpy(out, (const void *)(uintptr_t)addr, len);
+        return 1;
+    }
+    return ReadProcessMemory(GetCurrentProcess(),
+                             (const void *)(uintptr_t)addr,
+                             out, len, NULL) ? 1 : 0;
 }
 
 static uint64_t ShQ(uint64_t addr) {
@@ -494,7 +506,9 @@ static int ShStillValid(void) {
 }
 
 SH_API void ShInvalidate(void) {
+    extern void ShEntityCacheClear(void);
     g_resolved = 0;
+    ShEntityCacheClear();
 }
 
 extern int ShRequireInGame(void);
@@ -721,7 +735,7 @@ typedef struct {
     uint64_t ent;
     ShVec3   pos;
     float    yaw, pitch, roll;
-    volatile int ready;
+    volatile LONG ready;
 } ShXForm;
 
 static ShXForm g_xq[XQ_MAX];
@@ -732,7 +746,10 @@ SH_API int ShQueueTransform(uint64_t entity, const ShVec3 *pos,
 
     if (!entity || !pos) return ShFail(SH_ERR_BAD_ARG);
     for (i = 0; i < XQ_MAX; i++) {
-        if (g_xq[i].ready) continue;
+        /* Two producers can eye the same empty slot; the CAS makes
+         * one of them the owner so a transform is never lost. */
+        if (InterlockedCompareExchange(&g_xq[i].ready, 1, 0))
+            continue;
         g_xq[i].ent = entity;
         g_xq[i].pos = *pos;
         g_xq[i].yaw = yaw;
@@ -741,7 +758,7 @@ SH_API int ShQueueTransform(uint64_t entity, const ShVec3 *pos,
         /* Published last, so the pump never sees a half
          * filled slot.
          */
-        g_xq[i].ready = 1;
+        InterlockedExchange(&g_xq[i].ready, 1);
         g_lastError = SH_OK;
         return 1;
     }

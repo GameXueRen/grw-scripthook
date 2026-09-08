@@ -161,8 +161,8 @@ SH_API int ShInBinocular(void) { return (ShGetUiState() & SH_UI_BINOCULAR) != 0;
 #define SH_UI_PAUSED   (SH_UI_PAUSE | SH_UI_LOADOUT | SH_UI_MAP | \
                         SH_UI_SKILLS | SH_UI_POPUP)
 
-static int Paused(void) {
-    if (ShGetUiState() & SH_UI_PAUSED) return 1;
+static int Paused(uint32_t ui) {
+    if (ui & SH_UI_PAUSED) return 1;
     return ShInPauseMenu();
 }
 
@@ -201,7 +201,7 @@ SH_API int ShGetGameStateName(char *buf, int len) {
         else if (ui & SH_UI_DRONE) snprintf(buf, len, "Drone");
         else if (ui & SH_UI_BINOCULAR) snprintf(buf, len, "Binocular");
         else if (ui & SH_UI_CINEMATIC) snprintf(buf, len, "Cinematic");
-        else if (Paused()) snprintf(buf, len, "Paused%s", sub);
+        else if (Paused(ui)) snprintf(buf, len, "Paused%s", sub);
         else snprintf(buf, len, "Playing%s", sub);
     }
     else if (h == HASH_MENU) snprintf(buf, len, "MenuOrLobby");
@@ -273,7 +273,9 @@ SH_API int ShGetGameState(void) {
 
     TrackState(h);
     if (h == HASH_PLAYING || h == HASH_INGAME) {
-        /* the flow stays Playing through all of these */
+        /* the flow stays Playing through all of these; one
+         * ShGetUiState per call - it is 12 scene lookups and the
+         * chat thread polls here every 15ms */
         uint32_t ui = ShGetUiState();
         int cam;
         if (ui & SH_UI_LOADING) return SH_STATE_RELOADING;
@@ -282,7 +284,7 @@ SH_API int ShGetGameState(void) {
          * so it reports as the drone, never as paused. */
         cam = EngineCamera(ui);
         if (cam) return cam;
-        if (Paused()) return SH_STATE_PAUSED;
+        if (Paused(ui)) return SH_STATE_PAUSED;
         return SH_STATE_INGAME;
     }
     if (h == HASH_MENU) return SH_STATE_MENU;

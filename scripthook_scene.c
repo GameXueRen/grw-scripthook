@@ -96,7 +96,7 @@ typedef struct {
 
 static SceneSlot g_s[MAX_SCENES];
 static CRITICAL_SECTION g_slock;
-static int g_slockInit;
+static volatile LONG g_slockInit = 0;
 static uint8_t *g_stub;
 static uint8_t g_thunkOrig[5];
 static volatile uint32_t g_lastStamp;
@@ -105,10 +105,17 @@ static int64_t g_qpcFreq;
 static volatile LONG g_frame;
 
 static void SLock(void) {
-    if (!g_slockInit) {
+    /* CAS-claimed init: two threads first-touching the lock at once
+     * must not both InitializeCriticalSection (spawn.c pattern). */
+    for (;;) {
+        LONG s = InterlockedCompareExchange(&g_slockInit, 0, 0);
+        if (s == 1) break;
+        if (s == 2) { Sleep(0); continue; }
+        if (InterlockedCompareExchange(&g_slockInit, 2, 0)) continue;
         InitializeCriticalSection(&g_slock);
         LogInit("scripthook_scene.log");
-        g_slockInit = 1;
+        InterlockedExchange(&g_slockInit, 1);
+        break;
     }
     EnterCriticalSection(&g_slock);
 }
@@ -271,9 +278,20 @@ static const char *SceneName(uint64_t scene) {
     uint64_t priv, root, rootP, inst, blk;
     uint32_t len = 0;
     int i;
+    /* The cache fills from both the render hook and plugin threads;
+     * without the lock two first-lookups raced for one slot and a
+     * wrong name stuck there for the session (UI state misread). */
+    SLock();
     for (i = 0; i < g_nNames; i++)
-        if (g_names[i].scene == scene) return g_names[i].name;
-    if (g_nNames >= NAME_CACHE) return "";
+        if (g_names[i].scene == scene) {
+            const char *hit = g_names[i].name;
+            SUnlock();
+            return hit;
+        }
+    if (g_nNames >= NAME_CACHE) {
+        SUnlock();
+        return "";
+    }
     priv = RQ(scene + 8);
     root = priv ? RQ(priv + SP_ROOT) : 0;
     rootP = root ? RQ(root + 0x20) : 0;
@@ -289,7 +307,11 @@ static const char *SceneName(uint64_t scene) {
             g_names[g_nNames].name[len] = 0;
         }
     }
-    return g_names[g_nNames++].name;
+    {
+        const char *stored = g_names[g_nNames++].name;
+        SUnlock();
+        return stored;
+    }
 }
 
 SH_API int ShGameSceneActive(const char *name) {

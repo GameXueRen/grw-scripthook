@@ -340,7 +340,16 @@ static void HandleDone(void) {
     g_sendJob.hwnd = hwnd;
     g_sendJob.len = len;
 
-    CloseHandle(CreateThread(NULL, 0, SendThread, NULL, 0, NULL));
+    {
+        HANDLE h = CreateThread(NULL, 0, SendThread, NULL, 0, NULL);
+        if (h) CloseHandle(h);
+        else {
+            /* Nobody else releases the keyboard: with g_sending
+             * stuck at 1 every key would stay swallowed. */
+            g_sending = 0;
+            ReleaseKeys();
+        }
+    }
 }
 
 /* ---- runtime configuration ------------------------------------------
@@ -578,10 +587,26 @@ void ShChatCapture(ShChatView *out) {
     Lock();
     out->open  = g_chat.open ? 1 : 0;
     out->phase = g_chat.cmd ? 2 : (g_chat.open ? 1 : 0);
-    n = WideCharToMultiByte(CP_UTF8, 0, g_chat.text, -1,
-                            out->text, sizeof(out->text), NULL, NULL);
+    /* Convert the used length only: converting the whole buffer
+     * with -1 fails outright once the UTF-8 form outgrows the
+     * view (about 170 CJK chars), blanking the box. */
+    n = WideCharToMultiByte(CP_UTF8, 0, g_chat.text, g_chat.len,
+                            out->text, sizeof(out->text) - 1,
+                            NULL, NULL);
+    if (n <= 0 && g_chat.len > 0) {
+        /* Still too long: keep the longest prefix that fits. */
+        int keep = g_chat.len;
+        while (keep > 1) {
+            keep--;
+            n = WideCharToMultiByte(CP_UTF8, 0, g_chat.text, keep,
+                                    out->text, sizeof(out->text) - 1,
+                                    NULL, NULL);
+            if (n > 0) break;
+        }
+    }
     Unlock();
-    if (n <= 0) out->text[0] = 0;
+    if (n > 0) out->text[n] = 0;   /* success already NULs; be exact */
+    else out->text[0] = 0;
     if (g_chat.cmd == 1)
         strncpy(out->hint, "sending...", sizeof(out->hint) - 1);
     else if (g_chat.open)

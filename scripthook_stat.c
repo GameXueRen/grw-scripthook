@@ -72,7 +72,14 @@ SH_API int ShStatWrite(uint64_t stat, uint32_t value) {
             ShSetError(SH_ERR_UNWRITABLE);
             return 0;
         }
-        *s.p[i] = b[i];
+        /* Kernel-mediated like every other engine write: the page
+         * check and a plain store do not close over a free. */
+        if (!WriteProcessMemory(GetCurrentProcess(),
+                                (void *)(uintptr_t)s.p[i],
+                                &b[i], 1, NULL)) {
+            ShSetError(SH_ERR_UNWRITABLE);
+            return 0;
+        }
     }
     ShSetError(SH_OK);
     return 1;

@@ -27,25 +27,48 @@ static GetState_t g_origState[MAX_VT];
 static GetData_t  g_origData[MAX_VT];
 static int g_nDev;
 
-/* DIK codes above 0x7f are the E0 prefixed scancodes */
+/* DIK codes above 0x7f are the E0 prefixed scancodes.
+ * MapVirtualKeyA per keydown added up over the game's polling of
+ * every bound key, so the answers are cached: DIK codes are fixed
+ * for a keyboard layout's lifetime. */
+static int g_dikVk[256];
+static int g_dikVkReady = 0;
+
 static int DikToVk(DWORD dik) {
+    DWORD d;
     UINT vk;
-    switch (dik) {
-    case 0xC8: return VK_UP;      case 0xD0: return VK_DOWN;
-    case 0xCB: return VK_LEFT;    case 0xCD: return VK_RIGHT;
-    case 0x9C: return VK_RETURN;  case 0xC7: return VK_HOME;
-    case 0xCF: return VK_END;     case 0xC9: return VK_PRIOR;
-    case 0xD1: return VK_NEXT;    case 0xD2: return VK_INSERT;
-    case 0xD3: return VK_DELETE;  case 0x9D: return VK_RCONTROL;
-    case 0xB8: return VK_RMENU;   case 0xB5: return VK_DIVIDE;
-    case 0xDB: return VK_LWIN;    case 0xDC: return VK_RWIN;
-    default: break;
+    if (dik >= 256) return 0;
+    if (!g_dikVkReady) {
+        for (d = 0; d < 256; d++) {
+            switch (d) {
+            case 0xC8: g_dikVk[d] = VK_UP;      continue;
+            case 0xD0: g_dikVk[d] = VK_DOWN;    continue;
+            case 0xCB: g_dikVk[d] = VK_LEFT;    continue;
+            case 0xCD: g_dikVk[d] = VK_RIGHT;   continue;
+            case 0x9C: g_dikVk[d] = VK_RETURN;  continue;
+            case 0xC7: g_dikVk[d] = VK_HOME;    continue;
+            case 0xCF: g_dikVk[d] = VK_END;     continue;
+            case 0xC9: g_dikVk[d] = VK_PRIOR;   continue;
+            case 0xD1: g_dikVk[d] = VK_NEXT;    continue;
+            case 0xD2: g_dikVk[d] = VK_INSERT;  continue;
+            case 0xD3: g_dikVk[d] = VK_DELETE;  continue;
+            case 0x9D: g_dikVk[d] = VK_RCONTROL; continue;
+            case 0xB8: g_dikVk[d] = VK_RMENU;   continue;
+            case 0xB5: g_dikVk[d] = VK_DIVIDE;  continue;
+            case 0xDB: g_dikVk[d] = VK_LWIN;    continue;
+            case 0xDC: g_dikVk[d] = VK_RWIN;    continue;
+            default: break;
+            }
+            if (d & 0x80)
+                vk = MapVirtualKeyA(0xE000u | (d & 0x7Fu),
+                                    MAPVK_VSC_TO_VK_EX);
+            else
+                vk = MapVirtualKeyA(d, MAPVK_VSC_TO_VK_EX);
+            g_dikVk[d] = (int)vk;
+        }
+        g_dikVkReady = 1;
     }
-    if (dik & 0x80)
-        vk = MapVirtualKeyA(0xE000u | (dik & 0x7Fu), MAPVK_VSC_TO_VK_EX);
-    else
-        vk = MapVirtualKeyA(dik, MAPVK_VSC_TO_VK_EX);
-    return (int)vk;
+    return g_dikVk[dik];
 }
 
 /* Reverse map for the fake-key injector. */

@@ -878,17 +878,43 @@ SH_API const char *ShLangGet(void) {
     return g_langName;
 }
 
+/* One lock guards parse-once publication and read-back: without it,
+ * a parse in flight published half-filled tables to concurrent
+ * readers, and two writers raced the same .tmp file. */
+static CRITICAL_SECTION g_cfgLock;
+static volatile LONG g_cfgLockReady = 0;
+
+static void EnsureConfigLock(void) {
+    for (;;) {
+        LONG s = InterlockedCompareExchange(&g_cfgLockReady, 0, 0);
+        if (s == 1) return;
+        if (s == 2) { Sleep(0); continue; }
+        if (InterlockedCompareExchange(&g_cfgLockReady, 2, 0)) continue;
+        InitializeCriticalSection(&g_cfgLock);
+        InterlockedExchange(&g_cfgLockReady, 1);
+        return;
+    }
+}
+
 static void LoadConfig(void) {
     char path[GAME_DIR_MAX];
     FILE *f;
     size_t n;
 
-    if (g_configReady) return;
-    g_configReady = 1;
+    EnsureConfigLock();
+    EnterCriticalSection(&g_cfgLock);
+    if (g_configReady) {
+        LeaveCriticalSection(&g_cfgLock);
+        return;
+    }
+    /* Inside the lock: readers block on the same CS until the
+     * parse finishes, so the tables are never seen half-built. */
 
     if (snprintf(path, sizeof(path), "%sscripthook.ini",
-                 GameDir()) < 0)
+                 GameDir()) < 0) {
+        LeaveCriticalSection(&g_cfgLock);
         return;
+    }
     f = fopen(path, "rb");
     if (!f) {
         /* First launch: write the default so the schema is
@@ -896,21 +922,31 @@ static void LoadConfig(void) {
         WriteDefaultConfig(path);
         f = fopen(path, "rb");
     }
-    if (!f) return;
-    n = fread(g_config, 1, sizeof(g_config) - 1, f);
-    fclose(f);
-    g_config[n] = 0;
-    ParseConfig(g_config);
-    ResolveLanguage();
+    if (f) {
+        n = fread(g_config, 1, sizeof(g_config) - 1, f);
+        fclose(f);
+        g_config[n] = 0;
+        ParseConfig(g_config);
+        ResolveLanguage();
+    }
+    LeaveCriticalSection(&g_cfgLock);
 }
 
 static const char *FindEntry(const char *section, const char *key) {
     int i;
+    const char *hit = NULL;
+    /* SetEntry rewrites entries field-by-field under this lock; a
+     * reader without it could strcmp a half-written key. */
+    EnsureConfigLock();
+    EnterCriticalSection(&g_cfgLock);
     for (i = 0; i < g_nentries; i++)
         if (!strcmp(g_entries[i].section, section) &&
-            !strcmp(g_entries[i].key, key))
-            return g_entries[i].value;
-    return NULL;
+            !strcmp(g_entries[i].key, key)) {
+            hit = g_entries[i].value;
+            break;
+        }
+    LeaveCriticalSection(&g_cfgLock);
+    return hit;
 }
 
 /** Parse scripthook.ini now. The loader calls this before
@@ -1283,9 +1319,18 @@ SH_API int ShConfigSetStr(const char *section, const char *key,
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
+    /* One lock around file rewrite and in-memory update: two
+     * threads writing different keys used to race on the same
+     * .tmp and the last writer wiped the first one's key. */
+    EnsureConfigLock();
     LoadConfig();
-    if (!IniWriteValue(section, key, value)) return 0;
+    EnterCriticalSection(&g_cfgLock);
+    if (!IniWriteValue(section, key, value)) {
+        LeaveCriticalSection(&g_cfgLock);
+        return 0;
+    }
     SetEntry(section, key, value);
+    LeaveCriticalSection(&g_cfgLock);
     return 1;
 }
 

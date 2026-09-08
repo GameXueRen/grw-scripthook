@@ -42,13 +42,23 @@ static int Install(void);
 
 /* Our window is the foreground one. While the game is in the
  * background it must see no keys at all, like any unfocused app:
- * the machine's keyboard belongs to whatever window is active. */
+ * the machine's keyboard belongs to whatever window is active.
+ * The game polls hundreds of keys per frame through here, so the
+ * foreground lookup is cached for 50ms - focus changes are rare
+ * and 50ms of stale "focused" only delays a suppression by one
+ * poll burst. */
 static int GameFocused(void) {
-    HWND fg = GetForegroundWindow();
-    DWORD pid = 0;
-    if (!fg) return 0;
-    GetWindowThreadProcessId(fg, &pid);
-    return pid == GetCurrentProcessId();
+    static DWORD lastAt = 0;
+    static DWORD lastAns = 0;
+    DWORD now = GetTickCount();
+    if (!lastAt || (int)(now - lastAt) >= 50) {
+        HWND fg = GetForegroundWindow();
+        DWORD pid = 0;
+        if (fg) GetWindowThreadProcessId(fg, &pid);
+        lastAns = (pid == GetCurrentProcessId()) ? 1 : 0;
+        lastAt = now ? now : 1;
+    }
+    return (int)lastAns;
 }
 
 /* one rule for the poll stub and the DirectInput wrapper */

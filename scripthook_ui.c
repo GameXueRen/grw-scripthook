@@ -176,7 +176,7 @@ typedef struct {
 
 static Widget g_w[MAX_UI];
 static CRITICAL_SECTION g_lock;
-static int g_lockInit = 0;
+static volatile LONG g_lockInit = 0;
 
 static int RunJob(int op, Widget *w);
 static int HaveZombies(void);
@@ -204,6 +204,7 @@ typedef struct {
 
 typedef struct {
     int  used;
+    DWORD owner;    /* thread that began the batch; 0 = free */
     int  n;
     BOp  ops[MAX_BOPS];
 } Batch;
@@ -241,10 +242,16 @@ static uint8_t g_imageGuid[16] = {
     0xb3,0xca,0x4f,0xc8,0x9b,0x06,0x90,0x38 };
 
 static void Lock(void) {
-    if (!g_lockInit) {
+    /* CAS-claimed init - see scripthook_scene.c SLock. */
+    for (;;) {
+        LONG s = InterlockedCompareExchange(&g_lockInit, 0, 0);
+        if (s == 1) break;
+        if (s == 2) { Sleep(0); continue; }
+        if (InterlockedCompareExchange(&g_lockInit, 2, 0)) continue;
         InitializeCriticalSection(&g_lock);
         LogInit("scripthook_ui.log");
-        g_lockInit = 1;
+        InterlockedExchange(&g_lockInit, 1);
+        break;
     }
     EnterCriticalSection(&g_lock);
 }
@@ -1153,11 +1160,16 @@ SH_API int ShUiSetReset(uint32_t scene, void (*fn)(uint32_t, void *),
 
 SH_API int ShUiBegin(void) {
     int i;
+    DWORD self = GetCurrentThreadId();
     if (t_batch) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     Lock();
     for (i = 0; i < MAX_BATCH; i++) {
-        if (!g_batches[i].used) {
+        /* Reclaim a slot a previous incarnation of this thread left
+         * behind by exiting inside a batch - otherwise eight such
+         * exits would drain the pool for the whole session. */
+        if (!g_batches[i].used || g_batches[i].owner == self) {
             g_batches[i].used = 1;
+            g_batches[i].owner = self;
             g_batches[i].n = 0;
             SetBatch(&g_batches[i]);
             break;
@@ -1180,7 +1192,7 @@ static int Record(int op, uint32_t id, const PropCall *pc) {
 SH_API int ShUiAbort(void) {
     Batch *bt = t_batch;
     if (!bt) return 0;
-    bt->used = 0;
+    bt->used = 0; bt->owner = 0;
     SetBatch(NULL);
     return 1;
 }
@@ -1192,7 +1204,7 @@ static int RunBatch(Batch *bt) {
     dummy.scratch = (uint64_t)(uintptr_t)bt;
     Lock();
     ok = bt->n ? RunJob(OP_BATCH, &dummy) : 1;
-    bt->used = 0;
+    bt->used = 0; bt->owner = 0;
     Unlock();
     return ok;
 }
@@ -1225,10 +1237,10 @@ SH_API int ShUiCommitAsync(void (*done)(int ok, void *user), void *user) {
     if (!bt) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     SetBatch(NULL);
     ac = (AsyncCommit *)HeapAlloc(GetProcessHeap(), 0, sizeof(*ac));
-    if (!ac) { bt->used = 0; return 0; }
+    if (!ac) { bt->used = 0; bt->owner = 0; return 0; }
     ac->bt = bt; ac->done = done; ac->user = user;
     h = CreateThread(NULL, 0, CommitThread, ac, 0, NULL);
-    if (!h) { HeapFree(GetProcessHeap(), 0, ac); bt->used = 0; return 0; }
+    if (!h) { HeapFree(GetProcessHeap(), 0, ac); bt->used = 0; bt->owner = 0; return 0; }
     CloseHandle(h);
     return 1;
 }

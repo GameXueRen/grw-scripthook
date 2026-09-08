@@ -32,8 +32,14 @@ static DllUnregisterServer_t  p_DllUnregisterServer;
 
 static void LoadRealDinput8(void) {
     char sysdir[MAX_PATH];
-    GetSystemDirectoryA(sysdir, MAX_PATH);
-    strcat(sysdir, "\\dinput8.dll");
+    UINT n = GetSystemDirectoryA(sysdir, MAX_PATH);
+    /* The system dir fits easily, but never trust MAX_PATH math:
+     * truncate instead of strcat past the buffer. */
+    if (n == 0 || n > MAX_PATH - 14) {
+        Log("FATAL: system directory path too long");
+        return;
+    }
+    memcpy(sysdir + n, "\\dinput8.dll", 13);
 
     g_realDinput8 = LoadLibraryA(sysdir);
     if (!g_realDinput8) {
@@ -188,7 +194,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     } else if (reason == DLL_PROCESS_DETACH && g_logFile) {
         Log("unloading");
         LogClose();
-        if (g_realDinput8) FreeLibrary(g_realDinput8);
+        /* No FreeLibrary(g_realDinput8) here: this also runs on
+         * process exit under the loader lock, where freeing a
+         * system dll the process still references can deadlock.
+         * The OS unmaps everything anyway. */
     }
     return TRUE;
 }
