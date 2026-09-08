@@ -318,7 +318,16 @@ static struct {
     uint64_t ent;
     uint64_t at;
 } g_headMiss[HEAD_MISS_SLOTS];
-#define HEAD_MISS_MS  700u
+
+/* A group that was looked for and not found stays "not found" for a
+ * long time. Proving it costs a full sweep of the address space, so
+ * a caller retrying sooner than this would pay for that sweep over
+ * and over - which is how a group that does not exist yet used to
+ * stall the caller for tens of seconds every few seconds. Anything
+ * that can make the group appear (an aim edge, a new session) clears
+ * the lot, see ShHeadClearMiss.
+ */
+#define HEAD_MISS_MS  600000u
 
 static int HeadMissHit(uint64_t entity, uint64_t now) {
     int i;
@@ -395,10 +404,43 @@ static int CtrlAlive(uint64_t ctrl, uint64_t entity) {
     return OwnsAnyNode(ctrl, entity);
 }
 
+/* Where an interrupted sweep has to pick up again, and how much of
+ * one call it may spend. Walking the whole address space runs for
+ * tens of seconds, which no caller can afford to block on, so the
+ * sweep is chopped into slices and resumed by whoever calls next.
+ */
+static uint8_t *g_sweepAt = NULL;
+static size_t   g_sweepOff = 0;
+/* Where the neighbourhood pass ends. NULL once it has given up and
+ * the whole space is being walked. */
+static uint8_t *g_sweepEnd = NULL;
+/* Which pass the sweep is on: 0 the body's neighbourhood, 1
+ * everything above it, 2 everything below. */
+static int g_sweepPass = 0;
+#define SWEEP_TOP ((uint8_t *)0x7FFFFF000000ULL)
+#define SWEEP_BUDGET_MS 250u
+/* The group is allocated for the body it hides, so the memory around
+ * that body is tried first: a couple of hundred megabytes against
+ * several gigabytes, and it is where the answer usually is. */
+#define SWEEP_NEAR_WIN 0x4000000ULL
+
 static uint64_t FindHeadGroup(uint64_t entity) {
     MEMORY_BASIC_INFORMATION mbi;
-    uint8_t *scan = (uint8_t *)0x10000;
+    uint8_t *scan;
     uint64_t now = GetTickCount64();
+    uint64_t t0 = now;
+
+    /* A fresh sweep starts around the body and only widens to the
+     * whole address space if that turned up nothing. A resumed sweep
+     * carries on from wherever it stopped. */
+    if (!g_sweepAt) {
+        g_sweepOff = 0;
+        g_sweepEnd = (uint8_t *)(uintptr_t)(entity + SWEEP_NEAR_WIN);
+        g_sweepAt = (entity > SWEEP_NEAR_WIN)
+                    ? (uint8_t *)(uintptr_t)(entity - SWEEP_NEAR_WIN)
+                    : (uint8_t *)0x10000;
+    }
+    scan = g_sweepAt;
 
     /* These are freed and recycled, so a cached pointer is
      * verified before it is trusted.
@@ -430,7 +472,50 @@ static uint64_t FindHeadGroup(uint64_t entity) {
         if (next <= scan) break;
         if ((uint64_t)(uintptr_t)mbi.BaseAddress >= 0x800000000000ULL)
             break;
+        /* This pass is done, widen to the next one. The group is
+         * allocated for that body, so distance from it is the best
+         * guess at where to look: a sweep that starts at the bottom
+         * of the address space can spend its whole budget nowhere
+         * near where the group actually is. */
+        if (g_sweepEnd && (uint8_t *)mbi.BaseAddress >= g_sweepEnd) {
+            if (g_sweepPass == 0) {
+                g_sweepPass = 1;
+                g_sweepAt =
+                    (uint8_t *)(uintptr_t)(entity + SWEEP_NEAR_WIN);
+                g_sweepEnd = SWEEP_TOP;
+            } else if (g_sweepPass == 1) {
+                g_sweepPass = 2;
+                g_sweepAt = (uint8_t *)0x10000;
+                g_sweepEnd = (entity > SWEEP_NEAR_WIN)
+                    ? (uint8_t *)(uintptr_t)(entity - SWEEP_NEAR_WIN)
+                    : NULL;
+            } else {
+                g_sweepPass = 0;
+                g_sweepAt = NULL;
+                g_sweepOff = 0;
+                g_sweepEnd = NULL;
+                HeadMissRemember(entity, now);
+                return 0;
+            }
+            g_sweepOff = 0;
+            scan = g_sweepAt;
+            continue;
+        }
+        /* Out of time for this slice: remember the place and let the
+         * next call carry on. Nothing is remembered as a miss, the
+         * sweep simply is not finished yet. */
+        if (GetTickCount64() - t0 >= SWEEP_BUDGET_MS) {
+            g_sweepAt = next;
+            g_sweepOff = 0;
+            return 0;
+        }
+        /* Private committed read write memory only. The group lives
+         * on a heap, and skipping the image mappings and the mapped
+         * views - textures and streams, gigabytes of them - is what
+         * keeps this sweep to a few seconds instead of thirty.
+         */
         if (mbi.State == MEM_COMMIT &&
+            mbi.Type == MEM_PRIVATE &&
             (mbi.Protect & PAGE_READWRITE) &&
             !(mbi.Protect & PAGE_GUARD)) {
             uint8_t *b = (uint8_t *)mbi.BaseAddress;
@@ -448,8 +533,17 @@ static uint64_t FindHeadGroup(uint64_t entity) {
              * rather than faulting. */
             static uint8_t buf[0x200000];
 
-            for (o = 0; o + 0x50 <= sz;
+            /* One region can be large enough to swallow the whole
+             * budget on its own, so the slice test is repeated
+             * inside it and the walk resumes on that same chunk. */
+            for (o = (b == g_sweepAt) ? g_sweepOff : 0;
+                 o + 0x50 <= sz;
                  o += sizeof(buf) - 0x50) {
+                if (GetTickCount64() - t0 >= SWEEP_BUDGET_MS) {
+                    g_sweepAt = b;
+                    g_sweepOff = o;
+                    return 0;
+                }
                 got = sz - o;
                 if (got > sizeof(buf)) got = sizeof(buf);
                 if (!ShReadFast((uint64_t)(uintptr_t)(b + o),
@@ -466,12 +560,39 @@ static uint64_t FindHeadGroup(uint64_t entity) {
                     g_headEnt = entity;
                     g_headCtrl = (uint64_t)(uintptr_t)(b + o + k);
                     HeadMissClear(entity);
+                    g_sweepAt = NULL;
+                    g_sweepOff = 0;
+                    g_sweepEnd = NULL;
+                    g_sweepPass = 0;
                     return g_headCtrl;
                 }
             }
         }
         scan = next;
     }
+    /* Ran out of address space rather than out of passes: pick up the
+     * next pass on the next call, the answer is not a miss yet. */
+    if (g_sweepPass < 2) {
+        if (g_sweepPass == 0) {
+            g_sweepPass = 1;
+            g_sweepAt = (uint8_t *)(uintptr_t)(entity + SWEEP_NEAR_WIN);
+            g_sweepEnd = SWEEP_TOP;
+        } else {
+            g_sweepPass = 2;
+            g_sweepAt = (uint8_t *)0x10000;
+            g_sweepEnd = (entity > SWEEP_NEAR_WIN)
+                ? (uint8_t *)(uintptr_t)(entity - SWEEP_NEAR_WIN)
+                : NULL;
+        }
+        g_sweepOff = 0;
+        return 0;
+    }
+    /* Every pass came back empty, so now the miss can be trusted and
+     * the next sweep starts over. */
+    g_sweepAt = NULL;
+    g_sweepOff = 0;
+    g_sweepEnd = NULL;
+    g_sweepPass = 0;
     HeadMissRemember(entity, now);
     return 0;
 }
@@ -703,6 +824,10 @@ SH_API int ShGetHeadNodes(uint64_t entity, uint64_t *out, int max) {
 SH_API void ShHeadInvalidate(void) {
     g_headEnt = 0;
     g_headCtrl = 0;
+    g_sweepAt = NULL;   /* a sweep of the old session means nothing */
+    g_sweepOff = 0;
+    g_sweepEnd = NULL;
+    g_sweepPass = 0;
     HeadMissClearAll();
 }
 
@@ -713,6 +838,12 @@ SH_API void ShHeadInvalidate(void) {
  *  or the body rescans the whole heap after every vehicle
  *  ride. */
 SH_API void ShHeadClearMiss(void) {
+    /* A group may have appeared in a part of the heap the sweep
+     * already walked past, so the next one starts from the top. */
+    g_sweepAt = NULL;
+    g_sweepOff = 0;
+    g_sweepEnd = NULL;
+    g_sweepPass = 0;
     HeadMissClearAll();
 }
 
@@ -721,6 +852,10 @@ SH_API void ShHeadClearMiss(void) {
  *  not outlive a session invalidation. */
 void ShEntityCacheClear(void) {
     memset(g_clsCache, 0, sizeof(g_clsCache));
+    g_sweepAt = NULL;
+    g_sweepOff = 0;
+    g_sweepEnd = NULL;
+    g_sweepPass = 0;
     HeadMissClearAll();
 }
 

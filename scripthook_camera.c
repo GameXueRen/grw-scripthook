@@ -81,6 +81,22 @@ static volatile uint64_t g_headNearAt = 0; /* last frame cam was on the head */
 #define HEAD_NEAR_DIST 1.0f   /* metres: first person eye to head bone */
 #define FP_LIVE_MS     250u   /* how stale "near" may be before we say away */
 
+/* Last frame ApplyHead really placed the eye. The three places it
+ * bows out (a scoped fov, a camera beyond a chase arm, no head to
+ * read) write nothing at all, so a stamp that stops advancing means
+ * the engine owns the view - which is exactly what "not first
+ * person" has to mean. Unlike the distance below this says nothing
+ * about where the eye sits, so a preset or a seat anchor that parks
+ * the eye well off the head bone still counts as first person. */
+static volatile uint64_t g_headWroteAt = 0;
+
+/* How long after the last question the head has to stay live. The
+ * view state is also read while we do NOT own the camera (to tell
+ * "the engine took over" apart), and the head pump only runs while
+ * somebody wants the head. A consumer polling it keeps it alive. */
+static volatile uint64_t g_viewWantAt = 0;
+#define VIEW_WANT_MS 2000u
+
 /* Diagnostic only. Special views run mode 0 like the main
  * camera (measured: the drone), so mode gates nothing.
  */
@@ -119,6 +135,7 @@ extern void ShHeadWant(void);
 extern int ShFovSet(float radians);
 extern void ShFovClear(void);
 extern int ShHeadCached(ShVec3 *out);
+extern int ShGetGameState(void);
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern void *ShAllocNear(uint64_t target);
 
@@ -128,15 +145,20 @@ extern void *ShAllocNear(uint64_t target);
 /* The engine consumes this with no checks of its own, so a
  * NaN or a runaway value crashes it far from here. Refuse
  * the write and keep the engine's frame instead. */
-static void WritePos(float *m, float x, float y, float z) {
-    if (x != x || y != y || z != z) return;
+/* Returns 1 when the position was really written. A refused
+ * value (NaN, runaway) leaves the engine's own frame alone, and
+ * the first person state machine has to be able to tell that no
+ * eye was placed on this frame. */
+static int WritePos(float *m, float x, float y, float z) {
+    if (x != x || y != y || z != z) return 0;
     if (fabsf(x) > 1e6f || fabsf(y) > 1e6f || fabsf(z) > 1e6f)
-        return;
+        return 0;
     m[12] = x;
     m[13] = y;
     m[14] = z;
     m[15] = 1.0f;
     g_writes++;
+    return 1;
 }
 
 /* Derived from the player and the engine's own basis, never
@@ -202,6 +224,82 @@ static void WriteRot(float *m) {
  * zoomed one is a scope drawing its own overlay. */
 #define CAM_ARM_MAX  4.0f
 #define CAM_ZOOM_FOV 0.30f
+/* Past this the head reading cannot be real, see ApplyHead. */
+#define CAM_SANE_MAX 100.0f
+
+/* Kept for diagnostics: the last time the eye was bowed out to. */
+static volatile uint64_t g_headBowAt = 0;
+
+/* Where the eye actually went and how far the head was, for the
+ * diagnostics in ShCameraEyeAt. */
+static ShVec3 g_diagEye;
+static float g_diagD = -1.0f;
+
+/* Why the eye was not placed, for diagnostics: 0 it was, 1 there was
+ * no head to read, 2 the camera is a scope, 3 it is beyond a chase
+ * arm. Read with ShCameraHeadBow. */
+static volatile int g_headBow = 0;
+
+/* The eye placed on the last frame that had one, so a rig that keeps
+ * flickering in and out of being readable holds the view where it was
+ * instead of snapping it between the head and the body every other
+ * frame - which reads as the view fighting for control.
+ */
+static ShVec3 g_lastEye;
+static uint64_t g_lastEyeAt = 0;
+/* When the real head bone was last read. Holding the eye has to be
+ * timed from this and not from g_lastEyeAt: the eye we place
+ * ourselves refreshes that one every frame, so a hold timed from it
+ * never expires and the view stays nailed in place while the body
+ * walks away from it. */
+static uint64_t g_lastHeadAt = 0;
+/* ... and where that head was. A head that has stopped refreshing is
+ * still a head, and it is worth far more than the body position some
+ * of these frames hand back, which is nowhere near the player at all
+ * - a body swap puts it next to the origin, and an eye placed there
+ * throws the view clean out of the world. */
+
+#define EYE_HOLD_MS 500u
+
+/* Metres the eye may travel in one frame before it is eased onto
+ * rather than snapped to. Two sources feed this eye and they can
+ * disagree for a frame or two - the rig becoming readable again, a
+ * menu handing the world back - and a view that jumps metres between
+ * two frames reads as the camera fighting for control. Past
+ * EYE_JUMP_MAX it is a teleport, and easing that would fly the camera
+ * across the map, so it is applied as it is.
+ */
+#define EYE_SLEW_MAX 0.35f
+#define EYE_JUMP_MAX 8.0f
+
+/* Largest move asked for in the last second, for diagnostics. */
+static float g_eyeJump = 0.0f;
+static uint64_t g_eyeJumpAt = 0;
+
+/* Two ways the view can end up not being ours even while we place an
+ * eye every frame, which is what a flicker between first and third
+ * person looks like from the outside. Both are counted for
+ * ShCameraEyeDiag:
+ *   over  - the pose left on a camera is not the pose that camera
+ *           carries the next time it comes round, so something wrote
+ *           over it after we did;
+ *   swaps - the camera object itself changed, so two of them are
+ *           taking turns and only one of them ever gets our eye.
+ */
+static uint64_t g_eyeCam = 0;
+static float g_eyeSet[3];
+static int g_eyeSetOk = 0;
+static int g_eyeOver = 0;
+static int g_camSwaps = 0;
+
+/* Last frame we still owned the eye. Handing it back for iron sights
+ * is not a change of view, so the state stays first person for a
+ * moment after it - see ShCameraViewMode. */
+static volatile uint64_t g_headHeldAt = 0;
+/* Only long enough to cover the hand over itself. Held any longer it
+ * keeps the head hidden while the engine draws an over the shoulder
+ * aim, which is a view with the body in it. */
+#define FP_HANDOVER_MS 250u
 
 /* Vehicles run longer chase arms, so the head pump feeds
  * this hint on its own slow cadence. The frame path must
@@ -221,21 +319,101 @@ static void ApplyHead(float *m, float fov) {
     float ex = m[12], ey = m[13], ez = m[14];
     float gx = fx, gy = fy, gl, len;
     float px, py, pz, d;
+    int fromBody = 0;
+    int holdEye = 0;
 
-    if (!ShHeadCached(&h)) return;
+    if (!ShHeadCached(&h)) {
+        /* Nothing to read: a respawn, a body swap, a rig kept hidden
+         * inside a vehicle. Writing nothing at all leaves the frame
+         * on the engine's own camera, and that is third person - for
+         * as long as the rig is missing, which is seconds. The body
+         * stands in for the head instead: ShGetPlayerPosition is
+         * already about head height, and an eye a little off is far
+         * better than a view that drops out of first person. */
+        if (g_lastEyeAt && g_lastHeadAt &&
+            GetTickCount64() - g_lastHeadAt < EYE_HOLD_MS) {
+            /* Hold the last eye for the moment the rig is missing - a
+             * respawn, a body swap, a rig kept hidden inside a
+             * vehicle. Going anywhere else for those few frames is far
+             * more visible than an eye that is a little stale. */
+            h = g_lastEye;
+            fromBody = 1;
+            holdEye = 1;
+        } else {
+            /* Nothing sound to go on, and guessing is exactly what
+             * threw the view around: a body position handed back in
+             * the middle of a body swap can be kilometres from the
+             * player, and a head that stopped refreshing may be a head
+             * from somewhere else entirely. Writing nothing hands the
+             * frame back to the engine for a moment, which is at least
+             * honest, and the eye returns the instant the head can be
+             * read again. */
+            g_headBow = 1;
+            return;
+        }
+    } else {
+        g_lastHeadAt = GetTickCount64();
+    }
+
+    /* Only while the world is being played. A pause menu, the map and
+     * the loadout keep rendering world frames behind them, and those
+     * frames have a camera of their own: placing the eye on them sets
+     * the two against each other and the view drifts about instead of
+     * showing either one. Hand them back and take the eye again the
+     * moment play resumes. */
+    {
+        int s = ShGetGameState();
+        if (s != SH_STATE_INGAME && s != SH_STATE_UNKNOWN) {
+            g_headBow = 6;
+            return;
+        }
+    }
 
     /* A zoomed camera is a scope. The mask and reticle
      * anchor to the engine's own view, so moving the eye
      * displaces them. Skip and let it render. */
-    if (fov < CAM_ZOOM_FOV) return;
+    if (fov < CAM_ZOOM_FOV) { g_headBow = 2; return; }
 
     d = sqrtf((ex - h.x) * (ex - h.x) + (ey - h.y) * (ey - h.y)
               + (ez - h.z) * (ez - h.z));
 
+    /* A head hundreds of metres from the camera is not a head. It is
+     * a rig that was freed and recycled, or a body standing in for a
+     * player that is not there any more, and placing the eye on it
+     * throws the view into the sky. Leave the frame to the engine
+     * rather than chase a reading that makes no sense. */
+    if (d > CAM_SANE_MAX) { g_headBow = 5; return; }
+
     /* On foot, an engine camera beyond a chase arm is not
      * looking through the soldier: a drone, a cutscene, a
-     * tacmap. Vehicles keep longer arms, so they pass. */
-    if (d > CAM_ARM_MAX && !g_vehHint) return;
+     * tacmap. Vehicles keep longer arms, so they pass.
+     *
+     * Bowing out is only meant to cover the moment the engine
+     * takes the view. Kept up for longer it locks itself in: a
+     * menu hands the world back with the camera still out there,
+     * we bow out, so it stays out there, the eye is never placed,
+     * and the view sits in third person until something else
+     * happens to move it. Past a short grace it is written anyway.
+     */
+    if (d > CAM_ARM_MAX && !g_vehHint) {
+        int s = ShGetGameState();
+        /* A camera out there only means the engine took the view if
+         * the state says so. On its own the distance proves nothing:
+         * the engine recomputes its own third person pose every single
+         * frame whatever we write, so it is always out there, and
+         * bowing out for it means never placing the eye again - which
+         * is a view that flickers between first and third person
+         * instead of settling. A drone, a cinematic and the binoculars
+         * do own the view, and so does a camera that is not the
+         * player's own; those still get it. */
+        if (s == SH_STATE_DRONE || s == SH_STATE_BINOCULAR ||
+            s == SH_STATE_CINEMATIC) {
+            g_headBow = 3;
+            return;
+        }
+    }
+    g_headBowAt = 0;
+    g_headBow = fromBody ? 4 : 0;
 
     /* Flattened: nudging along a downward view would drop
      * the eye to the chest.
@@ -243,15 +421,25 @@ static void ApplyHead(float *m, float fov) {
     gl = sqrtf(gx * gx + gy * gy);
     if (gl > 0.01f) { gx /= gl; gy /= gl; }
     else { gx = 0.0f; gy = 1.0f; }
-    px = h.x + gx * g_back;
-    py = h.y + gy * g_back;
-    pz = h.z + g_up;
+    if (holdEye) {
+        /* What is being held is the eye itself, not a place to
+         * measure from. Applying the offsets again would add them
+         * again every frame, walking the view forward and upward for
+         * as long as the head stays unreadable. */
+        px = h.x;
+        py = h.y;
+        pz = h.z;
+    } else {
+        px = h.x + gx * g_back;
+        py = h.y + gy * g_back;
+        pz = h.z + g_up;
+    }
 
     /* ADS only: ease the eye the few cm onto the engine's
      * aim ray, at head depth, so the sights and the
      * bullets pass through screen center. */
     len = sqrtf(fx * fx + fy * fy + fz * fz);
-    if (d < CAM_ADS_FAR && len > 0.01f) {
+    if (!holdEye && d < CAM_ADS_FAR && len > 0.01f) {
         float t, w, perp;
 
         fx /= len; fy /= len; fz /= len;
@@ -275,7 +463,39 @@ static void ApplyHead(float *m, float fov) {
             pz += (ez + fz * t - pz) * w;
         }
     }
-    WritePos(m, px, py, pz);
+    /* Only a frame that really placed the eye counts. A refused
+     * value (or one of the bows out above) leaves the engine's own
+     * camera on screen, and the state machine has to see that. */
+    if (g_lastEyeAt) {
+        float dx = px - g_lastEye.x;
+        float dy = py - g_lastEye.y;
+        float dz = pz - g_lastEye.z;
+        float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        uint64_t now = GetTickCount64();
+
+        if (dist > EYE_SLEW_MAX && dist < EYE_JUMP_MAX) {
+            float k = EYE_SLEW_MAX / dist;
+            px = g_lastEye.x + dx * k;
+            py = g_lastEye.y + dy * k;
+            pz = g_lastEye.z + dz * k;
+        }
+        if (now - g_eyeJumpAt > 1000) {
+            g_eyeJump = 0.0f;
+            g_eyeJumpAt = now;
+        }
+        if (dist > g_eyeJump) g_eyeJump = dist;
+    }
+    if (WritePos(m, px, py, pz)) {
+        g_headWroteAt = GetTickCount64();
+        g_diagEye.x = px;
+        g_diagEye.y = py;
+        g_diagEye.z = pz;
+        g_diagD = d;
+        g_lastEye.x = px;
+        g_lastEye.y = py;
+        g_lastEye.z = pz;
+        g_lastEyeAt = g_headWroteAt;
+    }
 }
 
 /* Each field is written only if its bit is set, so the
@@ -318,8 +538,18 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
 
     g_cam = rcx;
     g_calls++;
+    /* When we last owned the eye, for the hand over grace in
+     * ShCameraViewMode. */
+    if (g_apply & CAM_HEAD_BIT) g_headHeldAt = GetTickCount64();
 
     f = (const float *)(uintptr_t)(rcx + CAM_POSE);
+    /* Did the eye we left on this camera survive to this frame? */
+    if (g_eyeSetOk && g_eyeCam == rcx &&
+        (fabsf(f[12] - g_eyeSet[0]) > 0.01f ||
+         fabsf(f[13] - g_eyeSet[1]) > 0.01f ||
+         fabsf(f[14] - g_eyeSet[2]) > 0.01f))
+        g_eyeOver++;
+    if (g_cam && rcx != g_cam) g_camSwaps++;
     ui = f[0] == 1.0f && f[1] == 0.0f && f[2] == 0.0f &&
          f[4] == 0.0f && f[5] == 1.0f && f[6] == 0.0f &&
          f[8] == 0.0f && f[9] == 0.0f && f[10] == 1.0f;
@@ -336,15 +566,27 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
      * do no head work at all. The pump keeps its state and
      * resumes on the first world frame. */
     if (!ui) {
-        if (g_apply & CAM_HEAD_BIT) ShHeadWant();
+        /* Keep the head live while we place the eye AND while
+         * somebody is asking for the view state: telling "we own
+         * the camera" from "the engine took it" needs the engine's
+         * own camera measured against the head on exactly the
+         * frames we are not writing. The pump is a few direct reads
+         * once resolved and a failed resolve is rate limited, so an
+         * idle view state costs nothing. */
+        if ((g_apply & CAM_HEAD_BIT) ||
+            GetTickCount64() < g_viewWantAt)
+            ShHeadWant();
         ShHeadPump();
 
         /* Whether the first person eye is really on camera,
          * measured from the frame's own camera rather than
          * from our write: a view the engine took (stowed
          * weapon, parachute, drone) sits away from the head
-         * even on the frames our write path never ran. */
-        if (g_apply & CAM_HEAD_BIT) {
+         * even on the frames our write path never ran.
+         * Measured unconditionally - gated on our own bit this
+         * could never refresh after we let go, which is the only
+         * moment case 2 of ShCameraViewMode can be decided. */
+        {
             ShVec3 h;
             float dx, dy, dz;
             if (ShHeadCached(&h)) {
@@ -357,6 +599,16 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
             }
         }
         if (g_apply) ApplyFields(rcx);
+    }
+    /* Remember the eye placed here so the next visit can tell whether
+     * it survived. */
+    if ((g_apply & CAM_HEAD_BIT) && g_headBow != 1 && g_headBow != 2 &&
+        g_headBow != 3) {
+        g_eyeCam = rcx;
+        g_eyeSet[0] = f[12];
+        g_eyeSet[1] = f[13];
+        g_eyeSet[2] = f[14];
+        g_eyeSetOk = 1;
     }
 }
 
@@ -586,17 +838,89 @@ SH_API int ShCameraReady(void) {
     return g_camStub != NULL && g_cam != 0;
 }
 
-/* The eye counts as live only while the camera the engine is
- * actually rendering has been sitting on the player's head.
- * The measurement happens in the frame path, so a view the
- * engine takes over (stowed weapon, parachute, drone) stops
- * refreshing the timestamp and the eye goes stale, no matter
- * whether our own write path was ever called for that frame.
+/* Two ways the view is first person, and the second one only
+ * exists because handing the camera back for iron sights must not
+ * flash the head back on:
+ *
+ *  1. we are placing the eye every frame: CAM_HEAD_BIT is ours and
+ *     ApplyHead did write on a recent frame. Where that eye sits is
+ *     irrelevant - a preset or a seat anchor offsetting it from the
+ *     head bone is still the first person view, and calling those
+ *     third person is what flashed the head on in vehicles.
+ *
+ *  2. we have let go and the engine's own camera is the one on
+ *     screen, sitting on the head bone: the aim camera of an iron
+ *     sight. Third person, drones, cutscenes and every pulled back
+ *     view are metres away, so they fail this.
+ *
+ * Everything else is third person. Reading this keeps the head
+ * measurement alive for the next VIEW_WANT_MS, which is what makes
+ * case 2 measurable at all.
  */
+SH_API int ShCameraViewMode(void) {
+    uint64_t now = GetTickCount64();
+
+    g_viewWantAt = now + VIEW_WANT_MS;
+    if ((g_apply & CAM_HEAD_BIT) && g_headWroteAt &&
+        now - g_headWroteAt < FP_LIVE_MS)
+        return SH_VIEW_FIRST_PERSON;
+    if (g_headNearAt && now - g_headNearAt < FP_LIVE_MS)
+        return SH_VIEW_FIRST_PERSON;
+    /* Handed back on purpose - iron sights - and only for the world:
+     * the engine's aim camera is drawing but the view is still the
+     * first person one, and flashing the head back on for the length
+     * of an aim reads as a bug. This is only for a camera we let go
+     * of: while we still hold the bit a bowed out frame (a stowed
+     * weapon, a parachute) really is another view. A drone or a
+     * cinematic is a change of view too, not a hand over, so those
+     * are excluded by the state. */
+    if (!(g_apply & CAM_HEAD_BIT) && g_headHeldAt &&
+        now - g_headHeldAt < FP_HANDOVER_MS &&
+        ShGetGameState() == SH_STATE_INGAME)
+        return SH_VIEW_FIRST_PERSON;
+    if (!g_headWroteAt && !g_headNearAt) return SH_VIEW_UNKNOWN;
+    return SH_VIEW_THIRD_PERSON;
+}
+
 SH_API int ShCameraFirstPersonActive(void) {
-    if (!(g_apply & CAM_HEAD_BIT)) return 0;
-    if (!g_headNearAt) return 0;
-    return GetTickCount64() - g_headNearAt < FP_LIVE_MS;
+    return ShCameraViewMode() == SH_VIEW_FIRST_PERSON;
+}
+
+/* Diagnostics: why the eye was not placed. 0 it was, 1 no head,
+ * 2 scope, 3 beyond a chase arm.
+ */
+SH_API int ShCameraHeadBow(void) {
+    return g_headBow;
+}
+
+/** Diagnostics: the largest distance the eye was asked to move in one
+ *  frame over the last second, in metres. A view that flickers shows
+ *  up here as a jump every frame.
+ */
+SH_API float ShCameraEyeJump(void) {
+    return g_eyeJump;
+}
+
+/* Where the last eye ended up and how far that head was from the
+ * camera, so a view thrown into the sky can be traced to a reading. */
+SH_API void ShCameraEyeAt(float pos[3], float *dist) {
+    if (pos) { pos[0] = g_diagEye.x; pos[1] = g_diagEye.y; pos[2] = g_diagEye.z; }
+    if (dist) *dist = g_diagD;
+}
+
+/* Counts since the last call, see the note on g_eyeOver. */
+SH_API void ShCameraEyeDiag(int *overwritten, int *swaps) {
+    if (overwritten) *overwritten = g_eyeOver;
+    if (swaps) *swaps = g_camSwaps;
+    g_eyeOver = 0;
+    g_camSwaps = 0;
+}
+
+/* Drop the hand over grace. Turning first person off is not handing
+ * the camera to the engine for an aim, so the view is third person
+ * from that moment on. */
+SH_API void ShCameraHandoverClear(void) {
+    g_headHeldAt = 0;
 }
 
 SH_API uint64_t ShCameraCalls(void) { return g_calls; }

@@ -777,13 +777,76 @@ SH_API int  ShCameraReady(void);
 SH_API uint64_t ShCameraCalls(void);
 SH_API uint64_t ShCameraWrites(void);
 
-/** True while the first person eye was written on a recent
- *  world frame. A consumer that hides the head only while
- *  first person is really on camera reads this, so the head
- *  comes back when the engine takes the view away (a stowed
- *  weapon widens it, a parachute pulls back, a drone flies).
+/** Which view the frame is showing.
+ *
+ *  SH_VIEW_FIRST_PERSON while the first person eye is the one on
+ *  camera. That is true in two cases: we are placing that eye
+ *  frame by frame (whatever offset the active preset or seat
+ *  anchor asks for - the eye being off the head bone does not
+ *  make the view third person), or, right after we let go, the
+ *  engine's own aim camera is sitting on the head bone, which is
+ *  the iron sight hand over.
+ *
+ *  Everything else is SH_VIEW_THIRD_PERSON: the engine pulled the
+ *  view back, a drone, a cutscene, a stowed weapon, a parachute,
+ *  or plain third person. SH_VIEW_UNKNOWN means nothing has been
+ *  measured yet, and consumers must treat it as "not first
+ *  person" - a head hidden on a guess shows a headless body.
+ *
+ *  Reading this keeps the head measurement alive for a couple of
+ *  seconds, so a consumer that polls it on its own tick is enough.
+ */
+enum ShViewMode {
+    SH_VIEW_UNKNOWN = 0,
+    SH_VIEW_FIRST_PERSON,
+    SH_VIEW_THIRD_PERSON
+};
+
+SH_API int  ShCameraViewMode(void);
+
+/** ShCameraViewMode() == SH_VIEW_FIRST_PERSON. A consumer that
+ *  hides the head only while first person is really on camera
+ *  reads this, so the head comes back when the engine takes the
+ *  view away.
  */
 SH_API int  ShCameraFirstPersonActive(void);
+
+/** Diagnostics: where the first person eye came from on the last
+ *  frame it could have been placed. 0 it was placed on the head,
+ *  1 there was nothing to place it on at all, 2 the camera is a
+ *  scope, 3 it sits beyond a chase arm, 4 the head could not be read
+ *  and a stand in was used, 5 the reading was not sane, 6 the frame is
+ *  not the played world at all - a menu, a drone, a cinematic.
+ */
+SH_API int  ShCameraHeadBow(void);
+
+/** Diagnostics: the largest distance the first person eye was asked
+ *  to move in one frame over the last second, in metres. A view that
+ *  flickers between two places shows up here as a jump every frame.
+ */
+SH_API float ShCameraEyeJump(void);
+
+/** Diagnostics for a view that flickers between first and third
+ *  person. overwritten counts the frames where the eye we placed was
+ *  gone by the time that camera came round again, swaps counts how
+ *  often the camera object itself changed. Both are counts since the
+ *  previous call, so a caller polling once a second gets a per second
+ *  rate. Either one above zero while the view flickers says the engine
+ *  is still drawing some of the frames.
+ */
+SH_API void ShCameraEyeDiag(int *overwritten, int *swaps);
+
+/** Diagnostics: where the last first person eye was placed, world
+ *  coordinates, and how far that head was from the camera in metres.
+ *  dist is -1 while nothing has been placed yet.
+ */
+SH_API void ShCameraEyeAt(float pos[3], float *dist);
+
+/** Drop the "we just handed the camera back" grace, see
+ *  ShCameraViewMode. Turning first person off is a change of view,
+ *  not a hand over to the engine's aim camera.
+ */
+SH_API void ShCameraHandoverClear(void);
 
 /** @} */
 /** @addtogroup state

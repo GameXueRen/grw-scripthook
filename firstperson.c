@@ -49,6 +49,12 @@ typedef void (*HeadInvalidate_t)(void);
 typedef void (*HeadClearMiss_t)(void);
 typedef int (*SetVisible_t)(uint64_t, uint64_t, int, int);
 typedef int (*FpActive_t)(void);
+typedef int (*ViewMode_t)(void);
+typedef int (*HeadBow_t)(void);
+typedef float (*EyeJump_t)(void);
+typedef void (*EyeDiag_t)(int *, int *);
+typedef void (*EyeAt_t)(float *, float *);
+typedef void (*HandoverClear_t)(void);
 typedef uint32_t (*MenuCreate_t)(const char *);
 typedef uint32_t (*MenuSub_t)(uint32_t, const char *);
 typedef int (*MenuToggle_t)(uint32_t, const char *, int,
@@ -95,6 +101,12 @@ static HeadInvalidate_t g_headInvalidate;
 static HeadClearMiss_t g_headClearMiss;
 static SetVisible_t g_setVisible;
 static FpActive_t   g_fpActive;
+static ViewMode_t   g_viewMode;
+static HeadBow_t    g_headBow;
+static EyeJump_t    g_eyeJump;
+static EyeDiag_t    g_eyeDiag;
+static EyeAt_t      g_eyeAt;
+static HandoverClear_t g_handoverClear;
 static InputCtx_t   g_inputCtx;
 static MenuIsOpen_t g_menuIsOpen;
 static MenuSetValue_t g_menuSetValue;
@@ -286,11 +298,18 @@ static volatile int g_headAway = 0;
 /* The engine rebuilds the head group on an outfit change or
  * a respawn, which drops the persistent hold and shows the
  * head again. A periodic reapply catches that, so the hide
- * self heals instead of relying on the one shot attempt.
- * Finding a not yet existing group sweeps the heap, so the
- * failure path is rate limited to its own beat. */
+ * self heals instead of relying on the one shot attempt. */
 #define REHIDE_MS       300u
-#define HIDE_RETRY_MS   500u
+/* Finding the head group sweeps the whole address space, tens of
+ * seconds of work that the kernel now hands back in slices of a few
+ * hundred milliseconds. So what a try cost is what tells the two
+ * failures apart: a slow one was sweeping and picks the sweep up on
+ * the very next tick, a fast one was a remembered miss and only has
+ * to be asked again once something may have changed the answer.
+ */
+#define SWEEP_STEP_MS     60u
+#define RESWEEP_RETRY_MS  300000u
+#define SWEEP_COST_MS     150u
 static uint64_t g_hideAt = 0;   /* last successful hide tick */
 static uint64_t g_hideTry = 0;  /* last failed scan tick */
 
@@ -363,6 +382,17 @@ static int HideHead(uint64_t root) {
     return n;
 }
 
+/* HideHead and how long it took. The cost is the only way to tell a
+ * call that was still sweeping the heap from one that simply found
+ * nothing, and the two have to be retried completely differently.
+ */
+static int HideHeadTimed(uint64_t root, uint64_t *cost) {
+    uint64_t t0 = GetTickCount64();
+    int n = HideHead(root);
+    *cost = GetTickCount64() - t0;
+    return n;
+}
+
 static void Report(void) {
     char line[96];
     size_t used;
@@ -405,6 +435,11 @@ static void SetFp(int on) {
         g_on = 1;
         g_nparts = 0;
         g_headAway = 0;
+        /* Fresh start: drop any "the group was not there" note and
+         * any backoff left over from before, so the first try
+         * happens on the next tick instead of waiting it out. */
+        if (g_headClearMiss) g_headClearMiss();
+        g_hideTry = 0;
         /* Start on the category the engine input context says
          * we are in, not on whatever the last session left. */
         if (g_inputCtx) {
@@ -416,6 +451,10 @@ static void SetFp(int on) {
     } else {
         g_on = 0;
         g_headAway = 0;
+        /* Turning first person off is a change of view, not a camera
+         * handed to the engine for an aim, so the grace that keeps
+         * the head hidden across an aim has to go with it. */
+        if (g_handoverClear) g_handoverClear();
         ShowHead();
         if (g_setBlur) g_setBlur(1);
         Hold(0);
@@ -678,11 +717,24 @@ static int Playing(void) {
     return g_inGame && g_inGame();
 }
 
+/* Whether the camera should stay ours. The pause menu, the map and
+ * the loadout only cover the world: it is still there and still ours
+ * to look through, and handing the camera back only to take it again
+ * is what costs the frames where the view is third person again. The
+ * views the engine drives itself (a drone, binoculars, a cinematic)
+ * do get it back - those we would only fight. */
+static int HoldThroughScreens(void) {
+    int s;
+    if (!g_state) return g_inGame ? g_inGame() : 0;
+    s = g_state();
+    return s == SH_STATE_INGAME || s == SH_STATE_PAUSED;
+}
+
 /* A new body means the old parts are gone, so the hold is
  * dropped and armed again on the new one.
  */
 static DWORD WINAPI TickThread(LPVOID p) {
-    int said = 0, settle = 0;
+    int said = 0, settle = 0, sightsNow = 0;
     int dPlay = -1, dFp = -1, prevAim = 0;
     uint64_t lastBeat = 0;
     (void)p;
@@ -706,16 +758,31 @@ static DWORD WINAPI TickThread(LPVOID p) {
          * is doing, which picks the eye offset category. */
         if (nowMs - lastBeat >= 1000) {
             int ctx = g_inputCtx ? g_inputCtx() : -1;
+            int vm = g_viewMode ? g_viewMode() : -1;
+            int gs = g_state ? g_state() : -1;
+            int bow = g_headBow ? g_headBow() : -1;
+            float jump = g_eyeJump ? g_eyeJump() : -1.0f;
+            int over = -1, swaps = -1;
+            float epos[3] = { 0, 0, 0 }, edist = -1.0f;
+            if (g_eyeDiag) g_eyeDiag(&over, &swaps);
+            if (g_eyeAt) g_eyeAt(epos, &edist);
             lastBeat = nowMs;
-            Diag("beat: play=%d held=%d want=%d away=%d n=%d "
-                 "fp=%s cat=%d ctx=%d root=%p",
-                 playing, g_held, g_wantHide, g_headAway, g_nparts,
-                 g_fpActive ? (g_fpActive() ? "yes" : "no") : "?",
+            Diag("beat: play=%d st=%d held=%d want=%d away=%d n=%d "
+                 "view=%d fp=%s bow=%d jump=%.2f over=%d swap=%d "
+                 "eye=%.0f,%.0f,%.0f d=%.1f aim=%d settle=%d sights=%d "
+                 "cat=%d ctx=%d root=%p",
+                 playing, gs, g_held, g_wantHide, g_headAway, g_nparts,
+                 vm, g_fpActive ? (g_fpActive() ? "yes" : "no") : "?",
+                 bow, jump, over, swaps, epos[0], epos[1], epos[2],
+                 edist, Aiming(), settle, sightsNow,
                  g_cat, ctx, (void *)(uintptr_t)g_root);
         }
-        /* Give the camera back on every screen, not just on
-         * the toggle, or the drone never gets it. */
-        if (!g_on || !playing) {
+        /* Give the camera back to the views the engine drives itself,
+         * not just on the toggle, or the drone never gets it. The
+         * screens that only cover the world keep it - see
+         * HoldThroughScreens - so coming back from one does not cost
+         * the frames where the view is third person again. */
+        if (!g_on || !HoldThroughScreens()) {
             Hold(0);
             /* A pause or equipment menu blurs the world behind
              * it, so a head hidden for first person would show
@@ -744,7 +811,18 @@ static DWORD WINAPI TickThread(LPVOID p) {
         } else {
             settle = 0;
         }
-        Hold(!(settle >= g_settleMs && IronSights()));
+        /* Handed back only for an aim that is really happening. The
+         * settle answers a question about iron sights that was never
+         * asked while the aim button is up, and a widget left over
+         * from an earlier aim answers it yes all the same - which
+         * hands the camera over with nobody aiming, leaves the view
+         * third person, and keeps handing it back so the hotkey
+         * cannot take it. settle first, then the widget walk, which
+         * is a walk of the UI tree and is not worth paying for
+         * before the answer could be used. */
+        if (aimNow && settle >= g_settleMs) sightsNow = IronSights();
+        else sightsNow = 0;
+        Hold(!sightsNow);
         /* Follow the engine input context: on foot, a ground
          * vehicle, a plane, a helicopter or riding along each
          * get their own eye offset. Menus and drones carry no
@@ -794,7 +872,17 @@ static DWORD WINAPI TickThread(LPVOID p) {
          * waiting for it delays showing the head for seconds.
          */
         if (g_wantHide) {
-            int fpOn = g_fpActive ? g_fpActive() : 1;
+            /* The view state, not a guess. First person is either
+             * us writing the eye every frame, or, right after we
+             * let go, the engine's aim camera sitting on the head.
+             * Anything else - including "not measured yet" - shows
+             * the head, so a stale state can never leave a headless
+             * body on screen. */
+            int fpOn;
+            if (g_viewMode)
+                fpOn = g_viewMode() == SH_VIEW_FIRST_PERSON;
+            else
+                fpOn = g_fpActive ? g_fpActive() : 1;
             if (fpOn != dFp) {
                 Diag("fpOn=%d", fpOn);
                 dFp = fpOn;
@@ -822,6 +910,14 @@ static DWORD WINAPI TickThread(LPVOID p) {
             Report();
             said = 1;
         }
+
+        /* Screens that only cover the world keep the camera, but the
+         * player lookup falls back to a heap scan while one is up, so
+         * everything touching the entity waits for the world to come
+         * back. The view state above still runs there, and that is
+         * what shows the head behind a menu instead of leaving a
+         * headless body in it. */
+        if (!playing) continue;
 
         /* The head nodes belong to the soldier entity; the
          * root re-parents to a vehicle on mount, so chasing
@@ -853,16 +949,22 @@ static DWORD WINAPI TickThread(LPVOID p) {
         if (g_wantHide) {
             uint64_t now = GetTickCount64();
             if (g_nparts == 0) {
-                /* Not hidden yet. The head group appears the
-                 * first time the player aims, so before any
-                 * aim it cannot exist - and hunting for it
-                 * sweeps the whole heap, which can block this
-                 * thread (and with it the flip hotkey) for
-                 * tens of seconds. Only try while aiming,
-                 * when the group can actually be found. */
-                if (aimNow && now >= g_hideTry) {
-                    g_hideTry = now + HIDE_RETRY_MS;
-                    if (HideHead(root)) {
+                /* First person is on camera and the head is not
+                 * hidden: hide it, with no other gate. The group is
+                 * engine made and may not exist yet, and hunting a
+                 * group that is not there sweeps the whole heap,
+                 * which blocks this thread and the flip hotkey with
+                 * it. So a miss backs off - by how much is measured,
+                 * not guessed: a cheap try (the body's group is
+                 * known, it just was not there) comes back at once,
+                 * a sweep does not. */
+                if (now >= g_hideTry) {
+                    uint64_t cost = 0;
+                    int ok = HideHeadTimed(root, &cost);
+                    g_hideTry = now + (cost >= SWEEP_COST_MS
+                                       ? SWEEP_STEP_MS
+                                       : RESWEEP_RETRY_MS);
+                    if (ok) {
                         g_hideAt = now;
                         Report();
                         said = 0;
@@ -876,10 +978,10 @@ static DWORD WINAPI TickThread(LPVOID p) {
                             ShowHead();
                             g_headAway = 0;
                         }
-                    } else if (!said) {
-                        Report();
-                        said = 1;
-                        Diag("hide miss (head group absent)");
+                    } else {
+                        Diag("hide miss (no head group, %ums)",
+                             (unsigned)cost);
+                        if (!said) { Report(); said = 1; }
                     }
                 }
             } else if (now - g_hideAt >= REHIDE_MS) {
@@ -888,17 +990,27 @@ static DWORD WINAPI TickThread(LPVOID p) {
                  * respawn - which drops the persistent hold
                  * and shows the head again. Re-apply on a slow
                  * beat so the hide self heals. */
-                if (!HideHead(root)) {
-                    g_nparts = 0;
-                    g_hideTry = now + HIDE_RETRY_MS;
-                    said = 0;
-                    Report();
-                    Diag("rehide miss");
-                } else {
-                    /* Parts stayed non-zero without this, so the
-                     * branch re-fired every tick (~16/s) instead
-                     * of once per REHIDE_MS. */
-                    g_hideAt = now;
+                {
+                    uint64_t cost = 0;
+                    if (!HideHeadTimed(root, &cost)) {
+                        g_nparts = 0;
+                        /* The group is gone again - an outfit swap,
+                         * a respawn. Same split as above: a call
+                         * that was sweeping picks the sweep up on
+                         * the next tick, a cheap one waits until
+                         * something may have changed the answer. */
+                        g_hideTry = now + (cost >= SWEEP_COST_MS
+                                           ? SWEEP_STEP_MS
+                                           : RESWEEP_RETRY_MS);
+                        said = 0;
+                        Report();
+                        Diag("rehide miss (%ums)", (unsigned)cost);
+                    } else {
+                        /* Parts stayed non-zero without this, so the
+                         * branch re-fired every tick (~16/s) instead
+                         * of once per REHIDE_MS. */
+                        g_hideAt = now;
+                    }
                 }
             }
         }
@@ -1139,6 +1251,15 @@ static DWORD WINAPI BindThread(LPVOID p) {
      * taken away from us, so the head stays hidden as asked. */
     *(FARPROC *)&g_fpActive =
         GetProcAddress(m, "ShCameraFirstPersonActive");
+    /* Optional: the three way view state. An older dinput8 only
+     * has the two way answer above, which stays the fallback. */
+    *(FARPROC *)&g_viewMode = GetProcAddress(m, "ShCameraViewMode");
+    *(FARPROC *)&g_headBow = GetProcAddress(m, "ShCameraHeadBow");
+    *(FARPROC *)&g_eyeJump = GetProcAddress(m, "ShCameraEyeJump");
+    *(FARPROC *)&g_eyeDiag = GetProcAddress(m, "ShCameraEyeDiag");
+    *(FARPROC *)&g_eyeAt = GetProcAddress(m, "ShCameraEyeAt");
+    *(FARPROC *)&g_handoverClear =
+        GetProcAddress(m, "ShCameraHandoverClear");
     /* Optional: an older dinput8 just keeps the blur. */
     *(FARPROC *)&g_setBlur = GetProcAddress(m, "ShSetCameraBlur");
     /* Optional: without the widget tree the camera is held

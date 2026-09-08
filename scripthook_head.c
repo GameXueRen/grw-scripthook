@@ -114,6 +114,14 @@ static int     g_vehAway = 0;          /* frames eye away from seat */
  * the pump runs only while something wants the head. */
 #define HEAD_WANT_FRAMES 600
 #define HEAD_RETRY_MS    500u
+
+/* A rig that goes missing - a body swap frees it - is usually
+ * replaced straight away, so the first few attempts come quickly and
+ * only a string of failures backs off to the slow beat. Waiting the
+ * full beat from the first miss is what made coming back from a menu
+ * or a respawn take seconds during which the view is not first
+ * person. */
+
 static volatile int g_want = 0;
 
 /* The bone offset moves on the anim tick and can be read
