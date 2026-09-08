@@ -229,12 +229,18 @@ static volatile int g_nSights;
  * the plugin saw instead of a guess. */
 static FILE *g_diag = NULL;
 static char  g_diagPath[MAX_PATH];
+static int   g_diagOn = 0;      /* [Settings] diag, default off */
 
 static void Diag(const char *fmt, ...) {
     char buf[256];
     va_list ap;
     SYSTEMTIME st;
 
+    /* Diagnostics are opt-in ([Settings] diag=1): the beat line
+     * alone used to write+flush once a second for the whole
+     * process lifetime, which is where the megabyte logs came
+     * from. */
+    if (!g_diagOn) return;
     if (!g_diagPath[0]) {
         if (g_logPath &&
             g_logPath("firstperson.log", g_diagPath,
@@ -244,7 +250,12 @@ static void Diag(const char *fmt, ...) {
                                sizeof(g_diagPath));
             { char *s = strrchr(g_diagPath, '\\');
               if (s) s[1] = 0; }
-            strcat(g_diagPath, "firstperson.log");
+            /* Bound the append: an exe path near MAX_PATH
+             * used to strcat past the buffer. */
+            if (strlen(g_diagPath) + 16 < sizeof(g_diagPath))
+                strcat(g_diagPath, "firstperson.log");
+            else
+                return;
         }
         g_diag = fopen(g_diagPath, "w");
     }
@@ -253,6 +264,7 @@ static void Diag(const char *fmt, ...) {
     va_start(ap, fmt);
     _vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
     va_end(ap);
+    buf[sizeof(buf) - 1] = 0;
     fprintf(g_diag, "[%02u:%02u:%02u.%03u] %s\n",
             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
     fflush(g_diag);
@@ -855,6 +867,15 @@ static DWORD WINAPI TickThread(LPVOID p) {
                         Report();
                         said = 0;
                         Diag("hide ok n=%d", g_nparts);
+                        /* The hide took a while (a first-time
+                         * sweep can run for seconds); the user
+                         * may have turned it off meanwhile, and
+                         * the show request would otherwise sit
+                         * behind g_nparts forever. */
+                        if (!g_wantHide || !g_on) {
+                            ShowHead();
+                            g_headAway = 0;
+                        }
                     } else if (!said) {
                         Report();
                         said = 1;
@@ -873,6 +894,11 @@ static DWORD WINAPI TickThread(LPVOID p) {
                     said = 0;
                     Report();
                     Diag("rehide miss");
+                } else {
+                    /* Parts stayed non-zero without this, so the
+                     * branch re-fired every tick (~16/s) instead
+                     * of once per REHIDE_MS. */
+                    g_hideAt = now;
                 }
             }
         }
@@ -936,11 +962,17 @@ static int  IniBool(const char *path, const char *key, int def) {
 
 static float IniFloat(const char *path, const char *key, float def) {
     char buf[64];
+    char *end;
+    double v;
     if (!GetPrivateProfileStringA("Settings", key, "", buf,
                                   sizeof(buf), path))
         return def;
     if (!buf[0]) return def;
-    return (float)atof(buf);
+    /* atof("abc") is 0, which silently zeroed an offset; require
+     * the value to parse. */
+    v = strtod(buf, &end);
+    if (end == buf) return def;
+    return (float)v;
 }
 
 /* Resolve <gamedir>\plugins\<name>\<name>.ini from the plugin's
@@ -985,6 +1017,12 @@ static void PresetKey(char *key, size_t n, int idx, int isUp) {
              g_presetTag[idx]);
 }
 
+static float ClampF(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
 static void LoadIni(void) {
     int i;
     char key[40];
@@ -993,17 +1031,22 @@ static void LoadIni(void) {
     ResetCatDefaults();
     if (!g_iniPath[0]) return;
     g_wantHide = IniBool(g_iniPath, "hide_head", g_wantHide);
+    g_diagOn = IniBool(g_iniPath, "diag", 0);
     for (i = 0; i < CAT_COUNT; i++) {
         CatKey(key, sizeof(key), i, 0);
-        g_fwd[i] = IniFloat(g_iniPath, key, FWD_DEF);
+        g_fwd[i] = ClampF(IniFloat(g_iniPath, key, FWD_DEF),
+                          FWD_MIN, FWD_MAX);
         CatKey(key, sizeof(key), i, 1);
-        g_up[i] = IniFloat(g_iniPath, key, UP_DEF);
+        g_up[i] = ClampF(IniFloat(g_iniPath, key, UP_DEF),
+                         UP_MIN, UP_MAX);
     }
     for (i = 0; i < PRESET_COUNT; i++) {
         PresetKey(key, sizeof(key), i, 0);
-        g_presFwd[i] = IniFloat(g_iniPath, key, FWD_DEF);
+        g_presFwd[i] = ClampF(IniFloat(g_iniPath, key, FWD_DEF),
+                              FWD_MIN, FWD_MAX);
         PresetKey(key, sizeof(key), i, 1);
-        g_presUp[i] = IniFloat(g_iniPath, key, UP_DEF);
+        g_presUp[i] = ClampF(IniFloat(g_iniPath, key, UP_DEF),
+                             UP_MIN, UP_MAX);
     }
     /* preset_active: 0 = Auto (default), 1..N = force preset N. */
     {
@@ -1013,6 +1056,8 @@ static void LoadIni(void) {
             g_presetSel = PRESET_AUTO;
     }
     g_settleMs = IniInt(g_iniPath, "settle_ms", g_settleMs);
+    if (g_settleMs < (int)SETTLE_MIN) g_settleMs = (int)SETTLE_MIN;
+    if (g_settleMs > (int)SETTLE_MAX) g_settleMs = (int)SETTLE_MAX;
     /* One hotkey row: hotkey_key is 0 (None)..3. An ini saved
      * by the two-row build has hotkey_on plus an old hotkey_key
      * that started at "="; migrate it so "on" keeps working. */
@@ -1210,17 +1255,24 @@ static DWORD WINAPI BindThread(LPVOID p) {
     }
     Report();
 
-    CreateThread(NULL, 0, TickThread, NULL, 0, NULL);
-    CreateThread(NULL, 0, HotkeyThread, NULL, 0, NULL);
+    {
+        HANDLE h;
+        h = CreateThread(NULL, 0, TickThread, NULL, 0, NULL);
+        if (h) CloseHandle(h);
+        h = CreateThread(NULL, 0, HotkeyThread, NULL, 0, NULL);
+        if (h) CloseHandle(h);
+    }
     return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
+        HANDLE h;
         g_inst = inst;
         DisableThreadLibraryCalls(inst);
-        CreateThread(NULL, 0, BindThread, NULL, 0, NULL);
+        h = CreateThread(NULL, 0, BindThread, NULL, 0, NULL);
+        if (h) CloseHandle(h);
     }
     return TRUE;
 }
