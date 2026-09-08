@@ -26,6 +26,15 @@
 #define TICK_MS     40
 #define OPTS        12
 
+/* A key that is held down repeats, and gets quicker while it is held:
+ * a pause first so a single press stays a single step, then a slow
+ * beat, then one step per tick. TICK_MS is 40, so the fastest repeat
+ * is the poll rate itself.
+ */
+#define REPEAT_DELAY_MS 350u
+#define REPEAT_SLOW_MS   80u
+#define REPEAT_FAST_MS   40u
+
 enum { IT_ACTION = 0, IT_SUB, IT_TOGGLE, IT_NUMBER, IT_LIST,
        IT_KEYBIND };
 
@@ -335,11 +344,67 @@ static int Pressed(int vk) {
     return hit;
 }
 
+/* Read only. Pressed() above rewrites g_keyWas, so asking it twice in
+ * one tick loses the answer, and a key being held has to be asked
+ * about on every tick. This one only reports whether it is down.
+ */
+static int KeyDown(int vk) {
+    return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+/* A direction that is being held. Navigation and the value edit are
+ * tracked apart: one can still be held while the other has just been
+ * let go, and they must not reset each other.
+ */
+typedef struct {
+    int   active;   /* the key is down                        */
+    int   dir;      /* -1 or +1                               */
+    DWORD next;     /* GetTickCount() it may act again after   */
+    int   n;        /* repeats so far, drives the speed up     */
+} Hold;
+
+static Hold g_holdNav;
+static Hold g_holdVal;
+
+static void HoldReset(void) {
+    g_holdNav.active = 0;
+    g_holdNav.n = 0;
+    g_holdVal.active = 0;
+    g_holdVal.n = 0;
+}
+
+/* Whether a held direction may act this tick: the press itself, then
+ * a pause, then a slow beat, then one step per tick. Returns 1 to act,
+ * 2 on the tick the key was let go, 0 otherwise.
+ */
+static int HoldTick(Hold *h, int down, int dir) {
+    DWORD now = GetTickCount();
+
+    if (!down) {
+        int was = h->active;
+        h->active = 0;
+        h->n = 0;
+        return was ? 2 : 0;
+    }
+    if (!h->active || h->dir != dir) {
+        h->active = 1;
+        h->dir = dir;
+        h->n = 0;
+        h->next = now + REPEAT_DELAY_MS;
+        return 1;
+    }
+    if ((int)(now - h->next) < 0) return 0;
+    h->n++;
+    h->next = now + (h->n < 4 ? REPEAT_SLOW_MS : REPEAT_FAST_MS);
+    return 1;
+}
+
 /* The menu keys are polled, so a background game window must not
  * react to keys meant for the window in front. Forget held keys
  * while unfocused so nothing fires when focus comes back. */
 static void ResetKeys(void) {
     memset(g_keyWas, 0, sizeof(g_keyWas));
+    HoldReset();
 }
 
 /* ---- key-bind capture ---------------------------------------------
@@ -429,35 +494,63 @@ static void Scroll(Menu *m) {
 static void Navigate(void) {
     Menu *m = MenuOf(g_current);
     Item *it;
-    int left, right;
+    int upE, wE, dnE, sE, lfE, aE, rtE, dE;
+    int upHeld, dnHeld, lfHeld, rtHeld;
+    int navDown, navDir, valDown, valDir, r;
 
     if (!m || m->count == 0) return;
-    /* Arrows and WASD both navigate; each is polled independently,
-     * so the two coexist without stealing presses from each other. */
-    if (Pressed(VK_UP) || Pressed('W'))
-        m->sel = (m->sel + m->count - 1) % m->count;
-    if (Pressed(VK_DOWN) || Pressed('S'))
-        m->sel = (m->sel + 1) % m->count;
+    /* Arrows and WASD both navigate, and every one of them is polled
+     * on its own so the two sets coexist instead of stealing presses
+     * from each other: a short circuit here would leave one of them
+     * with a stale idea of whether it is down.
+     */
+    upE = Pressed(VK_UP);     wE = Pressed('W');
+    dnE = Pressed(VK_DOWN);   sE = Pressed('S');
+    lfE = Pressed(VK_LEFT);   aE = Pressed('A');
+    rtE = Pressed(VK_RIGHT);  dE = Pressed('D');
+
+    upHeld = upE || wE || KeyDown(VK_UP)    || KeyDown('W');
+    dnHeld = dnE || sE || KeyDown(VK_DOWN)  || KeyDown('S');
+    lfHeld = lfE || aE || KeyDown(VK_LEFT)  || KeyDown('A');
+    rtHeld = rtE || dE || KeyDown(VK_RIGHT) || KeyDown('D');
+
+    navDown = upHeld || dnHeld;
+    navDir  = dnHeld ? 1 : -1;
+    valDown = lfHeld || rtHeld;
+    valDir  = rtHeld ? 1 : -1;
+
+    if (HoldTick(&g_holdNav, navDown, navDir) == 1)
+        m->sel = (m->sel + m->count + navDir) % m->count;
     Scroll(m);
 
     it = &m->items[m->sel];
-    left = Pressed(VK_LEFT) || Pressed('A');
-    right = Pressed(VK_RIGHT) || Pressed('D');
-    if (left || right) {
-        int dir = right ? 1 : -1;
+    r = HoldTick(&g_holdVal, valDown, valDir);
+    if (r == 1) {
         if (it->kind == IT_NUMBER) {
-            it->num += it->step * dir;
+            float was = it->num;
+            it->num += it->step * valDir;
             if (it->num < it->lo) it->num = it->lo;
             if (it->num > it->hi) it->num = it->hi;
-            Fire(g_current, m->sel, it);
+            /* Nothing moved: sitting against a limit is no reason to
+             * keep pushing callbacks into a queue of thirty two. */
+            if (it->num != was) Fire(g_current, m->sel, it);
         } else if (it->kind == IT_LIST && it->nopts) {
-            it->value = (it->value + it->nopts + dir) % it->nopts;
-            Fire(g_current, m->sel, it);
+            int was = it->value;
+            it->value = (it->value + it->nopts + valDir) % it->nopts;
+            if (it->value != was) Fire(g_current, m->sel, it);
         }
+    } else if (r == 2) {
+        /* Let go: what is on screen is what the plugin has to hold. A
+         * repeat that was dropped because the callback queue was full
+         * would otherwise leave the two disagreeing. */
+        if (it->kind == IT_NUMBER ||
+            (it->kind == IT_LIST && it->nopts))
+            Fire(g_current, m->sel, it);
     }
     if (Pressed(VK_RETURN)) {
         if (it->kind == IT_SUB && it->sub) {
             g_current = it->sub;
+            HoldReset();
         } else if (it->kind == IT_TOGGLE) {
             it->value = !it->value;
             Fire(g_current, m->sel, it);
@@ -478,6 +571,7 @@ static void Navigate(void) {
         }
     }
     if (Pressed(VK_BACK) || Pressed(VK_ESCAPE)) {
+        HoldReset();
         if (m->parent) g_current = m->parent;
         else g_open = 0;
     }
@@ -787,6 +881,7 @@ static DWORD WINAPI MenuThread(LPVOID p) {
          * menu having rendered. */
         if (Pressed(g_key)) {
             g_open = !g_open;
+            HoldReset();   /* opened or closed: nothing is held now */
             if (g_open) {
                 /* The Chinese chat box must yield the keyboard
                  * (it captured it to type); the menu owns the

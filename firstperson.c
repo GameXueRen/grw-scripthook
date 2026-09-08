@@ -24,11 +24,11 @@
 #define FWD_DEF     15.0f
 #define FWD_MIN     0.0f
 #define FWD_MAX     60.0f
-#define FWD_STEP    5.0f
+#define FWD_STEP    2.0f
 #define UP_DEF      0.0f
 #define UP_MIN      -30.0f
 #define UP_MAX      30.0f
-#define UP_STEP     5.0f
+#define UP_STEP     2.0f
 
 /* How long the aim has to hold before the camera is handed
  * over, so the zoom into the body is never on screen. */
