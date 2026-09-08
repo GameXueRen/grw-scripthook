@@ -135,6 +135,8 @@ static void PeekLanguage(const char *text);
 static int  IsLangSection(const char *sec);
 static void AddLangEntry(const char *section, const char *key,
                          const char *value);
+SH_API const char *ShLangForOwned(const char *owner, const char *scope,
+                                  const char *text);
 
 #define CONFIG_MAX  65536u
 #define ENTRIES_MAX 256
@@ -207,6 +209,10 @@ static const char *DEFAULT_CONFIG =
     "; plugin passed to ShMenuCreate), NOT the plugin folder name.\n"
     "; Deeper menus use a dotted path: [zh_cn.A.B] then falls back to\n"
     "; [zh_cn.A] then [zh_cn].\n"
+    "; A plugin can also carry its translations in its OWN ini\n"
+    "; (plugins\\<name>\\<name>.ini, same [lang] sections): those win\n"
+    "; over this file, which stays the shared fallback - so a plugin\n"
+    "; travels with its translations.\n"
     "; ------------------------------------------------------------\n"
     "\n"
     "[zh_cn]\n"
@@ -341,119 +347,143 @@ static void WriteDefaultConfig(const char *path) {
 /* A deliberately small INI parser: sections, key=value,
  * # and ; comments, quoted values, trailing comments are
  * stripped only when separated by whitespace. */
+
+/* Advance over one physical line, NUL-terminating it in place.
+ * Returns 0 at end of text. */
+static int NextLine(const char **p, char *line, size_t cap) {
+    size_t i = 0;
+    const char *q = *p;
+
+    if (!*q) return 0;
+    while (*q && *q != '\n' && *q != '\r' && i < cap - 1)
+        line[i++] = *q++;
+    line[i] = 0;
+    if (*q == '\r') q++;
+    if (*q == '\n') q++;
+    *p = q;
+    return 1;
+}
+
+/* Parse one line in place. [section] lines update section and
+ * return 0; a key=value row fills *keyOut/*valueOut and returns
+ * 1. Language-section rows use the quoted-key and " = " rules so
+ * a key containing '=' still translates. */
+static int ParseIniLine(char *line, char *section, size_t secCap,
+                        char **keyOut, char **valueOut) {
+    char *s = line, *e, *eq;
+    size_t i = 0;
+
+    while (*s == ' ' || *s == '\t') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    *e = 0;
+
+    if (!*s || *s == ';' || *s == '#') return 0;
+
+    if (*s == '[') {
+        char *c = strchr(s, ']');
+        if (!c) return 0;
+        *c = 0;
+        i = strlen(s + 1);
+        if (i >= secCap) i = secCap - 1;
+        memcpy(section, s + 1, i);
+        section[i] = 0;
+        return 0;
+    }
+
+    /* Find the '=' that separates key and value. The first
+     * '=' in an unquoted language key may belong to the key
+     * itself ("Equal (=)"), so split those on " = " instead.
+     * A quoted key ("\"Equal (=)\"") reads verbatim up to its
+     * closing quote, so no '=' inside it is ever mistaken for
+     * the separator. Plain config rows keep the simple rule. */
+    eq = NULL;
+    if (IsLangSection(section)) {
+        char *qs = s, q = 0;
+        while (*qs == ' ' || *qs == '\t') qs++;
+        if (*qs == '"' || *qs == '\'') {
+            char *c;
+            q = *qs;
+            c = strchr(qs + 1, q);
+            if (c) {
+                char *p = c + 1;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == '=') {
+                    /* Closing quote ends the key; s moves to
+                     * the text inside the quotes and eq points
+                     * at the real separator. */
+                    s = qs + 1;
+                    *c = 0;
+                    eq = p;
+                }
+            }
+        }
+        if (!eq) {
+            /* Unquoted key: split on " = " (space-equals-space)
+             * so an '=' inside the key is not the separator. */
+            char *sp = strstr(s, " = ");
+            if (sp) eq = sp + 1;
+            else    eq = strchr(s, '=');
+        }
+    } else {
+        eq = strchr(s, '=');
+    }
+    if (!eq) return 0;
+    *eq = 0;
+
+    /* key is whatever s points at now: the text after the
+     * opening quote for a quoted key, the raw key otherwise.
+     * Save it before s is reused for the value below. */
+    *keyOut = s;
+
+    /* trim the key */
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    *e = 0;
+
+    /* trim the value, drop quotes and a trailing comment */
+    s = eq + 1;
+    while (*s == ' ' || *s == '\t') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    *e = 0;
+    if (*s == '"' || *s == '\'') {
+        size_t l = strlen(s);
+        if (l > 1 && s[l - 1] == *s) s[l - 1] = 0;
+        s++;
+    }
+    *valueOut = s;
+    return 1;
+}
+
 static void ParseConfig(const char *text) {
-    const char *p = text;
     char section[48] = "";
 
     PeekLanguage(text);
-    while (*p) {
+    while (*text) {
         char line[512];
-        char *s, *e, *eq, *key;
-        size_t i = 0;
+        char *key, *val;
+        size_t i;
 
-        while (*p && *p != '\n' && *p != '\r' && i < sizeof(line) - 1)
-            line[i++] = *p++;
-        line[i] = 0;
-        if (*p == '\r') p++;
-        if (*p == '\n') p++;
-
-        s = line;
-        while (*s == ' ' || *s == '\t') s++;
-        e = s + strlen(s);
-        while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
-        *e = 0;
-
-        if (!*s || *s == ';' || *s == '#') continue;
-
-        if (*s == '[') {
-            char *c = strchr(s, ']');
-            if (!c) continue;
-            *c = 0;
-            i = strlen(s + 1);
-            if (i >= sizeof(section)) i = sizeof(section) - 1;
-            memcpy(section, s + 1, i);
-            section[i] = 0;
+        if (!NextLine(&text, line, sizeof(line))) break;
+        if (!ParseIniLine(line, section, sizeof(section), &key, &val))
             continue;
-        }
 
-        /* Find the '=' that separates key and value. The first
-         * '=' in an unquoted language key may belong to the key
-         * itself ("Equal (=)"), so split those on " = " instead.
-         * A quoted key ("\"Equal (=)\"") reads verbatim up to its
-         * closing quote, so no '=' inside it is ever mistaken for
-         * the separator. Plain config rows keep the simple rule. */
-        eq = NULL;
-        if (IsLangSection(section)) {
-            char *qs = s, q = 0;
-            while (*qs == ' ' || *qs == '\t') qs++;
-            if (*qs == '"' || *qs == '\'') {
-                char *c;
-                q = *qs;
-                c = strchr(qs + 1, q);
-                if (c) {
-                    char *p = c + 1;
-                    while (*p == ' ' || *p == '\t') p++;
-                    if (*p == '=') {
-                        /* Closing quote ends the key; s moves to
-                         * the text inside the quotes and eq points
-                         * at the real separator. */
-                        s = qs + 1;
-                        *c = 0;
-                        eq = p;
-                    }
-                }
-            }
-            if (!eq) {
-                /* Unquoted key: split on " = " (space-equals-space)
-                 * so an '=' inside the key is not the separator. */
-                char *sp = strstr(s, " = ");
-                if (sp) eq = sp + 1;
-                else    eq = strchr(s, '=');
-            }
-        } else {
-            eq = strchr(s, '=');
-        }
-        if (!eq) continue;
-        *eq = 0;
+        if (!*val) continue;
 
-        /* key is whatever s points at now: the text after the
-         * opening quote for a quoted key, the raw key otherwise.
-         * Save it before s is reused for the value below. */
-        key = s;
-
-        /* trim the key */
-        e = s + strlen(s);
-        while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
-        *e = 0;
-
-        /* trim the value, drop quotes and a trailing comment */
-        s = eq + 1;
-        while (*s == ' ' || *s == '\t') s++;
-        e = s + strlen(s);
-        while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
-        *e = 0;
-        if (*s == '"' || *s == '\'') {
-            size_t l = strlen(s);
-            if (l > 1 && s[l - 1] == *s) s[l - 1] = 0;
-            s++;
-        }
-
-        if (!*s) continue;
-
-        /* eq points at '='; the key is key..eq-1, value is s.
-         * Language sections never touch the main entry table, so
+        /* Language sections never touch the main entry table, so
          * a large translation set cannot crowd the config out. */
         if (IsLangSection(section)) {
-            AddLangEntry(section, key, s);
+            AddLangEntry(section, key, val);
             continue;
         }
+        if (g_nentries >= ENTRIES_MAX) continue;
+
         i = strlen(key);
         if (i >= sizeof(g_entries[g_nentries].key))
             i = sizeof(g_entries[g_nentries].key) - 1;
         memcpy(g_entries[g_nentries].key, key, i);
         g_entries[g_nentries].key[i] = 0;
-
-        if (g_nentries >= ENTRIES_MAX) continue;
 
         i = strlen(section);
         if (i >= sizeof(g_entries[g_nentries].section))
@@ -461,10 +491,10 @@ static void ParseConfig(const char *text) {
         memcpy(g_entries[g_nentries].section, section, i);
         g_entries[g_nentries].section[i] = 0;
 
-        i = strlen(s);
+        i = strlen(val);
         if (i >= sizeof(g_entries[g_nentries].value))
             i = sizeof(g_entries[g_nentries].value) - 1;
-        memcpy(g_entries[g_nentries].value, s, i);
+        memcpy(g_entries[g_nentries].value, val, i);
         g_entries[g_nentries].value[i] = 0;
 
         g_nentries++;
@@ -622,53 +652,225 @@ SH_API const char *ShLang(const char *text) {
  *  The scope is a dotted title path ("First person.Custom.Height"),
  *  so deeper menus try the full path, then each shorter prefix,
  *  then the global table: [lang.A.B.C] -> [lang.A.B] -> [lang.A]
- *  -> [lang] -> the same for en -> the original text. */
+ *  -> [lang] -> the same for en -> the original text.
+ *  With an owner (a plugin folder name), the plugin's own
+ *  plugins\<owner>\<owner>.ini is consulted first at every step of
+ *  that order, and scripthook.ini remains the fallback - so a
+ *  shared plugin carries its translations in its own file. */
 SH_API const char *ShLangFor(const char *scope, const char *text) {
-    const char *v;
+    return ShLangForOwned(NULL, scope, text);
+}
+
+/* ---- plugin-owned translation tables ------------------------------ */
+
+/* [<lang>...] sections from plugins\<owner>\<owner>.ini, so a
+ * shared plugin brings its own translations.  The main ini stays
+ * the fallback: lookup order is plugin(lang) -> main(lang) ->
+ * plugin(en) -> main(en) -> the original text. */
+#define PLANGS_MAX      512
+#define PLOAD_MAX       32
+
+typedef struct {
+    char owner[48];
+    char lang[16];
+    char scope[48];
+    char key[128];
+    char value[256];
+} PlangEntry;
+
+static PlangEntry g_plangs[PLANGS_MAX];
+static int g_nplangs = 0;
+
+/* one attempted load per plugin, including "no file" */
+static struct {
+    char owner[48];
+    int  done;
+} g_pload[PLOAD_MAX];
+static int g_npload = 0;
+static CRITICAL_SECTION g_plangLock;
+static volatile LONG g_plangLockReady = 0;
+
+static void AddPlangEntry(const char *owner, const char *section,
+                          const char *key, const char *value) {
+    char lang[16], scope[48];
+    const char *dot;
+    size_t n;
+    PlangEntry *e;
+
+    if (g_nplangs >= PLANGS_MAX) return;
+    dot = strchr(section, '.');
+    if (dot) {
+        n = (size_t)(dot - section);
+        if (n >= sizeof(lang)) n = sizeof(lang) - 1;
+        memcpy(lang, section, n);
+        lang[n] = 0;
+        strncpy(scope, dot + 1, sizeof(scope) - 1);
+        scope[sizeof(scope) - 1] = 0;
+    } else {
+        strncpy(lang, section, sizeof(lang) - 1);
+        lang[sizeof(lang) - 1] = 0;
+        scope[0] = 0;
+    }
+    e = &g_plangs[g_nplangs++];
+    strncpy(e->owner, owner, sizeof(e->owner) - 1);
+    e->owner[sizeof(e->owner) - 1] = 0;
+    strncpy(e->lang, lang, sizeof(e->lang) - 1);
+    e->lang[sizeof(e->lang) - 1] = 0;
+    strncpy(e->scope, scope, sizeof(e->scope) - 1);
+    e->scope[sizeof(e->scope) - 1] = 0;
+    strncpy(e->key, key, sizeof(e->key) - 1);
+    e->key[sizeof(e->key) - 1] = 0;
+    strncpy(e->value, value, sizeof(e->value) - 1);
+    e->value[sizeof(e->value) - 1] = 0;
+}
+
+/* Only [<lang>] / [<lang>.<scope>] sections feed the translation
+ * table; anything else in a plugin ini belongs to the plugin's own
+ * GetPrivateProfile config and is ignored here. */
+static void ParsePluginLangs(const char *owner, const char *text) {
+    char section[48] = "";
+
+    while (*text) {
+        char line[512];
+        char *key, *val;
+
+        if (!NextLine(&text, line, sizeof(line))) break;
+        if (!ParseIniLine(line, section, sizeof(section), &key, &val))
+            continue;
+        if (!*val) continue;
+        if (IsLangSection(section))
+            AddPlangEntry(owner, section, key, val);
+    }
+}
+
+/* Lazy per-plugin load.  Runs once per owner (a missing file
+ * counts as done), guarded by a lock because ShMenuStatusF can
+ * trigger lookups from plugin threads while the menu thread is
+ * capturing. */
+static void PluginLangsLoad(const char *owner) {
+    char path[GAME_DIR_MAX];
+    static char text[CONFIG_MAX];
+    FILE *f;
+    size_t n;
+    int i, slot = -1;
+
+    if (!owner || !owner[0]) return;
+    if (!g_plangLockReady) {
+        /* first-use init; concurrent doubles are harmless */
+        if (InterlockedCompareExchange(&g_plangLockReady, 2, 0) == 0) {
+            InitializeCriticalSection(&g_plangLock);
+            InterlockedExchange(&g_plangLockReady, 1);
+        }
+    }
+    if (g_plangLockReady != 1) return;
+    EnterCriticalSection(&g_plangLock);
+    for (i = 0; i < g_npload; i++)
+        if (!strcmp(g_pload[i].owner, owner)) { slot = i; break; }
+    if (slot >= 0 && g_pload[slot].done) {
+        LeaveCriticalSection(&g_plangLock);
+        return;
+    }
+    if (slot < 0 && g_npload < PLOAD_MAX) {
+        slot = g_npload++;
+        strncpy(g_pload[slot].owner, owner,
+                sizeof(g_pload[slot].owner) - 1);
+        g_pload[slot].owner[sizeof(g_pload[slot].owner) - 1] = 0;
+    }
+    if (slot >= 0) g_pload[slot].done = 1;
+    if (slot >= 0 &&
+        ShPluginIniPath(owner, path, sizeof(path)) &&
+        (f = fopen(path, "rb")) != NULL) {
+        n = fread(text, 1, sizeof(text) - 1, f);
+        fclose(f);
+        text[n] = 0;
+        ParsePluginLangs(owner, text);
+    }
+    LeaveCriticalSection(&g_plangLock);
+}
+
+static const char *PlangFind(const char *owner, const char *lang,
+                             const char *scope, const char *key) {
+    int i;
+    for (i = 0; i < g_nplangs; i++) {
+        if (strcmp(g_plangs[i].owner, owner)) continue;
+        if (strcmp(g_plangs[i].lang, lang)) continue;
+        if (g_plangs[i].scope[0] &&
+            strcmp(g_plangs[i].scope, scope))
+            continue;
+        if (!strcmp(g_plangs[i].key, key))
+            return g_plangs[i].value;
+    }
+    return NULL;
+}
+
+/* One scope-fallback walk for the given table set.  An owner walks
+ * the plugin table first and the main table second, so a key that
+ * the plugin ini does not carry still finds the shared translation. */
+static const char *TableChainFind(const char *owner, const char *lang,
+                                  const char *scope, const char *text) {
     char buf[64];
+    const char *v;
+    const char *p = scope ? scope : "";
+    int pass;
+
+    for (pass = 0; pass < 2; pass++) {
+        if (pass == 1 || !owner || !owner[0]) {
+            for (;;) {
+                v = LangFind(lang, p, text);
+                if (v) return v;
+                {
+                    const char *dot = strrchr(p, '.');
+                    size_t n;
+                    if (!dot) break;
+                    n = (size_t)(dot - (scope ? scope : ""));
+                    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+                    memcpy(buf, scope ? scope : "", n);
+                    buf[n] = 0;
+                    p = buf;
+                }
+            }
+            v = LangFind(lang, "", text);
+            if (v) return v;
+            /* no owner: the main table is the only table */
+            if (!owner || !owner[0]) break;
+        } else {
+            for (;;) {
+                v = PlangFind(owner, lang, p, text);
+                if (v) return v;
+                {
+                    const char *dot = strrchr(p, '.');
+                    size_t n;
+                    if (!dot) break;
+                    n = (size_t)(dot - (scope ? scope : ""));
+                    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+                    memcpy(buf, scope ? scope : "", n);
+                    buf[n] = 0;
+                    p = buf;
+                }
+            }
+            v = PlangFind(owner, lang, "", text);
+            if (v) return v;
+        }
+    }
+    return NULL;
+}
+
+/** Translate like ShLangFor, but honour an owning plugin: its own
+ *  ini wins over scripthook.ini at every step.  owner NULL or ""
+ *  behaves exactly like ShLangFor. */
+SH_API const char *ShLangForOwned(const char *owner, const char *scope,
+                                  const char *text) {
+    const char *v;
 
     if (!text) return "";
-    if (!scope) scope = "";
     LoadConfig();
+    if (owner && owner[0]) PluginLangsLoad(owner);
     if (g_langName[0]) {
-        const char *p = scope;
-        for (;;) {
-            v = LangFind(g_langName, p, text);
-            if (v) return v;
-            {
-                const char *dot = strrchr(p, '.');
-                size_t n;
-                if (!dot) break;
-                n = (size_t)(dot - scope);
-                if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-                memcpy(buf, scope, n);
-                buf[n] = 0;
-                p = buf;
-            }
-        }
-        v = LangFind(g_langName, "", text);
+        v = TableChainFind(owner, g_langName, scope, text);
         if (v) return v;
     }
-    {
-        const char *p = scope;
-        for (;;) {
-            v = LangFind("en", p, text);
-            if (v) return v;
-            {
-                const char *dot = strrchr(p, '.');
-                size_t n;
-                if (!dot) break;
-                n = (size_t)(dot - scope);
-                if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-                memcpy(buf, scope, n);
-                buf[n] = 0;
-                p = buf;
-            }
-        }
-        v = LangFind("en", "", text);
-        if (v) return v;
-    }
-    return text;
+    v = TableChainFind(owner, "en", scope, text);
+    return v ? v : text;
 }
 
 SH_API const char *ShLangGet(void) {

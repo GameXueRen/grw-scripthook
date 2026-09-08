@@ -44,6 +44,7 @@ typedef struct {
 typedef struct {
     int      used;
     char     title[LABEL];
+    char     owner[48];   /* owning plugin folder name; "" = built-in */
     char     hint[128];
     char     status[96];
     uint32_t parent;
@@ -77,7 +78,8 @@ static Menu *MenuOf(uint32_t h) {
     return &g_menus[h - 1];
 }
 
-static uint32_t NewMenu(const char *title, uint32_t parent) {
+static uint32_t NewMenu(const char *title, uint32_t parent,
+                        const char *owner) {
     int i;
 
     for (i = 0; i < MENUS; i++) {
@@ -89,9 +91,53 @@ static uint32_t NewMenu(const char *title, uint32_t parent) {
             strncpy(g_menus[i].title, title, LABEL - 1);
             g_menus[i].title[LABEL - 1] = 0;
         }
+        if (owner) {
+            strncpy(g_menus[i].owner, owner,
+                    sizeof(g_menus[i].owner) - 1);
+            g_menus[i].owner[sizeof(g_menus[i].owner) - 1] = 0;
+        }
         return (uint32_t)(i + 1);
     }
     return 0;
+}
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#pragma intrinsic(_ReturnAddress)
+#define SH_CALLER_ADDR() _ReturnAddress()
+#else
+#define SH_CALLER_ADDR() __builtin_return_address(0)
+#endif
+
+/* Which plugin is calling?  The return address sits in the caller's
+ * code, so FROM_ADDRESS names the .asi that created the menu; our
+ * own dll and the exe mean built-in (owner "", main-ini fallback).
+ * Runs once per ShMenuCreate, off the hot path. */
+static void OwnerFromAddress(char *out, int cap) {
+    void *ra = SH_CALLER_ADDR();
+    HMODULE m = NULL;
+    char path[MAX_PATH];
+    const char *name;
+    size_t n;
+
+    out[0] = 0;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)ra, &m) || !m)
+        return;
+    path[0] = 0;
+    GetModuleFileNameA(m, path, sizeof(path));
+    name = strrchr(path, '\\');
+    name = name ? name + 1 : path;
+    if (!_stricmp(name, "dinput8.dll") || !_stricmp(name, "GRW.exe"))
+        return;                       /* built-in */
+    n = strlen(name);
+    if (n > 4 && !_stricmp(name + n - 4, ".asi")) n -= 4;
+    else if (n > 4 && !_stricmp(name + n - 4, ".dll")) n -= 4;
+    if (n >= (size_t)cap) n = (size_t)cap - 1;
+    memcpy(out, name, n);
+    out[n] = 0;
 }
 
 /* Free a menu and everything under it. Caller holds the
@@ -172,15 +218,18 @@ static void VkName(int vk, char *out, int n) {
 }
 
 /* Rendered text for the value side of a row. Fixed words and list
- * options are translated in the menu's scope; number and arrow
- * formats are language-neutral. */
-static void ValueText(const char *scope, const Item *it,
-                      char *out, int n) {
+ * options are translated in the menu's scope (and in the owning
+ * plugin's ini first); number and arrow formats are language-
+ * neutral. */
+static void ValueText(const char *owner, const char *scope,
+                      const Item *it, char *out, int n) {
     out[0] = 0;
     if (it->kind == IT_SUB) snprintf(out, n, ">");
     else if (it->kind == IT_TOGGLE)
-        snprintf(out, n, "[%s]", it->value ? ShLangFor(scope, "on")
-                                           : ShLangFor(scope, "off"));
+        snprintf(out, n, "[%s]", it->value
+                                       ? ShLangForOwned(owner, scope, "on")
+                                       : ShLangForOwned(owner, scope,
+                                                        "off"));
     else if (it->kind == IT_NUMBER)
         /* Integer step with a whole current value renders as an
          * integer (< 30 >); fractional steps keep two decimals. */
@@ -190,7 +239,8 @@ static void ValueText(const char *scope, const Item *it,
             snprintf(out, n, "< %.2f >", it->num);
     else if (it->kind == IT_LIST && it->nopts)
         snprintf(out, n, "< %s >",
-                 ShLangFor(scope, it->opts[it->value % it->nopts]));
+                 ShLangForOwned(owner, scope,
+                                it->opts[it->value % it->nopts]));
     else if (it->kind == IT_KEYBIND) {
         if (g_capActive && it == g_capItem) {
             snprintf(out, n, "< ... >");   /* waiting for a key */
@@ -600,6 +650,7 @@ void ShMenuCaptureView(ShMenuView *v) {
     m = MenuOf(g_current);
     if (m) {
         char path[64], parentPath[64];
+        const char *owner = m->owner;
         Menu *pm = MenuOf(m->parent);
 
         v->isRoot = (m->parent == 0);
@@ -629,25 +680,35 @@ void ShMenuCaptureView(ShMenuView *v) {
                             "\xE2\x86\x90 \xE2\x86\x92 or A/D adjust"));
         else if (m->hint[0])
             SafeCopy(v->hint, sizeof(v->hint),
-                     ShLangFor(path, m->hint));
+                     ShLangForOwned(owner, path, m->hint));
         else {
             char confHint[128];
             if (ShConfigGetStr("MenuHints", m->title, NULL,
                                confHint, sizeof(confHint)) &&
                 confHint[0])
                 SafeCopy(v->hint, sizeof(v->hint),
-                         ShLangFor(path, confHint));
+                         ShLangForOwned(owner, path, confHint));
         }
 
         SafeCopy(v->title, sizeof(v->title),
-                 ShLangFor(parentPath, m->title));
+                 ShLangForOwned(owner, parentPath, m->title));
         SafeCopy(v->status, sizeof(v->status),
-                 ShLangFor(path, m->status));
+                 ShLangForOwned(owner, path, m->status));
         for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
             ShMenuRow *r = &v->row[v->rows];
+            const Item *it = &m->items[i];
+            /* A submenu row shows the child menu's title, so it is
+             * translated with the CHILD's owner: the root is built
+             * in, but its plugin rows must still read the plugin's
+             * own ini first (scope stays the global table). */
+            const char *rowOwner = owner;
+            if (it->kind == IT_SUB) {
+                Menu *cm = MenuOf(it->sub);
+                if (cm && cm->owner[0]) rowOwner = cm->owner;
+            }
             SafeCopy(r->name, sizeof(r->name),
-                     ShLangFor(path, m->items[i].label));
-            ValueText(path, &m->items[i], r->value, sizeof(r->value));
+                     ShLangForOwned(rowOwner, path, it->label));
+            ValueText(owner, path, it, r->value, sizeof(r->value));
             r->selected = (i == m->sel);
             if (r->selected) v->sel = v->rows;
             v->rows++;
@@ -749,7 +810,7 @@ static void EnsureMenu(void) {
     g_started = 1;
     InitializeCriticalSection(&g_lock);
     g_lockReady = 1;
-    g_root = NewMenu("SCRIPTHOOK", 0);
+    g_root = NewMenu("SCRIPTHOOK", 0, NULL);
     CreateThread(NULL, 0, MenuThread, NULL, 0, NULL);
 }
 
@@ -757,10 +818,12 @@ SH_API uint32_t ShMenuCreate(const char *title) {
     Menu *root;
     uint32_t h;
     Item *it;
+    char owner[48];
 
+    OwnerFromAddress(owner, sizeof(owner));
     EnsureMenu();
     Lock();
-    h = NewMenu(title, g_root);
+    h = NewMenu(title, g_root, owner);
     root = MenuOf(g_root);
     if (h && root) {
         it = NewItem(root, IT_SUB, title, NULL, NULL);
@@ -824,7 +887,11 @@ SH_API uint32_t ShMenuSub(uint32_t parent, const char *label) {
 
     EnsureMenu();
     Lock();
-    h = NewMenu(label, parent);
+    m = MenuOf(parent);
+    /* The submenu belongs to whoever owns the parent, so a
+     * built-in page added under a plugin menu still translates
+     * from that plugin's ini. */
+    h = NewMenu(label, parent, m ? m->owner : NULL);
     m = MenuOf(parent);
     if (h && m) {
         it = NewItem(m, IT_SUB, label, NULL, NULL);
@@ -981,7 +1048,7 @@ SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
     m = MenuOf(menu);
     if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
     MenuPath(m, path, sizeof(path));
-    SafeCopy(tmpl, sizeof(tmpl), ShLangFor(path, fmt));
+    SafeCopy(tmpl, sizeof(tmpl), ShLangForOwned(m->owner, path, fmt));
     Unlock();
 
     va_start(ap, fmt);

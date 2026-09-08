@@ -1494,13 +1494,26 @@ SH_API int  ShPluginIniPath(const char *plugin, char *buf, int size);
  *  language "zh_cn" the [zh_cn] and [zh_cn.<scope>] sections
  *  hold translations keyed by the original English text. Lookup
  *  order: [lang.scope] -> [lang] -> [en.scope] -> [en] -> the
- *  original text. @{ */
+ *  original text.
+ *
+ *  Menus created by a plugin (through ShMenuCreate) also consult
+ *  that plugin's own ini, plugins\<name>\<name>.ini, FIRST: same
+ *  [lang] / [lang.<scope>] sections, but they win over
+ *  scripthook.ini, which stays the fallback. Ship a plugin's
+ *  translations inside its own ini and they travel with it. @{ */
 
 /** Translate without a scope (framework text, plugin HUD text). */
 SH_API const char *ShLang(const char *text);
 /** Translate within a menu's scope (its English title). NULL
  *  scope is the same as ShLang. */
 SH_API const char *ShLangFor(const char *scope, const char *text);
+/** Translate like ShLangFor, but check the owning plugin's ini
+ *  first. owner is the plugin folder name (NULL or "" = the main
+ *  ini only). The framework passes each menu's owner
+ *  automatically; plugins only need this for their own HUD text. */
+SH_API const char *ShLangForOwned(const char *owner,
+                                  const char *scope,
+                                  const char *text);
 /** The active language name, from [Settings] Language. */
 SH_API const char *ShLangGet(void);
 
