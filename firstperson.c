@@ -50,6 +50,9 @@ typedef void (*HeadClearMiss_t)(void);
 typedef int (*SetVisible_t)(uint64_t, uint64_t, int, int);
 typedef int (*FpActive_t)(void);
 typedef int (*ViewMode_t)(void);
+typedef uint32_t (*ToastEx_t)(const char *, uint32_t, uint32_t);
+typedef int (*ToastSet_t)(uint32_t, const char *, uint32_t,
+                          uint32_t);
 typedef int (*HeadBow_t)(void);
 typedef float (*EyeJump_t)(void);
 typedef void (*EyeDiag_t)(int *, int *);
@@ -102,6 +105,8 @@ static HeadClearMiss_t g_headClearMiss;
 static SetVisible_t g_setVisible;
 static FpActive_t   g_fpActive;
 static ViewMode_t   g_viewMode;
+static ToastEx_t    g_toastEx;
+static ToastSet_t   g_toastSet;
 static HeadBow_t    g_headBow;
 static EyeJump_t    g_eyeJump;
 static EyeDiag_t    g_eyeDiag;
@@ -438,6 +443,42 @@ static void Report(void) {
  * not touch the player: resolving it can fall back to a heap
  * scan. Everything here is camera state and deferred calls.
  */
+/* ---- what the bar says -------------------------------------------
+ * One line across the top of the screen, so a flip never has to be
+ * guessed at from the view alone. Only a state that changed is
+ * said: a scan can run for seconds and must not announce itself on
+ * every one of those ticks.
+ */
+enum {
+    SAY_NONE = 0,
+    SAY_FP_SCANNING,   /* first person on, still looking for it */
+    SAY_FP_HIDDEN,     /* first person on, head hidden */
+    SAY_FP_NOHIDE,     /* first person on, hide head is off */
+    SAY_TP             /* third person */
+};
+static volatile int g_said = SAY_NONE;
+static uint32_t     g_toastId = 0;
+
+/* Amber while something is still being looked for, green once it is
+ * done, plain white for a plain change of view. */
+#define SAY_RGB_BUSY  0xFFD24Au
+#define SAY_RGB_DONE  0x7CFF8Au
+#define SAY_RGB_PLAIN 0xFFFFFFu
+
+static void Say(int state, const char *text, uint32_t rgb) {
+    if (g_said == state) return;
+    g_said = state;
+    if (!g_toastEx) return;
+    /* Same line again rather than a second one: a state that moves
+     * on - scanning to hidden - must not stack up. A line whose time
+     * is up is gone and cannot be set, so it is simply made again -
+     * not noticing that lost every message after the first one. */
+    if (g_toastId && g_toastSet &&
+        g_toastSet(g_toastId, text, rgb, SH_TOAST_MS_DEFAULT))
+        return;
+    g_toastId = g_toastEx(text, rgb, SH_TOAST_MS_DEFAULT);
+}
+
 static void SetFp(int on) {
     if (on) {
         g_on = 1;
@@ -456,6 +497,14 @@ static void SetFp(int on) {
         }
         Hold(1);
         if (g_setBlur) g_setBlur(0);
+        /* The head group is the engine's and it only makes it the
+         * first time the player aims, so say what is happening
+         * rather than leave a head on screen with no word for it. */
+        if (g_wantHide)
+            Say(SAY_FP_SCANNING, "第一人称已开启，正在扫描头部",
+                SAY_RGB_BUSY);
+        else
+            Say(SAY_FP_NOHIDE, "第一人称已开启", SAY_RGB_PLAIN);
     } else {
         g_on = 0;
         g_headAway = 0;
@@ -466,6 +515,7 @@ static void SetFp(int on) {
         ShowHead();
         if (g_setBlur) g_setBlur(1);
         Hold(0);
+        Say(SAY_TP, "第三人称已开启", SAY_RGB_PLAIN);
     }
     /* The Enabled row shows the state a hotkey may have just
      * changed behind the menu's back; sync it so the next
@@ -983,6 +1033,8 @@ static DWORD WINAPI TickThread(LPVOID p) {
                         Report();
                         said = 0;
                         Diag("hide ok n=%d", g_nparts);
+                        Say(SAY_FP_HIDDEN, "第一人称已开启，已隐藏头部",
+                            SAY_RGB_DONE);
                         /* The hide took a while (a first-time
                          * sweep can run for seconds); the user
                          * may have turned it off meanwhile, and
@@ -1020,6 +1072,12 @@ static DWORD WINAPI TickThread(LPVOID p) {
                         said = 0;
                         Report();
                         Diag("rehide miss (%ums)", (unsigned)cost);
+                        /* It came back, so the scan is running
+                         * again and the line has to say so. */
+                        if (g_wantHide)
+                            Say(SAY_FP_SCANNING,
+                                "第一人称已开启，正在扫描头部",
+                                SAY_RGB_BUSY);
                     } else {
                         /* Parts stayed non-zero without this, so the
                          * branch re-fired every tick (~16/s) instead
@@ -1269,6 +1327,10 @@ static DWORD WINAPI BindThread(LPVOID p) {
     /* Optional: the three way view state. An older dinput8 only
      * has the two way answer above, which stays the fallback. */
     *(FARPROC *)&g_viewMode = GetProcAddress(m, "ShCameraViewMode");
+    /* Optional: the status line. An older dinput8 without it simply
+     * says nothing. */
+    *(FARPROC *)&g_toastEx = GetProcAddress(m, "ShToastEx");
+    *(FARPROC *)&g_toastSet = GetProcAddress(m, "ShToastSet");
     *(FARPROC *)&g_headBow = GetProcAddress(m, "ShCameraHeadBow");
     *(FARPROC *)&g_eyeJump = GetProcAddress(m, "ShCameraEyeJump");
     *(FARPROC *)&g_eyeDiag = GetProcAddress(m, "ShCameraEyeDiag");
