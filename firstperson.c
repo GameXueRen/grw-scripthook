@@ -308,7 +308,15 @@ static volatile int g_headAway = 0;
  * to be asked again once something may have changed the answer.
  */
 #define SWEEP_STEP_MS     60u
-#define RESWEEP_RETRY_MS  300000u
+/* A remembered miss is only true until the engine creates the group,
+ * which it does the first time the player aims. An aim edge clears it
+ * at once; this beat is what catches the group when the sweep had
+ * already walked past the place it appeared in, so it has to be short
+ * enough to matter and the sliced sweep costs no stalls. */
+#define RESWEEP_RETRY_MS  60000u
+/* While the player is aiming the group exists or is about to, so a
+ * remembered miss is retried far sooner than on the idle beat. */
+#define RESWEEP_AIM_MS    2000u
 #define SWEEP_COST_MS     150u
 static uint64_t g_hideAt = 0;   /* last successful hide tick */
 static uint64_t g_hideTry = 0;  /* last failed scan tick */
@@ -935,9 +943,14 @@ static DWORD WINAPI TickThread(LPVOID p) {
              * head group may not be found yet (it appears on
              * the first aim). Drop the old hold first so the
              * head is never stuck invisible behind a hold we no
-             * longer track. */
+             * longer track. The cached group belongs to the old
+             * body, and while that one is still alive the kernel
+             * answers "no group" for the new one and remembers it
+             * for ten minutes - a respawn would then never hide
+             * again - so the whole cache goes with the old body. */
             if (g_hideRoot && g_hideRoot != root)
                 ShowHead();
+            if (g_headInvalidate) g_headInvalidate();
             g_root = root;
             g_nparts = 0;
             g_hideAt = 0;
@@ -963,7 +976,8 @@ static DWORD WINAPI TickThread(LPVOID p) {
                     int ok = HideHeadTimed(root, &cost);
                     g_hideTry = now + (cost >= SWEEP_COST_MS
                                        ? SWEEP_STEP_MS
-                                       : RESWEEP_RETRY_MS);
+                                       : (aimNow ? RESWEEP_AIM_MS
+                                                 : RESWEEP_RETRY_MS));
                     if (ok) {
                         g_hideAt = now;
                         Report();
@@ -1001,7 +1015,8 @@ static DWORD WINAPI TickThread(LPVOID p) {
                          * something may have changed the answer. */
                         g_hideTry = now + (cost >= SWEEP_COST_MS
                                            ? SWEEP_STEP_MS
-                                           : RESWEEP_RETRY_MS);
+                                           : (aimNow ? RESWEEP_AIM_MS
+                                                     : RESWEEP_RETRY_MS));
                         said = 0;
                         Report();
                         Diag("rehide miss (%ums)", (unsigned)cost);

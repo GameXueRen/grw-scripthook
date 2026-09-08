@@ -130,12 +130,13 @@ extern void ShSetError(int err);
 extern void ShVisibilityPump(void);
 extern void ShTransformPump(void);
 extern void ShDominoPump(void);
-extern void ShHeadPump(void);
+extern void ShHeadPump(int light);
 extern void ShHeadWant(void);
 extern int ShFovSet(float radians);
 extern void ShFovClear(void);
 extern int ShHeadCached(ShVec3 *out);
 extern int ShGetGameState(void);
+extern void ShHeadRebuild(void);
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern void *ShAllocNear(uint64_t target);
 
@@ -229,6 +230,9 @@ static void WriteRot(float *m) {
 
 /* Kept for diagnostics: the last time the eye was bowed out to. */
 static volatile uint64_t g_headBowAt = 0;
+
+/* How long the head reading has been refused as not sane. */
+static volatile uint64_t g_bow5At = 0;
 
 /* Where the eye actually went and how far the head was, for the
  * diagnostics in ShCameraEyeAt. */
@@ -576,7 +580,7 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
         if ((g_apply & CAM_HEAD_BIT) ||
             GetTickCount64() < g_viewWantAt)
             ShHeadWant();
-        ShHeadPump();
+        ShHeadPump(0);
 
         /* Whether the first person eye is really on camera,
          * measured from the frame's own camera rather than
@@ -599,6 +603,17 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
             }
         }
         if (g_apply) ApplyFields(rcx);
+    } else {
+        /* Menu frames: the head pump must not take its full path here
+         * - it would have to look the player up, which is what used to
+         * crash menus - but with the rig already resolved the bones can
+         * simply be read on. That keeps the head fresh behind the menu,
+         * so coming back to the world puts the eye straight back
+         * instead of waiting out a resolve. */
+        if (g_apply & CAM_HEAD_BIT) {
+            ShHeadWant();
+            ShHeadPump(1);
+        }
     }
     /* Remember the eye placed here so the next visit can tell whether
      * it survived. */
@@ -609,6 +624,20 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
         g_eyeSet[1] = f[13];
         g_eyeSet[2] = f[14];
         g_eyeSetOk = 1;
+    }
+    /* A head reading far out for more than a moment means the rig is
+     * stale: a body swap that reused the entity passes the identity
+     * check, and the old bones keep reading the old spot - which is
+     * exactly what bowed this frame out. Resolve a fresh rig instead
+     * of bowing out forever. */
+    if (g_headBow == 5) {
+        if (!g_bow5At) g_bow5At = GetTickCount64();
+        else if (GetTickCount64() - g_bow5At > 1000) {
+            g_bow5At = 0;
+            ShHeadRebuild();
+        }
+    } else {
+        g_bow5At = 0;
     }
 }
 

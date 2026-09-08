@@ -427,7 +427,7 @@ static int VehReadFallback(void) {
 /* Driven from the camera detour, on the game thread. No
  * lookups here: the addresses were validated at resolve,
  * and a bad reading sends us back to resolve. */
-void ShHeadPump(void) {
+void ShHeadPump(int light) {
     float b[3], org[3], rq[4];
     float n, cx, cy, cz, dx, dy, dz;
     uint32_t flags;
@@ -437,6 +437,17 @@ void ShHeadPump(void) {
     g_want--;
 
     now = GetTickCount64();
+
+    /* Behind a menu the player cannot be looked up - a frame path
+     * player lookup is what used to crash the menu - and resolving
+     * the rig is work the frame must not do either. When the rig is
+     * already resolved the bones are simply read on, so the head
+     * stays fresh behind the menu and the eye can go straight back
+     * the moment the world does. */
+    if (light) {
+        if (!g_ready) { g_valid = 0; return; }
+        goto reads;
+    }
 
     /* Menus hide the player from the static lookup, and
      * the rig is still there behind the menu. Polling
@@ -453,7 +464,13 @@ void ShHeadPump(void) {
      * memory still reads as plausible, so the identity is
      * rechecked on a timer rather than trusted. The seat
      * anchor needs the same peek, so the two share a beat. */
-    if (now - g_lastCheck >= HEAD_RETRY_MS) {
+    /* Behind a pause or a loadout the player is not findable, and
+     * counting that against the rig would drop a resolve that is
+     * still perfectly good - which is what made coming back from a
+     * menu wait out a resolve for nothing. The check simply resumes
+     * on the first frame back in the world. */
+    if (now - g_lastCheck >= HEAD_RETRY_MS &&
+        ShGetGameState() != SH_STATE_PAUSED) {
         ShPlayer p;
         int inVeh;
         uint64_t ent;
@@ -557,6 +574,7 @@ void ShHeadPump(void) {
         if (!Resolve()) { g_valid = 0; return; }
     }
 
+reads:
     /* Kernel reads: the rig can be freed on another thread
      * between any check and use, and these must not fault.
      * A locked seat anchor falls back to the chassis eye
@@ -654,6 +672,18 @@ void ShHeadPump(void) {
     }
     VehAnchor(&g_head.x);
     g_valid = 1;
+}
+
+/* Drop the rig and resolve a fresh one. Used when the head being read
+ * is clearly not the player any more: a body swap that reuses the same
+ * entity passes the identity check, and the old bone addresses keep
+ * reading the old spot - sane looking numbers, kilometres away - which
+ * pins the view in third person until something forces a resolve.
+ */
+void ShHeadRebuild(void) {
+    g_ready = 0;
+    g_valid = 0;
+    g_lastTry = 0;
 }
 
 int ShHeadCached(ShVec3 *out) {
