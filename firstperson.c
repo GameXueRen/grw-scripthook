@@ -1,6 +1,18 @@
 /* First person. The camera sits at the player's eye and the
  * head is hidden, so the body and weapon stay drawn.
  */
+/* The eye is not computed here. The ScriptHook asks the engine
+ * for the head position - the argument its own head function
+ * takes is captured once, then that same function is asked
+ * again every frame - and writes the answer where the camera
+ * position goes. That is what makes the view agree with the
+ * engine on slopes, in vehicles and through a respawn, instead
+ * of being a reading of ours pushed around the camera basis.
+ *
+ * What this plugin owns is therefore small: the offset, the
+ * on/off state, the head, and telling the player what is
+ * happening.
+ */
 /* Binds late by choice. Plugins may import the ScriptHook
  * directly instead, since the loader loads them from a
  * thread rather than from DllMain. */
@@ -18,24 +30,15 @@
 #define TICK_MS     60
 #define MAX_PARTS   64
 
-/* The player position is already at head height, so forward
- * is the only offset needed to clear the face.
+/* The eye offset, in centimetres, in world axes. The engine's
+ * head position is already the eye, so the useful range is
+ * small: these are the final centimetres of taste, not a
+ * distance to walk forwards.
  */
-#define FWD_DEF     15.0f
-#define FWD_MIN     0.0f
-#define FWD_MAX     60.0f
-#define FWD_STEP    2.0f
-#define UP_DEF      0.0f
-#define UP_MIN      -30.0f
-#define UP_MAX      30.0f
-#define UP_STEP     2.0f
-
-/* How long the aim has to hold before the camera is handed
- * over, so the zoom into the body is never on screen. */
-#define SETTLE_DEF  600.0f
-#define SETTLE_MIN  0.0f
-#define SETTLE_MAX  2000.0f
-#define SETTLE_STEP 50.0f
+#define OFF_DEF     0.0f
+#define OFF_MIN     -100.0f
+#define OFF_MAX     100.0f
+#define OFF_STEP    1.0f
 
 typedef int (*IsInGame_t)(void);
 typedef int (*GameState_t)(void);
@@ -53,10 +56,6 @@ typedef int (*ViewMode_t)(void);
 typedef uint32_t (*ToastEx_t)(const char *, uint32_t, uint32_t);
 typedef int (*ToastSet_t)(uint32_t, const char *, uint32_t,
                           uint32_t);
-typedef int (*HeadBow_t)(void);
-typedef float (*EyeJump_t)(void);
-typedef void (*EyeDiag_t)(int *, int *);
-typedef void (*EyeAt_t)(float *, float *);
 typedef void (*HandoverClear_t)(void);
 typedef uint32_t (*MenuCreate_t)(const char *);
 typedef uint32_t (*MenuSub_t)(uint32_t, const char *);
@@ -81,6 +80,21 @@ typedef int (*WidgetGetS_t)(uint64_t, uint32_t, char *, int);
 typedef int (*SceneName_t)(uint64_t, char *, int);
 typedef int (*WidgetPropType_t)(uint64_t, uint32_t);
 typedef int (*LogPath_t)(const char *, char *, int);
+
+/* The engine side of the view. Optional: a ScriptHook without
+ * them is one we do not know how to patch, and the camera then
+ * falls back to the placement it has always used. */
+typedef int      (*Fp2Install_t)(void);
+typedef int      (*Fp2Extras_t)(uint32_t);
+typedef int      (*Fp2Ready_t)(void);
+typedef uint32_t (*Fp2Missing_t)(void);
+typedef void     (*Fp2Enable_t)(int);
+typedef void     (*Fp2SetOffset_t)(float, float, float);
+typedef void     (*Fp2Gate_t)(int *, int *, int *, int *);
+typedef int      (*Fp2HeadOk_t)(void);
+typedef void     (*Fp2HeadShow_t)(int);
+typedef int      (*Fp2Bow_t)(void);
+typedef uint32_t (*Fp2Age_t)(void);
 
 static LogPath_t    g_logPath;
 
@@ -107,10 +121,6 @@ static FpActive_t   g_fpActive;
 static ViewMode_t   g_viewMode;
 static ToastEx_t    g_toastEx;
 static ToastSet_t   g_toastSet;
-static HeadBow_t    g_headBow;
-static EyeJump_t    g_eyeJump;
-static EyeDiag_t    g_eyeDiag;
-static EyeAt_t      g_eyeAt;
 static HandoverClear_t g_handoverClear;
 static InputCtx_t   g_inputCtx;
 static MenuIsOpen_t g_menuIsOpen;
@@ -127,10 +137,35 @@ static WidgetGetS_t  g_widgetGetS;
 static SceneName_t   g_sceneName;
 static WidgetPropType_t g_widgetPropType;
 
+static Fp2Install_t   g_fpxInstall;
+static Fp2Extras_t    g_fpxExtras;
+static Fp2Ready_t     g_fpxReady;
+static Fp2Missing_t   g_fpxMissing;
+static Fp2Enable_t    g_fpxEnable;
+static Fp2SetOffset_t g_fpxSetOff;
+static Fp2Gate_t      g_fpxGate;
+static Fp2HeadOk_t    g_fpxHeadOk;
+static Fp2HeadShow_t  g_fpxHeadShow;
+static Fp2Bow_t       g_fpxBow;
+static Fp2Age_t       g_fpxAge;
+static int            g_fpxUp = 0;   /* engine sites are patched */
+
 static uint32_t g_menu = 0;
 static volatile int   g_on = 0;
 static volatile int   g_wantHide = 1;
-static volatile int   g_settleMs = (int)SETTLE_DEF;
+/* [Settings] engine_camera=0 leaves the eye to the placement
+ * the ScriptHook has always used, which is the way back if the
+ * engine's own head function ever disagrees with a build. */
+static volatile int   g_engineCam = 1;
+/* [Settings] engine_extras takes the body and shoulder patches,
+ * one bit each: 1 the body position hook, 2 body visibility,
+ * 4 the shoulder swap, 8 the wall push. All four by default -
+ * they are what the table does, and a build that disagrees with
+ * one of them can leave it out bit by bit. */
+static volatile int   g_extras = 15;
+static volatile float g_offX = OFF_DEF;
+static volatile float g_offY = OFF_DEF;
+static volatile float g_offZ = OFF_DEF;
 
 /* A hotkey flips first/third person while playing: the same
  * toggle as the menu's Enabled row. The key edge is polled on
@@ -150,100 +185,10 @@ static const char *g_hotName[HOTKEYS] = {
 };
 static volatile int g_hotKey = 0;   /* index into g_hotVk, 0 = off */
 
-/* The eye offset can differ per stance or vehicle: a motorbike
- * leans, a helicopter seat sits higher, a passenger looks out
- * from a different place. Every category has its own forward
- * and height, chosen by the player. On foot lumps every stance
- * together; ground vehicles lump cars, bikes and boats. */
-enum {
-    CAT_FOOT = 0,    /* on foot, any stance */
-    CAT_LAND,        /* ground vehicle (car, motorbike, boat) */
-    CAT_PLANE,       /* airplane */
-    CAT_HELI,        /* helicopter */
-    CAT_RIDER,       /* riding along as a passenger */
-    CAT_COUNT
-};
-
-/* Menu titles and ini suffixes, per category. */
-static const char *g_catName[CAT_COUNT] = {
-    "On foot", "Ground vehicle", "Airplane",
-    "Helicopter", "Passenger"
-};
-static const char *g_catTag[CAT_COUNT] = {
-    "foot", "land", "plane", "heli", "rider"
-};
-
-/* Custom presets: a saved pair of offsets the player can apply
- * on top of any state. The five categories auto-switch on the
- * engine input context, but a stance or vehicle that has no
- * category of its own (or a look the player simply wants to
- * reuse everywhere) can be covered by picking a preset. The
- * preset list row is 0 = Auto (follow the categories), 1..N =
- * force that preset's pair regardless of the current category. */
-enum {
-    PRESET_AUTO = -1,  /* follow g_cat as usual */
-    PRESET_1,          /* index 0 of the preset arrays */
-    PRESET_2,
-    PRESET_3,
-    PRESET_4,
-    PRESET_COUNT       /* number of custom presets */
-};
-static const char *g_presetName[PRESET_COUNT] = {
-    "Custom 1", "Custom 2", "Custom 3", "Custom 4"
-};
-static const char *g_presetTag[PRESET_COUNT] = {
-    "preset1", "preset2", "preset3", "preset4"
-};
-
-/* cm, per preset. Active choice is g_presetSel: -1 = auto
- * (category based), 0..N-1 = force that preset. */
-static volatile float g_presFwd[PRESET_COUNT];
-static volatile float g_presUp[PRESET_COUNT];
-static volatile int   g_presetSel = PRESET_AUTO;
-
-/* cm, per category. Active at any time is g_cat, driven by
- * the engine input context: OnFoot, Vehicle, Airplane,
- * Helicopter or VehiclePassenger. The array holds the menu
- * defaults for categories without an ini entry yet. */
-static volatile float g_fwd[CAT_COUNT];
-static volatile float g_up[CAT_COUNT];
-static volatile int   g_cat = CAT_FOOT;
-
-static void ResetCatDefaults(void) {
-    int i;
-    for (i = 0; i < CAT_COUNT; i++) {
-        g_fwd[i] = FWD_DEF;
-        g_up[i] = UP_DEF;
-    }
-    for (i = 0; i < PRESET_COUNT; i++) {
-        g_presFwd[i] = FWD_DEF;
-        g_presUp[i] = UP_DEF;
-    }
-}
-
-/* The engine input context names what the player is doing.
- * Menu, drone and pause contexts carry no category; those
- * keep whatever was current. */
-static int CatFromCtx(int ctx) {
-    switch (ctx) {
-    case SH_CTX_ONFOOT:            return CAT_FOOT;
-    case SH_CTX_VEHICLE:           return CAT_LAND;
-    case SH_CTX_AIRPLANE:          return CAT_PLANE;
-    case SH_CTX_HELICOPTER:        return CAT_HELI;
-    case SH_CTX_VEHICLE_PASSENGER: return CAT_RIDER;
-    default:                       return -1;
-    }
-}
-
-/* Counted so the status line can say where the walk got
- * to, rather than only whether it matched. */
-static volatile int g_nScenes, g_nWidgets, g_nLabels, g_nText;
-static volatile int g_nSights;
-
 /* Diagnostic log: firstperson.log beside the game log folder.
- * Written from the tick thread only, on state changes, so the
- * menu return and stowed/parachute cases leave a trace of what
- * the plugin saw instead of a guess. */
+ * Written from the tick thread only, on state changes, so a
+ * view that will not come back leaves a trace of what the
+ * plugin saw instead of a guess. */
 static FILE *g_diag = NULL;
 static char  g_diagPath[MAX_PATH];
 static int   g_diagOn = 0;      /* [Settings] diag, default off */
@@ -287,49 +232,45 @@ static void Diag(const char *fmt, ...) {
     fflush(g_diag);
 }
 
-static int Aiming(void);
-static void SaveIni(void);
-
+/* ---- the head, when the engine cannot name it -------------
+ * The engine's own visibility call needs a pointer it builds
+ * for itself; where that chain does not resolve - a ScriptHook
+ * without the sites, or a moment when the rig is not the one
+ * it expects - the head is hidden the old way, by scanning the
+ * entity for its head nodes. The two never run at once: a node
+ * hold and the engine's own flag would fight, and the head
+ * would flicker.
+ */
 static uint64_t g_root = 0;
 static uint64_t g_hideRoot = 0;
 static uint64_t g_parts[MAX_PARTS];
 static int      g_nparts = 0;
-/* The engine can take the camera away - a stowed weapon
- * widens the view, a parachute pulls back, a drone flies.
- * While that view is up, hiding the head shows a headless
- * body in it. This is set while the camera is not ours so
- * the hide is lifted until first person comes back. */
+
+/* Set while the view is not ours, so the hold is lifted and
+ * the head is shown for as long as that is true. */
 static volatile int g_headAway = 0;
+
 /* The engine rebuilds the head group on an outfit change or
- * a respawn, which drops the persistent hold and shows the
- * head again. A periodic reapply catches that, so the hide
- * self heals instead of relying on the one shot attempt. */
+ * a respawn, which drops a node hold and shows the head again.
+ * A periodic reapply catches that, so the hide self heals. */
 #define REHIDE_MS       300u
 /* Finding the head group sweeps the whole address space, tens of
- * seconds of work that the kernel now hands back in slices of a few
- * hundred milliseconds. So what a try cost is what tells the two
- * failures apart: a slow one was sweeping and picks the sweep up on
- * the very next tick, a fast one was a remembered miss and only has
- * to be asked again once something may have changed the answer.
+ * seconds of work that the kernel now hands back in slices of a
+ * few hundred milliseconds. So what a try cost is what tells the
+ * two failures apart: a slow one was sweeping and picks the
+ * sweep up on the very next tick, a fast one was a remembered
+ * miss and only has to be asked again once something may have
+ * changed the answer.
  */
 #define SWEEP_STEP_MS     60u
-/* A remembered miss is only true until the engine creates the group,
- * which it does the first time the player aims. An aim edge clears it
- * at once; this beat is what catches the group when the sweep had
- * already walked past the place it appeared in, so it has to be short
- * enough to matter and the sliced sweep costs no stalls. */
 #define RESWEEP_RETRY_MS  60000u
-/* While the player is aiming the group exists or is about to, so a
- * remembered miss is retried far sooner than on the idle beat. */
-#define RESWEEP_AIM_MS    2000u
 #define SWEEP_COST_MS     150u
 static uint64_t g_hideAt = 0;   /* last successful hide tick */
 static uint64_t g_hideTry = 0;  /* last failed scan tick */
 
 /* The head render nodes live on the soldier entity. The
  * root re-parents to a vehicle on every mount, so resolving
- * the head from the root would lose it each time (the head
- * pump picks the entity for the same reason). The root is
+ * the head from the root would lose it each time. The root is
  * still read for body swap detection below.
  */
 static uint64_t PlayerHeadEnt(void) {
@@ -340,38 +281,11 @@ static uint64_t PlayerHeadEnt(void) {
     return p.entity ? p.entity : p.root;
 }
 
-/* The eye follows the head bone inside the engine's own
- * frame, so nothing here runs per frame. The active category
- * owns the offsets; every camera push reads it so a category
- * switch that lands mid aim applies the right seat. A forced
- * custom preset (g_presetSel >= 0) overrides the category's
- * own pair entirely.
- */
-static void PushCamera(void) {
-    if (!g_fp) return;
-    if (g_presetSel >= 0 && g_presetSel < PRESET_COUNT)
-        g_fp(g_presFwd[g_presetSel] / 100.0f,
-             g_presUp[g_presetSel] / 100.0f);
-    else
-        g_fp(g_fwd[g_cat] / 100.0f, g_up[g_cat] / 100.0f);
-}
-
-/* The hook reapplies the eye every frame until it is given
- * back, so a screen the player opens has to release it. The
- * drone owns its own camera and fights us for it. */
-static volatile int g_held = 0;
-
-static void Hold(int want) {
-    if (want == g_held) return;
-    g_held = want;
-    if (want) PushCamera();
-    else if (g_release) g_release(SH_CAM_POS);
-}
-
 /* Entity wide show: releases every hold on the root and
  * unhides all nodes in one deferred call, applied on the
  * game thread against the live node list. */
 static void ShowHead(void) {
+    if (g_fpxUp && g_fpxHeadShow) g_fpxHeadShow(1);
     if (g_setVisible && g_hideRoot)
         g_setVisible(g_hideRoot, 0, 1, 0);
     g_nparts = 0;
@@ -395,9 +309,10 @@ static int HideHead(uint64_t root) {
     return n;
 }
 
-/* HideHead and how long it took. The cost is the only way to tell a
- * call that was still sweeping the heap from one that simply found
- * nothing, and the two have to be retried completely differently.
+/* HideHead and how long it took. The cost is the only way to
+ * tell a call that was still sweeping the heap from one that
+ * simply found nothing, and the two have to be retried
+ * completely differently.
  */
 static int HideHeadTimed(uint64_t root, uint64_t *cost) {
     uint64_t t0 = GetTickCount64();
@@ -406,87 +321,72 @@ static int HideHeadTimed(uint64_t root, uint64_t *cost) {
     return n;
 }
 
-static void Report(void) {
-    char line[96];
-    size_t used;
-
-    if (!g_status) return;
-    if (!g_on)
-        snprintf(line, sizeof(line), "off");
-    else if (!g_widgetGetS)
-        snprintf(line, sizeof(line),
-                 "on, no widget tree: update the ScriptHook");
-    else if (!g_wantHide)
-        snprintf(line, sizeof(line), "on, head left visible");
-    else if (g_headAway)
-        snprintf(line, sizeof(line),
-                 "on, head shown (view taken)");
-    else if (g_nparts > 0)
-        snprintf(line, sizeof(line), "on, head hidden (%d parts)",
-                 g_nparts);
-    else
-        snprintf(line, sizeof(line), "on, aim once to hide the head");
-    used = strlen(line);
-    if (g_on) {
-        if (g_presetSel >= 0 && g_presetSel < PRESET_COUNT)
-            snprintf(line + used, sizeof(line) - used, " [%s]",
-                     g_presetName[g_presetSel]);
-        else if (g_cat >= 0 && g_cat < CAT_COUNT)
-            snprintf(line + used, sizeof(line) - used, " [%s]",
-                     g_catName[g_cat]);
-    }
-    g_status(g_menu, line);
+/* 1 while the engine's own call is the one hiding the head, so
+ * the node scan has to stay out of it. */
+static int EngineHidesHead(void) {
+    return g_engineCam && g_fpxUp && g_fpxHeadOk && g_fpxHeadOk();
 }
 
-/* Turn first person on or off. Runs on both the menu worker
- * (Enabled toggle) and the tick thread (hotkey), so it must
- * not touch the player: resolving it can fall back to a heap
- * scan. Everything here is camera state and deferred calls.
- */
-/* ---- what the bar says -------------------------------------------
- * One line across the top of the screen, so nothing here has to be
- * guessed at from the view alone. Only a state that changed is said,
- * so a wait that runs for seconds does not announce itself on every
- * one of those ticks.
- *
- * A wait stays up until it is over (ms 0) - that is the whole point:
- * a scan can run for tens of seconds, and a line that left after two
- * of them is exactly what makes the wait look like a hang. A result -
- * head hidden, third person - is said briefly instead.
+/* ---- the camera ------------------------------------------- */
+
+/* The offset is all this plugin contributes to the eye: the
+ * ScriptHook does the rest inside the engine's frame. Taking
+ * the camera is still a camera call, because that is what
+ * marks the position as ours. */
+static void PushCamera(void) {
+    if (g_fpxSetOff)
+        g_fpxSetOff(g_offX / 100.0f, g_offY / 100.0f,
+                    g_offZ / 100.0f);
+    if (g_fp) g_fp(0.0f, 0.0f);
+}
+
+/* The hook reapplies the eye every frame until it is given
+ * back, so a screen the player opens has to release it. */
+static volatile int g_held = 0;
+
+static void Hold(int want) {
+    if (want == g_held) return;
+    g_held = want;
+    if (want) {
+        if (g_engineCam && g_fpxUp && g_fpxEnable) g_fpxEnable(1);
+        PushCamera();
+    } else {
+        if (g_fpxUp && g_fpxEnable) g_fpxEnable(0);
+        if (g_release) g_release(SH_CAM_POS);
+    }
+}
+
+/* ---- what the bar says -----------------------------------
+ * One line across the top of the screen, so nothing here has
+ * to be guessed at from the view alone. Only a state that
+ * changed is said, so a wait that runs for seconds does not
+ * announce itself on every one of those ticks.
  */
 enum {
     SAY_NONE = 0,
     SAY_FP_SCANNING,   /* looking for the head group            wait */
-    SAY_FP_SCANHINT,   /* nothing yet: what would end it        wait */
     SAY_FP_SWAP,       /* a new body: hiding it again           wait */
     SAY_FP_REHIDE,     /* the head came back: hiding it again   wait */
-    SAY_FP_WAITING,    /* waiting for first person to come back wait */
-    SAY_FP_PAUSED,     /* a screen is up: it comes back         wait */
-    SAY_FP_ENGINE,     /* the engine owns the view             wait */
-    SAY_FP_HIDDEN,     /* head hidden                         brief */
-    SAY_FP_NOHIDE,     /* first person on, hide head is off   brief */
-    SAY_TP             /* third person                        brief */
+    SAY_FP_NOSITE,     /* no engine sites: the old placement    brief */
+    SAY_FP_HIDDEN,     /* head hidden                          brief */
+    SAY_FP_NOHIDE,     /* first person on, hide head is off    brief */
+    SAY_TP             /* third person                         brief */
 };
 static volatile int      g_said = SAY_NONE;
 static uint32_t          g_toastId = 0;
 
-/* When the wait now running started, for the step that says what
- * would end it. 0 = no wait is being timed. */
+/* When the wait now running started, for the step that says
+ * what would end it. 0 = no wait is being timed. */
 static volatile uint64_t g_waitFrom = 0;
 
-/* How long a scan may run before it says what would unstick it. The
- * head group is the engine's and appears on the first aim, so this
- * is the one wait the player can end - which is why it is the one
- * that gets told how. */
-#define SAY_HINT_AFTER_MS 6000u
-
-/* A wait is said for at most this long. Waiting is worth saying, but
- * a line that nothing ever moves on from and that nobody can dismiss
- * is worse than no line, so eventually it goes on its own. */
+/* A wait is said for at most this long. Waiting is worth
+ * saying, but a line that nothing ever moves on from and that
+ * nobody can dismiss is worse than no line, so eventually it
+ * goes on its own. */
 #define SAY_WAIT_MS 60000u
 
-/* Amber while something is being waited for, green once it is done,
- * plain white for a plain change of view. */
+/* Amber while something is being waited for, green once it is
+ * done, plain white for a plain change of view. */
 #define SAY_RGB_BUSY  0xFFD24Au
 #define SAY_RGB_DONE  0x7CFF8Au
 #define SAY_RGB_PLAIN 0xFFFFFFu
@@ -497,18 +397,19 @@ static void Say(int state, const char *text, uint32_t rgb,
     if (g_said == state) return;
     g_said = state;
     if (!g_toastEx) return;
-    /* Same line again rather than a second one: a state that moves
-     * on - scanning to hidden - must not stack up. A line whose time
-     * is up is gone and cannot be set, so it is simply made again -
-     * not noticing that lost every message after the first one. */
+    /* Same line again rather than a second one: a state that
+     * moves on - scanning to hidden - must not stack up. A
+     * line whose time is up is gone and cannot be set, so it
+     * is simply made again - not noticing that lost every
+     * message after the first one. */
     if (g_toastId && g_toastSet &&
         g_toastSet(g_toastId, text, rgb, ms))
         return;
     g_toastId = g_toastEx(text, rgb, ms);
 }
 
-/* Start timing a wait, unless one is already being timed: a wait
- * that is already running keeps its own clock. */
+/* Start timing a wait, unless one is already being timed: a
+ * wait that is already running keeps its own clock. */
 static void WaitFrom(uint64_t now) {
     if (!g_waitFrom) g_waitFrom = now;
 }
@@ -517,34 +418,39 @@ static void WaitEnd(void) {
     g_waitFrom = 0;
 }
 
+static void Report(void);
+static void SaveIni(void);
+
+/* Turn first person on or off. Runs on both the menu worker
+ * (Enabled toggle) and the tick thread (hotkey), so it must
+ * not touch the player: resolving it can fall back to a heap
+ * scan. Everything here is camera state and deferred calls.
+ */
 static void SetFp(int on) {
     if (on) {
         g_on = 1;
         g_nparts = 0;
         g_headAway = 0;
-        /* Fresh start: drop any "the group was not there" note and
-         * any backoff left over from before, so the first try
-         * happens on the next tick instead of waiting it out. */
+        /* Fresh start: drop any "the group was not there" note
+         * and any backoff left over from before, so the first
+         * try happens on the next tick instead of waiting it
+         * out. */
         if (g_headClearMiss) g_headClearMiss();
         g_hideTry = 0;
-        /* Start on the category the engine input context says
-         * we are in, not on whatever the last session left. */
-        if (g_inputCtx) {
-            int c = CatFromCtx(g_inputCtx());
-            if (c >= 0) g_cat = c;
-        }
         Hold(1);
         if (g_setBlur) g_setBlur(0);
-        /* The head group is the engine's and it only makes it the
-         * first time the player aims, so say what is happening
-         * rather than leave a head on screen with no word for it.
-         * The wait for that group can run for tens of seconds - it
-         * stays said until the head is actually gone. */
         WaitEnd();
-        if (g_wantHide) {
+        if (g_wantHide && !EngineHidesHead()) {
+            /* The engine cannot name the head yet, so the old
+             * scan is what will hide it - and that can run for
+             * tens of seconds. Say so rather than leave a head
+             * on screen with no word for it. */
             WaitFrom(GetTickCount64());
             Say(SAY_FP_SCANNING, "第一人称已开启，正在扫描头部并隐藏…",
                 SAY_RGB_BUSY, SAY_WAIT_MS);
+        } else if (g_wantHide) {
+            Say(SAY_FP_HIDDEN, "第一人称已开启，头部已隐藏",
+                SAY_RGB_DONE, SH_TOAST_MS_DEFAULT);
         } else {
             Say(SAY_FP_NOHIDE, "第一人称已开启", SAY_RGB_PLAIN,
                 SH_TOAST_MS_DEFAULT);
@@ -552,9 +458,10 @@ static void SetFp(int on) {
     } else {
         g_on = 0;
         g_headAway = 0;
-        /* Turning first person off is a change of view, not a camera
-         * handed to the engine for an aim, so the grace that keeps
-         * the head hidden across an aim has to go with it. */
+        /* Turning first person off is a change of view, not a
+         * camera handed to the engine for an aim, so the grace
+         * that keeps the head hidden across an aim has to go
+         * with it. */
         if (g_handoverClear) g_handoverClear();
         ShowHead();
         if (g_setBlur) g_setBlur(1);
@@ -600,169 +507,44 @@ static void OnHide(uint32_t menu, uint32_t item, int value,
     if (!value) {
         g_headAway = 0;
         ShowHead();
-        /* Nothing is being waited for any more, so the wait and its
-         * line both go. */
         WaitEnd();
         if (g_on)
             Say(SAY_FP_NOHIDE, "第一人称已开启", SAY_RGB_PLAIN,
                 SH_TOAST_MS_DEFAULT);
     } else if (g_on) {
-        WaitFrom(GetTickCount64());
-        Say(SAY_FP_SCANNING, "第一人称已开启，正在扫描头部并隐藏…",
-            SAY_RGB_BUSY, SAY_WAIT_MS);
+        if (EngineHidesHead()) {
+            Say(SAY_FP_HIDDEN, "第一人称已开启，头部已隐藏",
+                SAY_RGB_DONE, SH_TOAST_MS_DEFAULT);
+        } else {
+            WaitFrom(GetTickCount64());
+            Say(SAY_FP_SCANNING, "第一人称已开启，正在扫描头部并隐藏…",
+                SAY_RGB_BUSY, SAY_WAIT_MS);
+        }
     }
     Report();
 }
 
-/* Each category owns its own sliders; user carries the
- * category and the axis (cat*2 + 0 forward, +1 height). */
-static void OnCatSlide(uint32_t menu, uint32_t item, int value,
-                       void *user) {
-    int code = (int)(intptr_t)user;
-    int cat = code >> 1, up = code & 1;
-    (void)menu; (void)item;
-    if (cat < 0 || cat >= CAT_COUNT) return;
-    if (up) g_up[cat] = (float)value;
-    else    g_fwd[cat] = (float)value;
-    SaveIni();
-    /* Only while we already own it, or adjusting a slider
-     * would take the camera back during a screen. */
-    if (g_on && g_held && cat == g_cat) PushCamera();
-}
-
-/* Preset list row: 0 = Auto (follow the categories), 1..N =
- * force that custom preset. Applying takes effect immediately
- * on the camera, then sticks for the session and is saved. */
-static void OnPresetList(uint32_t menu, uint32_t item, int value,
-                         void *user) {
-    (void)menu; (void)item; (void)user;
-    g_presetSel = value - 1;   /* -1 = Auto, 0.. = preset */
-    if (g_presetSel < PRESET_AUTO) g_presetSel = PRESET_AUTO;
-    if (g_presetSel >= PRESET_COUNT) g_presetSel = PRESET_COUNT - 1;
-    SaveIni();
-    if (g_on && g_held) PushCamera();
-    Report();
-}
-
-/* Each preset owns its own sliders; user carries the preset and
- * the axis (preset*2 + 0 forward, +1 height). */
-static void OnPresetSlide(uint32_t menu, uint32_t item, int value,
+/* One slider per world axis: 0 X, 1 Y, 2 Z. */
+static void OnOffsetSlide(uint32_t menu, uint32_t item, int value,
                           void *user) {
-    int code = (int)(intptr_t)user;
-    int idx = code >> 1, up = code & 1;
+    int axis = (int)(intptr_t)user;
     (void)menu; (void)item;
-    if (idx < 0 || idx >= PRESET_COUNT) return;
-    if (up) g_presUp[idx] = (float)value;
-    else    g_presFwd[idx] = (float)value;
+
+    if (axis == 0)      g_offX = (float)value;
+    else if (axis == 1) g_offY = (float)value;
+    else if (axis == 2) g_offZ = (float)value;
+    else return;
     SaveIni();
-    /* Live preview only while we already own the camera and this
-     * preset is the one in force. */
-    if (g_on && g_held && g_presetSel == idx) PushCamera();
+    /* Only while we already own it, or dragging a slider would
+     * take the camera back during a screen. */
+    if (g_on && g_held) PushCamera();
 }
 
-/* 0 hands the camera over the instant iron sights come up,
- * which shows the eye flying into the body. */
-static void OnSettle(uint32_t menu, uint32_t item, int value,
-                     void *user) {
-    (void)menu; (void)item; (void)user;
-    g_settleMs = value;
-    SaveIni();
-}
+/* ---- the UI dump, for when the view will not come back --- */
 
-/* The weapon prompt names the mode Alt switches TO, not
- * the one you are in. So a label reading OVER THE SHOULDER
- * means iron sights are up right now. */
-/* Iron sights are the engine's own aim camera. Holding the
- * eye there rips the scope glass off the weapon and smears
- * the scenery through the temporal upscaler. */
-/* The label holds a localisation key, not the drawn text:
- * [AIMMODE_PC_OTS] is what renders as OVER THE SHOULDER.
- * The literal is kept for a build that resolves inline. */
-#define WANT_KEY     "AIMMODE_PC_OTS"
-#define WANT_LABEL   "OVER THE SHOULDER"
-#define WANT_SCENE   "HUD_WeaponItemDisplay"
-#define WALK_DEPTH   10
-#define WALK_BUDGET  600
-
-static int Contains(const char *hay, const char *needle) {
-    int i, j;
-
-    for (i = 0; hay[i]; i++) {
-        for (j = 0; needle[j]; j++) {
-            char a = hay[i + j], b = needle[j];
-            if (a >= 'a' && a <= 'z') a = (char)(a - 32);
-            if (b >= 'a' && b <= 'z') b = (char)(b - 32);
-            if (a != b) break;
-        }
-        if (!needle[j]) return 1;
-    }
-    return 0;
-}
-
-static int LabelSays(uint64_t w, int depth, int *budget) {
-    char cls[32], txt[160];
-    int n, i;
-
-    if (!w || depth > WALK_DEPTH) return 0;
-    if (--*budget < 0) return 0;
-    g_nWidgets++;
-
-    if (g_widgetClass(w, cls, sizeof(cls)) && Contains(cls, "Label")) {
-        g_nLabels++;
-        if (g_widgetGetS(w, SH_P_TEXT, txt, sizeof(txt))) {
-            g_nText++;
-            if (Contains(txt, WANT_KEY) || Contains(txt, WANT_LABEL))
-                return 1;
-        }
-    }
-
-    n = g_childCount(w);
-    for (i = 0; i < n; i++)
-        if (LabelSays(g_childAt(w, i), depth + 1, budget)) return 1;
-    return 0;
-}
-
-/* The weapon prompt stays up after ADS ends, so the aim
- * mode alone would leave the camera released for good.
- * Our own poll: the hook only blocks the GAME's reads. */
-static int Aiming(void) {
-    return (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-}
-
-/* Walks the game's own UI, so it needs a ScriptHook that
- * exposes the widget tree. Older ones keep the camera. */
-static int IronSights(void) {
-    int i, n, budget = WALK_BUDGET;
-
-    if (!g_sceneCount || !g_sceneAt || !g_sceneRoot ||
-        !g_childCount || !g_childAt || !g_widgetClass ||
-        !g_widgetGetS)
-        return 0;
-
-    g_nWidgets = 0; g_nLabels = 0; g_nText = 0;
-    n = g_sceneCount();
-    g_nScenes = n;
-    for (i = 0; i < n; i++) {
-        uint64_t s = g_sceneAt(i), root;
-        char name[64];
-
-        /* Only the weapon display carries the prompt, and
-         * walking all thirteen scenes every tick is work
-         * for nothing. */
-        if (g_sceneName && g_sceneName(s, name, sizeof(name)) &&
-            !Contains(name, WANT_SCENE))
-            continue;
-        root = g_sceneRoot(s);
-        if (!root) continue;
-        if (LabelSays(root, 0, &budget)) { g_nSights = 1; return 1; }
-    }
-    g_nSights = 0;
-    return 0;
-}
-
-/* Every widget of every game scene, written out, because
- * the label we want is on screen and the walk does not
- * see its text. Ground truth beats another guess. */
+/* Every widget of every game scene, written out, because a
+ * label we may one day want is on screen and the walk does
+ * not see its text. Ground truth beats another guess. */
 static FILE *g_dump;
 
 static void DumpWidget(uint64_t w, int depth, int *budget) {
@@ -823,6 +605,8 @@ static void OnDump(uint32_t menu, uint32_t item, int value,
     if (g_status) g_status(g_menu, "dumped firstperson_ui.log");
 }
 
+/* ---- where the view stands ------------------------------- */
+
 /* Paused counts as in game, but the player lookup falls
  * back to a heap scan while a menu is up. Nothing here is
  * urgent enough to pay for that, so the tick waits. */
@@ -831,12 +615,11 @@ static int Playing(void) {
     return g_inGame && g_inGame();
 }
 
-/* Whether the camera should stay ours. The pause menu, the map and
- * the loadout only cover the world: it is still there and still ours
- * to look through, and handing the camera back only to take it again
- * is what costs the frames where the view is third person again. The
- * views the engine drives itself (a drone, binoculars, a cinematic)
- * do get it back - those we would only fight. */
+/* Whether the camera should stay ours. The pause menu, the map
+ * and the loadout only cover the world: it is still there and
+ * still ours to look through, and handing the camera back only
+ * to take it again is what costs the frames where the view is
+ * third person again. */
 static int HoldThroughScreens(void) {
     int s;
     if (!g_state) return g_inGame ? g_inGame() : 0;
@@ -845,10 +628,8 @@ static int HoldThroughScreens(void) {
 }
 
 /* Views the engine drives itself - a drone, the binoculars, a
- * cutscene. The camera is genuinely not ours there and the head is
- * meant to show, so this is not a wait that ends on its own: it is
- * the answer to "why am I not in first person".
- */
+ * cutscene. The camera is genuinely not ours there and the
+ * head is meant to show. */
 static int EngineView(void) {
     int s;
     if (!g_state) return 0;
@@ -857,18 +638,43 @@ static int EngineView(void) {
            s == SH_STATE_CINEMATIC;
 }
 
-/* A new body means the old parts are gone, so the hold is
- * dropped and armed again on the new one.
- */
+static void Report(void) {
+    char line[128];
+
+    if (!g_status) return;
+    if (!g_on)
+        snprintf(line, sizeof(line), "off");
+    else if (!g_wantHide)
+        snprintf(line, sizeof(line), "on, head left visible");
+    else if (g_headAway)
+        snprintf(line, sizeof(line), "on, head shown (view taken)");
+    else if (!g_fpxUp)
+        snprintf(line, sizeof(line),
+                 "on, no engine sites: update the ScriptHook");
+    else if (EngineHidesHead())
+        snprintf(line, sizeof(line), "on, head hidden");
+    else if (g_nparts > 0)
+        snprintf(line, sizeof(line), "on, head hidden (%d parts)",
+                 g_nparts);
+    else
+        snprintf(line, sizeof(line), "on, aim once to hide the head");
+
+    if (g_on)
+        snprintf(line + strlen(line), sizeof(line) - strlen(line),
+                 " [%+.0f %+.0f %+.0f]", g_offX, g_offY, g_offZ);
+    g_status(g_menu, line);
+}
+
+/* ---- the tick -------------------------------------------- */
+
 static DWORD WINAPI TickThread(LPVOID p) {
-    int said = 0, settle = 0, sightsNow = 0;
-    int dPlay = -1, dFp = -1, prevAim = 0;
+    int said = 0, dPlay = -1;
     uint64_t lastBeat = 0;
     (void)p;
 
     for (;;) {
         uint64_t root;
-        int playing, aimNow;
+        int playing, menu = 0, drone = 0, ads = 0, fresh = 0;
         uint64_t nowMs;
 
         Sleep(TICK_MS);
@@ -878,342 +684,129 @@ static DWORD WINAPI TickThread(LPVOID p) {
             Diag("playing=%d", playing);
             dPlay = playing;
         }
-        /* Periodic summary so a menu round trip leaves a trace
-         * even when nothing changes: playing, held, wantHide,
-         * the head hide state, and where first person stands.
-         * The engine input context (ctx) shows what the player
-         * is doing, which picks the eye offset category. */
+
+        /* The gates are the engine's own bytes, patched in the
+         * ScriptHook where the engine writes them. Reading them
+         * here is only so the bar can say why the view went. */
+        if (g_fpxUp && g_fpxGate)
+            g_fpxGate(&menu, &drone, &ads, &fresh);
+
         if (nowMs - lastBeat >= 1000) {
-            int ctx = g_inputCtx ? g_inputCtx() : -1;
-            int vm = g_viewMode ? g_viewMode() : -1;
-            int gs = g_state ? g_state() : -1;
-            int bow = g_headBow ? g_headBow() : -1;
-            float jump = g_eyeJump ? g_eyeJump() : -1.0f;
-            int over = -1, swaps = -1;
-            float epos[3] = { 0, 0, 0 }, edist = -1.0f;
-            if (g_eyeDiag) g_eyeDiag(&over, &swaps);
-            if (g_eyeAt) g_eyeAt(epos, &edist);
             lastBeat = nowMs;
-            Diag("beat: play=%d st=%d held=%d want=%d away=%d n=%d "
-                 "view=%d fp=%s bow=%d jump=%.2f over=%d swap=%d "
-                 "eye=%.0f,%.0f,%.0f d=%.1f aim=%d settle=%d sights=%d "
-                 "cat=%d ctx=%d root=%p",
-                 playing, gs, g_held, g_wantHide, g_headAway, g_nparts,
-                 vm, g_fpActive ? (g_fpActive() ? "yes" : "no") : "?",
-                 bow, jump, over, swaps, epos[0], epos[1], epos[2],
-                 edist, Aiming(), settle, sightsNow,
-                 g_cat, ctx, (void *)(uintptr_t)g_root);
+            Diag("beat: play=%d on=%d held=%d want=%d away=%d n=%d "
+                 "menu=%d drone=%d ads=%d fresh=%d bow=%d age=%u "
+                 "headok=%d off=%.0f,%.0f,%.0f",
+                 playing, g_on, g_held, g_wantHide, g_headAway,
+                 g_nparts, menu, drone, ads, fresh,
+                 g_fpxBow ? g_fpxBow() : -1,
+                 g_fpxAge ? g_fpxAge() : 0u,
+                 g_fpxHeadOk ? g_fpxHeadOk() : -1,
+                 g_offX, g_offY, g_offZ);
         }
-        /* Give the camera back to the views the engine drives itself,
-         * not just on the toggle, or the drone never gets it. The
-         * screens that only cover the world keep it - see
-         * HoldThroughScreens - so coming back from one does not cost
-         * the frames where the view is third person again. */
+
         if (!g_on || !HoldThroughScreens()) {
-            Hold(0);
-            /* A pause or equipment menu blurs the world behind
-             * it, so a head hidden for first person would show
-             * as a headless body in that backdrop - and on the
-             * frames right after the menu closes. Restore it
-             * while the game camera is away, the away check on
-             * the world frames hides it again when the eye is
-             * really back. */
-            if (g_on && g_wantHide && !g_headAway && g_nparts > 0) {
-                g_headAway = 1;
+            /* Not playing, or a screen is up: the camera goes
+             * back and the head comes with it. */
+            if (g_held || g_nparts) {
                 ShowHead();
-                Diag("headAway=1 (screen up)");
-            }
-            /* The camera is not ours here and it comes back on its
-             * own, so say that: a head showing up with no word for
-             * it is what reads as something having gone wrong. */
-            if (g_on && g_wantHide) {
-                if (EngineView())
-                    Say(SAY_FP_ENGINE, "过场视角中，头部已自动显示",
-                        SAY_RGB_BUSY, SAY_WAIT_MS);
-                else
-                    /* A result, not a wait: nothing is pending here,
-                     * the view simply is not ours right now. */
-                    Say(SAY_FP_PAUSED, "非游玩画面，返回后自动恢复",
-                        SAY_RGB_BUSY, SH_TOAST_MS_DEFAULT);
+                Hold(0);
+                g_headAway = 0;
+                WaitEnd();
+                Report();
             }
             continue;
         }
-        /* The engine's aim camera owns iron sights, but
-         * only while the player is actually aiming. */
-        /* The wait is on the AIM, not on the mode: raising
-         * the weapon zooms the eye into the body, while
-         * Alt switches mode with no transition at all. */
-        /* So an already settled aim hands over the moment
-         * the mode changes. Taking it back is immediate. */
-        aimNow = Aiming();
-        if (aimNow) {
-            if (settle < g_settleMs) settle += TICK_MS;
-        } else {
-            settle = 0;
-        }
-        /* Handed back only for an aim that is really happening. The
-         * settle answers a question about iron sights that was never
-         * asked while the aim button is up, and a widget left over
-         * from an earlier aim answers it yes all the same - which
-         * hands the camera over with nobody aiming, leaves the view
-         * third person, and keeps handing it back so the hotkey
-         * cannot take it. settle first, then the widget walk, which
-         * is a walk of the UI tree and is not worth paying for
-         * before the answer could be used. */
-        if (aimNow && settle >= g_settleMs) sightsNow = IronSights();
-        else sightsNow = 0;
-        Hold(!sightsNow);
-        /* Follow the engine input context: on foot, a ground
-         * vehicle, a plane, a helicopter or riding along each
-         * get their own eye offset. Menus and drones carry no
-         * category and leave the current one in place. */
-        if (g_inputCtx && g_on) {
-            int cat = CatFromCtx(g_inputCtx());
-            if (cat >= 0 && cat != g_cat) {
-                Diag("cat %d -> %d (%s)", g_cat, cat,
-                     g_catName[cat]);
-                g_cat = cat;
-                if (g_held) PushCamera();
-                Report();
-            }
-        }
-        if (!g_held) continue;
-        /* The head group is created the first time the game
-         * camera aims, so an aim that happens while the head
-         * is still visible (n==0) is the moment a missing
-         * group can finally appear. Drop only the remembered
-         * miss so the retry rescans for it - the found group
-         * for the player body stays cached, or a vehicle ride
-         * that passes through an aim wipes it and the body
-         * has to sweep the whole heap again when we get out. */
-        if (aimNow != prevAim) {
-            prevAim = aimNow;
-            if (g_wantHide && g_nparts == 0) {
-                if (g_headClearMiss) g_headClearMiss();
-                else if (g_headInvalidate) g_headInvalidate();
-                g_hideTry = 0;
-                /* The aim is what makes the group appear, so the
-                 * wait for it starts again from here. */
-                WaitEnd();
-                WaitFrom(GetTickCount64());
-                Diag("aim edge %d -> retry hide (visible)", aimNow);
-            }
-        } else {
-            prevAim = aimNow;
-        }
 
-        /* Whether the first person eye is really on camera.
-         * This is answered by the camera hook measuring where
-         * the rendered camera sits, so it stays valid even
-         * while the player lookup below cannot resolve - a
-         * stowed weapon, a parachute, a drone, and the frames
-         * right after a menu closes all take the camera away,
-         * and on those the head must show again, not stay
-         * hidden behind a headless body.
-         *
-         * The check deliberately runs before the player lookup:
-         * menus leave the lookup on a heap scan backoff, and
-         * waiting for it delays showing the head for seconds.
-         */
-        if (g_wantHide) {
-            /* The view state, not a guess. First person is either
-             * us writing the eye every frame, or, right after we
-             * let go, the engine's aim camera sitting on the head.
-             * Anything else - including "not measured yet" - shows
-             * the head, so a stale state can never leave a headless
-             * body on screen. */
-            int fpOn;
-            if (g_viewMode)
-                fpOn = g_viewMode() == SH_VIEW_FIRST_PERSON;
-            else
-                fpOn = g_fpActive ? g_fpActive() : 1;
-            if (fpOn != dFp) {
-                Diag("fpOn=%d", fpOn);
-                dFp = fpOn;
-            }
-            if (!fpOn) {
-                if (!g_headAway) {
-                    g_headAway = 1;
-                    Diag("headAway=1 (fp lost)");
-                    ShowHead();
-                    Report();
-                    said = 0;
-                }
-                /* Say why the view is not first person and whether
-                 * it is coming back. This is the wait that used to
-                 * be silent - a menu left, a cutscene, the frames
-                 * an eye takes to come back - and a silent wait is
-                 * indistinguishable from a hang. */
-                if (!playing)
-                    Say(SAY_FP_PAUSED, "非游玩画面，返回后自动恢复",
-                        SAY_RGB_BUSY, SH_TOAST_MS_DEFAULT);
-                else if (EngineView())
-                    Say(SAY_FP_ENGINE, "过场视角中，头部已自动显示",
-                        SAY_RGB_BUSY, SAY_WAIT_MS);
-                else
-                    Say(SAY_FP_WAITING, "正在恢复第一人称…",
-                        SAY_RGB_BUSY, SAY_WAIT_MS);
-                continue;
-            }
-            if (g_headAway) {
-                /* Back in first person: drop the away state and
-                 * hide the head again right away. */
-                g_headAway = 0;
-                g_nparts = 0;
-                g_hideTry = 0;
-                said = 0;
-                Diag("headAway=0 (fp back)");
-            }
-        } else if (!said) {
-            Report();
-            said = 1;
-        }
-
-        /* Screens that only cover the world keep the camera, but the
-         * player lookup falls back to a heap scan while one is up, so
-         * everything touching the entity waits for the world to come
-         * back. The view state above still runs there, and that is
-         * what shows the head behind a menu instead of leaving a
-         * headless body in it. */
+        Hold(1);
         if (!playing) continue;
 
-        /* The head nodes belong to the soldier entity; the
-         * root re-parents to a vehicle on mount, so chasing
-         * the root hides nothing in a car and, worse, ShowHead
-         * on the flip leaves the head visible until we step
-         * out. Track the soldier, whose entity only changes on
-         * a true body swap (respawn, new session). */
+        /* A menu, the drone or a cutscene is a view the engine
+         * drives, and the head is meant to show in it. The
+         * engine side already lets go of the camera there, so
+         * all that is left is the head. */
+        if (menu || drone || EngineView()) {
+            if (!g_headAway) {
+                g_headAway = 1;
+                ShowHead();
+                WaitEnd();
+                Report();
+                Diag("away: menu=%d drone=%d engine=%d",
+                     menu, drone, EngineView());
+            }
+            continue;
+        }
+        if (g_headAway) {
+            g_headAway = 0;
+            Report();
+        }
+
+        if (!g_wantHide) continue;
+
+        /* Where the engine can name the head it hides it
+         * itself, every frame, from inside its own frame. Only
+         * when it cannot does the scan run. */
+        if (EngineHidesHead()) {
+            if (g_nparts) {
+                /* The two must never hold at once. */
+                if (g_setVisible && g_hideRoot)
+                    g_setVisible(g_hideRoot, 0, 1, 0);
+                g_nparts = 0;
+                g_hideRoot = 0;
+            }
+            if (g_said != SAY_FP_HIDDEN) {
+                WaitEnd();
+                Say(SAY_FP_HIDDEN, "第一人称已开启，头部已隐藏",
+                    SAY_RGB_DONE, SH_TOAST_MS_DEFAULT);
+                Report();
+            }
+            continue;
+        }
+
         root = PlayerHeadEnt();
         if (!root) continue;
+        /* A new body means the old parts are gone, so the hold
+         * is dropped and armed again on the new one. */
         if (root != g_root) {
-            uint64_t wasRoot = g_root;   /* 0 for the first body */
-            /* A body swap - a respawn, a new session - leaves
-             * the old entity's persistent hide hold running:
-             * the pump keeps hiding its head nodes even though
-             * the view has moved on, and on the new entity the
-             * head group may not be found yet (it appears on
-             * the first aim). Drop the old hold first so the
-             * head is never stuck invisible behind a hold we no
-             * longer track. The cached group belongs to the old
-             * body, and while that one is still alive the kernel
-             * answers "no group" for the new one and remembers it
-             * for ten minutes - a respawn would then never hide
-             * again - so the whole cache goes with the old body. */
-            if (g_hideRoot && g_hideRoot != root)
-                ShowHead();
+            ShowHead();
             if (g_headInvalidate) g_headInvalidate();
             g_root = root;
             g_nparts = 0;
-            g_hideAt = 0;
-            g_hideTry = 0;
-            said = 0;
             PushCamera();
-            Diag("head ent changed to %p", (void *)(uintptr_t)root);
-            /* A new body has to be scanned for all over again, and
-             * that wait is the one that looks like a hang. The first
-             * body of a session is not a respawn, so it says
-             * nothing. */
-            if (g_wantHide && wasRoot) {
-                WaitEnd();
-                WaitFrom(GetTickCount64());
-                Say(SAY_FP_SWAP, "已重生，正在重新隐藏头部…",
-                    SAY_RGB_BUSY, SAY_WAIT_MS);
-            }
+            WaitFrom(nowMs);
+            Say(SAY_FP_SWAP, "已切换角色，正在重新隐藏头部…",
+                SAY_RGB_BUSY, SAY_WAIT_MS);
+            Diag("body swap root=%p", (void *)(uintptr_t)root);
         }
-        if (g_wantHide) {
-            uint64_t now = GetTickCount64();
-            if (g_nparts == 0) {
-                /* First person is on camera and the head is not
-                 * hidden: hide it, with no other gate. The group is
-                 * engine made and may not exist yet, and hunting a
-                 * group that is not there sweeps the whole heap,
-                 * which blocks this thread and the flip hotkey with
-                 * it. So a miss backs off - by how much is measured,
-                 * not guessed: a cheap try (the body's group is
-                 * known, it just was not there) comes back at once,
-                 * a sweep does not. */
-                /* Say what is being waited for, and once the wait
-                 * has run long enough, what would end it: the group
-                 * is the engine's, it appears on the first aim, and
-                 * until then this is the one wait here the player
-                 * can finish. */
-                WaitFrom(now);
-                if (now - g_waitFrom >= SAY_HINT_AFTER_MS)
-                    Say(SAY_FP_SCANHINT, "未扫描到头部，请按1次右键瞄准",
-                        SAY_RGB_BUSY, SAY_WAIT_MS);
-                else
-                    Say(SAY_FP_SCANNING,
-                        "第一人称已开启，正在扫描头部并隐藏…",
-                        SAY_RGB_BUSY, SAY_WAIT_MS);
-                if (now >= g_hideTry) {
-                    uint64_t cost = 0;
-                    int ok = HideHeadTimed(root, &cost);
-                    g_hideTry = now + (cost >= SWEEP_COST_MS
-                                       ? SWEEP_STEP_MS
-                                       : (aimNow ? RESWEEP_AIM_MS
-                                                 : RESWEEP_RETRY_MS));
-                    if (ok) {
-                        g_hideAt = now;
-                        Report();
-                        said = 0;
-                        Diag("hide ok n=%d", g_nparts);
-                        /* The wait is over, so the line stops
-                         * standing there and becomes a result. */
-                        WaitEnd();
-                        Say(SAY_FP_HIDDEN, "第一人称已开启，头部已隐藏",
-                            SAY_RGB_DONE, SH_TOAST_MS_DEFAULT);
-                        /* The hide took a while (a first-time
-                         * sweep can run for seconds); the user
-                         * may have turned it off meanwhile, and
-                         * the show request would otherwise sit
-                         * behind g_nparts forever. */
-                        if (!g_wantHide || !g_on) {
-                            ShowHead();
-                            g_headAway = 0;
-                        }
-                    } else {
-                        Diag("hide miss (no head group, %ums)",
-                             (unsigned)cost);
-                        if (!said) { Report(); said = 1; }
-                    }
+
+        if (g_nparts == 0) {
+            WaitFrom(nowMs);
+            if (nowMs >= g_hideTry) {
+                uint64_t cost = 0;
+                int ok = HideHeadTimed(root, &cost);
+                g_hideTry = nowMs +
+                    (cost >= SWEEP_COST_MS ? SWEEP_STEP_MS
+                                           : RESWEEP_RETRY_MS);
+                if (ok) {
+                    g_hideAt = nowMs;
+                    Report();
+                    said = 0;
+                    WaitEnd();
+                    Say(SAY_FP_HIDDEN, "第一人称已开启，头部已隐藏",
+                        SAY_RGB_DONE, SH_TOAST_MS_DEFAULT);
+                } else if (!said) {
+                    Report();
+                    said = 1;
                 }
-            } else if (now - g_hideAt >= REHIDE_MS) {
-                /* The engine can rebuild the head nodes under
-                 * us - an outfit swap, a new ADS state, a
-                 * respawn - which drops the persistent hold
-                 * and shows the head again. Re-apply on a slow
-                 * beat so the hide self heals. */
-                {
-                    uint64_t cost = 0;
-                    if (!HideHeadTimed(root, &cost)) {
-                        g_nparts = 0;
-                        /* The group is gone again - an outfit swap,
-                         * a respawn. Same split as above: a call
-                         * that was sweeping picks the sweep up on
-                         * the next tick, a cheap one waits until
-                         * something may have changed the answer. */
-                        g_hideTry = now + (cost >= SWEEP_COST_MS
-                                           ? SWEEP_STEP_MS
-                                           : (aimNow ? RESWEEP_AIM_MS
-                                                     : RESWEEP_RETRY_MS));
-                        said = 0;
-                        Report();
-                        Diag("rehide miss (%ums)", (unsigned)cost);
-                        /* It came back, so the hide is being looked
-                         * for again and the line has to say so. */
-                        if (g_wantHide) {
-                            WaitEnd();
-                            WaitFrom(now);
-                            Say(SAY_FP_REHIDE, "头部重现，正在重新隐藏…",
-                                SAY_RGB_BUSY, SAY_WAIT_MS);
-                        }
-                    } else {
-                        /* Parts stayed non-zero without this, so the
-                         * branch re-fired every tick (~16/s) instead
-                         * of once per REHIDE_MS. */
-                        g_hideAt = now;
-                    }
-                }
+            }
+        } else if (nowMs - g_hideAt >= REHIDE_MS) {
+            uint64_t cost = 0;
+            int ok = HideHeadTimed(root, &cost);
+            g_hideAt = nowMs;
+            if (!ok) {
+                g_nparts = 0;
+                WaitFrom(nowMs);
+                Say(SAY_FP_REHIDE, "头部重新出现，正在再次隐藏…",
+                    SAY_RGB_BUSY, SAY_WAIT_MS);
             }
         }
     }
@@ -1235,8 +828,7 @@ static DWORD WINAPI HotkeyThread(LPVOID p) {
     for (;;) {
         Sleep(30);
         /* Playing state, not in the ScriptHook menu. The game's
-         * own pause screens keep playing true, so the camera
-         * check in the tick thread covers those. */
+         * own pause screens keep playing true. */
         if (g_hotKey > 0 && Playing() &&
             (!g_menuIsOpen || !g_menuIsOpen())) {
             down = (GetAsyncKeyState(g_hotVk[g_hotKey]) &
@@ -1253,6 +845,8 @@ static DWORD WINAPI HotkeyThread(LPVOID p) {
     }
     return 0;
 }
+
+/* ---- settings -------------------------------------------- */
 
 /* The plugin's own settings live in
  * plugins/firstperson/firstperson.ini, beside the .asi.
@@ -1282,11 +876,17 @@ static float IniFloat(const char *path, const char *key, float def) {
                                   sizeof(buf), path))
         return def;
     if (!buf[0]) return def;
-    /* atof("abc") is 0, which silently zeroed an offset; require
-     * the value to parse. */
+    /* atof("abc") is 0, which silently zeroed an offset;
+     * require the value to parse. */
     v = strtod(buf, &end);
     if (end == buf) return def;
     return (float)v;
+}
+
+static float ClampF(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 
 /* Resolve <gamedir>\plugins\<name>\<name>.ini from the plugin's
@@ -1315,121 +915,58 @@ static void ResolveIniPath(HMODULE m) {
         g_iniPath[0] = 0;
 }
 
-/* The FOOT category keeps the historic keys so an old config
- * file still reads; every category also gets its own key so
- * each stance or vehicle can be tuned separately. */
-static void CatKey(char *key, size_t n, int cat, int isUp) {
-    if (cat == CAT_FOOT)
-        snprintf(key, n, isUp ? "height_cm" : "forward_cm");
-    else
-        snprintf(key, n, isUp ? "up_%s_cm" : "fwd_%s_cm",
-                 g_catTag[cat]);
-}
-
-static void PresetKey(char *key, size_t n, int idx, int isUp) {
-    snprintf(key, n, isUp ? "%s_up_cm" : "%s_fwd_cm",
-             g_presetTag[idx]);
-}
-
-static float ClampF(float v, float lo, float hi) {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
 static void LoadIni(void) {
-    int i;
-    char key[40];
-    char legacy[16];
-
-    ResetCatDefaults();
     if (!g_iniPath[0]) return;
     g_wantHide = IniBool(g_iniPath, "hide_head", g_wantHide);
     g_diagOn = IniBool(g_iniPath, "diag", 0);
-    for (i = 0; i < CAT_COUNT; i++) {
-        CatKey(key, sizeof(key), i, 0);
-        g_fwd[i] = ClampF(IniFloat(g_iniPath, key, FWD_DEF),
-                          FWD_MIN, FWD_MAX);
-        CatKey(key, sizeof(key), i, 1);
-        g_up[i] = ClampF(IniFloat(g_iniPath, key, UP_DEF),
-                         UP_MIN, UP_MAX);
-    }
-    for (i = 0; i < PRESET_COUNT; i++) {
-        PresetKey(key, sizeof(key), i, 0);
-        g_presFwd[i] = ClampF(IniFloat(g_iniPath, key, FWD_DEF),
-                              FWD_MIN, FWD_MAX);
-        PresetKey(key, sizeof(key), i, 1);
-        g_presUp[i] = ClampF(IniFloat(g_iniPath, key, UP_DEF),
-                             UP_MIN, UP_MAX);
-    }
-    /* preset_active: 0 = Auto (default), 1..N = force preset N. */
-    {
-        int p = IniInt(g_iniPath, "preset_active", 0);
-        g_presetSel = p <= 0 ? PRESET_AUTO : p - 1;
-        if (g_presetSel >= PRESET_COUNT)
-            g_presetSel = PRESET_AUTO;
-    }
-    g_settleMs = IniInt(g_iniPath, "settle_ms", g_settleMs);
-    if (g_settleMs < (int)SETTLE_MIN) g_settleMs = (int)SETTLE_MIN;
-    if (g_settleMs > (int)SETTLE_MAX) g_settleMs = (int)SETTLE_MAX;
-    /* One hotkey row: hotkey_key is 0 (None)..3. An ini saved
-     * by the two-row build has hotkey_on plus an old hotkey_key
-     * that started at "="; migrate it so "on" keeps working. */
-    if (GetPrivateProfileStringA("Settings", "hotkey_on", "",
-                                 legacy, sizeof(legacy), g_iniPath) > 0) {
-        int k = IniInt(g_iniPath, "hotkey_key", 0);
-        g_hotKey = legacy[0] == '1' ? k + 1 : 0;
-        if (g_hotKey >= HOTKEYS) g_hotKey = HOTKEYS - 1;
-    } else {
-        g_hotKey = IniInt(g_iniPath, "hotkey_key", g_hotKey);
-        if (g_hotKey < 0 || g_hotKey >= HOTKEYS) g_hotKey = 0;
-    }
+    g_engineCam = IniBool(g_iniPath, "engine_camera", 1);
+    g_extras = IniInt(g_iniPath, "engine_extras", 15);
+    if (g_extras < 0) g_extras = 0;
+    if (g_extras > 15) g_extras = 15;
+    g_offX = ClampF(IniFloat(g_iniPath, "offset_x_cm", OFF_DEF),
+                    OFF_MIN, OFF_MAX);
+    g_offY = ClampF(IniFloat(g_iniPath, "offset_y_cm", OFF_DEF),
+                    OFF_MIN, OFF_MAX);
+    g_offZ = ClampF(IniFloat(g_iniPath, "offset_z_cm", OFF_DEF),
+                    OFF_MIN, OFF_MAX);
+    g_hotKey = IniInt(g_iniPath, "hotkey_key", g_hotKey);
+    if (g_hotKey < 0 || g_hotKey >= HOTKEYS) g_hotKey = 0;
 }
 
 /* Write the current settings back to <name>.ini. "Enabled" is
  * a live state, not a setting, so it is deliberately not saved
  * and always starts off. */
 static void SaveIni(void) {
-    char buf[64], key[40];
-    int i;
+    char buf[64];
 
     if (!g_iniPath[0]) return;
     snprintf(buf, sizeof(buf), "%d", g_wantHide);
-    WritePrivateProfileStringA("Settings", "hide_head", buf, g_iniPath);
-    for (i = 0; i < CAT_COUNT; i++) {
-        CatKey(key, sizeof(key), i, 0);
-        snprintf(buf, sizeof(buf), "%.1f", g_fwd[i]);
-        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
-        CatKey(key, sizeof(key), i, 1);
-        snprintf(buf, sizeof(buf), "%.1f", g_up[i]);
-        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
-    }
-    for (i = 0; i < PRESET_COUNT; i++) {
-        PresetKey(key, sizeof(key), i, 0);
-        snprintf(buf, sizeof(buf), "%.1f", g_presFwd[i]);
-        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
-        PresetKey(key, sizeof(key), i, 1);
-        snprintf(buf, sizeof(buf), "%.1f", g_presUp[i]);
-        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
-    }
-    snprintf(buf, sizeof(buf), "%d",
-             g_presetSel >= 0 ? g_presetSel + 1 : 0);
-    WritePrivateProfileStringA("Settings", "preset_active", buf,
+    WritePrivateProfileStringA("Settings", "hide_head", buf,
                                g_iniPath);
-    snprintf(buf, sizeof(buf), "%d", g_settleMs);
-    WritePrivateProfileStringA("Settings", "settle_ms", buf, g_iniPath);
+    snprintf(buf, sizeof(buf), "%.1f", g_offX);
+    WritePrivateProfileStringA("Settings", "offset_x_cm", buf,
+                               g_iniPath);
+    snprintf(buf, sizeof(buf), "%.1f", g_offY);
+    WritePrivateProfileStringA("Settings", "offset_y_cm", buf,
+                               g_iniPath);
+    snprintf(buf, sizeof(buf), "%.1f", g_offZ);
+    WritePrivateProfileStringA("Settings", "offset_z_cm", buf,
+                               g_iniPath);
     snprintf(buf, sizeof(buf), "%d", g_hotKey);
-    WritePrivateProfileStringA("Settings", "hotkey_key", buf, g_iniPath);
-    /* Remove the legacy two-row key so it cannot migrate twice. */
-    WritePrivateProfileStringA("Settings", "hotkey_on", NULL, g_iniPath);
+    WritePrivateProfileStringA("Settings", "hotkey_key", buf,
+                               g_iniPath);
 }
+
+/* ---- bind ------------------------------------------------ */
 
 static DWORD WINAPI BindThread(LPVOID p) {
     HMODULE m = NULL;
     MenuCreate_t menuCreate;
-    MenuSub_t   menuSub;
     MenuToggle_t menuToggle;
     MenuNumber_t menuNumber;
+    MenuList_t  menuList;
+    MenuAction_t menuAction;
+    MenuHint_t  menuHint;
     (void)p;
 
     while (!m) {
@@ -1453,133 +990,94 @@ static DWORD WINAPI BindThread(LPVOID p) {
      * taken away from us, so the head stays hidden as asked. */
     *(FARPROC *)&g_fpActive =
         GetProcAddress(m, "ShCameraFirstPersonActive");
-    /* Optional: the three way view state. An older dinput8 only
-     * has the two way answer above, which stays the fallback. */
     *(FARPROC *)&g_viewMode = GetProcAddress(m, "ShCameraViewMode");
-    /* Optional: the status line. An older dinput8 without it simply
-     * says nothing. */
+    /* Optional: the status line. An older dinput8 without it
+     * simply says nothing. */
     *(FARPROC *)&g_toastEx = GetProcAddress(m, "ShToastEx");
     *(FARPROC *)&g_toastSet = GetProcAddress(m, "ShToastSet");
-    *(FARPROC *)&g_headBow = GetProcAddress(m, "ShCameraHeadBow");
-    *(FARPROC *)&g_eyeJump = GetProcAddress(m, "ShCameraEyeJump");
-    *(FARPROC *)&g_eyeDiag = GetProcAddress(m, "ShCameraEyeDiag");
-    *(FARPROC *)&g_eyeAt = GetProcAddress(m, "ShCameraEyeAt");
     *(FARPROC *)&g_handoverClear =
         GetProcAddress(m, "ShCameraHandoverClear");
     /* Optional: an older dinput8 just keeps the blur. */
     *(FARPROC *)&g_setBlur = GetProcAddress(m, "ShSetCameraBlur");
-    /* Optional: without the widget tree the camera is held
-     * through iron sights, which is the old behaviour. */
+    *(FARPROC *)&g_inputCtx = GetProcAddress(m, "ShInputContext");
+    *(FARPROC *)&g_menuIsOpen = GetProcAddress(m, "ShMenuIsOpen");
     *(FARPROC *)&g_sceneCount = GetProcAddress(m, "ShGameSceneCount");
     *(FARPROC *)&g_sceneAt = GetProcAddress(m, "ShGameSceneAt");
     *(FARPROC *)&g_sceneRoot = GetProcAddress(m, "ShSceneRoot");
-    *(FARPROC *)&g_childCount = GetProcAddress(m, "ShWidgetChildCount");
+    *(FARPROC *)&g_childCount =
+        GetProcAddress(m, "ShWidgetChildCount");
     *(FARPROC *)&g_childAt = GetProcAddress(m, "ShWidgetChildAt");
     *(FARPROC *)&g_widgetClass = GetProcAddress(m, "ShWidgetClass");
     *(FARPROC *)&g_widgetGetS = GetProcAddress(m, "ShWidgetGetS");
     *(FARPROC *)&g_sceneName = GetProcAddress(m, "ShGameSceneName");
     *(FARPROC *)&g_widgetPropType =
         GetProcAddress(m, "ShWidgetPropType");
-    *(FARPROC *)&g_inputCtx = GetProcAddress(m, "ShInputContext");
-    *(FARPROC *)&g_menuIsOpen = GetProcAddress(m, "ShMenuIsOpen");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
-    *(FARPROC *)&menuSub = GetProcAddress(m, "ShMenuSub");
     *(FARPROC *)&menuToggle = GetProcAddress(m, "ShMenuToggle");
     *(FARPROC *)&menuNumber = GetProcAddress(m, "ShMenuNumber");
-    *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
+    *(FARPROC *)&menuList = GetProcAddress(m, "ShMenuList");
+    *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
+    *(FARPROC *)&menuHint = GetProcAddress(m, "ShMenuHint");
     *(FARPROC *)&g_menuSetValue =
         GetProcAddress(m, "ShMenuSetValue");
+    *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
+
+    /* The engine side of the view. Missing from an older
+     * dinput8, and that is fine: the camera then falls back to
+     * the placement it has always had. */
+    *(FARPROC *)&g_fpxInstall = GetProcAddress(m, "ShFp2Install");
+    *(FARPROC *)&g_fpxExtras =
+        GetProcAddress(m, "ShFp2InstallExtras");
+    *(FARPROC *)&g_fpxReady = GetProcAddress(m, "ShFp2Ready");
+    *(FARPROC *)&g_fpxMissing = GetProcAddress(m, "ShFp2Missing");
+    *(FARPROC *)&g_fpxEnable = GetProcAddress(m, "ShFp2Enable");
+    *(FARPROC *)&g_fpxSetOff = GetProcAddress(m, "ShFp2SetOffset");
+    *(FARPROC *)&g_fpxGate = GetProcAddress(m, "ShFp2Gate");
+    *(FARPROC *)&g_fpxHeadOk = GetProcAddress(m, "ShFp2HeadOk");
+    *(FARPROC *)&g_fpxHeadShow = GetProcAddress(m, "ShFp2HeadShow");
+    *(FARPROC *)&g_fpxBow = GetProcAddress(m, "ShFp2Bow");
+    *(FARPROC *)&g_fpxAge = GetProcAddress(m, "ShFp2Age");
+
     if (!g_inGame || !g_getPlayer || !g_fp || !g_release) return 1;
     if (!g_headNodes || !g_setVisible) return 1;
     if (!menuCreate || !menuToggle || !menuNumber || !g_status)
         return 1;
 
+    if (g_fpxInstall) g_fpxInstall();
+    g_fpxUp = g_fpxReady && g_fpxReady();
     ResolveIniPath(m);
     LoadIni();
+    /* The body and shoulder patches are the ones that change the
+     * engine whether first person is on or not, so they are off
+     * until asked for: [Settings] engine_extras=1. */
+    if (g_extras && g_fpxExtras) g_fpxExtras((uint32_t)g_extras);
+    Diag("bind: fpx=%d miss=%03x extras=%d", g_fpxUp,
+         g_fpxMissing ? (unsigned)g_fpxMissing() : 0u, g_extras);
     g_menu = menuCreate("First person");
     menuToggle(g_menu, "Enabled", 0, OnToggle, NULL);
     /* One row picks the flip key: None (=off), =, F2 or F3.
      * The row's label is the English lookup key, translated by
      * the [zh_cn.First person] table. */
-    {
-        MenuList_t menuList;
-        *(FARPROC *)&menuList = GetProcAddress(m, "ShMenuList");
-        if (menuList)
-            menuList(g_menu, "View toggle hotkey", g_hotName,
-                     HOTKEYS, g_hotKey, OnHotKey, NULL);
-    }
+    if (menuList)
+        menuList(g_menu, "View toggle hotkey", g_hotName,
+                 HOTKEYS, g_hotKey, OnHotKey, NULL);
     menuToggle(g_menu, "Hide head", g_wantHide, OnHide, NULL);
-    if (menuSub) {
-        MenuList_t menuList;
-        int i;
-        /* ADS settle ms sits above the Preset row (View preset). */
-        menuNumber(g_menu, "ADS settle ms", (float)g_settleMs,
-                   SETTLE_MIN, SETTLE_MAX, SETTLE_STEP, OnSettle, NULL);
-        /* Custom presets: a pick row (Auto / Custom 1..4) above the
-         * category list. Selecting a preset forces its pair on every
-         * state; Auto hands control back to the category list. */
-        {
-            static const char *opts[PRESET_COUNT + 1];
-            opts[0] = "Auto";
-            for (i = 0; i < PRESET_COUNT; i++)
-                opts[i + 1] = g_presetName[i];
-            *(FARPROC *)&menuList = GetProcAddress(m, "ShMenuList");
-            if (menuList)
-                menuList(g_menu, "Preset", opts, PRESET_COUNT + 1,
-                         g_presetSel + 1, OnPresetList, NULL);
-        }
-        /* One submenu per category: its own Forward/Height pair.
-         * Each row carries the category and axis so a slider knows
-         * where it writes, and entering a category's submenu shows
-         * that category's current values. */
-        for (i = 0; i < CAT_COUNT; i++) {
-            uint32_t sub = menuSub(g_menu, g_catName[i]);
-            if (!sub) continue;
-            menuNumber(sub, "Forward cm", g_fwd[i],
-                       FWD_MIN, FWD_MAX, FWD_STEP, OnCatSlide,
-                       (void *)(intptr_t)(i * 2 + 0));
-            menuNumber(sub, "Height cm", g_up[i],
-                       UP_MIN, UP_MAX, UP_STEP, OnCatSlide,
-                       (void *)(intptr_t)(i * 2 + 1));
-        }
-        /* Editable presets follow the category list, so the category
-         * submenus stay contiguous after Passenger. */
-        for (i = 0; i < PRESET_COUNT; i++) {
-            uint32_t sub = menuSub(g_menu, g_presetName[i]);
-            if (!sub) continue;
-            menuNumber(sub, "Forward cm", g_presFwd[i],
-                       FWD_MIN, FWD_MAX, FWD_STEP, OnPresetSlide,
-                       (void *)(intptr_t)(i * 2 + 0));
-            menuNumber(sub, "Height cm", g_presUp[i],
-                       UP_MIN, UP_MAX, UP_STEP, OnPresetSlide,
-                       (void *)(intptr_t)(i * 2 + 1));
-        }
-    } else {
-        /* No submenus in an older ScriptHook: keep the single
-         * on foot pair and ADS settle on the root. */
-        menuNumber(g_menu, "Forward cm", g_fwd[CAT_FOOT],
-                   FWD_MIN, FWD_MAX, FWD_STEP, OnCatSlide,
-                   (void *)(intptr_t)(CAT_FOOT * 2 + 0));
-        menuNumber(g_menu, "Height cm", g_up[CAT_FOOT],
-                   UP_MIN, UP_MAX, UP_STEP, OnCatSlide,
-                   (void *)(intptr_t)(CAT_FOOT * 2 + 1));
-        menuNumber(g_menu, "ADS settle ms", (float)g_settleMs,
-                   SETTLE_MIN, SETTLE_MAX, SETTLE_STEP, OnSettle, NULL);
+    if (menuNumber) {
+        menuNumber(g_menu, "Offset X cm", g_offX,
+                   OFF_MIN, OFF_MAX, OFF_STEP, OnOffsetSlide,
+                   (void *)(intptr_t)0);
+        menuNumber(g_menu, "Offset Y cm", g_offY,
+                   OFF_MIN, OFF_MAX, OFF_STEP, OnOffsetSlide,
+                   (void *)(intptr_t)1);
+        menuNumber(g_menu, "Offset Z cm", g_offZ,
+                   OFF_MIN, OFF_MAX, OFF_STEP, OnOffsetSlide,
+                   (void *)(intptr_t)2);
     }
-    {
-        MenuAction_t menuAction;
-        *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
-        if (menuAction)
-            menuAction(g_menu, "Dump UI to log", OnDump, NULL);
-    }
-    {
-        MenuHint_t menuHint;
-        *(FARPROC *)&menuHint = GetProcAddress(m, "ShMenuHint");
-        if (menuHint)
-            menuHint(g_menu,
-                     "First-person view: hide head, adjust eye height "
-                     "and distance per stance or vehicle.");
-    }
+    if (menuAction)
+        menuAction(g_menu, "Dump UI to log", OnDump, NULL);
+    if (menuHint)
+        menuHint(g_menu,
+                 "第一人称：隐藏头部，并可按世界坐标轴微调眼睛位置。");
     Report();
 
     {

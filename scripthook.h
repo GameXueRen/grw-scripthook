@@ -1084,6 +1084,89 @@ SH_API int  ShCameraApply(const ShCameraOverride *o);
 SH_API int  ShCameraMatrix(int index, float *out16);
 
 /** @} */
+/** @defgroup fpx First person, the engine's own way
+ *
+ *  The eye is the engine's own head position. The argument the
+ *  engine hands its head function is captured once, then that
+ *  same function is asked again every frame and the answer is
+ *  written where the camera position goes. Nothing here is
+ *  derived from the camera basis: no forward, no up, no easing
+ *  - which is why it does not fight the engine on slopes, in
+ *  vehicles or through a respawn.
+ *
+ *  A menu, the drone and iron sights each carry a byte the
+ *  engine already maintains, and while any of them is up the
+ *  camera is left alone.
+ *
+ *  ShCameraFirstPerson takes this path whenever it is
+ *  available. Where these sites cannot be found - a build we
+ *  have not seen - the older placement still answers, so the
+ *  game behaves exactly as it did before.
+ *  @{
+ */
+
+/** Install every site. Returns 1 when the capture site, the
+ *  one the rest depends on, was found and patched. A partial
+ *  install still works: the gates that could not be found
+ *  simply never close.
+ */
+SH_API int  ShFp2Install(void);
+SH_API int  ShFp2Ready(void);
+
+/** The body and shoulder patches: always allow a shoulder swap,
+ *  keep the body when it is pushed against a wall, and the two
+ *  hooks that feed them. None of these is needed for the eye,
+ *  and all of them change how the engine draws the body whether
+ *  first person is on or not, so they are installed separately.
+ *
+ *  mask is one bit per site - 1 the body position hook, 2 body
+ *  visibility, 4 the shoulder swap, 8 the wall push - so they
+ *  can be taken one at a time. Returns 1 when every site that
+ *  was asked for took.
+ */
+SH_API int  ShFp2InstallExtras(uint32_t mask);
+
+/** Which sites did not take, as a mask. 0 means all of them.
+ *  Bit 0 the capture site, 1/2/3 the three menu sites, 4 the
+ *  drone, 5 aim down sight, 6 the body reading, 7 body
+ *  visibility, 8 the shoulder swap, 9 the wall push.
+ */
+SH_API uint32_t ShFp2Missing(void);
+
+/** 1 to take the camera, 0 to hand it back. */
+SH_API void ShFp2Enable(int on);
+
+/** The eye offset in metres, in world axes. */
+SH_API void ShFp2SetOffset(float x, float y, float z);
+
+/** The live gate bytes. Any argument may be NULL. */
+SH_API void ShFp2Gate(int *menu, int *drone, int *ads, int *fresh);
+
+/** 1 while the head is reachable through the engine's own
+ *  visibility call, so a caller knows whether it has to hide
+ *  the head by some other means.
+ */
+SH_API int  ShFp2HeadOk(void);
+
+/** Force the head visible (non zero) or hidden (0), now. */
+SH_API void ShFp2HeadShow(int show);
+
+/** Why the last frame placed no eye: 0 it placed, 1 not
+ *  asked, 2 a menu, 3 the drone, 4 an aim, 5 stale, 6 no
+ *  argument, 7 the answer was not a position.
+ */
+SH_API int  ShFp2Bow(void);
+
+/** Milliseconds since the last frame an eye was placed. */
+SH_API uint32_t ShFp2Age(void);
+
+/** @} */
+
+/* Not exported. Called from the camera manager's own frame,
+ * inside the engine's call chain, by scripthook_camera.c.
+ */
+int ShFp2PlaceEye(uint64_t cm, float *m, float *p);
+
 /** @addtogroup state
  *  @{ */
 

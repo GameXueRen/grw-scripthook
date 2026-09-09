@@ -103,7 +103,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
                         scripthook_npc.c scripthook_domino.c \
                         scripthook_hit.c scripthook_camera.c \
                         scripthook_head.c scripthook_fov.c \
-                        scripthook_blur.c \
+                        scripthook_blur.c scripthook_fpx.c \
                         scripthook_stat.c scripthook_resource.c \
                         scripthook_stealth.c scripthook_ammo.c \
                         scripthook_weather.c scripthook_crash.c \
@@ -124,7 +124,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
 		scripthook_state.c scripthook_entity.c \
 		scripthook_spawn.c scripthook_npc.c scripthook_domino.c scripthook_hit.c \
 		scripthook_camera.c scripthook_head.c \
-		scripthook_fov.c scripthook_blur.c \
+		scripthook_fov.c scripthook_blur.c scripthook_fpx.c \
 		scripthook_stat.c scripthook_resource.c \
 		scripthook_stealth.c scripthook_ammo.c \
 		scripthook_weather.c scripthook_crash.c \

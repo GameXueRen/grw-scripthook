@@ -140,6 +140,7 @@ $fwSources = @(
     'scripthook_domino.c', 'scripthook_hit.c',
     'scripthook_camera.c', 'scripthook_head.c',
     'scripthook_fov.c', 'scripthook_blur.c',
+    'scripthook_fpx.c',
     'scripthook_stat.c', 'scripthook_resource.c',
     'scripthook_stealth.c', 'scripthook_ammo.c',
     'scripthook_weather.c', 'scripthook_crash.c',
@@ -182,6 +183,7 @@ $fwLink = @("$tmp\guard_pad.obj") + $cppObjs + @(
     "/Fe:$out",
     '/link',
     "/DEF:$root\proxy.def",
+    "/MAP:$tmp\framework.map",
     "/IMPLIB:$root\libscripthook.lib",
     'dinput8.lib', 'dxguid.lib', 'gdi32.lib', 'user32.lib',
     'd3d11.lib', 'dxgi.lib', 'dwmapi.lib'
