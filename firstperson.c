@@ -40,6 +40,14 @@
 #define OFF_MAX     100.0f
 #define OFF_STEP    1.0f
 
+/* How long an aim keeps the eye before the engine's own aim
+ * camera takes over. 0 hands it over the instant the aim
+ * starts, which is what the table does. */
+#define SETTLE_DEF  600.0f
+#define SETTLE_MIN  0.0f
+#define SETTLE_MAX  2000.0f
+#define SETTLE_STEP 50.0f
+
 typedef int (*IsInGame_t)(void);
 typedef int (*GameState_t)(void);
 typedef int (*GetPlayer_t)(ShPlayer *);
@@ -67,18 +75,10 @@ typedef int (*MenuList_t)(uint32_t, const char *, const char **,
                           int, int, ShMenuFn, void *);
 typedef int (*MenuSetValue_t)(uint32_t, const char *, int);
 typedef int (*MenuStatus_t)(uint32_t, const char *);
+typedef int (*MenuStatusF_t)(uint32_t, const char *, ...);
+typedef const char *(*LangFor_t)(const char *, const char *);
 typedef int (*MenuIsOpen_t)(void);
-typedef int (*MenuAction_t)(uint32_t, const char *, ShMenuFn, void *);
 typedef int (*MenuHint_t)(uint32_t, const char *);
-typedef int (*SceneCount_t)(void);
-typedef uint64_t (*SceneAt_t)(int);
-typedef uint64_t (*SceneRoot_t)(uint64_t);
-typedef int (*ChildCount_t)(uint64_t);
-typedef uint64_t (*ChildAt_t)(uint64_t, int);
-typedef int (*WidgetClass_t)(uint64_t, char *, int);
-typedef int (*WidgetGetS_t)(uint64_t, uint32_t, char *, int);
-typedef int (*SceneName_t)(uint64_t, char *, int);
-typedef int (*WidgetPropType_t)(uint64_t, uint32_t);
 typedef int (*LogPath_t)(const char *, char *, int);
 
 /* The engine side of the view. Optional: a ScriptHook without
@@ -90,6 +90,7 @@ typedef int      (*Fp2Ready_t)(void);
 typedef uint32_t (*Fp2Missing_t)(void);
 typedef void     (*Fp2Enable_t)(int);
 typedef void     (*Fp2SetOffset_t)(float, float, float);
+typedef void     (*Fp2Settle_t)(uint32_t);
 typedef void     (*Fp2Gate_t)(int *, int *, int *, int *);
 typedef int      (*Fp2HeadOk_t)(void);
 typedef void     (*Fp2HeadShow_t)(int);
@@ -126,16 +127,9 @@ static InputCtx_t   g_inputCtx;
 static MenuIsOpen_t g_menuIsOpen;
 static MenuSetValue_t g_menuSetValue;
 static MenuStatus_t g_status;
+static MenuStatusF_t g_statusF;
+static LangFor_t    g_langFor;
 static SetBlur_t    g_setBlur;
-static SceneCount_t  g_sceneCount;
-static SceneAt_t     g_sceneAt;
-static SceneRoot_t   g_sceneRoot;
-static ChildCount_t  g_childCount;
-static ChildAt_t     g_childAt;
-static WidgetClass_t g_widgetClass;
-static WidgetGetS_t  g_widgetGetS;
-static SceneName_t   g_sceneName;
-static WidgetPropType_t g_widgetPropType;
 
 static Fp2Install_t   g_fpxInstall;
 static Fp2Extras_t    g_fpxExtras;
@@ -143,6 +137,7 @@ static Fp2Ready_t     g_fpxReady;
 static Fp2Missing_t   g_fpxMissing;
 static Fp2Enable_t    g_fpxEnable;
 static Fp2SetOffset_t g_fpxSetOff;
+static Fp2Settle_t    g_fpxSettle;
 static Fp2Gate_t      g_fpxGate;
 static Fp2HeadOk_t    g_fpxHeadOk;
 static Fp2HeadShow_t  g_fpxHeadShow;
@@ -163,9 +158,90 @@ static volatile int   g_engineCam = 1;
  * they are what the table does, and a build that disagrees with
  * one of them can leave it out bit by bit. */
 static volatile int   g_extras = 15;
-static volatile float g_offX = OFF_DEF;
-static volatile float g_offY = OFF_DEF;
-static volatile float g_offZ = OFF_DEF;
+
+/* The offset is not one number, it is one per kind of moment:
+ * a motorcycle leans, a helicopter seat sits high, a passenger
+ * looks out from somewhere else entirely. Each kind keeps its
+ * own three axes, and the engine's input context says which one
+ * is in play - unless the player has picked a preset, which
+ * then holds whatever the world is doing. */
+enum {
+    CAT_FOOT = 0,   /* on foot, any stance */
+    CAT_LAND,       /* ground vehicle: car, motorbike, boat */
+    CAT_PLANE,      /* airplane */
+    CAT_HELI,       /* helicopter */
+    CAT_RIDER,      /* riding along as a passenger */
+    CAT_COUNT
+};
+
+/* Menu titles and ini suffixes, per category. The English
+ * titles are the lookup keys for [zh_cn.First person]. */
+static const char *g_catName[CAT_COUNT] = {
+    "On foot", "Ground vehicle", "Airplane",
+    "Helicopter", "Passenger"
+};
+static const char *g_catTag[CAT_COUNT] = {
+    "foot", "land", "plane", "heli", "rider"
+};
+
+/* Custom presets: a saved set of offsets to switch to by hand,
+ * for the places the automatic choice gets wrong. The list row
+ * is 0 = Auto (follow the categories), 1..4 = force a preset. */
+enum {
+    PRESET_AUTO = -1,  /* follow g_cat as usual */
+    PRESET_1,          /* index 0 of the preset arrays */
+    PRESET_2,
+    PRESET_3,
+    PRESET_4,
+    PRESET_COUNT       /* number of custom presets */
+};
+static const char *g_presetName[PRESET_COUNT] = {
+    "Custom 1", "Custom 2", "Custom 3", "Custom 4"
+};
+static const char *g_presetTag[PRESET_COUNT] = {
+    "preset1", "preset2", "preset3", "preset4"
+};
+
+/* cm, per category and per preset: X, Y and Z in world axes. */
+static volatile float g_catX[CAT_COUNT];
+static volatile float g_catY[CAT_COUNT];
+static volatile float g_catZ[CAT_COUNT];
+static volatile float g_preX[PRESET_COUNT];
+static volatile float g_preY[PRESET_COUNT];
+static volatile float g_preZ[PRESET_COUNT];
+static volatile int   g_cat = CAT_FOOT;
+static volatile int   g_presetSel = PRESET_AUTO;
+static volatile int   g_settleMs = (int)SETTLE_DEF;
+
+static void ResetOffsets(void) {
+    int i;
+    for (i = 0; i < CAT_COUNT; i++) {
+        g_catX[i] = OFF_DEF;
+        g_catY[i] = OFF_DEF;
+        g_catZ[i] = OFF_DEF;
+    }
+    for (i = 0; i < PRESET_COUNT; i++) {
+        g_preX[i] = OFF_DEF;
+        g_preY[i] = OFF_DEF;
+        g_preZ[i] = OFF_DEF;
+    }
+}
+
+/* The engine input context names what the player is doing.
+ * Menu, drone and pause contexts carry no category of their
+ * own - a drone is a view the engine draws itself and no
+ * offset of ours reaches it - so those keep whatever was
+ * current. */
+static int CatFromCtx(int ctx) {
+    switch (ctx) {
+    case SH_CTX_ONFOOT:            return CAT_FOOT;
+    case SH_CTX_VEHICLE:           return CAT_LAND;
+    case SH_CTX_AIRPLANE:          return CAT_PLANE;
+    case SH_CTX_HELICOPTER:        return CAT_HELI;
+    case SH_CTX_VEHICLE_PASSENGER: return CAT_RIDER;
+    default:                       return -1;
+    }
+}
 
 /* A hotkey flips first/third person while playing: the same
  * toggle as the menu's Enabled row. The key edge is polled on
@@ -333,10 +409,29 @@ static int EngineHidesHead(void) {
  * ScriptHook does the rest inside the engine's frame. Taking
  * the camera is still a camera call, because that is what
  * marks the position as ours. */
+/* The three numbers in force right now: a preset if one has
+ * been picked, otherwise whatever the current category says. */
+static void ActiveOffset(float *x, float *y, float *z) {
+    if (g_presetSel >= 0 && g_presetSel < PRESET_COUNT) {
+        *x = g_preX[g_presetSel];
+        *y = g_preY[g_presetSel];
+        *z = g_preZ[g_presetSel];
+        return;
+    }
+    if (g_cat < 0 || g_cat >= CAT_COUNT) {
+        *x = OFF_DEF; *y = OFF_DEF; *z = OFF_DEF;
+        return;
+    }
+    *x = g_catX[g_cat];
+    *y = g_catY[g_cat];
+    *z = g_catZ[g_cat];
+}
+
 static void PushCamera(void) {
-    if (g_fpxSetOff)
-        g_fpxSetOff(g_offX / 100.0f, g_offY / 100.0f,
-                    g_offZ / 100.0f);
+    float x, y, z;
+
+    ActiveOffset(&x, &y, &z);
+    if (g_fpxSetOff) g_fpxSetOff(x / 100.0f, y / 100.0f, z / 100.0f);
     if (g_fp) g_fp(0.0f, 0.0f);
 }
 
@@ -437,6 +532,7 @@ static void SetFp(int on) {
          * out. */
         if (g_headClearMiss) g_headClearMiss();
         g_hideTry = 0;
+        if (g_fpxSettle) g_fpxSettle((uint32_t)g_settleMs);
         Hold(1);
         if (g_setBlur) g_setBlur(0);
         WaitEnd();
@@ -524,85 +620,68 @@ static void OnHide(uint32_t menu, uint32_t item, int value,
     Report();
 }
 
-/* One slider per world axis: 0 X, 1 Y, 2 Z. */
-static void OnOffsetSlide(uint32_t menu, uint32_t item, int value,
+/* Each category owns its own three sliders; user carries the
+ * category and the axis (cat*3 + 0 X, +1 Y, +2 Z). */
+static void OnCatSlide(uint32_t menu, uint32_t item, int value,
                           void *user) {
-    int axis = (int)(intptr_t)user;
+    int code = (int)(intptr_t)user;
+    int set = code / 3, axis = code % 3;
     (void)menu; (void)item;
 
-    if (axis == 0)      g_offX = (float)value;
-    else if (axis == 1) g_offY = (float)value;
-    else if (axis == 2) g_offZ = (float)value;
+    if (set < 0 || set >= CAT_COUNT) return;
+    if (axis == 0)      g_catX[set] = (float)value;
+    else if (axis == 1) g_catY[set] = (float)value;
+    else if (axis == 2) g_catZ[set] = (float)value;
     else return;
     SaveIni();
     /* Only while we already own it, or dragging a slider would
-     * take the camera back during a screen. */
+     * take the camera back during a screen - and only for the
+     * set actually in force, so tuning a helicopter seat does
+     * not move the eye while walking. */
+    if (g_on && g_held && g_presetSel == PRESET_AUTO && set == g_cat)
+        PushCamera();
+    Report();
+}
+
+/* Each preset owns its own sliders; user carries the preset and
+ * the axis (preset*3 + 0 X, +1 Y, +2 Z). */
+static void OnPresetSlide(uint32_t menu, uint32_t item, int value,
+                          void *user) {
+    int code = (int)(intptr_t)user;
+    int set = code / 3, axis = code % 3;
+    (void)menu; (void)item;
+
+    if (set < 0 || set >= PRESET_COUNT) return;
+    if (axis == 0)      g_preX[set] = (float)value;
+    else if (axis == 1) g_preY[set] = (float)value;
+    else if (axis == 2) g_preZ[set] = (float)value;
+    else return;
+    SaveIni();
+    if (g_on && g_held && g_presetSel == set) PushCamera();
+    Report();
+}
+
+/* Preset list row: 0 = Auto (follow the categories), 1..4 =
+ * force that preset whatever the world is doing. */
+static void OnPresetList(uint32_t menu, uint32_t item, int value,
+                         void *user) {
+    (void)menu; (void)item; (void)user;
+    g_presetSel = value - 1;
+    if (g_presetSel < PRESET_AUTO) g_presetSel = PRESET_AUTO;
+    if (g_presetSel >= PRESET_COUNT) g_presetSel = PRESET_COUNT - 1;
+    SaveIni();
     if (g_on && g_held) PushCamera();
+    Report();
 }
 
-/* ---- the UI dump, for when the view will not come back --- */
-
-/* Every widget of every game scene, written out, because a
- * label we may one day want is on screen and the walk does
- * not see its text. Ground truth beats another guess. */
-static FILE *g_dump;
-
-static void DumpWidget(uint64_t w, int depth, int *budget) {
-    char cls[48], txt[192], pad[24];
-    int n, i, got, type;
-
-    if (!w || depth > 16 || --*budget < 0) return;
-
-    for (i = 0; i < depth && i < 20; i++) pad[i] = ' ';
-    pad[i] = 0;
-
-    cls[0] = 0;
-    g_widgetClass(w, cls, sizeof(cls));
-    type = g_widgetPropType ? g_widgetPropType(w, SH_P_TEXT) : -1;
-    got = g_widgetGetS(w, SH_P_TEXT, txt, sizeof(txt));
-
-    fprintf(g_dump, "%s%016llx %-28s texttype %d %s\n", pad,
-            (unsigned long long)w, cls[0] ? cls : "?", type,
-            got ? txt : "<no text>");
-
-    n = g_childCount(w);
-    for (i = 0; i < n; i++)
-        DumpWidget(g_childAt(w, i), depth + 1, budget);
-}
-
-static void OnDump(uint32_t menu, uint32_t item, int value,
-                   void *user) {
-    char path[MAX_PATH], name[64];
-    int i, n, budget = 20000;
-    (void)menu; (void)item; (void)value; (void)user;
-
-    if (!g_sceneCount) return;
-    /* All logs live in <gamedir>\logs; fall back to the exe
-     * folder on hooks old enough to lack ShLogPath. */
-    if (!g_logPath ||
-        !g_logPath("firstperson_ui.log", path, sizeof(path))) {
-        GetModuleFileNameA(NULL, path, sizeof(path));
-        { char *s = strrchr(path, '\\'); if (s) s[1] = 0; }
-        strcat(path, "firstperson_ui.log");
-    }
-
-    g_dump = fopen(path, "w");
-    if (!g_dump) return;
-    n = g_sceneCount();
-    fprintf(g_dump, "%d scenes drawn last frame\n\n", n);
-    for (i = 0; i < n; i++) {
-        uint64_t s = g_sceneAt(i), root = g_sceneRoot(s);
-        name[0] = 0;
-        if (g_sceneName) g_sceneName(s, name, sizeof(name));
-        fprintf(g_dump, "scene %d %016llx root %016llx name %s\n",
-                i, (unsigned long long)s, (unsigned long long)root,
-                name[0] ? name : "?");
-        DumpWidget(root, 1, &budget);
-        fprintf(g_dump, "\n");
-    }
-    fclose(g_dump);
-    g_dump = NULL;
-    if (g_status) g_status(g_menu, "dumped firstperson_ui.log");
+/* How long an aim keeps the eye. The window lives in the
+ * ScriptHook, which is the only place that sees the aim begin. */
+static void OnSettle(uint32_t menu, uint32_t item, int value,
+                     void *user) {
+    (void)menu; (void)item; (void)user;
+    g_settleMs = value;
+    if (g_fpxSettle) g_fpxSettle((uint32_t)g_settleMs);
+    SaveIni();
 }
 
 /* ---- where the view stands ------------------------------- */
@@ -638,31 +717,87 @@ static int EngineView(void) {
            s == SH_STATE_CINEMATIC;
 }
 
-static void Report(void) {
+/* The name of the set in force, put through the menu's own
+ * translation table so the row does not read half in one
+ * language and half in another. */
+static const char *ActiveSetName(void) {
+    const char *name, *trans;
+
+    if (g_presetSel >= 0 && g_presetSel < PRESET_COUNT)
+        name = g_presetName[g_presetSel];
+    else if (g_cat >= 0 && g_cat < CAT_COUNT)
+        name = g_catName[g_cat];
+    else
+        return "";
+    if (!g_langFor) return name;
+    trans = g_langFor("First person", name);
+    return trans ? trans : name;
+}
+
+/* The row is printed from a template, and the template is
+ * translated before it is filled in - so the English below is a
+ * key in [zh_cn.First person] rather than something the player
+ * ever reads. The table supplies the whole line, placeholders
+ * and all.
+ */
+static void SayOffset(const char *tmpl, const char *set, float x,
+                      float y, float z) {
     char line[128];
 
-    if (!g_status) return;
-    if (!g_on)
-        snprintf(line, sizeof(line), "off");
-    else if (!g_wantHide)
-        snprintf(line, sizeof(line), "on, head left visible");
-    else if (g_headAway)
-        snprintf(line, sizeof(line), "on, head shown (view taken)");
-    else if (!g_fpxUp)
-        snprintf(line, sizeof(line),
-                 "on, no engine sites: update the ScriptHook");
-    else if (EngineHidesHead())
-        snprintf(line, sizeof(line), "on, head hidden");
-    else if (g_nparts > 0)
-        snprintf(line, sizeof(line), "on, head hidden (%d parts)",
-                 g_nparts);
-    else
-        snprintf(line, sizeof(line), "on, aim once to hide the head");
-
-    if (g_on)
-        snprintf(line + strlen(line), sizeof(line) - strlen(line),
-                 " [%+.0f %+.0f %+.0f]", g_offX, g_offY, g_offZ);
+    if (g_statusF) { g_statusF(g_menu, tmpl, set, x, y, z); return; }
+    snprintf(line, sizeof(line), tmpl, set, x, y, z);
     g_status(g_menu, line);
+}
+
+static void SayParts(const char *tmpl, int parts, const char *set,
+                     float x, float y, float z) {
+    char line[128];
+
+    if (g_statusF) {
+        g_statusF(g_menu, tmpl, parts, set, x, y, z);
+        return;
+    }
+    snprintf(line, sizeof(line), tmpl, parts, set, x, y, z);
+    g_status(g_menu, line);
+}
+
+/* Which set is in force and what it says, so a change of stance
+ * or a preset pick is visible on the row rather than only in the
+ * view. */
+#define STATUS_OFF     "off"
+#define STATUS_BARE    "on, head left visible [%s %+.0f %+.0f %+.0f]"
+#define STATUS_AWAY    "on, head shown (view taken) [%s %+.0f %+.0f %+.0f]"
+#define STATUS_NOSITE  "on, no engine sites [%s %+.0f %+.0f %+.0f]"
+#define STATUS_HIDDEN  "on, head hidden [%s %+.0f %+.0f %+.0f]"
+#define STATUS_PARTS   "on, head hidden (%d parts) [%s %+.0f %+.0f %+.0f]"
+#define STATUS_WAIT    "on, aim once to hide the head [%s %+.0f %+.0f %+.0f]"
+
+static void Report(void) {
+    float x, y, z;
+    const char *set;
+
+    if (!g_status) return;
+    if (!g_on) {
+        if (g_statusF) g_statusF(g_menu, STATUS_OFF);
+        else           g_status(g_menu, STATUS_OFF);
+        return;
+    }
+
+    ActiveOffset(&x, &y, &z);
+    set = ActiveSetName();
+
+    if (!g_wantHide)
+        SayOffset(STATUS_BARE, set, x, y, z);
+    else if (g_headAway)
+        SayOffset(STATUS_AWAY, set, x, y, z);
+    else if (!g_fpxUp)
+        SayOffset(STATUS_NOSITE, set, x, y, z);
+    else if (EngineHidesHead())
+        SayOffset(STATUS_HIDDEN, set, x, y, z);
+    else if (g_nparts > 0)
+        SayParts(STATUS_PARTS, g_nparts, set, x, y, z);
+    else
+        SayOffset(STATUS_WAIT, set, x, y, z);
 }
 
 /* ---- the tick -------------------------------------------- */
@@ -693,15 +828,17 @@ static DWORD WINAPI TickThread(LPVOID p) {
 
         if (nowMs - lastBeat >= 1000) {
             lastBeat = nowMs;
+            float ax, ay, az;
+            ActiveOffset(&ax, &ay, &az);
             Diag("beat: play=%d on=%d held=%d want=%d away=%d n=%d "
                  "menu=%d drone=%d ads=%d fresh=%d bow=%d age=%u "
-                 "headok=%d off=%.0f,%.0f,%.0f",
+                 "headok=%d cat=%d preset=%d off=%.0f,%.0f,%.0f",
                  playing, g_on, g_held, g_wantHide, g_headAway,
                  g_nparts, menu, drone, ads, fresh,
                  g_fpxBow ? g_fpxBow() : -1,
                  g_fpxAge ? g_fpxAge() : 0u,
                  g_fpxHeadOk ? g_fpxHeadOk() : -1,
-                 g_offX, g_offY, g_offZ);
+                 g_cat, g_presetSel, ax, ay, az);
         }
 
         if (!g_on || !HoldThroughScreens()) {
@@ -718,6 +855,22 @@ static DWORD WINAPI TickThread(LPVOID p) {
         }
 
         Hold(1);
+
+        /* Which set of offsets is in force. Only while the
+         * choice is automatic, and only when the kind of moment
+         * actually changes - the context read is cheap, but
+         * pushing the camera is not something to do for nothing.
+         */
+        if (g_presetSel == PRESET_AUTO && g_inputCtx) {
+            int c = CatFromCtx(g_inputCtx());
+            if (c >= 0 && c != g_cat) {
+                Diag("cat %s -> %s", g_catName[g_cat], g_catName[c]);
+                g_cat = c;
+                PushCamera();
+                Report();
+            }
+        }
+
         if (!playing) continue;
 
         /* A menu, the drone or a cutscene is a view the engine
@@ -889,6 +1042,14 @@ static float ClampF(float v, float lo, float hi) {
     return v;
 }
 
+/* One key per axis per set: <tag>_x_cm, <tag>_y_cm, <tag>_z_cm.
+ * The tag is the category (foot, land, plane, heli, rider) or
+ * the preset (preset1 .. preset4). */
+static void OffsetKey(char *key, size_t n, const char *tag, int axis) {
+    static const char ax[3] = { 'x', 'y', 'z' };
+    snprintf(key, n, "%s_%c_cm", tag, ax[axis]);
+}
+
 /* Resolve <gamedir>\plugins\<name>\<name>.ini from the plugin's
  * own file name and the loader's ShPluginIniPath, once. */
 static void ResolveIniPath(HMODULE m) {
@@ -916,6 +1077,9 @@ static void ResolveIniPath(HMODULE m) {
 }
 
 static void LoadIni(void) {
+    int i;
+    char key[40];
+
     if (!g_iniPath[0]) return;
     g_wantHide = IniBool(g_iniPath, "hide_head", g_wantHide);
     g_diagOn = IniBool(g_iniPath, "diag", 0);
@@ -923,12 +1087,38 @@ static void LoadIni(void) {
     g_extras = IniInt(g_iniPath, "engine_extras", 15);
     if (g_extras < 0) g_extras = 0;
     if (g_extras > 15) g_extras = 15;
-    g_offX = ClampF(IniFloat(g_iniPath, "offset_x_cm", OFF_DEF),
-                    OFF_MIN, OFF_MAX);
-    g_offY = ClampF(IniFloat(g_iniPath, "offset_y_cm", OFF_DEF),
-                    OFF_MIN, OFF_MAX);
-    g_offZ = ClampF(IniFloat(g_iniPath, "offset_z_cm", OFF_DEF),
-                    OFF_MIN, OFF_MAX);
+    ResetOffsets();
+    for (i = 0; i < CAT_COUNT; i++) {
+        OffsetKey(key, sizeof(key), g_catTag[i], 0);
+        g_catX[i] = ClampF(IniFloat(g_iniPath, key, OFF_DEF),
+                           OFF_MIN, OFF_MAX);
+        OffsetKey(key, sizeof(key), g_catTag[i], 1);
+        g_catY[i] = ClampF(IniFloat(g_iniPath, key, OFF_DEF),
+                           OFF_MIN, OFF_MAX);
+        OffsetKey(key, sizeof(key), g_catTag[i], 2);
+        g_catZ[i] = ClampF(IniFloat(g_iniPath, key, OFF_DEF),
+                           OFF_MIN, OFF_MAX);
+    }
+    for (i = 0; i < PRESET_COUNT; i++) {
+        OffsetKey(key, sizeof(key), g_presetTag[i], 0);
+        g_preX[i] = ClampF(IniFloat(g_iniPath, key, OFF_DEF),
+                           OFF_MIN, OFF_MAX);
+        OffsetKey(key, sizeof(key), g_presetTag[i], 1);
+        g_preY[i] = ClampF(IniFloat(g_iniPath, key, OFF_DEF),
+                           OFF_MIN, OFF_MAX);
+        OffsetKey(key, sizeof(key), g_presetTag[i], 2);
+        g_preZ[i] = ClampF(IniFloat(g_iniPath, key, OFF_DEF),
+                           OFF_MIN, OFF_MAX);
+    }
+    /* preset_active: 0 = Auto (default), 1..4 = force preset N. */
+    {
+        int p = IniInt(g_iniPath, "preset_active", 0);
+        g_presetSel = p <= 0 ? PRESET_AUTO : p - 1;
+        if (g_presetSel >= PRESET_COUNT) g_presetSel = PRESET_AUTO;
+    }
+    g_settleMs = IniInt(g_iniPath, "settle_ms", g_settleMs);
+    if (g_settleMs < (int)SETTLE_MIN) g_settleMs = (int)SETTLE_MIN;
+    if (g_settleMs > (int)SETTLE_MAX) g_settleMs = (int)SETTLE_MAX;
     g_hotKey = IniInt(g_iniPath, "hotkey_key", g_hotKey);
     if (g_hotKey < 0 || g_hotKey >= HOTKEYS) g_hotKey = 0;
 }
@@ -937,20 +1127,41 @@ static void LoadIni(void) {
  * a live state, not a setting, so it is deliberately not saved
  * and always starts off. */
 static void SaveIni(void) {
-    char buf[64];
+    char buf[64], key[40];
+    int i;
 
     if (!g_iniPath[0]) return;
     snprintf(buf, sizeof(buf), "%d", g_wantHide);
     WritePrivateProfileStringA("Settings", "hide_head", buf,
                                g_iniPath);
-    snprintf(buf, sizeof(buf), "%.1f", g_offX);
-    WritePrivateProfileStringA("Settings", "offset_x_cm", buf,
+    for (i = 0; i < CAT_COUNT; i++) {
+        OffsetKey(key, sizeof(key), g_catTag[i], 0);
+        snprintf(buf, sizeof(buf), "%.1f", g_catX[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+        OffsetKey(key, sizeof(key), g_catTag[i], 1);
+        snprintf(buf, sizeof(buf), "%.1f", g_catY[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+        OffsetKey(key, sizeof(key), g_catTag[i], 2);
+        snprintf(buf, sizeof(buf), "%.1f", g_catZ[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+    }
+    for (i = 0; i < PRESET_COUNT; i++) {
+        OffsetKey(key, sizeof(key), g_presetTag[i], 0);
+        snprintf(buf, sizeof(buf), "%.1f", g_preX[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+        OffsetKey(key, sizeof(key), g_presetTag[i], 1);
+        snprintf(buf, sizeof(buf), "%.1f", g_preY[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+        OffsetKey(key, sizeof(key), g_presetTag[i], 2);
+        snprintf(buf, sizeof(buf), "%.1f", g_preZ[i]);
+        WritePrivateProfileStringA("Settings", key, buf, g_iniPath);
+    }
+    snprintf(buf, sizeof(buf), "%d",
+             g_presetSel >= 0 ? g_presetSel + 1 : 0);
+    WritePrivateProfileStringA("Settings", "preset_active", buf,
                                g_iniPath);
-    snprintf(buf, sizeof(buf), "%.1f", g_offY);
-    WritePrivateProfileStringA("Settings", "offset_y_cm", buf,
-                               g_iniPath);
-    snprintf(buf, sizeof(buf), "%.1f", g_offZ);
-    WritePrivateProfileStringA("Settings", "offset_z_cm", buf,
+    snprintf(buf, sizeof(buf), "%d", g_settleMs);
+    WritePrivateProfileStringA("Settings", "settle_ms", buf,
                                g_iniPath);
     snprintf(buf, sizeof(buf), "%d", g_hotKey);
     WritePrivateProfileStringA("Settings", "hotkey_key", buf,
@@ -962,10 +1173,10 @@ static void SaveIni(void) {
 static DWORD WINAPI BindThread(LPVOID p) {
     HMODULE m = NULL;
     MenuCreate_t menuCreate;
+    MenuSub_t   menuSub;
     MenuToggle_t menuToggle;
     MenuNumber_t menuNumber;
     MenuList_t  menuList;
-    MenuAction_t menuAction;
     MenuHint_t  menuHint;
     (void)p;
 
@@ -1001,26 +1212,17 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_setBlur = GetProcAddress(m, "ShSetCameraBlur");
     *(FARPROC *)&g_inputCtx = GetProcAddress(m, "ShInputContext");
     *(FARPROC *)&g_menuIsOpen = GetProcAddress(m, "ShMenuIsOpen");
-    *(FARPROC *)&g_sceneCount = GetProcAddress(m, "ShGameSceneCount");
-    *(FARPROC *)&g_sceneAt = GetProcAddress(m, "ShGameSceneAt");
-    *(FARPROC *)&g_sceneRoot = GetProcAddress(m, "ShSceneRoot");
-    *(FARPROC *)&g_childCount =
-        GetProcAddress(m, "ShWidgetChildCount");
-    *(FARPROC *)&g_childAt = GetProcAddress(m, "ShWidgetChildAt");
-    *(FARPROC *)&g_widgetClass = GetProcAddress(m, "ShWidgetClass");
-    *(FARPROC *)&g_widgetGetS = GetProcAddress(m, "ShWidgetGetS");
-    *(FARPROC *)&g_sceneName = GetProcAddress(m, "ShGameSceneName");
-    *(FARPROC *)&g_widgetPropType =
-        GetProcAddress(m, "ShWidgetPropType");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
+    *(FARPROC *)&menuSub = GetProcAddress(m, "ShMenuSub");
     *(FARPROC *)&menuToggle = GetProcAddress(m, "ShMenuToggle");
     *(FARPROC *)&menuNumber = GetProcAddress(m, "ShMenuNumber");
     *(FARPROC *)&menuList = GetProcAddress(m, "ShMenuList");
-    *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
     *(FARPROC *)&menuHint = GetProcAddress(m, "ShMenuHint");
     *(FARPROC *)&g_menuSetValue =
         GetProcAddress(m, "ShMenuSetValue");
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
+    *(FARPROC *)&g_statusF = GetProcAddress(m, "ShMenuStatusF");
+    *(FARPROC *)&g_langFor = GetProcAddress(m, "ShLangFor");
 
     /* The engine side of the view. Missing from an older
      * dinput8, and that is fine: the camera then falls back to
@@ -1032,6 +1234,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_fpxMissing = GetProcAddress(m, "ShFp2Missing");
     *(FARPROC *)&g_fpxEnable = GetProcAddress(m, "ShFp2Enable");
     *(FARPROC *)&g_fpxSetOff = GetProcAddress(m, "ShFp2SetOffset");
+    *(FARPROC *)&g_fpxSettle = GetProcAddress(m, "ShFp2Settle");
     *(FARPROC *)&g_fpxGate = GetProcAddress(m, "ShFp2Gate");
     *(FARPROC *)&g_fpxHeadOk = GetProcAddress(m, "ShFp2HeadOk");
     *(FARPROC *)&g_fpxHeadShow = GetProcAddress(m, "ShFp2HeadShow");
@@ -1062,22 +1265,75 @@ static DWORD WINAPI BindThread(LPVOID p) {
         menuList(g_menu, "View toggle hotkey", g_hotName,
                  HOTKEYS, g_hotKey, OnHotKey, NULL);
     menuToggle(g_menu, "Hide head", g_wantHide, OnHide, NULL);
-    if (menuNumber) {
-        menuNumber(g_menu, "Offset X cm", g_offX,
-                   OFF_MIN, OFF_MAX, OFF_STEP, OnOffsetSlide,
-                   (void *)(intptr_t)0);
-        menuNumber(g_menu, "Offset Y cm", g_offY,
-                   OFF_MIN, OFF_MAX, OFF_STEP, OnOffsetSlide,
-                   (void *)(intptr_t)1);
-        menuNumber(g_menu, "Offset Z cm", g_offZ,
-                   OFF_MIN, OFF_MAX, OFF_STEP, OnOffsetSlide,
-                   (void *)(intptr_t)2);
+    /* How long an aim keeps the eye before the engine's own aim
+     * camera takes over. */
+    if (menuNumber)
+        menuNumber(g_menu, "ADS settle ms", (float)g_settleMs,
+                   SETTLE_MIN, SETTLE_MAX, SETTLE_STEP, OnSettle,
+                   NULL);
+    /* Which set of offsets is in force: Auto follows what the
+     * player is doing, a preset holds one set regardless. */
+    if (menuList) {
+        static const char *opts[PRESET_COUNT + 1];
+        int i;
+        opts[0] = "Auto";
+        for (i = 0; i < PRESET_COUNT; i++)
+            opts[i + 1] = g_presetName[i];
+        menuList(g_menu, "Preset", opts, PRESET_COUNT + 1,
+                 g_presetSel + 1, OnPresetList, NULL);
     }
-    if (menuAction)
-        menuAction(g_menu, "Dump UI to log", OnDump, NULL);
+    if (menuNumber) {
+        int i;
+
+        /* One submenu per kind of moment, then one per preset:
+         * each holds its own X, Y and Z. */
+        if (!menuSub) {
+            /* No submenus in an older ScriptHook: the on foot
+             * set is the one that matters most, so it lives on
+             * the root rather than not at all. */
+            menuNumber(g_menu, "X cm", g_catX[CAT_FOOT],
+                       OFF_MIN, OFF_MAX, OFF_STEP, OnCatSlide,
+                       (void *)(intptr_t)(CAT_FOOT * 3 + 0));
+            menuNumber(g_menu, "Y cm", g_catY[CAT_FOOT],
+                       OFF_MIN, OFF_MAX, OFF_STEP, OnCatSlide,
+                       (void *)(intptr_t)(CAT_FOOT * 3 + 1));
+            menuNumber(g_menu, "Z cm", g_catZ[CAT_FOOT],
+                       OFF_MIN, OFF_MAX, OFF_STEP, OnCatSlide,
+                       (void *)(intptr_t)(CAT_FOOT * 3 + 2));
+        }
+        for (i = 0; menuSub && i < CAT_COUNT; i++) {
+            uint32_t sub = menuSub(g_menu, g_catName[i]);
+            /* A slot ran out rather than anything being wrong
+             * with the row, so say which one went missing. */
+            if (!sub) { Diag("no submenu: %s", g_catName[i]); continue; }
+            menuNumber(sub, "X cm", g_catX[i],
+                       OFF_MIN, OFF_MAX, OFF_STEP, OnCatSlide,
+                       (void *)(intptr_t)(i * 3 + 0));
+            menuNumber(sub, "Y cm", g_catY[i],
+                       OFF_MIN, OFF_MAX, OFF_STEP, OnCatSlide,
+                       (void *)(intptr_t)(i * 3 + 1));
+            menuNumber(sub, "Z cm", g_catZ[i],
+                       OFF_MIN, OFF_MAX, OFF_STEP, OnCatSlide,
+                       (void *)(intptr_t)(i * 3 + 2));
+        }
+        for (i = 0; menuSub && i < PRESET_COUNT; i++) {
+            uint32_t sub = menuSub(g_menu, g_presetName[i]);
+            if (!sub) { Diag("no submenu: %s", g_presetName[i]); continue; }
+            menuNumber(sub, "X cm", g_preX[i],
+                       OFF_MIN, OFF_MAX, OFF_STEP, OnPresetSlide,
+                       (void *)(intptr_t)(i * 3 + 0));
+            menuNumber(sub, "Y cm", g_preY[i],
+                       OFF_MIN, OFF_MAX, OFF_STEP, OnPresetSlide,
+                       (void *)(intptr_t)(i * 3 + 1));
+            menuNumber(sub, "Z cm", g_preZ[i],
+                       OFF_MIN, OFF_MAX, OFF_STEP, OnPresetSlide,
+                       (void *)(intptr_t)(i * 3 + 2));
+        }
+    }
     if (menuHint)
         menuHint(g_menu,
-                 "第一人称：隐藏头部，并可按世界坐标轴微调眼睛位置。");
+                 "First-person view: hide the head, and tune the "
+                 "eye offset per stance or vehicle.");
     Report();
 
     {

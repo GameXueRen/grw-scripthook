@@ -1139,6 +1139,14 @@ SH_API void ShFp2Enable(int on);
 /** The eye offset in metres, in world axes. */
 SH_API void ShFp2SetOffset(float x, float y, float z);
 
+/** How long an aim keeps the first person eye before the
+ *  engine's own aim camera takes over, in milliseconds. 0
+ *  hands it over the instant the aim starts, which is what
+ *  the table does; the larger it is, the longer the view
+ *  stays ours into the aim.
+ */
+SH_API void ShFp2Settle(uint32_t ms);
+
 /** The live gate bytes. Any argument may be NULL. */
 SH_API void ShFp2Gate(int *menu, int *drone, int *ads, int *fresh);
 

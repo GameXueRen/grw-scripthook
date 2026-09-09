@@ -145,6 +145,13 @@ static volatile int     g_bow = 0;
 /* The first few placements are written to the log, step by
  * step. After that it goes quiet: this runs every frame. */
 static uint32_t         g_trace = 0;
+
+/* How long an aim keeps the eye before the engine's own aim
+ * camera takes over, and when the aim now running started.
+ * 0 ms is the table's own behaviour: hand it over at once. */
+static volatile uint32_t g_settleMs = 600;
+static volatile uint64_t g_adsAt = 0;
+static volatile int      g_adsPrev = 0;
 enum {
     BOW_NONE = 0,   /* placed                                  */
     BOW_OFF,        /* first person not asked for              */
@@ -634,6 +641,18 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
     tr = (g_trace < 24);
     if (!g_ready) { g_bow = BOW_OFF; return 0; }
     if (!g_fp.want)   { g_bow = BOW_OFF;   return 0; }
+
+    /* Where the aim began. The settle window is measured from
+     * the edge, and the edge is only visible here: the byte is
+     * written by a stub in the engine's own call, which cannot
+     * ask the time. */
+    if (g_fp.skip[3]) {
+        if (!g_adsPrev) g_adsAt = GetTickCount64();
+    } else {
+        g_adsAt = 0;
+    }
+    g_adsPrev = g_fp.skip[3];
+
     /* A menu and the drone are views the engine draws itself,
      * and a hidden head in either is a headless body on
      * screen. An aim is the opposite: the table keeps the head
@@ -641,7 +660,19 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
      * filling with the inside of a skull. */
     if (g_fp.skip[0]) { g_bow = BOW_MENU;  HeadVis(0); return 0; }
     if (g_fp.skip[1]) { g_bow = BOW_DRONE; HeadVis(0); return 0; }
-    if (g_fp.skip[3]) { g_bow = BOW_ADS;   HeadVis(1); return 0; }
+    /* An aim hands the camera to the engine's own aim camera -
+     * but not on the instant it starts. For those first frames
+     * the eye stays ours, which is what makes the change over
+     * a settle instead of a snap. How long is the player's
+     * call: 0 hands it over at once, and the table's own
+     * behaviour is exactly that. */
+    if (g_fp.skip[3] && (g_settleMs == 0 || g_adsAt == 0 ||
+                         GetTickCount64() - g_adsAt >=
+                         (uint64_t)g_settleMs)) {
+        g_bow = BOW_ADS;
+        HeadVis(1);
+        return 0;
+    }
 
     /* No fresh capture this frame: place nothing, but the head
      * stays hidden. The table skips the placement on such a
@@ -824,6 +855,10 @@ SH_API void ShFp2SetOffset(float x, float y, float z) {
     g_fp.off[1] = y;
     g_fp.off[2] = z;
     g_fp.off[3] = 0.0f;
+}
+
+SH_API void ShFp2Settle(uint32_t ms) {
+    g_settleMs = ms;
 }
 
 /** The live gate bytes: menu count, drone, aim, and whether a

@@ -19,7 +19,13 @@
 #include "scripthook.h"
 #include "log.h"
 
-#define MENUS       24
+/* One slot per menu, and a plugin that offers its settings per
+ * kind of moment spends several: the first person plugin alone
+ * takes ten (its own page, five categories, four presets). The
+ * count has to cover every plugin's submenus at once, not just
+ * the rows on the root.
+ */
+#define MENUS       64
 #define ITEMS       96
 #define LABEL       48
 #define VISIBLE     12
