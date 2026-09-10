@@ -116,11 +116,14 @@ function Invoke-FrameworkBuild {
 }
 
 function Build-Plugin {
-    param([string]$Name, [string]$Source, [string[]]$LinkArgs)
+    param([string]$Name, [string]$Source, [string[]]$LinkArgs,
+          [string[]]$ExtraSources)
     $dir = Join-Path $plugins $Name
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $dll = Join-Path $dir "$Name.asi"
-    & cl @c (Join-Path $root $Source) "/Fe:$dll" /link $LinkArgs
+    $src = @((Join-Path $root $Source))
+    if ($ExtraSources) { $src += $ExtraSources }
+    & cl @c $src "/Fe:$dll" /link $LinkArgs
     if ($LASTEXITCODE -ne 0) { throw "cl failed for $Name" }
     Write-Host "built $dll"
 }
@@ -204,6 +207,16 @@ Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')
 Build-Plugin 'chaos'        'chaos.c'        @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib', 'winmm.lib')
 Build-Plugin 'fov_changer'  'fov_changer.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'skipintro'     'skipintro.c'
+# LastRites_dlcfix hooks the function's own entry point rather than the
+# game's lookup of it, so the hook does not depend on being installed
+# before the game asks. That needs MinHook, which the framework already
+# carries; the plugin target picks up its four sources here.
+Build-Plugin -Name 'LastRites_dlcfix' -Source 'LastRites_dlcfix.c' -LinkArgs @() -ExtraSources @(
+    (Join-Path $root 'third_party/minhook/src/buffer.c'),
+    (Join-Path $root 'third_party/minhook/src/hook.c'),
+    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
+    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
+)
 Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')
 Build-Plugin 'CrazyCars'    'crazycars.c'    @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')
