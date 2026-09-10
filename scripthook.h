@@ -1174,7 +1174,8 @@ void ShFp2HeadFrame(void);
 typedef struct {
     int      active;        /* any stage does something             */
     int      stage;         /* the dial in force (SH_STAGE_*)       */
-    int      dial[3];       /* the three dials as read from the ini */
+    int      dial[3];       /* the three core dials from the ini    */
+    int      prio[3];       /* the three priority dials             */
     int      ecoreState;    /* SH_CF_* for this CPU's applicability */
     unsigned origCount;     /* processors this process started with */
     unsigned sysCount;      /* processors the machine has           */

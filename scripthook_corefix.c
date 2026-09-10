@@ -115,6 +115,25 @@ enum {
     D_NO_SMT_ECORE_CPU0
 };
 
+/* What a priority dial can ask for, in the ini's own order. Realtime is
+ * deliberately not one of them - a game at realtime priority can starve
+ * the desktop, the audio and the input threads, which is the opposite of
+ * what any of this is for.
+ *
+ * The two lower classes belong to the start-up stages only. A loading
+ * screen that yields the machine to whatever else is running is a real
+ * choice; a game being played at low priority is just a stutter, so the
+ * play dial does not offer them (and a hand-written ini value that asks
+ * for one reads as "leave alone"). */
+enum {
+    P_LOW = 0,          /* IDLE_PRIORITY_CLASS                 */
+    P_BELOW,            /* BELOW_NORMAL_PRIORITY_CLASS         */
+    P_LEAVE,            /* touch nothing                       */
+    P_NORMAL,           /* NORMAL_PRIORITY_CLASS               */
+    P_ABOVE,            /* ABOVE_NORMAL_PRIORITY_CLASS         */
+    P_HIGH              /* HIGH_PRIORITY_CLASS                 */
+};
+
 /* Every processor the machine has, whatever this process is currently
  * allowed. A "force all cores" dial needs this rather than the process'
  * own mask, because the system may already have trimmed that one on its
@@ -132,6 +151,16 @@ static ULONG_PTR g_keepMask;
 static DWORD     g_reportCount;
 static DWORD     g_coreCap;                 /* cpu_cores, 0 = no cap */
 static int       g_dial[STAGE_COUNT];
+/* The priority dials, one per stage, and what the process' class was
+ * when we arrived - so a "leave alone" stage can give it back instead of
+ * leaving the last stage's class in place. */
+static int       g_prio[STAGE_COUNT];
+static DWORD     g_prioOrig;
+static int       g_prioTouched;
+/* The class the current stage wants held, 0 while it wants none: the
+ * SetPriorityClass hook answers the engine with this one, because the
+ * engine sets its own class during start up and would undo the dial. */
+static volatile LONG g_prioNow;
 /* The Intel P-core set and the SMT0 set, detected once at start up: the
  * detections pin this thread to each processor in turn, which is only
  * trustworthy before the hooks exist. */
@@ -400,6 +429,7 @@ typedef BOOL      (WINAPI *pfn_SetProcessAffinityMask)(HANDLE, DWORD_PTR);
 typedef DWORD_PTR (WINAPI *pfn_SetThreadAffinityMask)(HANDLE, DWORD_PTR);
 typedef DWORD     (WINAPI *pfn_SetThreadIdealProcessor)(HANDLE, DWORD);
 typedef BOOL      (WINAPI *pfn_SetThreadIdealProcessorEx)(HANDLE, PPROCESSOR_NUMBER, PPROCESSOR_NUMBER);
+typedef BOOL      (WINAPI *pfn_SetPriorityClass)(HANDLE, DWORD);
 typedef LONG      (WINAPI *pfn_NtQSI)(ULONG, PVOID, ULONG, PULONG);
 typedef LONG      (WINAPI *pfn_NtSIP)(HANDLE, ULONG, PVOID, ULONG);
 
@@ -415,11 +445,12 @@ static pfn_SetProcessAffinityMask       real_SetProcessAffinityMask;
 static pfn_SetThreadAffinityMask        real_SetThreadAffinityMask;
 static pfn_SetThreadIdealProcessor      real_SetThreadIdealProcessor;
 static pfn_SetThreadIdealProcessorEx    real_SetThreadIdealProcessorEx;
+static pfn_SetPriorityClass            real_SetPriorityClass;
 static pfn_NtQSI                        real_NtQSI;
 static pfn_NtSIP                        real_NtSIP;
 
 static volatile LONG c_GSI, c_GNSI, c_GAPC, c_GMPC, c_GAPGC, c_GLPI, c_GLPIEx,
-                     c_GPAM, c_SPAM, c_STAM, c_STIP, c_STIPEx;
+                     c_GPAM, c_SPAM, c_STAM, c_STIP, c_STIPEx, c_SPC, c_PHOLD;
 
 /* ========================================================================= */
 /* COUNT clamps.                                                              */
@@ -609,6 +640,21 @@ static BOOL WINAPI hook_SetThreadIdealProcessorEx(HANDLE h, PPROCESSOR_NUMBER id
 }
 
 /* ========================================================================= */
+/* PRIORITY: the engine sets its own class while it starts, which would       */
+/* quietly undo a priority dial. While a stage holds one, its request is      */
+/* answered with ours; with no dial in force it goes through untouched, which */
+/* is what "leave alone" has to mean here too.                                */
+/* ========================================================================= */
+static BOOL WINAPI hook_SetPriorityClass(HANDLE h, DWORD cls)
+{
+    note(&c_SPC, 3, "  >> SetPriorityClass requested=0x%lX",
+         (unsigned long)cls);
+    if (g_prioNow)
+        return real_SetPriorityClass(h, (DWORD)g_prioNow);
+    return real_SetPriorityClass(h, cls);
+}
+
+/* ========================================================================= */
 /* ntdll direct-call path (bypasses kernel32).                                */
 /* ========================================================================= */
 typedef struct _SBI {
@@ -649,6 +695,7 @@ static LONG WINAPI hook_NtQSI(ULONG cls, PVOID buf, ULONG len, PULONG retlen)
 }
 
 #define PROC_AFFINITY_MASK_CLASS 21
+#define PROC_PRIORITY_CLASS      18
 static LONG WINAPI hook_NtSIP(HANDLE proc, ULONG cls, PVOID info, ULONG len)
 {
     if (cls == PROC_AFFINITY_MASK_CLASS && info &&
@@ -656,6 +703,15 @@ static LONG WINAPI hook_NtSIP(HANDLE proc, ULONG cls, PVOID info, ULONG len)
         ULONG_PTR m = (*(ULONG_PTR *)info) & g_keepMask;
         if (m == 0) m = g_keepMask;
         return real_NtSIP(proc, cls, &m, (ULONG)sizeof(m));
+    }
+    /* The direct route to the same thing: an engine that calls ntdll
+     * instead of kernel32 would otherwise walk straight past a dial. */
+    if (cls == PROC_PRIORITY_CLASS && info && len >= sizeof(ULONG) &&
+        g_prioNow) {
+        ULONG v = (ULONG)g_prioNow;
+        note(&c_SPC, 5, "  >> NtSetInformationProcess priority forced=0x%lX",
+             (unsigned long)v);
+        return real_NtSIP(proc, cls, &v, (ULONG)sizeof(v));
     }
     return real_NtSIP(proc, cls, info, len);
 }
@@ -689,6 +745,7 @@ static int install_hooks(void)
     ok &= hook_api(L"kernel32", "SetThreadAffinityMask",    (LPVOID)hook_SetThreadAffinityMask,    (LPVOID *)&real_SetThreadAffinityMask);
     ok &= hook_api(L"kernel32", "SetThreadIdealProcessor",  (LPVOID)hook_SetThreadIdealProcessor,  (LPVOID *)&real_SetThreadIdealProcessor);
     ok &= hook_api(L"kernel32", "SetThreadIdealProcessorEx",(LPVOID)hook_SetThreadIdealProcessorEx,(LPVOID *)&real_SetThreadIdealProcessorEx);
+    ok &= hook_api(L"kernel32", "SetPriorityClass",         (LPVOID)hook_SetPriorityClass,         (LPVOID *)&real_SetPriorityClass);
     /* ntdll direct path (best-effort) */
     hook_api(L"ntdll", "NtQuerySystemInformation", (LPVOID)hook_NtQSI, (LPVOID *)&real_NtQSI);
     hook_api(L"ntdll", "NtSetInformationProcess",  (LPVOID)hook_NtSIP, (LPVOID *)&real_NtSIP);
@@ -762,6 +819,31 @@ static const char *stage_name(int s)
     }
 }
 
+static DWORD prio_class(int p)
+{
+    switch (p) {
+    case P_LOW:    return IDLE_PRIORITY_CLASS;
+    case P_BELOW:  return BELOW_NORMAL_PRIORITY_CLASS;
+    case P_NORMAL: return NORMAL_PRIORITY_CLASS;
+    case P_ABOVE:  return ABOVE_NORMAL_PRIORITY_CLASS;
+    case P_HIGH:   return HIGH_PRIORITY_CLASS;
+    default:       return 0;
+    }
+}
+
+static const char *prio_name(int p)
+{
+    switch (p) {
+    case P_LOW:    return "low";
+    case P_BELOW:  return "below normal";
+    case P_LEAVE:  return "leave alone";
+    case P_NORMAL: return "normal";
+    case P_ABOVE:  return "above normal";
+    case P_HIGH:   return "high";
+    default:       return "?";
+    }
+}
+
 /* Every processor the machine has, whatever this process is currently
  * allowed to touch. A dial works from this and not from the process' own
  * mask, because the system may already have trimmed that one by itself -
@@ -785,6 +867,39 @@ static ULONG_PTR system_mask(void)
  * including any trimming the system decided on its own. Everything else
  * works from the machine's own set and sets the process affinity for
  * real, so the scheduler enforces it and Task Manager can show it. */
+/* Priority and affinity are both per-process and both restated whenever
+ * the stage changes. A stage that asks for no priority gives back the
+ * class the process came with, for the same reason the affinity goes
+ * back: the stage before it must not quietly stay in force. */
+static void ApplyPriority(int stage)
+{
+    int p = g_prio[stage];
+    DWORD cls;
+
+    if (p == P_LEAVE) {
+        g_prioNow = 0;
+        if (g_prioTouched) {
+            SetPriorityClass(GetCurrentProcess(), g_prioOrig);
+            g_prioTouched = 0;
+            Log("corefix: %s: priority put back as it was found (0x%lX)",
+                stage_name(stage), (unsigned long)g_prioOrig);
+        }
+        return;
+    }
+    cls = prio_class(p);
+    if (!cls)
+        return;
+    g_prioNow = (LONG)cls;              /* the hook holds it there */
+    SetPriorityClass(GetCurrentProcess(), cls);
+    g_prioTouched = 1;
+    /* Read it back: someone outside this process - a launcher or the
+     * anti-cheat service, whose calls our hooks cannot see - may already
+     * have put it where it was, and then the log has to say so. */
+    Log("corefix: %s: priority %s (0x%lX), now 0x%lX", stage_name(stage),
+        prio_name(p), (unsigned long)cls,
+        (unsigned long)GetPriorityClass(GetCurrentProcess()));
+}
+
 static void ApplyDial(int stage)
 {
     int d = g_dial[stage];
@@ -814,6 +929,7 @@ static void ApplyDial(int stage)
             Log("corefix: stage %s: leave alone - nothing is set and every "
                 "query answers as it came", stage_name(stage));
         }
+        ApplyPriority(stage);
         g_stage = stage;
         g_status.stage = stage;
         g_status.keepCount = 0;
@@ -865,6 +981,7 @@ static void ApplyDial(int stage)
         "affinity %s",
         stage_name(stage), dial_name(d), (size_t)m,
         (unsigned long)g_reportCount, set ? "applied" : "FAILED");
+    ApplyPriority(stage);
 }
 
 /* A dial reads as one of the enum values. A value its stage does not
@@ -875,6 +992,16 @@ static int read_dial(const char *key, int maxDial)
     int v = ShConfigGetInt("loader", key, 0);
 
     return (v >= 0 && v <= maxDial) ? v : D_LEAVE;
+}
+
+/* A priority dial reads as one of the P_* values at or above `lo`. One
+ * below it - the play stage does not offer the lower half - reads as
+ * "leave alone" rather than as something arbitrary. */
+static int read_prio(const char *key, int lo)
+{
+    int v = ShConfigGetInt("loader", key, P_LEAVE);
+
+    return (v >= lo && v <= P_HIGH) ? v : P_LEAVE;
 }
 
 /* Who we are and who started us. A child process inherits its parent's
@@ -945,6 +1072,12 @@ void ShCoreFixStartup(void)
     g_dial[STAGE_WINDOW] = read_dial("cpu_window", D_NO_SMT_ECORE);
     g_dial[STAGE_PLAY]   = read_dial("cpu_play",   D_NO_SMT_ECORE_CPU0);
 
+    /* The priority dials share one scale (P_LOW..P_HIGH); the play stage
+     * is simply not offered its lower half. */
+    g_prio[STAGE_BOOT]   = read_prio("cpu_prio_boot",   P_LOW);
+    g_prio[STAGE_WINDOW] = read_prio("cpu_prio_window", P_LOW);
+    g_prio[STAGE_PLAY]   = read_prio("cpu_prio_play",   P_LEAVE);
+
     /* The cap is a ceiling: 0, a missing key and junk all mean "no cap",
      * and one processor group's worth of bits is as far as a single mask
      * word reaches. */
@@ -955,6 +1088,9 @@ void ShCoreFixStartup(void)
     g_status.dial[0] = g_dial[STAGE_BOOT];
     g_status.dial[1] = g_dial[STAGE_WINDOW];
     g_status.dial[2] = g_dial[STAGE_PLAY];
+    g_status.prio[0] = g_prio[STAGE_BOOT];
+    g_status.prio[1] = g_prio[STAGE_WINDOW];
+    g_status.prio[2] = g_prio[STAGE_PLAY];
 
     g_sysMask = system_mask();
     if (GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys))
@@ -966,11 +1102,14 @@ void ShCoreFixStartup(void)
     g_procOrig = procMask;
     g_status.origCount = popcount_ptr(procMask);
     g_status.sysCount = popcount_ptr(g_sysMask);
+    g_prioOrig = GetPriorityClass(GetCurrentProcess());
 
     if (g_dial[STAGE_BOOT] == D_LEAVE && g_dial[STAGE_WINDOW] == D_LEAVE &&
-        g_dial[STAGE_PLAY] == D_LEAVE && g_coreCap == 0) {
-        Log("corefix: disabled - all three dials are leave-alone and no "
-            "cap is set, so not one API is touched");
+        g_dial[STAGE_PLAY] == D_LEAVE && g_coreCap == 0 &&
+        g_prio[STAGE_BOOT] == P_LEAVE && g_prio[STAGE_WINDOW] == P_LEAVE &&
+        g_prio[STAGE_PLAY] == P_LEAVE) {
+        Log("corefix: disabled - every dial is leave-alone and no cap is "
+            "set, so not one API is touched");
         return;
     }
 
@@ -980,6 +1119,9 @@ void ShCoreFixStartup(void)
         g_dial[STAGE_WINDOW], dial_name(g_dial[STAGE_WINDOW]),
         g_dial[STAGE_PLAY], dial_name(g_dial[STAGE_PLAY]),
         (unsigned long)g_coreCap);
+    Log("corefix: priorities boot=%s window=%s play=%s (found 0x%lX)",
+        prio_name(g_prio[STAGE_BOOT]), prio_name(g_prio[STAGE_WINDOW]),
+        prio_name(g_prio[STAGE_PLAY]), (unsigned long)g_prioOrig);
     Log("corefix: the machine has %lu processors, this process started on "
         "%lu (mask 0x%zX)",
         (unsigned long)g_status.sysCount, (unsigned long)g_status.origCount,
@@ -1169,6 +1311,19 @@ static DWORD WINAPI StageThread(LPVOID p)
         }
         if (stage != g_stage)
             ApplyDial(stage);
+        /* A held priority is checked rather than assumed. The class can
+         * be changed by a process outside this one, where no hook of
+         * ours is in the path - an anti-cheat or launcher service can do
+         * it with its own handle - and a dial that quietly stops being
+         * in force is worse than one that never was. */
+        if (g_prioNow &&
+            (DWORD)GetPriorityClass(GetCurrentProcess()) != (DWORD)g_prioNow) {
+            DWORD was = GetPriorityClass(GetCurrentProcess());
+
+            SetPriorityClass(GetCurrentProcess(), (DWORD)g_prioNow);
+            note(&c_PHOLD, 3, "  priority class was 0x%lX, held back to "
+                 "0x%lX", (unsigned long)was, (unsigned long)g_prioNow);
+        }
         Sleep(STAGE_POLL_MS);
     }
     return 0;

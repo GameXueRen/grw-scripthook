@@ -36,6 +36,7 @@ typedef struct {
     int  def;             /* fallback when the key is missing */
     const char **opts;    /* a fixed-choice row when non-NULL */
     int  nopts;           /* how many of them this row offers */
+    const int  *vals;     /* the ini value per option, NULL = the index */
 } Setting;
 
 /* The stage dials, in the ini's own order: what, if anything, is done to
@@ -58,16 +59,38 @@ static const char *g_stageOpts[] = {
  * engine needs processor 0 while it is starting up. */
 #define STAGE_NOPTS 5
 
+/* The priority classes, in the ini's own order. The start-up stages
+ * offer the two lower ones as well - a loading screen may as well yield
+ * the machine to whatever else wants it - while the play stage does not,
+ * because a game being played at low priority is just a stutter.
+ * Realtime is offered nowhere: a game at realtime priority can starve
+ * the desktop and the audio threads. */
+static const char *g_prioOpts[] = {
+    "Low", "Below normal", "Leave alone", "Normal", "Above normal", "High"
+};
+static const char *g_prioPlayOpts[] = {
+    "Leave alone", "Normal", "Above normal", "High"
+};
+/* The play row maps onto the same scale, minus the low end. */
+static const int g_prioPlayVals[] = { 2, 3, 4, 5 };
+
 static const Setting g_loaderSettings[] = {
     { "loader", "load_plugins",
       "Load all plugins", 0, 0, 0, 0, 1, NULL, 0 },
-    /* One row per stage of the game's start up. */
+    /* One pair of rows per stage of the game's start up: which set of
+     * processors it runs on, and which priority class it holds. */
     { "loader", "cpu_boot",
       "Boot cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
+    { "loader", "cpu_prio_boot",
+      "Boot priority", 1, 0, 5, 1, 0, g_prioOpts, 6, NULL },
     { "loader", "cpu_window",
       "Loading cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
+    { "loader", "cpu_prio_window",
+      "Loading priority", 1, 0, 5, 1, 0, g_prioOpts, 6, NULL },
     { "loader", "cpu_play",
       "Play cores", 1, 0, 8, 1, 0, g_stageOpts, 9 },
+    { "loader", "cpu_prio_play",
+      "Play priority", 1, 0, 5, 1, 0, g_prioPlayOpts, 4, g_prioPlayVals },
     /* A ceiling on the play stage alone (0 = none): trimming the set
      * while the game is still starting is a good way to make it not
      * start, and the stutter it is for is a play-time thing. */
@@ -111,6 +134,11 @@ static void OnNumber(uint32_t menu, uint32_t item, int value,
     const Setting *s = (const Setting *)user;
     (void)item;
     if (!s) return;
+    /* A list row hands back the option's index; the ini wants that
+     * option's value, which is the index itself unless the row maps it
+     * (the play priority row shares the scale but not its low end). */
+    if (s->opts && s->vals && value >= 0 && value < s->nopts)
+        value = s->vals[value];
     if (ShConfigSetInt(s->section, s->key, value))
         ReportSaved(menu);
 }
@@ -197,11 +225,16 @@ static void BuildLoaderMenu(void) {
          i++) {
         const Setting *s = &g_loaderSettings[i];
         if (s->opts) {
-            /* A fixed-choice row: the ini value is the index into the
-             * option list, and the callback is handed that index. */
+            /* A fixed-choice row: the ini holds the option's value, the
+             * list wants its index, and the callback is handed the index
+             * again. */
             int cur = ShConfigGetInt(s->section, s->key, s->def);
-            if (cur < 0 || cur >= s->nopts) cur = 0;
-            ShMenuList(g_loaderMenu, s->label, s->opts, s->nopts, cur,
+            int idx = 0, i;
+
+            for (i = 0; i < s->nopts; i++) {
+                if ((s->vals ? s->vals[i] : i) == cur) { idx = i; break; }
+            }
+            ShMenuList(g_loaderMenu, s->label, s->opts, s->nopts, idx,
                        OnNumber, (void *)s);
         } else if (s->isNumber) {
             int cur = ShConfigGetInt(s->section, s->key, s->def);
