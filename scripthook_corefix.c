@@ -39,8 +39,10 @@
  *          is reported as not applicable and NOTHING is trimmed
  *   4..    combinations; the play dial also has processor 0
  *
- * cpu_cores=N caps whatever a stage lands on at its lowest N processors
- * (0 or a missing key = no cap).
+ * cpu_cores=N caps the play stage at its lowest N processors (0 or a
+ * missing key = no cap). It applies to play alone: trimming the set
+ * while the game is still starting is a good way to make it not start,
+ * and the stutter it is for is a play-time thing anyway.
  *
  * Why the stages are the point: the engine's start up walks the
  * processors by index - the log has it setting the process mask to 0x1,
@@ -119,6 +121,11 @@ enum {
  * own - Win11 does exactly that at start up, which is the thing the
  * dial exists to undo. */
 static ULONG_PTR g_sysMask;
+/* What the process' own affinity was when we arrived, so a stage that
+ * asks for nothing can put it back instead of leaving the last stage's
+ * trim in place: "leave alone" means as we found it, not as we left it. */
+static ULONG_PTR g_procOrig;
+static int       g_touched;                 /* we have set an affinity */
 /* The set in force, and the count the engine is told. Zero in both
  * means "leave alone": every hook answers through unhooked. */
 static ULONG_PTR g_keepMask;
@@ -781,20 +788,37 @@ static ULONG_PTR system_mask(void)
 static void ApplyDial(int stage)
 {
     int d = g_dial[stage];
+    /* The core ceiling belongs to play alone: trimming the set while the
+     * game is still starting is a good way to make it not start, and it
+     * is not what it is for - the stutter is a play-time thing. A stage
+     * that asks for nothing and has no ceiling to apply therefore does
+     * nothing at all, even when a ceiling is set for the play stage. */
+    DWORD cap = (stage == STAGE_PLAY) ? g_coreCap : 0;
     ULONG_PTR m;
     DWORD n;
     BOOL set;
 
-    if (d == D_LEAVE && g_coreCap == 0) {
+    if (d == D_LEAVE && cap == 0) {
+        /* As we found it, not as we left it: a stage that asks for
+         * nothing gives back the affinity the process came with, or the
+         * trim from the stage before would quietly stay in force. */
         g_keepMask = 0;
         g_reportCount = 0;
+        if (g_touched) {
+            apply_mask(g_procOrig);
+            g_touched = 0;
+            Log("corefix: stage %s: leave alone - the process affinity is "
+                "put back as it was found (0x%zX), and every query answers "
+                "as it came", stage_name(stage), (size_t)g_procOrig);
+        } else {
+            Log("corefix: stage %s: leave alone - nothing is set and every "
+                "query answers as it came", stage_name(stage));
+        }
         g_stage = stage;
         g_status.stage = stage;
         g_status.keepCount = 0;
         g_status.reportCount = 0;
         g_status.mask = 0;
-        Log("corefix: stage %s: leave alone - nothing is set and every "
-            "query answers as it came", stage_name(stage));
         return;
     }
 
@@ -817,12 +841,12 @@ static void ApplyDial(int stage)
         ULONG_PTR t = m & ~(ULONG_PTR)1;
         if (t) m = t;                   /* never an empty set */
     }
-    if (g_coreCap) {
+    if (cap) {
         n = popcount_ptr(m);
-        if (n > g_coreCap) {
-            m = keep_lowest_bits(m, g_coreCap);
-            Log("corefix: %s: cap %lu trims the set from %lu",
-                stage_name(stage), (unsigned long)g_coreCap, (unsigned long)n);
+        if (n > cap) {
+            m = keep_lowest_bits(m, cap);
+            Log("corefix: %s: max cores %lu trims the set from %lu",
+                stage_name(stage), (unsigned long)cap, (unsigned long)n);
         }
     }
     if (!m)
@@ -831,6 +855,7 @@ static void ApplyDial(int stage)
     g_keepMask = m;
     g_reportCount = popcount_ptr(m);
     set = apply_mask(m);
+    g_touched = 1;
     g_stage = stage;
     g_status.stage = stage;
     g_status.keepCount = g_reportCount;
@@ -938,6 +963,7 @@ void ShCoreFixStartup(void)
         procMask = g_sysMask;
     if (!procMask)
         procMask = g_sysMask;
+    g_procOrig = procMask;
     g_status.origCount = popcount_ptr(procMask);
     g_status.sysCount = popcount_ptr(g_sysMask);
 
@@ -948,7 +974,8 @@ void ShCoreFixStartup(void)
         return;
     }
 
-    Log("corefix: dials boot=%d(%s) window=%d(%s) play=%d(%s) cap=%lu",
+    Log("corefix: dials boot=%d(%s) window=%d(%s) play=%d(%s) "
+        "play-max-cores=%lu",
         g_dial[STAGE_BOOT], dial_name(g_dial[STAGE_BOOT]),
         g_dial[STAGE_WINDOW], dial_name(g_dial[STAGE_WINDOW]),
         g_dial[STAGE_PLAY], dial_name(g_dial[STAGE_PLAY]),

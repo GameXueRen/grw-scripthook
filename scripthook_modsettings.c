@@ -68,9 +68,11 @@ static const Setting g_loaderSettings[] = {
       "Loading cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
     { "loader", "cpu_play",
       "Play cores", 1, 0, 8, 1, 0, g_stageOpts, 9 },
-    /* A global ceiling on top of whatever a stage asked for; 0 = none. */
+    /* A ceiling on the play stage alone (0 = none): trimming the set
+     * while the game is still starting is a good way to make it not
+     * start, and the stutter it is for is a play-time thing. */
     { "loader", "cpu_cores",
-      "Logical cores kept", 1, 0, 64, 1, 0, NULL, 0 },
+      "Play max cores", 1, 0, 64, 1, 0, NULL, 0 },
 };
 
 /* ---- menu handles ---------------------------------------------- */
