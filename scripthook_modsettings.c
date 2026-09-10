@@ -2,7 +2,8 @@
  * scripthook.ini at runtime.
  *
  * The engine reads every key it exposes here only at startup:
- *   - [loader] load_plugins / cpu_ecore_off / cpu_ht_off / cpu_cores
+ *   - [loader] load_plugins / cpu_boot / cpu_window / cpu_play
+ *     / cpu_cores
  *   - [plugins]  one toggle per plugins\<name>\<name>.asi
  *   - [Settings] Language (menu language)
  * Each page carries a single hint line noting that changes need a
@@ -28,22 +29,48 @@
 
 typedef struct {
     const char *section;  /* ini section, e.g. "loader" */
-    const char *key;      /* ini key, e.g. "load_plugins" */
+    const char *key;      /* ini key, e.g. "cpu_play" */
     const char *label;    /* menu label == translation key */
     int  isNumber;        /* a number row (cpu_cores) not a toggle */
     float lo, hi, step;
     int  def;             /* fallback when the key is missing */
+    const char **opts;    /* a fixed-choice row when non-NULL */
+    int  nopts;           /* how many of them this row offers */
 } Setting;
+
+/* The stage dials, in the ini's own order: what, if anything, is done to
+ * the set of processors the game may run on while that stage is in
+ * force. The first five values are shared by every stage; the play stage
+ * also offers processor 0, whose combinations sit after them. The ini
+ * stores the index into this list. */
+static const char *g_stageOpts[] = {
+    "Leave alone",              /* 0 */
+    "All cores",                /* 1 */
+    "SMT off",                  /* 2 */
+    "E-cores off",              /* 3 */
+    "SMT + E-cores off",        /* 4 */
+    "CPU 0 off",                /* 5 */
+    "SMT + CPU0 off",           /* 6 */
+    "E-cores + CPU0 off",       /* 7 */
+    "SMT + E-cores + CPU0 off"  /* 8 */
+};
+/* The logo and window stages stop before the processor-0 values: the
+ * engine needs processor 0 while it is starting up. */
+#define STAGE_NOPTS 5
 
 static const Setting g_loaderSettings[] = {
     { "loader", "load_plugins",
-      "Load all plugins", 0, 0, 0, 0, 1 },
-    { "loader", "cpu_ecore_off",
-      "Hide E-cores", 0, 0, 0, 0, 0 },
-    { "loader", "cpu_ht_off",
-      "Drop SMT/HT", 0, 0, 0, 0, 0 },
+      "Load all plugins", 0, 0, 0, 0, 1, NULL, 0 },
+    /* One row per stage of the game's start up. */
+    { "loader", "cpu_boot",
+      "Boot cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
+    { "loader", "cpu_window",
+      "Loading cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
+    { "loader", "cpu_play",
+      "Play cores", 1, 0, 8, 1, 0, g_stageOpts, 9 },
+    /* A global ceiling on top of whatever a stage asked for; 0 = none. */
     { "loader", "cpu_cores",
-      "Logical cores kept", 1, 0, 256, 1, 8 },
+      "Logical cores kept", 1, 0, 64, 1, 0, NULL, 0 },
 };
 
 /* ---- menu handles ---------------------------------------------- */
@@ -167,7 +194,14 @@ static void BuildLoaderMenu(void) {
     for (i = 0; i < sizeof(g_loaderSettings) / sizeof(g_loaderSettings[0]);
          i++) {
         const Setting *s = &g_loaderSettings[i];
-        if (s->isNumber) {
+        if (s->opts) {
+            /* A fixed-choice row: the ini value is the index into the
+             * option list, and the callback is handed that index. */
+            int cur = ShConfigGetInt(s->section, s->key, s->def);
+            if (cur < 0 || cur >= s->nopts) cur = 0;
+            ShMenuList(g_loaderMenu, s->label, s->opts, s->nopts, cur,
+                       OnNumber, (void *)s);
+        } else if (s->isNumber) {
             int cur = ShConfigGetInt(s->section, s->key, s->def);
             ShMenuNumber(g_loaderMenu, s->label, (float)cur,
                          s->lo, s->hi, s->step, OnNumber, (void *)s);
@@ -287,23 +321,66 @@ void ShModSettingsStartup(void) {
      * but the page reads the ini directly, so that does not matter. */
     ShChatMenuRegister(g_modMenu);
 
-    /* One hint per page is enough: loader and plugins rows only act
-     * on the next launch, as does the language switch. The loader
-     * page adds a second line: the core-count cap does nothing on its
-     * own, it only trims when an E-core/SMT switch above is on.
-     * The strings are pre-translated here (capture translates the
-     * stored hint again, a no-op for already-localised text). */
+    /* One hint per page is enough: these rows only act on the next
+     * launch, as does the language switch. The loader page adds what
+     * the CPU dials are actually doing on this machine, because a dial
+     * that cannot apply here (E-cores off on a CPU without E-cores)
+     * otherwise reads as one that was ignored, and because "the system
+     * already trimmed this process" is the one thing that decides
+     * whether an "All cores" dial is worth setting. The strings are
+     * pre-translated here (capture translates the stored hint again, a
+     * no-op for already-localised text). */
     {
-        char hint[192];
+        char   hint[384];
+        char   line[160];
+        size_t used;
+        ShCoreFixStatus cf;
+
         snprintf(hint, sizeof(hint), "%s",
                  ShLang("These changes take effect after a game restart."));
         ShMenuHint(g_modMenu, hint);
         ShMenuHint(g_pluginMenu, hint);
 
-        snprintf(hint, sizeof(hint), "%s\n%s",
-                 ShLang("These changes take effect after a game restart."),
-                 ShLang("The core limit applies only when an E-core "
-                        "or SMT switch above is enabled."));
+        used = strlen(hint);
+        if (ShCoreFixGetStatus(&cf)) {
+            line[0] = 0;
+            if (cf.ecoreState == SH_CF_NA_NOT_INTEL)
+                snprintf(line, sizeof(line), "%s",
+                         ShLang("E-cores off: not applicable on this CPU."));
+            else if (cf.ecoreState == SH_CF_NA_NO_ECORE)
+                snprintf(line, sizeof(line), "%s",
+                         ShLang("E-cores off: this CPU has no E-cores."));
+            else if (cf.ecoreState == SH_CF_FAILED)
+                snprintf(line, sizeof(line), "%s",
+                         ShLang("E-cores off: detection failed."));
+            if (line[0] && used + 2 < sizeof(hint))
+                used += (size_t)snprintf(hint + used,
+                                         sizeof(hint) - used, "\n%s", line);
+
+            if (cf.active && used + 2 < sizeof(hint)) {
+                snprintf(line, sizeof(line),
+                         ShLang("Machine: %u processors, the game started "
+                                "on %u."),
+                         cf.sysCount, cf.origCount);
+                used += (size_t)snprintf(hint + used,
+                                         sizeof(hint) - used, "\n%s", line);
+            }
+            if (cf.active && used + 2 < sizeof(hint)) {
+                const char *stage = cf.stage == SH_STAGE_BOOT ? "boot"
+                                  : cf.stage == SH_STAGE_WINDOW ? "window"
+                                  : "play";
+
+                if (cf.keepCount == 0)
+                    snprintf(line, sizeof(line),
+                             ShLang("Now: %s stage, left alone."),
+                             ShLang(stage));
+                else
+                    snprintf(line, sizeof(line),
+                             ShLang("Now: %s stage, %u processors."),
+                             ShLang(stage), cf.keepCount);
+                snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
+            }
+        }
         ShMenuHint(g_loaderMenu, hint);
     }
 }

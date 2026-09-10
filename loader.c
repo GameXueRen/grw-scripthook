@@ -63,6 +63,7 @@ static void LoadRealDinput8(void) {
 extern void ShStateStartup(void);
 extern void ShCrashStartup(void);
 extern void ShCoreFixStartup(void);
+extern void ShCoreFixLateStartup(void);
 extern void ShModSettingsStartup(void);
 extern void ShChatStartup(void);
 
@@ -146,6 +147,12 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     (void)p;
     ShConfigInit();
     Log("config loaded from scripthook.ini");
+    /* The play-time half of the CPU trims: the deferred processor-0
+     * drop. Started here rather than in DllMain, where creating a
+     * thread can deadlock against the loader lock. A no-op unless
+     * cpu_no0=1.
+     */
+    ShCoreFixLateStartup();
     /* Mod settings must be up before the plugin scan: it owns the
      * very switches that gate the plugins, so it has to exist even
      * when load_plugins=0 (otherwise nothing could turn them back on

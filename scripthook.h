@@ -1148,6 +1148,54 @@ SH_API uint32_t ShFp2Age(void);
 int ShFp2PlaceEye(uint64_t cm, float *m, float *p);
 void ShFp2HeadFrame(void);
 
+/** Outcome of one scheduling trim, for the log and the menu.
+ *  The values double as the state of the whole switch: 0 it was
+ *  never asked for, 1 it is in force, 2 it does not apply to
+ *  this CPU (not an Intel hybrid), 3 it does not apply (an Intel
+ *  CPU with no E-cores), 4 the detection failed, 5 it was asked
+ *  for but the result would have been an empty set.
+ */
+#define SH_CF_OFF           0
+#define SH_CF_APPLIED       1
+#define SH_CF_NA_NOT_INTEL  2
+#define SH_CF_NA_NO_ECORE   3
+#define SH_CF_FAILED        4
+#define SH_CF_SKIPPED_EMPTY 5
+
+/** The stage a dial belongs to. */
+#define SH_STAGE_BOOT   0   /* the game's logo screen               */
+#define SH_STAGE_WINDOW 1   /* the window: loading, menu, lobby     */
+#define SH_STAGE_PLAY   2   /* in play                              */
+
+/** What the CPU scheduling dials did this launch. Read by the mod
+ *  settings page, which lives in the same dinput8.dll and is started
+ *  after the dials have run, so the fields are settled by then.
+ */
+typedef struct {
+    int      active;        /* any stage does something             */
+    int      stage;         /* the dial in force (SH_STAGE_*)       */
+    int      dial[3];       /* the three dials as read from the ini */
+    int      ecoreState;    /* SH_CF_* for this CPU's applicability */
+    unsigned origCount;     /* processors this process started with */
+    unsigned sysCount;      /* processors the machine has           */
+    unsigned reportCount;   /* what the engine is told (0 = as-is)  */
+    unsigned keepCount;     /* schedulable now (0 = as it came)     */
+    unsigned long long mask;/* the set in force (0 = as it came)    */
+} ShCoreFixStatus;
+
+/** Fill *out with the launch's scheduling result and return 1, or
+ *  0 when there is nothing to say yet.
+ */
+int ShCoreFixGetStatus(ShCoreFixStatus *out);
+
+/** Start the part of the CPU trims that runs during play: the deferred
+ *  processor-0 drop, which is applied once the world is up and taken
+ *  back for a load screen or a menu. Called from the loader thread
+ *  (never from DllMain, where creating a thread deadlocks), and does
+ *  nothing unless cpu_no0=1 asked for it.
+ */
+void ShCoreFixLateStartup(void);
+
 /** @addtogroup state
  *  @{ */
 
