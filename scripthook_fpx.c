@@ -962,6 +962,7 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
         float ox, oy, oz;
         uint32_t s0, s1;
         int spin = 0;
+        float fx, fy, fl;
 
         /* The offset as one set, not three reads, see
          * ShFp2SetOffset. A torn set is caught by the stamp
@@ -973,9 +974,27 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
             oz = g_fp.off[2];
             s1 = g_offSeq;
         } while ((s0 != s1 || (s0 & 1u)) && ++spin < 8);
-        out[0] += ox;
-        out[1] += oy;
-        out[2] += oz;
+
+        /* The offset is in the eye's own axes, not the
+         * world's: right along the camera's right, forward
+         * along its forward flattened to the horizon, and up
+         * in world Z. Flattened because a downward view would
+         * otherwise walk the eye into the chest, and the
+         * horizon is the one direction that does not change
+         * with where the player is looking. */
+        fx = m[4];
+        fy = m[5];
+        fl = sqrtf(fx * fx + fy * fy);
+        if (fl > 0.01f) {
+            fx /= fl;
+            fy /= fl;
+        } else {
+            fx = 0.0f;
+            fy = 1.0f;
+        }
+        out[0] += m[0] * ox + fx * oy;
+        out[1] += m[1] * ox + fy * oy;
+        out[2] += m[2] * ox + oz;
     }
     if (out[0] != out[0] || out[1] != out[1] || out[2] != out[2]) {
         g_bow = BOW_BAD;
@@ -1124,7 +1143,9 @@ SH_API void ShFp2HeadShow(int show) {
     }
 }
 
-/** The eye offset, in metres, in world axes.
+/** The eye offset, in metres, in the eye's own axes: right
+ *  along the camera's right, forward along its forward
+ *  flattened to the horizon, and up in world Z.
  *
  *  Written from a plugin thread, read inside the engine's
  *  frame, so the three floats are published behind a counter:

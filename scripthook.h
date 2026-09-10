@@ -1105,8 +1105,11 @@ SH_API uint32_t ShFp2Missing(void);
 /** 1 to take the camera, 0 to hand it back. */
 SH_API void ShFp2Enable(int on);
 
-/** The eye offset in metres, in world axes. */
-SH_API void ShFp2SetOffset(float x, float y, float z);
+/** The eye offset in metres, in the eye's own axes: right
+ *  along the camera's right, forward along its forward
+ *  flattened to the horizon, up in world Z.
+ */
+SH_API void ShFp2SetOffset(float right, float forward, float up);
 
 /** The live gate bytes. Any argument may be NULL. */
 SH_API void ShFp2Gate(int *menu, int *drone, int *ads, int *fresh);
