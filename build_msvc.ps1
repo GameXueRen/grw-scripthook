@@ -217,6 +217,16 @@ Build-Plugin -Name 'LastRites_dlcfix' -Source 'LastRites_dlcfix.c' -LinkArgs @()
     (Join-Path $root 'third_party/minhook/src/trampoline.c'),
     (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 )
+
+# ModeExitProbe answered its question - the mode-switch exit is the
+# engine's design, not a defect; see its header - so it is no longer
+# deployed. The source stays for the next question of this kind.
+#Build-Plugin -Name 'ModeExitProbe' -Source 'ModeExitProbe.c' -LinkArgs @() -ExtraSources @(
+#    (Join-Path $root 'third_party/minhook/src/buffer.c'),
+#    (Join-Path $root 'third_party/minhook/src/hook.c'),
+#    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
+#    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
+#)
 Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')
 Build-Plugin 'CrazyCars'    'crazycars.c'    @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')
