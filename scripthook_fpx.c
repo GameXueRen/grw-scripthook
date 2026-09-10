@@ -146,12 +146,6 @@ static volatile int     g_bow = 0;
  * step. After that it goes quiet: this runs every frame. */
 static uint32_t         g_trace = 0;
 
-/* How long an aim keeps the eye before the engine's own aim
- * camera takes over, and when the aim now running started.
- * 0 ms is the table's own behaviour: hand it over at once. */
-static volatile uint32_t g_settleMs = 600;
-static volatile uint64_t g_adsAt = 0;
-static volatile int      g_adsPrev = 0;
 enum {
     BOW_NONE = 0,   /* placed                                  */
     BOW_OFF,        /* first person not asked for              */
@@ -161,20 +155,35 @@ enum {
 };
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
+extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern void *ShAllocNear(uint64_t target);
 extern void ShSetError(int err);
 
 /* ---- byte level helpers ---------------------------------- */
 
+/* Reads. The heap path goes through the kernel read, which
+ * fails clean on a page the engine decommits between the
+ * check and the copy - the plain memcpy after VirtualQuery
+ * that was here before had exactly that race, and repeated
+ * menu and map transitions were where it lost. The image is
+ * exempt: it lives as long as the process, so it reads
+ * directly. */
 static uint64_t RdQ(uint64_t addr) {
     uint64_t v = 0;
-    if (!addr || !ShReadableAddr(addr, 8)) return 0;
-    memcpy(&v, (const void *)(uintptr_t)addr, 8);
-    return v;
+
+    if (!addr) return 0;
+    if (ShReadMem(addr, &v, 8)) return v;
+    if (ShReadableAddr(addr, 8)) {
+        memcpy(&v, (const void *)(uintptr_t)addr, 8);
+        return v;
+    }
+    return 0;
 }
 
 static int RdF(uint64_t addr, float *out, int n) {
-    if (!addr || !ShReadableAddr(addr, (size_t)n * 4)) return 0;
+    if (!addr || n < 1 || n > 4) return 0;
+    if (ShReadMem(addr, out, (size_t)n * 4)) return 1;
+    if (!ShReadableAddr(addr, (size_t)n * 4)) return 0;
     memcpy(out, (const void *)(uintptr_t)addr, (size_t)n * 4);
     return 1;
 }
@@ -282,45 +291,117 @@ static uint8_t *NewStub(uint64_t nearSite) {
 }
 
 /* ---- the capture site ------------------------------------
- * Records the argument the engine itself passes to the head
- * function, and marks it fresh. Everything else follows from
- * this one value.
+ * The engine runs the head call once per character, not once
+ * per frame. A stub that keeps only the last set of arguments
+ * therefore keeps whoever was processed last - fine alone, and
+ * in a squad it is why the eye wandered onto a teammate and
+ * back. So the stub keeps the last eight, rcx with its r8 and
+ * r9, and the placement picks the one that sits where the
+ * local player is.
  *
- * All four argument registers are taken, not just the first.
- * The table calls the function from a patch site, where the
- * third and fourth happen to hold whatever the engine left
- * there; a call from C has no such luck, and a function that
- * reads them is handed our stack instead of the engine's. The
- * two extra values cost nothing when the function ignores
- * them and are the difference between working and a fault
- * when it does not.
+ * Layout, fixed so the stub can address it without help:
+ *   +0x000  uint64 rcx of the calls that hashed here
+ *   +0x200  uint64 r8 of the same calls
+ *   +0x400  uint64 r9 of the same calls
  *
- * Only rax is touched and it is put back: at a call site rax
- * is scratch, but nothing here owns it.
+ * No counter, no flag: the stub would have to read, bump and
+ * write a shared index on every call, and all three crashes
+ * landed on exactly that instruction. The slot comes from the
+ * argument itself instead - mixed bits of the heap pointer,
+ * so two calls that hash alike simply overwrite each other.
+ * The placement walks every slot and picks the one nearest
+ * the player, which is why a squad of four gets sixty four
+ * slots and a stir of the pointer's upper bits: eight slots
+ * let two soldiers of the same squad collide every other
+ * frame, and the eye went wandering onto whoever wrote last.
  */
+#define RING_SLOTS   64
+static volatile struct {
+    uint64_t a0[RING_SLOTS];     /* +0x000 */
+    uint64_t a2[RING_SLOTS];     /* +0x200 */
+    uint64_t a3[RING_SLOTS];     /* +0x400 */
+} g_ring;
+
+/* 1 while the head belongs to the engine's own state, 0 while
+ * first person holds it down. ShFp2Enable turns it off - taking
+ * the camera means taking the head - and the plugin hands it
+ * back through ShFp2HeadShow. */
+static volatile int g_headShow = 1;
+
+/* While non zero, a show window: the camera frame restates
+ * "head visible" until it runs out. Handing the head back is
+ * not a moment but a span - the engine's own idea of the head
+ * lags the switch, and a single call loses to it. */
+static volatile uint64_t g_showUntil;
+
+static void HeadVis(int hide);
+
+/* The eye offset's publish stamp, see ShFp2SetOffset. */
+static volatile uint32_t g_offSeq;
+
 static int InstallArgs(void) {
     static const uint8_t sig[1] = { 0xE8 };
     uint8_t *s;
-    int o = 0;
+    int o = 0, i;
 
     if (!Check(S_ARGS, 1, sig)) return 0;
     s = NewStub(S_ARGS);
     if (!s) return 0;
 
-    s[o++] = 0x50;                                  /* push rax */
-    EmitMov64(s, &o, 0xB8, (uint64_t)(uintptr_t)&g_fp.headArg);
-    s[o++] = 0x48; s[o++] = 0x89; s[o++] = 0x08;    /* mov [rax],rcx */
-    EmitMov64(s, &o, 0xB8, (uint64_t)(uintptr_t)&g_fp.headArg8);
-    s[o++] = 0x4C; s[o++] = 0x89; s[o++] = 0x00;    /* mov [rax],r8  */
-    EmitMov64(s, &o, 0xB8, (uint64_t)(uintptr_t)&g_fp.headArg9);
-    s[o++] = 0x4C; s[o++] = 0x89; s[o++] = 0x08;    /* mov [rax],r9  */
-    EmitMov64(s, &o, 0xB8, (uint64_t)(uintptr_t)&g_fp.skip[2]);
-    s[o++] = 0xFE; s[o++] = 0x00;                   /* inc byte [rax] */
-    s[o++] = 0x58;                                  /* pop rax  */
+    /* Only rdx is borrowed and put back, and r10 - which the
+     * call convention lets anything clobber anyway - holds the
+     * ring's address. Nothing is read from memory and nothing
+     * is read-modify-write: three plain aligned stores, which
+     * is all a capture needs to be.
+     */
+    s[o++] = 0x52;                                  /* push rdx            */
+    s[o++] = 0x49; s[o++] = 0xBA;                   /* mov r10, imm64      */
+    *(uint64_t *)(s + o) = (uint64_t)(uintptr_t)&g_ring; o += 8;
+    s[o++] = 0x89; s[o++] = 0xCA;                   /* mov edx,ecx         */
+    s[o++] = 0xC1; s[o++] = 0xEA; s[o++] = 0x04;    /* shr edx,4           */
+    s[o++] = 0x31; s[o++] = 0xCA;                   /* xor edx,ecx         */
+    s[o++] = 0xC1; s[o++] = 0xEA; s[o++] = 0x04;    /* shr edx,4           */
+    s[o++] = 0x83; s[o++] = 0xE2; s[o++] = 0x3F;    /* and edx,63   slot   */
+    s[o++] = 0x49; s[o++] = 0x89; s[o++] = 0x0C;    /* mov [r10+rdx*8],    */
+    s[o++] = 0xD2;                                  /*   rcx               */
+    s[o++] = 0x49; s[o++] = 0x89; s[o++] = 0x84;    /* mov [r10+rdx*8+200],*/
+    s[o++] = 0xD2;
+    *(uint32_t *)(s + o) = 0x200; o += 4;           /*   r8                */
+    s[o++] = 0x49; s[o++] = 0x89; s[o++] = 0x8C;    /* mov [r10+rdx*8+400],*/
+    s[o++] = 0xD2;
+    *(uint32_t *)(s + o) = 0x400; o += 4;           /*   r9                */
+    s[o++] = 0x5A;                                  /* pop rdx             */
     o = EmitJmp(s, o, (uint64_t)(uintptr_t)s + o, S_ARGS_FN);
     if (o < 0) return 0;
+    FlushInstructionCache(GetCurrentProcess(), s, (size_t)o);
 
-    return PatchCall(S_ARGS, S_ARGS_FN, s);
+    /* The stub's own bytes, so a crash dump at the fault has
+     * something authoritative to be checked against. */
+    for (i = 0; i < o; i += 24) {
+        char hex[80];
+        int j, k = 0;
+
+        for (j = i; j < o && j < i + 24; j++)
+            k += snprintf(hex + k, sizeof(hex) - k, " %02X", s[j]);
+        Log("args stub@%03d:%s", i, hex);
+    }
+
+    if (!PatchCall(S_ARGS, S_ARGS_FN, s)) return 0;
+
+    /* Read the site back. The patch was written, and this says
+     * it survived - a rel32 that points anywhere but the stub
+     * is a bug caught at install time, not a mystery later. */
+    {
+        const uint8_t *at = (const uint8_t *)(uintptr_t)S_ARGS;
+        int32_t rel = *(const int32_t *)(at + 1);
+        uint64_t got = S_ARGS + 5 + (int64_t)rel;
+
+        Log("args site: E8 rel->%llX (stub %llX) %s",
+            (unsigned long long)got,
+            (unsigned long long)(uintptr_t)s,
+            got == (uint64_t)(uintptr_t)s ? "ok" : "MISMATCH");
+    }
+    return 1;
 }
 
 /* ---- the gates -------------------------------------------
@@ -433,6 +514,16 @@ static int InstallAds(uint64_t site) {
     s[o++] = 0x50;
     EmitMov64(s, &o, 0xB8, (uint64_t)(uintptr_t)&g_fp.skip[3]);
     s[o++] = 0x88; s[o++] = 0x10;                   /* mov [rax],dl */
+    /* While first person holds the head down, this call is
+     * also the engine speaking its own mind about the head -
+     * and on the way out of an aim that mind says visible,
+     * which is a frame of skull before our next frame says
+     * otherwise. The call goes through either way; only its
+     * answer is ours to correct. */
+    EmitMov64(s, &o, 0xB8, (uint64_t)(uintptr_t)&g_headShow);
+    s[o++] = 0x80; s[o++] = 0x38; s[o++] = 0x00;    /* cmp byte [rax],0 */
+    s[o++] = 0x75; s[o++] = 0x02;                   /* jne +2           */
+    s[o++] = 0xB2; s[o++] = 0x01;                   /* mov dl,1         */
     /* The engine names the head right here: this call takes it
      * in rcx. Remembering it beats walking the chain ourselves,
      * which is a guess about a layout that only the engine
@@ -536,36 +627,142 @@ static uint64_t HeadTransform(uint64_t arg) {
     uint64_t a = arg;
     int i;
 
-    for (i = 0; i < 3; i++) {
+    /* Two plain dereferences, then the one that carries the
+     * 0x238: the table walks [[[rcx]]+0x238], and a third
+     * plain step here reads past the transform into whatever
+     * the object keeps next - which came out of the log as a
+     * code address full of int3 padding. */
+    for (i = 0; i < 2; i++) {
         a = RdQ(a);
         if (!a) return 0;
     }
     return RdQ(a + 0x238);
 }
 
+/* Of the last few captures, the one that sits where the local
+ * player is. In a squad the ring holds the whole squad, so
+ * metres from the player is the test; alone it is trivially
+ * the only entry. Returns 0 when nothing is close enough,
+ * which is the caller's cue to fall back.
+ */
+#define PICK_MAX_M   12.0f
+
+static uint64_t PickLocalCapture(const ShVec3 *me,
+                                 uint64_t *outA2, uint64_t *outA3) {
+    uint64_t arg = 0, a2 = 0, a3 = 0;
+    float best = PICK_MAX_M * PICK_MAX_M;
+    int i;
+
+    for (i = 0; i < RING_SLOTS; i++) {
+        uint64_t a = g_ring.a0[i];
+        uint64_t t2;
+        float p[3], dx, dy, dz, d;
+
+        if (!a) continue;
+        t2 = HeadTransform(a);
+        if (!t2) continue;
+        if (!RdF(t2, p, 3)) continue;
+        if (p[0] != p[0] || p[1] != p[1]) continue;
+        dx = p[0] - me->x;
+        dy = p[1] - me->y;
+        dz = p[2] - me->z;
+        d = dx * dx + dy * dy + dz * dz;
+        if (d >= best) continue;
+        best = d;
+        arg = a;
+        a2 = g_ring.a2[i];
+        a3 = g_ring.a3[i];
+    }
+    *outA2 = a2;
+    *outA3 = a3;
+    return arg;
+}
+
+/* Once every couple of seconds while nothing is being picked,
+ * say what the ring actually holds - so an empty ring, a chain
+ * that will not resolve and a distance that vetoes are told
+ * apart in the log instead of all reading as the same zero. */
+static void RingTrace(const ShVec3 *me) {
+    static uint64_t lastAt;
+    uint64_t now = GetTickCount64();
+    int slot[8], used = 0, i, n;
+    char line[300];
+
+    if (now - lastAt < 2000) return;
+    lastAt = now;
+
+    for (i = 0; i < RING_SLOTS && used < 8; i++)
+        if (g_ring.a0[i]) slot[used++] = i;
+
+    n = snprintf(line, sizeof line,
+                 "ring me=%.1f,%.1f,%.1f live=%d:", me->x, me->y, me->z,
+                 used);
+    for (i = 0; i < used && n > 0; i++)
+        n += snprintf(line + n, sizeof(line) - n, " %d:%llX",
+                      slot[i], (unsigned long long)g_ring.a0[slot[i]]);
+    if (n > 0) Log("%s", line);
+
+    n = snprintf(line, sizeof line, "ring p:");
+    for (i = 0; i < used && n > 0; i++) {
+        uint64_t t2 = HeadTransform(g_ring.a0[slot[i]]);
+        float p[3] = { 0, 0, 0 };
+
+        if (t2 && RdF(t2, p, 3))
+            n += snprintf(line + n, sizeof(line) - n,
+                          " %.1f,%.1f,%.1f", p[0], p[1], p[2]);
+        else
+            n += snprintf(line + n, sizeof(line) - n, " -");
+    }
+    if (n > 0) Log("%s", line);
+}
+
 /* The chain is walked one step at a time and each step is named,
  * because "the head could not be found" is not something that can
- * be acted on: which link came back empty is. */
-static uint32_t g_hpTrace = 0;
+ * be acted on: which link came back empty is. Time throttled,
+ * not counted: a count of eight was spent in the first second
+ * of one bad state and every state after it went unlogged. */
+static uint64_t g_hpLogAt;
+
+static int HpLogReady(void) {
+    uint64_t now = GetTickCount64();
+
+    if (now - g_hpLogAt < 2000) return 0;
+    g_hpLogAt = now;
+    return 1;
+}
 
 static uint64_t HeadPtrStop(int step) {
-    if (g_hpTrace < 8) {
-        g_hpTrace++;
+    if (HpLogReady())
         Log("headptr: nothing at step %d", step);
-    }
     return 0;
+}
+
+/* The visibility call writes into the node it is handed. A
+ * node that cannot take that write is not a node this state
+ * should be talking to - handing one over is what crashed
+ * the map screens. */
+static int Writable(uint64_t addr, size_t len) {
+    MEMORY_BASIC_INFORMATION mbi;
+
+    if (!addr) return 0;
+    if (!VirtualQuery((void *)(uintptr_t)addr, &mbi, sizeof(mbi)))
+        return 0;
+    if (mbi.State != MEM_COMMIT) return 0;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+    if (!(mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
+                         PAGE_EXECUTE_READWRITE |
+                         PAGE_EXECUTE_WRITECOPY)))
+        return 0;
+    return (uint64_t)(uintptr_t)mbi.BaseAddress
+           + mbi.RegionSize >= addr + len;
 }
 
 /* The head, for the visibility call. A chain the table walks
  * by hand; it ends in a small table indexed by a type tag the
  * site has to match, and a miss is simply "not now". */
-static uint64_t HeadPtr(void) {
+static uint64_t HeadPtrChain(void) {
     uint64_t a, c;
     uint16_t tag;
-
-    /* What the engine handed its own visibility call. It is the
-     * real thing, so it wins over anything we walk to. */
-    if (g_fp.headPtr) return g_fp.headPtr;
 
     a = RdQ(HEAD_ROOT); if (!a) return HeadPtrStop(0);
     a = RdQ(a + 0x10);  if (!a) return HeadPtrStop(1);
@@ -576,17 +773,53 @@ static uint64_t HeadPtr(void) {
     c = RdQ(c + 0x10);  if (!c) return HeadPtrStop(6);
     if (!ShReadableAddr(c + 3, 2)) return HeadPtrStop(7);
     memcpy(&tag, (const void *)(uintptr_t)(c + 3), 2);
-    if ((tag & 0xFFu) != 15u) {
-        if (g_hpTrace < 8) {
-            g_hpTrace++;
-            Log("headptr: tag %u, not 15", (unsigned)(tag & 0xFFu));
-        }
+    tag &= 0xFFu;
+    /* The tag names the slot, and it is not a constant: the
+     * log caught 0x0F on foot, 0x15 around vehicles and 0xC7
+     * after a map screen - three states, three slots. The
+     * table's own check reads "15", which in Cheat Engine's
+     * assembler is hex, and a white list kept missing states.
+     * Any of them indexes the same table; what matters is
+     * that the slot yields a pointer at all. */
+    a = RdQ(a + 0x27);  if (!a) return HeadPtrStop(9);
+    a = RdQ(a + (uint64_t)tag * 8u);
+    if (!a) {
+        if (HpLogReady())
+            Log("headptr: tag %u, empty slot", (unsigned)tag);
         return 0;
     }
-    a = RdQ(a + 0x27);  if (!a) return HeadPtrStop(9);
-    a = RdQ(a + (uint64_t)(tag & 0xFFu) * 8u);
-    if (!a) return HeadPtrStop(10);
+    if (!Writable(a, 0x40)) {
+        if (HpLogReady())
+            Log("headptr: tag %u, node not writable", (unsigned)tag);
+        return 0;
+    }
     return a;
+}
+
+/* Chain first, so a respawn picks the fresh pointer the same
+ * frame it exists; the last good one only answers when the
+ * chain will not resolve right now, which is the ordinary
+ * state in a menu rather than an error. */
+static uint64_t HeadPtr(void) {
+    uint64_t a = HeadPtrChain();
+
+    if (a) {
+        g_fp.headPtr = a;
+        return a;
+    }
+    return g_fp.headPtr;
+}
+
+/* The camera frame, whether first person runs or not: hold the
+ * head down while first person has it, and restate "visible"
+ * through the show window after a handover. */
+void ShFp2HeadFrame(void) {
+    if (g_headShow) {
+        if (g_showUntil) {
+            if (GetTickCount64() < g_showUntil) HeadVis(0);
+            else g_showUntil = 0;
+        }
+    }
 }
 
 /* Two readings that should describe the same place. A
@@ -634,61 +867,65 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
      * here is a stack the engine happily writes straight
      * through. */
     SH_ALIGNED(16) float out[8];
-    uint64_t arg, tf;
-    int i, tr;
+    uint64_t arg, tf, a2, a3;
+    ShVec3 me;
+    int tr;
 
     (void)cm;
     tr = (g_trace < 24);
     if (!g_ready) { g_bow = BOW_OFF; return 0; }
     if (!g_fp.want)   { g_bow = BOW_OFF;   return 0; }
 
-    /* Where the aim began. The settle window is measured from
-     * the edge, and the edge is only visible here: the byte is
-     * written by a stub in the engine's own call, which cannot
-     * ask the time. */
+    /* Gates that bow out of placing the eye. The head is none
+     * of these branches' business: it does what ShFp2HeadWant
+     * said, at the top of this function, every frame. */
+    if (g_fp.skip[0]) { g_bow = BOW_MENU;  return 0; }
+    if (g_fp.skip[1]) { g_bow = BOW_DRONE; return 0; }
+
+    /* While first person holds the camera the head goes, and
+     * it goes every frame: the engine reasserts its own idea
+     * of the head constantly, and a missed frame is a frame
+     * the head is back. An aim keeps it away too - that is
+     * what keeps the sights from filling with a skull. In a
+     * menu or the drone the branches above left already, so
+     * the engine's own state shows it again there. */
+    if (!g_headShow) HeadVis(1);
+    /* An aim hands the frame to the engine's own aim camera,
+     * the instant it starts - the table's behaviour, and the
+     * only one this design has: the engine's aim transition
+     * runs the whole time, so a window that keeps writing over
+     * it does not blend anything, it hides the transition and
+     * then reveals it in one jump when the window closes.
+     * That is a pull, and it was measured as one. */
     if (g_fp.skip[3]) {
-        if (!g_adsPrev) g_adsAt = GetTickCount64();
-    } else {
-        g_adsAt = 0;
-    }
-    g_adsPrev = g_fp.skip[3];
-
-    /* A menu and the drone are views the engine draws itself,
-     * and a hidden head in either is a headless body on
-     * screen. An aim is the opposite: the table keeps the head
-     * hidden there, which is what keeps the sights from
-     * filling with the inside of a skull. */
-    if (g_fp.skip[0]) { g_bow = BOW_MENU;  HeadVis(0); return 0; }
-    if (g_fp.skip[1]) { g_bow = BOW_DRONE; HeadVis(0); return 0; }
-    /* An aim hands the camera to the engine's own aim camera -
-     * but not on the instant it starts. For those first frames
-     * the eye stays ours, which is what makes the change over
-     * a settle instead of a snap. How long is the player's
-     * call: 0 hands it over at once, and the table's own
-     * behaviour is exactly that. */
-    if (g_fp.skip[3] && (g_settleMs == 0 || g_adsAt == 0 ||
-                         GetTickCount64() - g_adsAt >=
-                         (uint64_t)g_settleMs)) {
         g_bow = BOW_ADS;
-        HeadVis(1);
         return 0;
     }
 
-    /* No fresh capture this frame: place nothing, but the head
-     * stays hidden. The table skips the placement on such a
-     * frame and never the head, and skipping both is exactly
-     * what let it back on screen for a frame at a time. */
-    if (!g_fp.skip[2]) {
-        g_bow = BOW_STALE;
-        HeadVis(1);
+    /* Pick the capture that belongs to the local player. The
+     * engine runs the head call once per character, so the ring
+     * holds the whole squad; no match falls back to the last
+     * capture that vetted - but only while that one still
+     * resolves. After a respawn the remembered argument points
+     * at a freed object, and the head call below would be a
+     * call into nothing: the whole chain has to answer before
+     * it is used. */
+    a2 = g_fp.headArg8;
+    a3 = g_fp.headArg9;
+    arg = ShGetPlayerPosition(&me)
+          ? PickLocalCapture(&me, &a2, &a3) : 0;
+    if (!arg && g_fp.headArgPrev &&
+        HeadTransform(g_fp.headArgPrev))
+        arg = g_fp.headArgPrev;
+    if (!arg) {
+        /* Nothing picked. Three ways to get here and the log
+         * has to say which: the ring was never written (the
+         * stub is not running), nothing in it resolves to a
+         * transform, or everything is too far away. */
+        g_bow = BOW_ARG;
+        RingTrace(&me);
         return 0;
     }
-
-    /* One capture feeds one frame. */
-    g_fp.skip[2] = 0;
-    arg = g_fp.headArg;
-    if (!arg) arg = g_fp.headArgPrev;
-    if (!arg) { g_bow = BOW_ARG; HeadVis(1); return 0; }
 
     /* Vetted readings are remembered as the last known good
      * one, for the frame where a capture goes missing.
@@ -702,23 +939,44 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
      * placed and the head was never hidden. The check is a
      * note, not a veto. */
     tf = HeadTransform(arg);
-    if (tf && Sane(tf)) g_fp.headArgPrev = arg;
+    if (tf && Sane(tf)) {
+        g_fp.headArgPrev = arg;
+        g_fp.headArg8 = a2;
+        g_fp.headArg9 = a3;
+    }
 
     memset(out, 0, sizeof(out));
     if (tr)
         Log("#%u arg=%llx a2=%llx a3=%llx prev=%llx", g_trace,
             (unsigned long long)arg,
-            (unsigned long long)g_fp.headArg8,
-            (unsigned long long)g_fp.headArg9,
+            (unsigned long long)a2,
+            (unsigned long long)a3,
             (unsigned long long)g_fp.headArgPrev);
     ((HeadFn)(uintptr_t)FN_HEAD)(arg, (uint64_t)(uintptr_t)out,
-                                 g_fp.headArg8, g_fp.headArg9);
+                                 a2, a3);
     if (tr)
         Log("#%u out %.2f %.2f %.2f", g_trace,
             out[0], out[1], out[2]);
     g_trace++;
-    for (i = 0; i < 3; i++)
-        out[i] += g_fp.off[i];
+    {
+        float ox, oy, oz;
+        uint32_t s0, s1;
+        int spin = 0;
+
+        /* The offset as one set, not three reads, see
+         * ShFp2SetOffset. A torn set is caught by the stamp
+         * and simply read again. */
+        do {
+            s0 = g_offSeq;
+            ox = g_fp.off[0];
+            oy = g_fp.off[1];
+            oz = g_fp.off[2];
+            s1 = g_offSeq;
+        } while ((s0 != s1 || (s0 & 1u)) && ++spin < 8);
+        out[0] += ox;
+        out[1] += oy;
+        out[2] += oz;
+    }
     if (out[0] != out[0] || out[1] != out[1] || out[2] != out[2]) {
         g_bow = BOW_BAD;
         return 0;
@@ -739,7 +997,6 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
     p[3] = 0.0f;
 
     g_fp.placedAt = GetTickCount64();
-    HeadVis(1);
     g_bow = BOW_NONE;
     return 1;
 }
@@ -837,28 +1094,52 @@ SH_API uint32_t ShFp2Missing(void) {
     return g_miss | g_exMiss;
 }
 
-/** 1 to take the camera, 0 to hand it back. */
+/** 1 to take the camera, 0 to hand it back. The head is none
+ *  of this call's business: the plugin says what it should be,
+ *  through ShFp2HeadWant.
+ */
 SH_API void ShFp2Enable(int on) {
     g_fp.want = (uint8_t)(on ? 1 : 0);
+    /* Taking the camera means taking the head: first person
+     * holds it down every frame from here. Handing the camera
+     * back hands the head back with it - through a window of
+     * restated shows, since the engine's own state lags. */
+    g_headShow = on ? 0 : 1;
     if (!on) {
-        /* Handing the camera back means the head has to come
-         * back with it, and it has to happen now rather than
-         * on the next beat. */
-        g_fp.visAt = 0;
+        g_showUntil = GetTickCount64() + 800;
         HeadVis(0);
     }
 }
 
-/** The eye offset, in metres, in world axes. */
+/** Force the head visible (non zero) or hidden (0), now and
+ *  for every frame until said otherwise. Showing calls the
+ *  engine once; hiding is the camera frame's business, one
+ *  call a frame for as long as it lasts.
+ */
+SH_API void ShFp2HeadShow(int show) {
+    g_headShow = show ? 1 : 0;
+    if (show) {
+        g_showUntil = GetTickCount64() + 800;
+        HeadVis(0);
+    }
+}
+
+/** The eye offset, in metres, in world axes.
+ *
+ *  Written from a plugin thread, read inside the engine's
+ *  frame, so the three floats are published behind a counter:
+ *  odd while a write is in progress, even when it is done, and
+ *  the reader takes the set again if it caught a tear. Three
+ *  separate stores are not one store, and the frame that mixed
+ *  an old x with a new y would be a visible nudge.
+ */
 SH_API void ShFp2SetOffset(float x, float y, float z) {
+    g_offSeq++;
     g_fp.off[0] = x;
     g_fp.off[1] = y;
     g_fp.off[2] = z;
     g_fp.off[3] = 0.0f;
-}
-
-SH_API void ShFp2Settle(uint32_t ms) {
-    g_settleMs = ms;
+    g_offSeq++;
 }
 
 /** The live gate bytes: menu count, drone, aim, and whether a
@@ -890,10 +1171,4 @@ SH_API uint32_t ShFp2Age(void) {
     return (uint32_t)(GetTickCount64() - g_fp.placedAt);
 }
 
-/** Force the head one way or the other, outside the frame
- *  path. Used when a screen opens and the head has to be
- *  visible even though first person is still armed.
- */
-SH_API void ShFp2HeadShow(int show) {
-    HeadVis(show ? 0 : 1);
-}
+

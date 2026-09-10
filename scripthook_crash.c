@@ -156,6 +156,29 @@ static void Report(EXCEPTION_POINTERS *ep, int fatal) {
                   (unsigned long long)c->R13, (unsigned long long)c->R14,
                   (unsigned long long)c->R15);
 
+    /* The bytes at the fault. Register guesses say one thing,
+     * the actual instruction stream says the truth - which is
+     * how a stub that looks right on paper gets caught. */
+    if (c->Rip > 0x10000 &&
+        n < (int)sizeof(g_buf) - 200) {
+        uint8_t code[32];
+        int k;
+
+        if (ShReadMem(c->Rip - 8, code, sizeof(code))) {
+            n += snprintf(g_buf + n, sizeof(g_buf) - n,
+                          "  code rip-08:");
+            for (k = 0; k < 8; k++)
+                n += snprintf(g_buf + n, sizeof(g_buf) - n,
+                              " %02X", code[k]);
+            n += snprintf(g_buf + n, sizeof(g_buf) - n,
+                          " | rip:");
+            for (; k < (int)sizeof(code); k++)
+                n += snprintf(g_buf + n, sizeof(g_buf) - n,
+                              " %02X", code[k]);
+            n += snprintf(g_buf + n, sizeof(g_buf) - n, "\n");
+        }
+    }
+
     /* The raw stack, annotated per module. Return
      * addresses stand out, which is enough to place the
      * fault in a call chain without unwind data. */

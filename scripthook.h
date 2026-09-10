@@ -873,37 +873,6 @@ SH_API int  ShCameraViewMode(void);
  */
 SH_API int  ShCameraFirstPersonActive(void);
 
-/** Diagnostics: where the first person eye came from on the last
- *  frame it could have been placed. 0 it was placed on the head,
- *  1 there was nothing to place it on at all, 2 the camera is a
- *  scope, 3 it sits beyond a chase arm, 4 the head could not be read
- *  and a stand in was used, 5 the reading was not sane, 6 the frame is
- *  not the played world at all - a menu, a drone, a cinematic.
- */
-SH_API int  ShCameraHeadBow(void);
-
-/** Diagnostics: the largest distance the first person eye was asked
- *  to move in one frame over the last second, in metres. A view that
- *  flickers between two places shows up here as a jump every frame.
- */
-SH_API float ShCameraEyeJump(void);
-
-/** Diagnostics for a view that flickers between first and third
- *  person. overwritten counts the frames where the eye we placed was
- *  gone by the time that camera came round again, swaps counts how
- *  often the camera object itself changed. Both are counts since the
- *  previous call, so a caller polling once a second gets a per second
- *  rate. Either one above zero while the view flickers says the engine
- *  is still drawing some of the frames.
- */
-SH_API void ShCameraEyeDiag(int *overwritten, int *swaps);
-
-/** Diagnostics: where the last first person eye was placed, world
- *  coordinates, and how far that head was from the camera in metres.
- *  dist is -1 while nothing has been placed yet.
- */
-SH_API void ShCameraEyeAt(float pos[3], float *dist);
-
 /** Drop the "we just handed the camera back" grace, see
  *  ShCameraViewMode. Turning first person off is a change of view,
  *  not a hand over to the engine's aim camera.
@@ -1139,14 +1108,6 @@ SH_API void ShFp2Enable(int on);
 /** The eye offset in metres, in world axes. */
 SH_API void ShFp2SetOffset(float x, float y, float z);
 
-/** How long an aim keeps the first person eye before the
- *  engine's own aim camera takes over, in milliseconds. 0
- *  hands it over the instant the aim starts, which is what
- *  the table does; the larger it is, the longer the view
- *  stays ours into the aim.
- */
-SH_API void ShFp2Settle(uint32_t ms);
-
 /** The live gate bytes. Any argument may be NULL. */
 SH_API void ShFp2Gate(int *menu, int *drone, int *ads, int *fresh);
 
@@ -1156,8 +1117,14 @@ SH_API void ShFp2Gate(int *menu, int *drone, int *ads, int *fresh);
  */
 SH_API int  ShFp2HeadOk(void);
 
-/** Force the head visible (non zero) or hidden (0), now. */
+/** Force the head visible (non zero) or hidden (0), now and
+ *  for every frame until said otherwise. While first person
+ *  holds the camera the hidden state is restated once a
+ *  frame, because the engine keeps reasserting its own.
+ */
 SH_API void ShFp2HeadShow(int show);
+
+
 
 /** Why the last frame placed no eye: 0 it placed, 1 not
  *  asked, 2 a menu, 3 the drone, 4 an aim, 5 stale, 6 no
@@ -1171,9 +1138,12 @@ SH_API uint32_t ShFp2Age(void);
 /** @} */
 
 /* Not exported. Called from the camera manager's own frame,
- * inside the engine's call chain, by scripthook_camera.c.
+ * inside the engine's call chain, by scripthook_camera.c -
+ * once a frame whether first person runs or not, so the head
+ * is held down while taken and restated while handed back.
  */
 int ShFp2PlaceEye(uint64_t cm, float *m, float *p);
+void ShFp2HeadFrame(void);
 
 /** @addtogroup state
  *  @{ */
