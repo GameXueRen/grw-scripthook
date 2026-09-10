@@ -47,7 +47,9 @@
  * preset, which then holds whatever the world is doing. */
 enum {
     CAT_FOOT = 0,   /* on foot, any stance */
-    CAT_LAND,       /* ground vehicle: car, motorbike, boat */
+    CAT_LAND,       /* ground vehicle: cars, and anything else */
+    CAT_BIKE,       /* motorbike: the rider leans forward */
+    CAT_BOAT,       /* boat: it rides, and sways */
     CAT_PLANE,      /* airplane */
     CAT_HELI,       /* helicopter */
     CAT_RIDER,      /* riding along as a passenger */
@@ -57,11 +59,11 @@ enum {
 /* Menu titles and ini suffixes, per category. The English
  * titles are the lookup keys for [zh_cn.First person]. */
 static const char *g_catName[CAT_COUNT] = {
-    "On foot", "Ground vehicle", "Airplane",
-    "Helicopter", "Passenger"
+    "On foot", "Ground vehicle", "Motorbike", "Boat",
+    "Airplane", "Helicopter", "Passenger"
 };
 static const char *g_catTag[CAT_COUNT] = {
-    "foot", "land", "plane", "heli", "rider"
+    "foot", "land", "bike", "boat", "plane", "heli", "rider"
 };
 
 /* Custom presets: a saved set of offsets to switch to by hand,
@@ -92,6 +94,9 @@ static const char *g_axisTag[3] = { "right", "fwd", "up" };
 typedef int (*IsInGame_t)(void);
 typedef int (*GameState_t)(void);
 typedef int (*InputCtx_t)(void);
+typedef int (*GetPlayer_t)(ShPlayer *);
+typedef int (*GetKind_t)(uint64_t);
+typedef int (*GetComps_t)(uint64_t, ShComponent *, int);
 typedef int (*FirstPerson_t)(float, float);
 typedef void (*Release_t)(uint32_t);
 typedef int (*SetBlur_t)(int);
@@ -144,6 +149,9 @@ static char      g_iniPath[MAX_PATH];
 static IsInGame_t   g_inGame;
 static GameState_t  g_state;
 static InputCtx_t   g_inputCtx;
+static GetPlayer_t  g_getPlayer;
+static GetKind_t    g_getKind;
+static GetComps_t   g_getComps;
 static FirstPerson_t g_fp;
 static Release_t    g_release;
 static ToastEx_t    g_toastEx;
@@ -630,17 +638,128 @@ static void ReportAway(const char *why) {
     SayStatusWhy(STATUS_AWAY, why, ActiveSetName(), r, f, u);
 }
 
+/* ---- which form of ground vehicle ------------------------
+ * The input context calls a bike, a car and a boat the same
+ * thing, so the difference has to come from the vehicle
+ * entity itself. The engine's own component classes turned out
+ * to carry it: measured live, two bikes of different makes
+ * carried the same set, two cars likewise, and the boat's set
+ * shared no mark with either. Each form answers to any one of
+ * its marks, so a component that has not streamed in yet
+ * costs nothing - the ground vehicle set stays in force until
+ * a later sample sees a mark.
+ */
+static const struct { uint32_t hash; int cat; } g_rideMark[] = {
+    /* Motorbike. */
+    { 0x02C64BC9u, CAT_BIKE }, { 0xA1CFF90Au, CAT_BIKE },
+    /* Boat. */
+    { 0xBE6165A8u, CAT_BOAT }, { 0xBF84AF62u, CAT_BOAT },
+    { 0xC7385C7Bu, CAT_BOAT },
+    /* Car. The three shared by both cars measured; the marks
+     * a car shares with aircraft are deliberately left out. */
+    { 0x2D07BAA8u, CAT_LAND }, { 0x614590A3u, CAT_LAND },
+    { 0x9F08D18Au, CAT_LAND }
+};
+#define RIDE_MARKS (int)(sizeof(g_rideMark) / sizeof(g_rideMark[0]))
+
+/* The gunner's seat is not told apart here - the Custom
+ * presets are what it is for. Four signals were measured
+ * against it and every one of them failed on the evidence:
+ * the eye's height over the chassis read -0.02 to 2.16 m for
+ * the same seat, the horizontal distance moves with the
+ * vehicle's own speed, the soldier carries 54 components in
+ * every seat, and the parent chain is the same entity link
+ * two levels up wherever he sits. Seat identity lives in the
+ * vehicle's own seat data, which is not parsed.
+ */
+
+/* The form in force, -1 while it is unknown. */
+static volatile int g_rideCat = -1;
+
+/* Which form the vehicle entity says it is, or -1 when no
+ * mark matches: an unknown vehicle keeps the ground vehicle
+ * set, never a wrong one. */
+static int RideForm(void) {
+    ShPlayer p;
+    ShComponent comp[64];
+    int n, i, m;
+
+    if (!g_getComps || !g_getPlayer) return -1;
+    memset(&p, 0, sizeof(p));
+    if (!g_getPlayer(&p) || !p.root) return -1;
+    n = g_getComps(p.root, comp, 64);
+    if (n > 64) n = 64;
+    for (i = 0; i < n; i++)
+        for (m = 0; m < RIDE_MARKS; m++)
+            if (comp[i].classHash == g_rideMark[m].hash)
+                return g_rideMark[m].cat;
+    return -1;
+}
+
+/* A ride fingerprint, kept as the answer's evidence: the kind
+ * of moment, the vehicle entity and its whole component set,
+ * so a form that comes out wrong can be traced to the mark it
+ * matched. Written when the kind of moment changes and while
+ * a ride lasts.
+ */
+static int CmpHash(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static void RideProbe(int ctx, uint64_t nowMs) {
+    static uint64_t lastAt;
+    static int lastCtx = -2;
+    ShPlayer p;
+    ShComponent comp[64];
+    uint32_t hash[64];
+    char line[320];
+    int n, i, j, k;
+
+    if (ctx == SH_CTX_ONFOOT && lastCtx == SH_CTX_ONFOOT) return;
+    if (ctx == lastCtx && nowMs - lastAt < 4000) return;
+    if (!g_getComps || !g_getPlayer) return;
+    lastCtx = ctx;
+    lastAt = nowMs;
+
+    memset(&p, 0, sizeof(p));
+    if (!g_getPlayer(&p) || !p.root) {
+        Diag("ride: ctx=%d no player", ctx);
+        return;
+    }
+    n = g_getComps(p.root, comp, 64);
+    Diag("ride: ctx=%d ent=%llx root=%llx kind=%d comps=%d form=%d",
+         ctx, (unsigned long long)p.entity,
+         (unsigned long long)p.root,
+         g_getKind ? g_getKind(p.root) : -1, n, g_rideCat);
+
+    if (n <= 0) return;
+
+    /* Sorted, because the component array's own order follows
+     * the entity's internals and differs between two vehicles
+     * of the same class. A set is what can be compared. */
+    if (n > 64) n = 64;
+    for (i = 0; i < n; i++) hash[i] = comp[i].classHash;
+    qsort(hash, (size_t)n, sizeof(hash[0]), CmpHash);
+    for (i = 0; i < n; i += 8) {
+        k = snprintf(line, sizeof(line), "ride fp[%02d]:", i);
+        for (j = i; j < n && j < i + 8; j++)
+            k += snprintf(line + k, sizeof(line) - k, " %08X", hash[j]);
+        Diag("%s", line);
+    }
+}
+
 /* ---- the tick -------------------------------------------- */
 
 static DWORD WINAPI TickThread(LPVOID p) {
     int dPlay = -1, dAway = -1;
-    uint64_t lastBeat = 0, menuHeldAt = 0;
+    uint64_t lastBeat = 0, menuHeldAt = 0, rideAt = 0;
     int menuStuckSaid = 0;
     (void)p;
 
     for (;;) {
         int playing, menu = 0, drone = 0, ads = 0, fresh = 0;
-        int away;
+        int away, ctx = -1;
         uint64_t nowMs;
 
         Sleep(TICK_MS);
@@ -682,13 +801,35 @@ static DWORD WINAPI TickThread(LPVOID p) {
             lastBeat = nowMs;
             Diag("beat: play=%d on=%d held=%d menu=%d drone=%d "
                  "ads=%d bow=%d age=%u headok=%d cat=%d preset=%d "
-                 "off=%.0f,%.0f,%.0f",
+                 "ctx=%d off=%.0f,%.0f,%.0f",
                  playing, g_on, g_held, menu, drone, ads,
                  g_fpxBow ? g_fpxBow() : -1,
                  g_fpxAge ? g_fpxAge() : 0u,
                  g_fpxHeadOk ? g_fpxHeadOk() : -1,
-                 g_cat, g_presetSel,
+                 g_cat, g_presetSel, ctx,
                  g_activeR, g_activeF, g_activeU);
+        }
+
+        /* The ride probe answers a question about the model, not
+         * about the view, so it runs whether first person is on
+         * or off - the point is to see what the engine calls the
+         * thing the player is sitting in. */
+        if (g_inputCtx) ctx = g_inputCtx();
+        if (ctx >= 0) {
+            /* The ground vehicle's form, re-read while the ride
+             * lasts: components stream in, so a car that read as
+             * unknown a second ago can answer now. One read a
+             * second is enough for something that changes only
+             * when the player changes seats. */
+            if (ctx == SH_CTX_VEHICLE) {
+                if (nowMs - rideAt >= 1000) {
+                    rideAt = nowMs;
+                    g_rideCat = RideForm();
+                }
+            } else {
+                g_rideCat = -1;
+            }
+            RideProbe(ctx, nowMs);
         }
 
         /* Off the camera, or a load screen: everything goes
@@ -710,11 +851,14 @@ static DWORD WINAPI TickThread(LPVOID p) {
          * actually changes - the context read is cheap, but
          * pushing the camera is not something to do for
          * nothing. */
-        if (g_presetSel == PRESET_AUTO && g_inputCtx) {
-            int c = CatFromCtx(g_inputCtx());
+        if (g_presetSel == PRESET_AUTO && ctx >= 0) {
+            int c = CatFromCtx(ctx);
+            /* A ground vehicle resolves further, to the form
+             * the vehicle entity named. An unrecognised vehicle
+             * stays on the ground vehicle set. */
+            if (c == CAT_LAND && g_rideCat > 0) c = g_rideCat;
             if (c >= 0 && c != g_cat) {
-                Diag("cat %s -> %s", g_catName[g_cat],
-                     g_catName[c]);
+                Diag("cat %s -> %s", g_catName[g_cat], g_catName[c]);
                 g_cat = c;
                 PushCamera();
                 if (!dAway) Report();
@@ -992,6 +1136,11 @@ static DWORD WINAPI BindThread(LPVOID p) {
     /* Which kind of moment the player is in, for the automatic
      * offset set. Optional: without it Auto stays on foot. */
     *(FARPROC *)&g_inputCtx = GetProcAddress(m, "ShInputContext");
+    /* The ride probe's readers, see RideProbe: optional, the
+     * probe simply says nothing without them. */
+    *(FARPROC *)&g_getPlayer = GetProcAddress(m, "ShGetPlayer");
+    *(FARPROC *)&g_getKind = GetProcAddress(m, "ShGetEntityKind");
+    *(FARPROC *)&g_getComps = GetProcAddress(m, "ShGetComponents");
 
     /* The engine side of the view. Missing from an older
      * dinput8: the plugin binds, the menu says the sites are
