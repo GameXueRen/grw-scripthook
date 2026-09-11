@@ -357,12 +357,11 @@ static HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share,
                                      DWORD flags, HANDLE tmpl) {
     HANDLE h = g_realCreateFileW(name, access, share, sa, disp, flags, tmpl);
 
-    /* Only the calls that can change a save are worth a line: an
-     * overwrite, a truncate, a delete-on-close, or an open for write.
-     * Plain reads of the folder are the game's own business. */
-    if (IsSavePathW(name) &&
-        ((access & (GENERIC_WRITE | DELETE)) ||
-         disp == CREATE_ALWAYS || disp == TRUNCATE_EXISTING)) {
+    /* Every open of a save path is recorded now, reads included. The
+     * question this round is what the save list reads when it is rebuilt
+     * after a death - and a read is exactly what that would look like, so
+     * filtering to writes would filter out the answer. */
+    if (IsSavePathW(name)) {
         char extra[160];
         snprintf(extra, sizeof(extra), "access=0x%lX disp=%lu flags=0x%lX",
                  (unsigned long)access, (unsigned long)disp,
@@ -428,10 +427,11 @@ static BOOL WINAPI HookFindNextFileW(HANDLE h, LPWIN32_FIND_DATAW fd) {
 static DWORD WINAPI HookGetFileAttributesW(LPCWSTR name) {
     DWORD r = g_realGetFileAttributesW(name);
 
-    /* Only the failures and the successes on a save file matter: a
-     * check right after a delete would say the game verifies its
-     * work. */
-    if (IsSavePathW(name) && wcsstr(name, L".save"))
+    /* Every existence check on a save path is recorded now. The list may
+     * be building itself by probing for the files rather than by walking
+     * the folder, and that is one of the two answers this round is
+     * after - narrowing to ".save" would hide the probe on a .delete. */
+    if (IsSavePathW(name))
         Note("GetFileAttributesW", name, "", r != INVALID_FILE_ATTRIBUTES,
              GetLastError());
     return r;
@@ -612,6 +612,31 @@ static void InstallHooks(void) {
     ProbeLog("install: walk the save folder now, then die in Ghost Mode");
 }
 
+/* A line whenever the engine's state changes, so the log can be read
+ * against the file operations. The question for the second round is which
+ * state the list is rebuilt in after a death, and whether an ordinary
+ * save ever passes through that same state - if it does not, that is a
+ * signal the plugin could use to tell the two apart. */
+static DWORD WINAPI WatchThread(LPVOID p) {
+    int last = -1;
+
+    (void)p;
+    for (;;) {
+        if (g_getState) {
+            int s = g_getState();
+            if (s != last) {
+                char name[64];
+                name[0] = 0;
+                if (g_stateName) g_stateName(name, (int)sizeof(name));
+                ProbeLog("state -> %d %s", s, name[0] ? name : "?");
+                last = s;
+            }
+        }
+        Sleep(100);
+    }
+    return 0;
+}
+
 static DWORD WINAPI InitThread(LPVOID p) {
     (void)p;
     OpenLog();
@@ -638,6 +663,7 @@ static DWORD WINAPI InitThread(LPVOID p) {
     if (Enabled()) {
         ListSaveFolder();
         InstallHooks();
+        CreateThread(NULL, 0, WatchThread, NULL, 0, NULL);
     } else {
         ProbeLog("probe is off: nothing is hooked, no folder is listed");
     }

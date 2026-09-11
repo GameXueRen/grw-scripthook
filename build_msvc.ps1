@@ -218,17 +218,21 @@ Build-Plugin -Name 'LastRites_dlcfix' -Source 'LastRites_dlcfix.c' -LinkArgs @()
     (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 )
 
-# GhostWipeProbe answered its question - the wipe is a rename, see
-# GhostNoWipe.c - and it must not be deployed alongside GhostNoWipe:
-# both hook MoveFileExW, and MinHook keeps its state per DLL, so two
-# plugins hooking one target tread on each other. The source stays as
-# the record of how the answer was found.
-#Build-Plugin -Name 'GhostWipeProbe' -Source 'GhostWipeProbe.c' -LinkArgs @() -ExtraSources @(
-#    (Join-Path $root 'third_party/minhook/src/buffer.c'),
-#    (Join-Path $root 'third_party/minhook/src/hook.c'),
-#    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
-#    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
-#)
+# GhostWipeProbe is the second round of evidence, for the question
+# GhostNoWipe cannot answer on its own: why the slot stays hidden for the
+# rest of the session even when nothing of the wipe is left on disk. It
+# records the APIs the save list could be built from - reads included -
+# and stamps each line with the engine state.
+#
+# Not built by default: it and GhostNoWipe both hook MoveFileExW, and
+# MinHook keeps its state per DLL, so the two plugins tread on each
+# other. Run it with the other one switched off.
+Build-Plugin -Name 'GhostWipeProbe' -Source 'GhostWipeProbe.c' -LinkArgs @() -ExtraSources @(
+    (Join-Path $root 'third_party/minhook/src/buffer.c'),
+    (Join-Path $root 'third_party/minhook/src/hook.c'),
+    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
+    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
+)
 
 # GhostNoWipe keeps a Ghost Mode save when a death ends the run: the
 # rename the game performs is turned into a copy. MinHook as well.

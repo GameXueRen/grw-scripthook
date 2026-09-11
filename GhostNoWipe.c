@@ -37,7 +37,18 @@
  *      either - the game redoes the rename on every pass over the list,
  *      and a game that has just been restarted never showed the screen.
  *
- * So three things are held at once:
+ * Which slots are protected
+ *
+ * Only the ones this plugin has seen a Ghost Mode death on. The game
+ * over screen is the one thing a Ghost Mode death produces and no other
+ * mode reaches, so a wipe caught while that screen is recent is the real
+ * thing - and the slot number goes into ghost_slots.ini at that moment,
+ * because by the next launch the window is gone and the game is redoing
+ * the rename with nothing left to tell it by. A slot that was never
+ * marked, and an ordinary save deleted by hand from the list, are left
+ * alone: the game behaves there exactly as it would without the plugin.
+ *
+ * So three things are held at once, for those slots:
  *
  *   - Two generations of clean copy. Every ordinary save rotates
  *     last\X.save into last\X.save.prev and writes the new one into
@@ -46,16 +57,24 @@
  *
  *   - Writes during the death are kept out of the file. Once the game
  *     over screen has been seen, a write that opens the save itself is
- *     diverted to the temp folder. The .tmp promotion is left alone: an
- *     attempt that held it back left no save at all - the old save has
- *     already moved aside as .old and been deleted by then - and the
- *     game reports that as the slot not existing.
+ *     diverted to temp\ beside the plugin.
  *
- *   - The wipe is dropped and the save repaired. Every rename of N.save
- *     to N.save.delete is refused, whatever the moment, and the save is
- *     put back from the .prev generation - not the newest copy, which
- *     may be the wipe's own write. The write to the .delete is sent to
- *     the temp folder, so no tombstone ever lands in the save folder.
+ *   - The save's content is held at the last save the player made. The
+ *     promotion of X.save.tmp over X.save is where the marked content
+ *     would land - measured, ten seconds after the game over screen and
+ *     nineteen before the rename - so it is refused and the save written
+ *     back from a clean copy. Refusing it without that would leave no
+ *     save at all, which the game reports as the slot not existing.
+ *
+ *   - The wipe is dropped and the save repaired. The rename of N.save to
+ *     N.save.delete is refused and the save put back from a clean copy.
+ *     The write to the .delete goes to temp\ as well, so no tombstone
+ *     lands in the save folder.
+ *
+ * Both working areas live in the plugin's own folder - last\ for the
+ * copies, temp\ for the diverted writes. Nothing goes to %TEMP% or
+ * anywhere else outside plugins\GhostNoWipe\. temp\ is emptied at start
+ * up so a long session's litter does not pile up.
  *
  * The slot is still shown as deleted for the rest of the session - that
  * state lives in the process - and comes back on the next launch: the
@@ -68,14 +87,15 @@
  * writes them - and an attempt to read their rewrites as the wipe's
  * record was a dead end.
  *
- * A player who wants a slot actually gone turns the plugin off - from
- * the menu, or enabled=0 in its ini - deletes it, and turns it back on.
+ * A wrong mark is undone from the menu ("Forget the ghost slots"), or by
+ * editing ghost_slots.ini, or by deleting it. enabled=0 leaves the game
+ * exactly as it would be without the plugin.
  *
  * Boundaries: single player only. This changes no difficulty, no death
- * rule and no save content of its own - it declines to move one file
- * and restores another. If cloud sync is turned on later, the kept
- * local save and whatever the cloud holds may disagree; that is for the
- * player to settle. Delete the plugin folder once the game is patched.
+ * rule and no save content of its own - it declines to move one file and
+ * restores another. If cloud sync is turned on later, the kept local
+ * save and whatever the cloud holds may disagree; that is for the player
+ * to settle. Delete the plugin folder once the game is patched.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -89,6 +109,7 @@
 /* From scripthook.h's ShGameState: UNKNOWN, MENU, LOADING, LOBBY,
  * INGAME, RELOADING, PAUSED, GAMEOVER. Kept as a number because a
  * plugin binds the framework by name, not by link. */
+#define SH_STATE_INGAME   4
 #define SH_STATE_GAMEOVER 7
 
 /* How long after the game over screen writes are still held back. The
@@ -99,8 +120,27 @@
 #define WATCH_MS 50
 
 typedef int (*GetState_t)(void);
+typedef uint32_t (*ToastEx_t)(const char *text, uint32_t rgb, uint32_t ms);
+typedef int      (*ToastSet_t)(uint32_t id, const char *text, uint32_t rgb,
+                               uint32_t ms);
+typedef int      (*ToastHide_t)(uint32_t id);
+typedef const char *(*LangForOwned_t)(const char *owner, const char *scope,
+                                      const char *text);
 
-static GetState_t g_getState;
+static GetState_t     g_getState;
+static ToastEx_t      g_toastEx;
+static ToastSet_t     g_toastSet;
+static ToastHide_t    g_toastHide;
+static LangForOwned_t g_langForOwned;
+
+/* Set by the death hooks, shown by the watch thread - the hooks run in
+ * the middle of a file call and have no business touching the HUD. */
+static volatile LONG g_noticeWanted;
+static uint32_t      g_noticeId;
+
+/* This plugin's folder name, which is how the framework finds the
+ * translation table kept in its own ini. */
+static char g_owner[64];
 
 static volatile LONG   g_enabled = 1;
 static volatile LONG64 g_lastGameOver;
@@ -150,18 +190,53 @@ static FILE *OpenLogAt(const char *dir, const char *name) {
 /* ---- the folders this plugin works with -------------------------------- */
 
 static HINSTANCE g_inst = NULL;
-static char      g_dirA[MAX_PATH];     /* the game's working directory */
-static wchar_t   g_backupDir[MAX_PATH];
+static char      g_dirA[MAX_PATH];        /* the game's working directory */
+static wchar_t   g_backupDir[MAX_PATH];   /* <plugin>\last - clean copies */
+static wchar_t   g_tempDir[MAX_PATH];     /* <plugin>\temp - diverted writes */
+static char      g_slotsPath[MAX_PATH];   /* <plugin>\ghost_slots.ini */
 
-/* The plugin's own folder, which is where the clean copies live:
- * <game>\plugins\GhostNoWipe\last\. */
+/* Empty a folder of the files an earlier run left there. Failures are
+ * logged and otherwise ignored: a stale divert file is harmless. */
+static void ClearFolder(const wchar_t *dir) {
+    wchar_t pat[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+
+    if (!dir[0] || wcslen(dir) + 4 >= MAX_PATH) return;
+    wcscpy(pat, dir);
+    wcscat(pat, L"\\*");
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        wchar_t victim[MAX_PATH];
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (wcslen(dir) + wcslen(fd.cFileName) + 2 >= MAX_PATH) continue;
+        wcscpy(victim, dir);
+        wcscat(victim, L"\\");
+        wcscat(victim, fd.cFileName);
+        DeleteFileW(victim);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+/* The plugin keeps two working areas in its own folder:
+ *
+ *   last\   the clean copies to go back to
+ *   temp\   the writes that must not land in the save folder
+ *
+ * The diverted writes used to go to %TEMP%\GhostNoWipe\ instead. They do
+ * not any more: a plugin has no business leaving anything outside its
+ * own folder, and this way the whole lot goes when the folder does. */
 static void ResolveFolders(void) {
     char mod[MAX_PATH];
+    char base[MAX_PATH];
     char *slash;
     int len;
 
     g_dirA[0] = 0;
     g_backupDir[0] = 0;
+    g_tempDir[0] = 0;
+    g_slotsPath[0] = 0;
 
     len = GetModuleFileNameA(NULL, mod, sizeof(mod));
     if (!len || len >= (int)sizeof(mod)) return;
@@ -170,23 +245,32 @@ static void ResolveFolders(void) {
     slash[1] = 0;
     lstrcpynA(g_dirA, mod, sizeof(g_dirA));
 
-    if (g_inst) {
-        char own[MAX_PATH];
-        int n;
-        if (GetModuleFileNameA(g_inst, own, sizeof(own))) {
-            char *p = strrchr(own, '\\');
-            if (p) {
-                *p = 0;
-                n = (int)strlen(own);
-                if (n + 16 < (int)sizeof(own)) {
-                    strcat(own, "\\last");
-                    CreateDirectoryA(own, NULL);
-                    MultiByteToWideChar(CP_ACP, 0, own, -1, g_backupDir,
-                                        MAX_PATH);
-                }
-            }
-        }
-    }
+    if (!g_inst) return;
+    if (!GetModuleFileNameA(g_inst, base, sizeof(base))) return;
+    slash = strrchr(base, '\\');
+    if (!slash) return;
+    *slash = 0;                       /* <game>\plugins\GhostNoWipe */
+    /* the folder name stands in for the plugin wherever the framework
+     * needs to know whose text this is */
+    slash = strrchr(base, '\\');
+    lstrcpynA(g_owner, slash ? slash + 1 : base, sizeof(g_owner));
+    len = (int)strlen(base);
+    if (len + 20 >= (int)sizeof(base)) return;
+
+    strcat(base, "\\last");
+    CreateDirectoryA(base, NULL);
+    MultiByteToWideChar(CP_ACP, 0, base, -1, g_backupDir, MAX_PATH);
+    base[len] = 0;
+
+    strcat(base, "\\temp");
+    CreateDirectoryA(base, NULL);
+    MultiByteToWideChar(CP_ACP, 0, base, -1, g_tempDir, MAX_PATH);
+    base[len] = 0;
+    ClearFolder(g_tempDir);
+
+    strcat(base, "\\ghost_slots.ini");
+    lstrcpynA(g_slotsPath, base, sizeof(g_slotsPath));
+    base[len] = 0;
 }
 
 /* ---- recognising the files --------------------------------------------- */
@@ -249,6 +333,25 @@ static int InDeathWindow(void) {
 
     if (!t) return 0;
     return (GetTickCount64() - (uint64_t)t) < DEATH_WINDOW_MS;
+}
+
+/* Defined further down, where the slot marks are kept. */
+static int  SlotOfName(const wchar_t *path, int *out);
+static int  IsGhostSlot(int slot);
+static void MarkGhostSlot(int slot);
+
+/* Whether a slot is one this plugin may touch at all.
+ *
+ * A Ghost Mode death is the only thing that raises the game over screen,
+ * so a wipe caught while that screen is recent is the real thing - and
+ * that is how a slot is recognised in the first place. Once recognised it
+ * is written down, because by the next launch the window is gone and the
+ * game is redoing the rename with nothing left to tell it by.
+ *
+ * Everything else is left alone: an ordinary save deleted by hand, a slot
+ * belonging to another mode, all of it. */
+static int ShouldTouchSlot(int slot) {
+    return IsGhostSlot(slot) || InDeathWindow();
 }
 
 /* ---- the clean copy ---------------------------------------------------- */
@@ -323,30 +426,6 @@ static int IsGlobalProfileName(const wchar_t *p) {
 
 static void RestoreSave(const wchar_t *save);
 
-/* Put the profile back. The saves are found from the paths already seen
- * rather than guessed: the folder is the one N.save lives in. */
-static void RestoreGlobalProfile(const wchar_t *save) {
-    wchar_t dir[MAX_PATH];
-    wchar_t path[MAX_PATH];
-    const wchar_t *slash;
-    size_t n;
-
-    slash = wcsrchr(save, L'\\');
-    if (!slash) slash = wcsrchr(save, L'/');
-    if (!slash) return;
-    n = (size_t)(slash - save);
-    if (n + 16 >= MAX_PATH) return;
-    wcsncpy(dir, save, n);
-    dir[n] = 0;
-
-    wcscpy(path, dir);
-    wcscat(path, L"\\1.save");
-    RestoreSave(path);
-    wcscpy(path, dir);
-    wcscat(path, L"\\2.save");
-    RestoreSave(path);
-}
-
 /* Roll the copies: what is there becomes the one before it, and the new
  * content becomes the current one. Two deep, because the wipe writes
  * once - so one step back is always a save made while the player was
@@ -376,61 +455,79 @@ static void BackupSaveIfMissing(const wchar_t *save) {
     if (GetFileAttributesW(dst) == INVALID_FILE_ATTRIBUTES) BackupSave(save);
 }
 
-/* The wipe is undone: whatever the game wrote into the save on its way
- * out is replaced. The copy BEFORE the newest one is used, because the
- * newest may be the wipe's own write - the game makes that one nine
- * seconds before the death screen is up, so nothing at that moment can
- * tell it from an ordinary save. The one before it is a save the player
- * made while alive. */
-static void RestoreSave(const wchar_t *save) {
+/* Write the save back from the clean copy, and say which copy was used.
+ *
+ * The newest copy is the one to use, now that nothing is filed away
+ * while the run is ending - a copy is only ever taken from a save the
+ * player made while alive, so the newest is the closest one to the
+ * death. The copy before it is the fallback for the first death after
+ * an upgrade, when the newest may still be a marked write.
+ *
+ * Returns 0 if there is no copy at all. The caller must then let the
+ * real call through: a save that cannot be repaired is better replaced
+ * by the game's own write than left missing. */
+static int RestoreSaveAs(const wchar_t *save) {
     wchar_t cur[MAX_PATH];
     wchar_t prev[MAX_PATH];
-    wchar_t src[MAX_PATH];
+    const wchar_t *src;
 
-    if (!g_realCopyFileW || !BackupPath(save, cur, MAX_PATH)) return;
-    if (!BackupPrevPath(save, prev, MAX_PATH)) return;
+    if (!g_realCopyFileW || !BackupPath(save, cur, MAX_PATH)) return 0;
 
-    if (GetFileAttributesW(prev) != INVALID_FILE_ATTRIBUTES)
-        wcscpy(src, prev);
-    else if (GetFileAttributesW(cur) != INVALID_FILE_ATTRIBUTES)
-        wcscpy(src, cur);
-    else {
-        GuardLog("no copy of %ls to put back - the save keeps whatever the "
-                 "game left in it", save);
-        return;
+    src = NULL;
+    if (GetFileAttributesW(cur) != INVALID_FILE_ATTRIBUTES)
+        src = cur;
+    else if (BackupPrevPath(save, prev, MAX_PATH) &&
+             GetFileAttributesW(prev) != INVALID_FILE_ATTRIBUTES)
+        src = prev;
+
+    if (!src) {
+        GuardLog("no copy of %ls to put back - it keeps whatever the game "
+                 "left in it", save);
+        return 0;
     }
 
-    if (g_realCopyFileW(src, save, FALSE))
-        GuardLog("put back %ls from %ls", save,
-                 _wcsicmp(src, prev) == 0 ? L"the copy before the newest one"
-                                          : L"the newest copy");
-    else
-        GuardLog("putting %ls back failed (err=%lu)", save, GetLastError());
+    if (!g_realCopyFileW(src, save, FALSE)) {
+        GuardLog("putting %ls back from %ls failed (err=%lu)", save, src,
+                 GetLastError());
+        return 0;
+    }
+
+    GuardLog("put back %ls from %ls", save,
+             _wcsicmp(src, cur) == 0 ? L"the newest copy"
+                                     : L"the copy before the newest one");
+    return 1;
+}
+
+/* Same, for a caller that just wants the save repaired and does not act
+ * on whether it worked. */
+static void RestoreSave(const wchar_t *save) {
+    RestoreSaveAs(save);
 }
 
 /* ---- keeping the wipe out of the save folder --------------------------- */
 
 /* A write to a path this plugin must not let land in the save folder is
- * sent to %TEMP%\GhostNoWipe\<name> instead, filled from `source` if it
- * is not there yet, so the game opens something and reads back what it
- * expects. `source` is the save itself for a write to the save, and the
- * save the tombstone was renamed from for a write to a .delete. */
+ * sent to the plugin's own temp\ folder instead, filled from `source` if
+ * it is not there yet, so the game opens something and reads back what
+ * it expects. `source` is the save itself for a write to the save, and
+ * the save the tombstone was renamed from for a write to a .delete.
+ *
+ * A failure here returns 0 and the caller falls through to the real
+ * API: no folder to divert into means the write goes where it would
+ * have gone without the plugin, which is the safe way to be wrong. */
 static int RedirectToTemp(const wchar_t *name, const wchar_t *source,
                           wchar_t *out, size_t cap) {
-    wchar_t temp[MAX_PATH];
     const wchar_t *base;
 
     if (!name || !source) return 0;
+    if (!g_tempDir[0]) return 0;
     base = wcsrchr(name, L'\\');
     if (!base) base = wcsrchr(name, L'/');
     base = base ? base + 1 : name;
 
-    if (!GetTempPathW(MAX_PATH, temp)) return 0;
-    if (wcslen(temp) + wcslen(base) + 16 >= cap) return 0;
+    if (wcslen(g_tempDir) + wcslen(base) + 4 >= cap) return 0;
 
-    wcscpy(out, temp);
-    wcscat(out, L"GhostNoWipe");
-    CreateDirectoryW(out, NULL);
+    wcscpy(out, g_tempDir);
     wcscat(out, L"\\");
     wcscat(out, base);
 
@@ -457,23 +554,47 @@ static BOOL WINAPI HookMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
          * every pass over the save list. Dropped, and the save repaired
          * in case the mark was written before the screen was noticed. */
         if (IsDeathRename(from, to)) {
-            GuardLog("keep  %ls", from);
-            GuardLog("      the rename is dropped and nothing takes its "
-                     "place; the .delete write goes to the temp folder");
-            RestoreSave(from);
-            RestoreGlobalProfile(from);
-            return TRUE;
+            int slot = 0;
+            if (SlotOfName(from, &slot) && ShouldTouchSlot(slot)) {
+                GuardLog("keep  %ls", from);
+                GuardLog("      the rename is dropped and nothing takes its "
+                         "place; the .delete write goes to the temp folder");
+                MarkGhostSlot(slot);
+                RestoreSave(from);
+                InterlockedExchange(&g_noticeWanted, 1);
+                return TRUE;
+            }
+            GuardLog("pass  %ls", from);
+            GuardLog("      a slot this plugin is not watching; the rename "
+                     "goes through");
         }
-        /* The last step of a save: the .tmp takes the save's place. Left
-         * alone, always. Holding this back is what broke an earlier
-         * attempt: by the time it runs, the old save has already moved
-         * aside as .old and been deleted, so refusing it leaves no save
-         * at all - which the game reports as the slot not existing.
+        /* The last step of a save: the .tmp takes the save's place.
          *
-         * A save written while the run is ending carries the mark, so it
-         * is not kept as the copy to go back to; the point of the copy is
-         * to predate it. The repair happens at the rename instead. */
+         * While the run is ending this is where the mark would land, and
+         * waiting for the rename to drop it is far too late. Measured:
+         * the game writes the marked save ten seconds after the game over
+         * screen and nineteen seconds before it renames the file - by
+         * then it has read its own write, and the next launch reads it
+         * too. Dropping the rename alone is what left a restart showing
+         * the slot as gone.
+         *
+         * So the promotion is dropped and the save put back from the
+         * clean copy. It keeps its name and the content it had while the
+         * player was alive, which is the one state the game reads as a
+         * slot that is still there. With no copy to go back to, the real
+         * call goes through: a save the game overwrote beats a missing
+         * one. */
         if (IsPromotion(from, to)) {
+            int slot = 0;
+
+            if (InDeathWindow() && SlotOfName(to, &slot) &&
+                ShouldTouchSlot(slot) && RestoreSaveAs(to)) {
+                GuardLog("hold  %ls", to);
+                GuardLog("      the run has ended; it keeps the content it "
+                         "had before it, from the clean copy");
+                InterlockedExchange(&g_noticeWanted, 1);
+                return TRUE;
+            }
             BOOL ok = g_realMoveFileExW(from, to, flags);
             if (ok) {
                 if (InDeathWindow())
@@ -495,14 +616,31 @@ static BOOL WINAPI HookMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
 static BOOL WINAPI HookMoveFileW(LPCWSTR from, LPCWSTR to) {
     if (Enabled()) {
         if (IsDeathRename(from, to)) {
-            GuardLog("keep  %ls", from);
-            GuardLog("      the rename is dropped and nothing takes its "
-                     "place");
-            RestoreSave(from);
-            RestoreGlobalProfile(from);
-            return TRUE;
+            int slot = 0;
+            if (SlotOfName(from, &slot) && ShouldTouchSlot(slot)) {
+                GuardLog("keep  %ls", from);
+                GuardLog("      the rename is dropped and nothing takes its "
+                         "place");
+                MarkGhostSlot(slot);
+                RestoreSave(from);
+                InterlockedExchange(&g_noticeWanted, 1);
+                return TRUE;
+            }
+            GuardLog("pass  %ls", from);
+            GuardLog("      a slot this plugin is not watching; the rename "
+                     "goes through");
         }
         if (IsPromotion(from, to)) {
+            int slot = 0;
+
+            if (InDeathWindow() && SlotOfName(to, &slot) &&
+                ShouldTouchSlot(slot) && RestoreSaveAs(to)) {
+                GuardLog("hold  %ls", to);
+                GuardLog("      the run has ended; it keeps the content it "
+                         "had before it, from the clean copy");
+                InterlockedExchange(&g_noticeWanted, 1);
+                return TRUE;
+            }
             BOOL ok = g_realMoveFileW(from, to);
             if (ok) {
                 if (InDeathWindow())
@@ -527,10 +665,13 @@ static HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share,
     wchar_t target[MAX_PATH];
 
     if (Enabled()) {
-        /* A write to the tombstone: out of the save folder, always. */
+        /* A write to the tombstone: out of the save folder, for a slot
+         * this plugin is watching. */
         if (IsDeleteMarkedSave(name)) {
             wchar_t source[MAX_PATH];
+            int slot = 0;
             if (StripDeleteSuffix(name, source, MAX_PATH) &&
+                SlotOfName(name, &slot) && ShouldTouchSlot(slot) &&
                 RedirectToTemp(name, source, target, MAX_PATH)) {
                 GuardLog("write %ls", name);
                 GuardLog("      goes to %ls - no tombstone lands in the save "
@@ -545,13 +686,14 @@ static HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share,
              * rather than the generic one, and checking only the generic
              * right is how one attempt let the mark through.
              *
-             * The global profile (1.save / 2.save) needs none of this. It
-             * is rewritten for ordinary reasons as well - changing a
-             * setting writes it - so an attempt to read its rewrites as
-             * the wipe's record was a dead end. */
+             * The global profile (1.save / 2.save) is not a slot and gets
+             * none of this: it is rewritten for ordinary reasons as well -
+             * changing a setting writes it - so an attempt to read its
+             * rewrites as the wipe's record was a dead end. */
+            int slot = 0;
             if ((access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA |
                            FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES)) &&
-                InDeathWindow() &&
+                SlotOfName(name, &slot) && ShouldTouchSlot(slot) &&
                 RedirectToTemp(name, name, target, MAX_PATH)) {
                 GuardLog("write %ls", name);
                 GuardLog("      the run has ended; it goes to %ls instead",
@@ -561,7 +703,8 @@ static HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share,
             }
             /* Reading it is how the game loads a slot: a good moment to
              * take a copy if there is none yet. */
-            BackupSaveIfMissing(name);
+            if (!IsGlobalProfileName(name))
+                BackupSaveIfMissing(name);
         }
     }
     return g_realCreateFileW(name, access, share, sa, disp, flags, tmpl);
@@ -572,23 +715,154 @@ static HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share,
 /* The rewrite of the save lands within a millisecond of the game over
  * screen, so the poll is deliberately quick. Transitions are logged once
  * each, not polled into the log. */
+/* ---- the line that says what really happened --------------------------- */
+
+/* The game's dialog says the save was deleted, and the slot is missing
+ * from the list as well, so on its own that dialog is the last word. A
+ * line goes up at the same moment saying otherwise: the save is still
+ * there, play resumes from the last checkpoint, and a restart brings the
+ * slot back. It stays until the player is in a game again.
+ *
+ * The text goes through the same table as the menu, so a translation
+ * shipped in this plugin's ini applies here too. */
+static const char *NOTICE_TEXT =
+    "The save was kept - the run is over, and play resumes from the last "
+    "checkpoint. Restart the game to carry on.";
+
+#define NOTICE_RGB 0xFFCC33u
+
+static void ShowKeptNotice(void) {
+    const char *text = NOTICE_TEXT;
+
+    if (!g_toastEx) return;
+    if (g_langForOwned)
+        text = g_langForOwned(g_owner[0] ? g_owner : NULL,
+                              "Ghost save guard", NOTICE_TEXT);
+
+    /* ms 0 keeps it up until it is dismissed: this is not a message that
+     * should fade while the player is still reading the save list. */
+    if (g_noticeId && g_toastSet &&
+        g_toastSet(g_noticeId, text, NOTICE_RGB, 0))
+        return;
+    g_noticeId = g_toastEx(text, NOTICE_RGB, 0);
+}
+
+static void HideKeptNotice(void) {
+    if (!g_noticeId || !g_toastHide) return;
+    g_toastHide(g_noticeId);
+    g_noticeId = 0;
+}
+
 static DWORD WINAPI WatchThread(LPVOID p) {
     int wasOver = 0;
 
     (void)p;
     for (;;) {
         if (Enabled() && g_getState) {
-            int over = (g_getState() == SH_STATE_GAMEOVER);
+            int st = g_getState();
+            int over = (st == SH_STATE_GAMEOVER);
+
             if (over) {
                 InterlockedExchange64(&g_lastGameOver,
                                       (LONG64)GetTickCount64());
                 if (!wasOver) GuardLog("death screen seen");
             }
+
+            /* The notice is raised from here and not from the hook that
+             * asks for it: a hook runs in the middle of a file call and
+             * has no business touching the HUD. */
+            if (InterlockedExchange(&g_noticeWanted, 0))
+                ShowKeptNotice();
+            else if (st == SH_STATE_INGAME)
+                HideKeptNotice();
+
             wasOver = over;
         }
         Sleep(WATCH_MS);
     }
     return 0;
+}
+
+/* ---- ghost slots ------------------------------------------------------- */
+
+/* Which slots this plugin has seen a Ghost Mode death on.
+ *
+ * The game over screen is the one thing a Ghost Mode death produces and
+ * no other mode ever reaches, so a wipe caught while that screen is
+ * recent is the real thing. The window closes when the game restarts,
+ * though, and the rename is redone on every pass over the list, so what
+ * was learned has to be written down or it goes with the process.
+ *
+ * Kept as a plain list of slot numbers under [slots] in the plugin's
+ * own folder. Editing a line out, deleting the file, or the menu item
+ * below all undo a wrong mark. */
+
+#define SLOT_MAX 64
+
+static unsigned char g_ghost[SLOT_MAX];
+
+/* "...\1771\17.save", "...\17.save.delete" and "...\17.save.tmp" all
+ * give 17. The global profile (1.save / 2.save) is not a slot. */
+static int SlotOfName(const wchar_t *path, int *out) {
+    const wchar_t *base, *dot, *slash;
+    wchar_t name[24];
+    wchar_t *end = NULL;
+    size_t n;
+    long v;
+
+    if (!IsSaveFolderPath(path)) return 0;
+    slash = wcsrchr(path, L'\\');
+    if (!slash) slash = wcsrchr(path, L'/');
+    base = slash ? slash + 1 : path;
+
+    dot = wcschr(base, L'.');
+    if (!dot) return 0;
+    n = (size_t)(dot - base);
+    if (!n || n >= sizeof(name) / sizeof(name[0])) return 0;
+    wcsncpy(name, base, n);
+    name[n] = 0;
+
+    v = wcstol(name, &end, 10);
+    if (!end || *end || v <= 1 || v >= SLOT_MAX) return 0;
+    if (v == 2) return 0;                 /* the global profile */
+    *out = (int)v;
+    return 1;
+}
+
+static void LoadGhostSlots(void) {
+    int i;
+
+    memset(g_ghost, 0, sizeof(g_ghost));
+    if (!g_slotsPath[0]) return;
+    for (i = 3; i < SLOT_MAX; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "%d", i);
+        if (GetPrivateProfileIntA("slots", key, 0, g_slotsPath))
+            g_ghost[i] = 1;
+    }
+}
+
+static int IsGhostSlot(int slot) {
+    if (slot <= 2 || slot >= SLOT_MAX) return 0;
+    return g_ghost[slot] != 0;
+}
+
+static void MarkGhostSlot(int slot) {
+    char key[16];
+
+    if (slot <= 2 || slot >= SLOT_MAX || g_ghost[slot]) return;
+    g_ghost[slot] = 1;
+    if (!g_slotsPath[0]) return;
+    snprintf(key, sizeof(key), "%d", slot);
+    WritePrivateProfileStringA("slots", key, "1", g_slotsPath);
+    GuardLog("slot %d is a Ghost Mode slot from now on", slot);
+}
+
+static void ForgetGhostSlots(void) {
+    memset(g_ghost, 0, sizeof(g_ghost));
+    if (g_slotsPath[0])
+        WritePrivateProfileStringA("slots", NULL, NULL, g_slotsPath);
+    GuardLog("menu: ghost slot marks cleared");
 }
 
 /* ---- plugin ini -------------------------------------------------------- */
@@ -637,13 +911,21 @@ static void OnEnable(uint32_t menu, uint32_t item, int value, void *user) {
     SaveIni();
 }
 
+static void OnForgetSlots(uint32_t menu, uint32_t item, int value,
+                          void *user) {
+    (void)menu; (void)item; (void)value; (void)user;
+    ForgetGhostSlots();
+}
+
 static void BuildMenu(HMODULE m) {
     uint32_t (*menuCreate)(const char *) = NULL;
     int (*menuToggle)(uint32_t, const char *, int, MenuFn, void *) = NULL;
+    int (*menuAction)(uint32_t, const char *, MenuFn, void *) = NULL;
     int (*menuHint)(uint32_t, const char *) = NULL;
 
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuToggle = GetProcAddress(m, "ShMenuToggle");
+    *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
     *(FARPROC *)&menuHint   = GetProcAddress(m, "ShMenuHint");
     if (!menuCreate || !menuToggle) return;
 
@@ -651,16 +933,13 @@ static void BuildMenu(HMODULE m) {
         uint32_t menu = menuCreate("Ghost save guard");
         menuToggle(menu, "Keep the save when the run ends", Enabled(),
                    OnEnable, NULL);
+        if (menuAction)
+            menuAction(menu, "Forget the ghost slots", OnForgetSlots, NULL);
         if (menuHint)
             menuHint(menu,
-                     "A death in Ghost Mode makes the game rewrite the save "
-                     "to mark the run over, then rename it to .save.delete - "
-                     "the rename is the tombstone the save list reads. The "
-                     "rewrite is held out of the file, the rename is "
-                     "dropped, and the save is put back from a clean copy "
-                     "kept at the last ordinary save. Deleting a slot by "
-                     "hand is caught too: turn the plugin off to remove "
-                     "one.");
+                     "Stops a Ghost Mode save being wiped when the run ends. "
+                     "Only slots this plugin has seen a Ghost Mode death on "
+                     "are protected; every other slot is left alone.");
     }
     GuardLog("menu created");
 }
@@ -710,20 +989,34 @@ static DWORD WINAPI InitThread(LPVOID p) {
     if (g_dirA[0]) g_log = OpenLogAt(g_dirA, "GhostNoWipe.log");
     ResolveIniPath();
     LoadConfig();
+    LoadGhostSlots();
 
     GuardLog("--- GhostNoWipe: keeping the save when a run ends ---");
     GuardLog("build " __DATE__ " " __TIME__);
     GuardLog("config: guard=%s, ini=%s", Enabled() ? "on" : "off",
              g_iniPath[0] ? g_iniPath : "(none)");
     GuardLog("clean copies: %ls", g_backupDir[0] ? g_backupDir : L"(nowhere)");
+    GuardLog("diverted writes: %ls",
+             g_tempDir[0] ? g_tempDir : L"(nowhere)");
+    GuardLog("ghost slots: %s", g_slotsPath[0] ? g_slotsPath : "(nowhere)");
 
     {
         HMODULE di = GetModuleHandleA("dinput8.dll");
         if (di) {
             *(FARPROC *)&g_getState = GetProcAddress(di, "ShGetGameState");
+            /* Optional: an older dinput8 simply has no status line, and
+             * the log says so rather than the plugin failing. */
+            *(FARPROC *)&g_toastEx = GetProcAddress(di, "ShToastEx");
+            *(FARPROC *)&g_toastSet = GetProcAddress(di, "ShToastSet");
+            *(FARPROC *)&g_toastHide = GetProcAddress(di, "ShToastHide");
+            *(FARPROC *)&g_langForOwned =
+                GetProcAddress(di, "ShLangForOwned");
             BuildMenu(di);
         }
     }
+    GuardLog("notice: toast=%p set=%p hide=%p lang=%p owner=%s",
+             (void *)g_toastEx, (void *)g_toastSet, (void *)g_toastHide,
+             (void *)g_langForOwned, g_owner[0] ? g_owner : "(none)");
     if (!g_getState)
         GuardLog("install: ShGetGameState not found - writes cannot be tied "
                  "to the death screen, only the rename is caught");
