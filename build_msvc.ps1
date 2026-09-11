@@ -218,6 +218,27 @@ Build-Plugin -Name 'LastRites_dlcfix' -Source 'LastRites_dlcfix.c' -LinkArgs @()
     (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 )
 
+# GhostWipeProbe answered its question - the wipe is a rename, see
+# GhostNoWipe.c - and it must not be deployed alongside GhostNoWipe:
+# both hook MoveFileExW, and MinHook keeps its state per DLL, so two
+# plugins hooking one target tread on each other. The source stays as
+# the record of how the answer was found.
+#Build-Plugin -Name 'GhostWipeProbe' -Source 'GhostWipeProbe.c' -LinkArgs @() -ExtraSources @(
+#    (Join-Path $root 'third_party/minhook/src/buffer.c'),
+#    (Join-Path $root 'third_party/minhook/src/hook.c'),
+#    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
+#    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
+#)
+
+# GhostNoWipe keeps a Ghost Mode save when a death ends the run: the
+# rename the game performs is turned into a copy. MinHook as well.
+Build-Plugin -Name 'GhostNoWipe' -Source 'GhostNoWipe.c' -LinkArgs @() -ExtraSources @(
+    (Join-Path $root 'third_party/minhook/src/buffer.c'),
+    (Join-Path $root 'third_party/minhook/src/hook.c'),
+    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
+    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
+)
+
 # ModeExitProbe answered its question - the mode-switch exit is the
 # engine's design, not a defect; see its header - so it is no longer
 # deployed. The source stays for the next question of this kind.
