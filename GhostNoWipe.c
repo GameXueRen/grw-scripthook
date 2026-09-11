@@ -78,10 +78,11 @@
  *
  *   - The save's content is held at the last save the player made. The
  *     promotion of X.save.tmp over X.save is where the marked content
- *     would land - measured, ten seconds after the game over screen and
- *     nineteen before the rename - so it is refused and the save written
- *     back from a clean copy. Refusing it without that would leave no
- *     save at all, which the game reports as the slot not existing.
+ *     would land, so the .tmp is rewritten from a clean copy and the move
+ *     goes ahead. It is not refused: refusing it leaves the .tmp in the
+ *     save folder and has the game retry every few seconds, and a retry
+ *     that slips past the window lands the mark after all. See
+ *     CleanCopyOver.
  *
  *   - The wipe is dropped and the save repaired. The rename of N.save to
  *     N.save.delete is refused and the save put back from a clean copy.
@@ -547,31 +548,35 @@ static void BackupSaveIfMissing(const wchar_t *save) {
     if (GetFileAttributesW(dst) == INVALID_FILE_ATTRIBUTES) BackupSave(save);
 }
 
+/* The copy a repair goes back to: the newest one, or the generation
+ * before it when the newest is missing. NULL when there is neither.
+ *
+ * The newest is the one to use, now that nothing is filed away while the
+ * run is ending - a copy is only ever taken from a save the player made
+ * while alive, so the newest is the closest one to the death. The
+ * generation before it is the fallback for the first death after an
+ * upgrade, when the newest may still be a marked write. */
+static const wchar_t *CleanCopyFor(const wchar_t *save, wchar_t *cur,
+                                   wchar_t *prev) {
+    if (!BackupPath(save, cur, MAX_PATH)) return NULL;
+    if (GetFileAttributesW(cur) != INVALID_FILE_ATTRIBUTES) return cur;
+    if (BackupPrevPath(save, prev, MAX_PATH) &&
+        GetFileAttributesW(prev) != INVALID_FILE_ATTRIBUTES)
+        return prev;
+    return NULL;
+}
+
 /* Write the save back from the clean copy, and say which copy was used.
- *
- * The newest copy is the one to use, now that nothing is filed away
- * while the run is ending - a copy is only ever taken from a save the
- * player made while alive, so the newest is the closest one to the
- * death. The copy before it is the fallback for the first death after
- * an upgrade, when the newest may still be a marked write.
- *
- * Returns 0 if there is no copy at all. The caller must then let the
- * real call through: a save that cannot be repaired is better replaced
+ * Returns 0 if there is no copy at all; the caller must then let the real
+ * call through, because a save that cannot be repaired is better replaced
  * by the game's own write than left missing. */
 static int RestoreSaveAs(const wchar_t *save) {
     wchar_t cur[MAX_PATH];
     wchar_t prev[MAX_PATH];
     const wchar_t *src;
 
-    if (!g_realCopyFileW || !BackupPath(save, cur, MAX_PATH)) return 0;
-
-    src = NULL;
-    if (GetFileAttributesW(cur) != INVALID_FILE_ATTRIBUTES)
-        src = cur;
-    else if (BackupPrevPath(save, prev, MAX_PATH) &&
-             GetFileAttributesW(prev) != INVALID_FILE_ATTRIBUTES)
-        src = prev;
-
+    if (!g_realCopyFileW) return 0;
+    src = CleanCopyFor(save, cur, prev);
     if (!src) {
         GuardLog("no copy of %ls to put back - it keeps whatever the game "
                  "left in it", save);
@@ -587,6 +592,40 @@ static int RestoreSaveAs(const wchar_t *save) {
     GuardLog("put back %ls from %ls", save,
              _wcsicmp(src, cur) == 0 ? L"the newest copy"
                                      : L"the copy before the newest one");
+    return 1;
+}
+
+/* Put the clean copy into the .tmp that is about to become the save.
+ *
+ * This is how the save is held while the run is ending: not by refusing
+ * the move, but by changing what is being moved. Refusing it looked
+ * simpler and behaved worse - the .tmp was left behind in the save
+ * folder, the game took the save for a failure and tried again every few
+ * seconds (ten times across one measured death, each attempt leaving
+ * another .tmp), and any attempt that slipped past the window landed the
+ * marked content in both the save and the copy. Swapping the content
+ * instead means the game gets the save it asked for, with the content
+ * chosen here, and nothing marked exists anywhere.
+ *
+ * Returns 0 if there is no copy, and the caller lets the real move
+ * through - a save the game overwrote beats a missing one. */
+static int CleanCopyOver(const wchar_t *tmp, const wchar_t *save) {
+    wchar_t cur[MAX_PATH];
+    wchar_t prev[MAX_PATH];
+    const wchar_t *src;
+
+    if (!g_realCopyFileW) return 0;
+    src = CleanCopyFor(save, cur, prev);
+    if (!src) {
+        GuardLog("no copy of %ls to write into the .tmp - the run's own "
+                 "write goes ahead", save);
+        return 0;
+    }
+    if (!g_realCopyFileW(src, tmp, FALSE)) {
+        GuardLog("writing %ls into %ls failed (err=%lu) - the run's own "
+                 "write goes ahead", src, tmp, GetLastError());
+        return 0;
+    }
     return 1;
 }
 
@@ -664,29 +703,26 @@ static BOOL WINAPI HookMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
         /* The last step of a save: the .tmp takes the save's place.
          *
          * While the run is ending this is where the mark would land, and
-         * waiting for the rename to drop it is far too late. Measured:
-         * the game writes the marked save ten seconds after the game over
-         * screen and nineteen seconds before it renames the file - by
-         * then it has read its own write, and the next launch reads it
-         * too. Dropping the rename alone is what left a restart showing
-         * the slot as gone.
+         * waiting for the rename to drop it is far too late - measured,
+         * the game writes the marked save anywhere from the same instant
+         * as the game over screen to ten seconds after it, and it redoes
+         * the rename on every pass over the list afterwards.
          *
-         * So the promotion is dropped and the save put back from the
-         * clean copy. It keeps its name and the content it had while the
-         * player was alive, which is the one state the game reads as a
-         * slot that is still there. With no copy to go back to, the real
-         * call goes through: a save the game overwrote beats a missing
-         * one. */
+         * The move is not refused; see CleanCopyOver. The .tmp is
+         * rewritten from the clean copy and the move goes ahead, so the
+         * game gets the save it asked for with the content the save held
+         * while the player was alive - and no .tmp is left behind. */
         if (IsPromotion(from, to)) {
             int slot = 0;
 
             if (InDeathWindow() && SlotOfName(to, &slot) &&
-                ShouldTouchSlot(slot) && RestoreSaveAs(to)) {
-                GuardLog("hold  %ls", to);
-                GuardLog("      the run has ended; it keeps the content it "
-                         "had before it, from the clean copy");
+                ShouldTouchSlot(slot) && CleanCopyOver(from, to)) {
+                GuardLog("swap  %ls", to);
+                GuardLog("      the run has ended; the .tmp was rewritten "
+                         "from the clean copy, so the save lands holding "
+                         "the content it had before it");
                 ShowKeptNotice();
-                return TRUE;
+                return g_realMoveFileExW(from, to, flags);
             }
             BOOL ok = g_realMoveFileExW(from, to, flags);
             if (ok) {
@@ -724,16 +760,19 @@ static BOOL WINAPI HookMoveFileW(LPCWSTR from, LPCWSTR to) {
             GuardLog("      a slot this plugin is not watching; the rename "
                      "goes through");
         }
+        /* Same as above: the .tmp is rewritten from the clean copy rather
+         * than the move refused. */
         if (IsPromotion(from, to)) {
             int slot = 0;
 
             if (InDeathWindow() && SlotOfName(to, &slot) &&
-                ShouldTouchSlot(slot) && RestoreSaveAs(to)) {
-                GuardLog("hold  %ls", to);
-                GuardLog("      the run has ended; it keeps the content it "
-                         "had before it, from the clean copy");
+                ShouldTouchSlot(slot) && CleanCopyOver(from, to)) {
+                GuardLog("swap  %ls", to);
+                GuardLog("      the run has ended; the .tmp was rewritten "
+                         "from the clean copy, so the save lands holding "
+                         "the content it had before it");
                 ShowKeptNotice();
-                return TRUE;
+                return g_realMoveFileW(from, to);
             }
             BOOL ok = g_realMoveFileW(from, to);
             if (ok) {

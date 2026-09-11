@@ -243,6 +243,18 @@ Build-Plugin -Name 'GhostNoWipe' -Source 'GhostNoWipe.c' -LinkArgs @() -ExtraSou
     (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 )
 
+# GhostRevive asked whether a Ghost Mode death could be sent down the
+# reviving path instead of the run-ending one. It cannot: the branch is
+# decided by whether the squad is aboard, inside a flow no export reaches
+# - ShTriggerGameOver is ignored and refilling the health changes nothing.
+# That is answered, and the long form is in
+# .codebuddy/plans/ghost-revive-findings.md and the source's own header.
+#
+# Built anyway, because it is the probe that answered the question and a
+# probe is only useful ready to run - but it ships switched off in its own
+# ini, so it registers nothing until asked.
+Build-Plugin -Name 'GhostRevive' -Source 'GhostRevive.c' -LinkArgs @()
+
 # ModeExitProbe answered its question - the mode-switch exit is the
 # engine's design, not a defect; see its header - so it is no longer
 # deployed. The source stays for the next question of this kind.
