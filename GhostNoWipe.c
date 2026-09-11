@@ -5,7 +5,7 @@
  * the save list, and that slot is gone.
  *
  * What is done to a save, measured with GhostWipeProbe on 2026-09-11
- * against a region-locked build, and corrected across three tries:
+ * against a region-locked build, and corrected across several tries:
  *
  *   1. The save is RENAMED, not deleted:
  *          MoveFileExW("...\1771\18.save", "...\1771\18.save.delete", 0xB)
@@ -31,11 +31,26 @@
  *      of a diff of two saves that both turned out to be post-death
  *      writes; that was wrong.
  *
- *   4. That write lands NINE SECONDS BEFORE the game over screen, so
- *      the moment a death is noticed is already too late to set it
- *      aside, and a window keyed on the screen cannot cover the rename
- *      either - the game redoes the rename on every pass over the list,
- *      and a game that has just been restarted never showed the screen.
+ *   4. That write lands anywhere from the same instant as the game over
+ *      screen to ten seconds after it, and the two slots of a pair are
+ *      written seconds apart. So the window has to be exact, and it has
+ *      to cover the write rather than the rename: a window still shut
+ *      when the first of a pair lands files the marked save away as the
+ *      clean copy, and the repair then hands that same marked content
+ *      back when the rename comes. Observed directly - of two deaths in
+ *      one session, one came back right and one came back marked.
+ *
+ * The window is kept honest from the file hooks themselves: a call that
+ * touches the save folder is judged on a fresh reading of the engine
+ * state rather than a rate-limited one, because a sampler a tenth of a
+ * second behind is a marked save. The watch thread stays as a second
+ * chance, but nothing essential waits on it - a thread that stops used
+ * to leave the window shut for good.
+ *
+ * The rename is not the same event: the game redoes it on every pass
+ * over the save list, and a game that has just been restarted never
+ * showed the screen, so that one is refused for a marked slot whatever
+ * the window says.
  *
  * Which slots are protected
  *
@@ -50,10 +65,12 @@
  *
  * So three things are held at once, for those slots:
  *
- *   - Two generations of clean copy. Every ordinary save rotates
- *     last\X.save into last\X.save.prev and writes the new one into
- *     last\X.save. The wipe writes once, so the .prev generation is
- *     always a save made while the player was alive.
+ *   - Two generations of clean copy. A save written while the run is
+ *     alive rotates last\X.save into last\X.save.prev and writes the new
+ *     one into last\X.save. Nothing is filed away while the window is
+ *     open, so the newest copy is always a save the player made while
+ *     alive - which is what a repair goes back to. The generation before
+ *     it is the fallback.
  *
  *   - Writes during the death are kept out of the file. Once the game
  *     over screen has been seen, a write that opens the save itself is
@@ -77,10 +94,15 @@
  * up so a long session's litter does not pile up.
  *
  * The slot is still shown as deleted for the rest of the session - that
- * state lives in the process - and comes back on the next launch: the
- * folder is scanned, and the save is there with no .delete beside it.
- * Verified: a death, a restart, and the slot is listed again and plays
- * from the last save point.
+ * state lives in the process, and the probe records no read of the save
+ * folder at all after the return to the menu - and comes back on the
+ * next launch: the folder is scanned, and the save is there with no
+ * .delete beside it. Verified: a death, a restart, the slot is listed
+ * again and plays from the last save point.
+ *
+ * The game's own dialog says otherwise either way, so a status line goes
+ * up at the same moment saying what really happened, and comes down once
+ * the player is in a game again.
  *
  * 1.save and 2.save are the global profile and need no part of this.
  * They are rewritten for ordinary reasons too - changing a setting
@@ -133,10 +155,10 @@ static ToastSet_t     g_toastSet;
 static ToastHide_t    g_toastHide;
 static LangForOwned_t g_langForOwned;
 
-/* Set by the death hooks, shown by the watch thread - the hooks run in
- * the middle of a file call and have no business touching the HUD. */
-static volatile LONG g_noticeWanted;
-static uint32_t      g_noticeId;
+/* Kept up while the slot is listed as gone, taken down once the player
+ * is back in a game. The hooks raise it; the state sampling takes it
+ * down. */
+static uint32_t g_noticeId;
 
 /* This plugin's folder name, which is how the framework finds the
  * translation table kept in its own ini. */
@@ -167,8 +189,9 @@ static void GuardLog(const char *fmt, ...) {
     while (InterlockedExchange(&g_logBusy, 1)) Sleep(1);
     if (g_log) {
         GetLocalTime(&st);
-        fprintf(g_log, "%02u:%02u:%02u.%03u  %s\n",
-                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, line);
+        fprintf(g_log, "%02u:%02u:%02u.%03u [%lu] %s\n",
+                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                (unsigned long)GetCurrentProcessId(), line);
         fflush(g_log);
     }
     InterlockedExchange(&g_logBusy, 0);
@@ -334,6 +357,75 @@ static int InDeathWindow(void) {
     if (!t) return 0;
     return (GetTickCount64() - (uint64_t)t) < DEATH_WINDOW_MS;
 }
+
+/* ---- sampling the engine state ---------------------------------------- */
+
+/* Done on the file hooks, which run on the game's own thread many times
+ * a frame. The watch thread is kept as a second chance, but nothing
+ * essential waits on it - and that matters, because a watch thread that
+ * stops leaves the death window shut for good. A window that never opens
+ * is a marked write taken for an ordinary save: it gets filed away as
+ * the clean copy, and handed straight back by the repair when the rename
+ * finally comes. That is how a slot comes back marked after a restart
+ * even though nothing of the wipe was left in the save folder.
+ *
+ * Transitions are logged once each. The sampling is rate limited, so a
+ * frame's worth of file calls costs one clock read. */
+static volatile LONG   g_prevState = -1;
+static volatile LONG   g_hideWanted;
+static volatile LONG64 g_lastSample;
+
+static void SampleStateNow(void) {
+    LONG64 now;
+    int st;
+
+    if (!g_getState) return;
+    now = (LONG64)GetTickCount64();
+    InterlockedExchange64(&g_lastSample, now);
+
+    st = g_getState();
+    if (st != (int)InterlockedCompareExchange(&g_prevState, 0, 0)) {
+        InterlockedExchange(&g_prevState, st);
+        GuardLog("state -> %d", st);
+    }
+
+    if (st == SH_STATE_GAMEOVER)
+        InterlockedExchange64(&g_lastGameOver, now);
+    else if (st == SH_STATE_INGAME)
+        InterlockedExchange(&g_hideWanted, 1);
+}
+
+static void SampleState(void) {
+    LONG64 now;
+
+    if (!g_getState) return;
+    now = (LONG64)GetTickCount64();
+    if (now - InterlockedCompareExchange64(&g_lastSample, 0, 0) < 100)
+        return;
+    SampleStateNow();
+}
+
+/* The state, sampled for a call that is about to be judged. The rate
+ * limit above is there so a frame's worth of file traffic costs one
+ * clock read - but a call inside the save folder is rare, and it is the
+ * one call whose answer changes the outcome.
+ *
+ * It has to be exact. Measured twice in one session: the marked write
+ * lands anywhere from the same instant as the game over screen to ten
+ * seconds after it, and the two slots of a pair are written seconds
+ * apart. A window that is still shut when the first of them lands is a
+ * marked save filed away as the clean copy - and then handed straight
+ * back by the repair when the rename comes, which is why the slot came
+ * back marked on some deaths and not others. */
+static void SampleFor(const wchar_t *a, const wchar_t *b) {
+    if (IsSaveFolderPath(a) || (b && IsSaveFolderPath(b)))
+        SampleStateNow();
+    else
+        SampleState();
+}
+
+static void ShowKeptNotice(void);
+static void HideKeptNotice(void);
 
 /* Defined further down, where the slot marks are kept. */
 static int  SlotOfName(const wchar_t *path, int *out);
@@ -550,6 +642,7 @@ static int StripDeleteSuffix(const wchar_t *name, wchar_t *out, size_t cap) {
 
 static BOOL WINAPI HookMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
     if (Enabled()) {
+        SampleFor(from, to);
         /* The wipe, at whatever moment it comes - the game redoes it on
          * every pass over the save list. Dropped, and the save repaired
          * in case the mark was written before the screen was noticed. */
@@ -561,7 +654,7 @@ static BOOL WINAPI HookMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
                          "place; the .delete write goes to the temp folder");
                 MarkGhostSlot(slot);
                 RestoreSave(from);
-                InterlockedExchange(&g_noticeWanted, 1);
+                ShowKeptNotice();
                 return TRUE;
             }
             GuardLog("pass  %ls", from);
@@ -592,7 +685,7 @@ static BOOL WINAPI HookMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
                 GuardLog("hold  %ls", to);
                 GuardLog("      the run has ended; it keeps the content it "
                          "had before it, from the clean copy");
-                InterlockedExchange(&g_noticeWanted, 1);
+                ShowKeptNotice();
                 return TRUE;
             }
             BOOL ok = g_realMoveFileExW(from, to, flags);
@@ -615,6 +708,7 @@ static BOOL WINAPI HookMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
 
 static BOOL WINAPI HookMoveFileW(LPCWSTR from, LPCWSTR to) {
     if (Enabled()) {
+        SampleFor(from, to);
         if (IsDeathRename(from, to)) {
             int slot = 0;
             if (SlotOfName(from, &slot) && ShouldTouchSlot(slot)) {
@@ -623,7 +717,7 @@ static BOOL WINAPI HookMoveFileW(LPCWSTR from, LPCWSTR to) {
                          "place");
                 MarkGhostSlot(slot);
                 RestoreSave(from);
-                InterlockedExchange(&g_noticeWanted, 1);
+                ShowKeptNotice();
                 return TRUE;
             }
             GuardLog("pass  %ls", from);
@@ -638,7 +732,7 @@ static BOOL WINAPI HookMoveFileW(LPCWSTR from, LPCWSTR to) {
                 GuardLog("hold  %ls", to);
                 GuardLog("      the run has ended; it keeps the content it "
                          "had before it, from the clean copy");
-                InterlockedExchange(&g_noticeWanted, 1);
+                ShowKeptNotice();
                 return TRUE;
             }
             BOOL ok = g_realMoveFileW(from, to);
@@ -665,6 +759,16 @@ static HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share,
     wchar_t target[MAX_PATH];
 
     if (Enabled()) {
+        /* Every file call is a chance to look at the engine state, and
+         * there are a great many of them: this is what keeps the death
+         * window honest, with the watch thread only as a second chance.
+         * A call inside the save folder is judged without the rate
+         * limit - see SampleFor. The notice is taken down from here too,
+         * on the game's own thread, which is the one that may touch the
+         * HUD. */
+        SampleFor(name, NULL);
+        if (InterlockedExchange(&g_hideWanted, 0)) HideKeptNotice();
+
         /* A write to the tombstone: out of the save folder, for a slot
          * this plugin is watching. */
         if (IsDeleteMarkedSave(name)) {
@@ -753,31 +857,14 @@ static void HideKeptNotice(void) {
     g_noticeId = 0;
 }
 
+/* The second chance at the state, for the moments the game is not
+ * opening files - which is most of the menu. It only samples; anything
+ * that touches the HUD is left to the game's own thread. */
 static DWORD WINAPI WatchThread(LPVOID p) {
-    int wasOver = 0;
-
     (void)p;
+    GuardLog("watch: thread up");
     for (;;) {
-        if (Enabled() && g_getState) {
-            int st = g_getState();
-            int over = (st == SH_STATE_GAMEOVER);
-
-            if (over) {
-                InterlockedExchange64(&g_lastGameOver,
-                                      (LONG64)GetTickCount64());
-                if (!wasOver) GuardLog("death screen seen");
-            }
-
-            /* The notice is raised from here and not from the hook that
-             * asks for it: a hook runs in the middle of a file call and
-             * has no business touching the HUD. */
-            if (InterlockedExchange(&g_noticeWanted, 0))
-                ShowKeptNotice();
-            else if (st == SH_STATE_INGAME)
-                HideKeptNotice();
-
-            wasOver = over;
-        }
+        if (Enabled()) SampleState();
         Sleep(WATCH_MS);
     }
     return 0;
