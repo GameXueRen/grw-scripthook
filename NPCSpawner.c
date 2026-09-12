@@ -17,12 +17,13 @@
  *   Facing        Face Player / Face Forward
  *   Spawn Selected / Undo Last Spawn
  *
- * The interesting part is the group filter: the framework's
- * ShNpcArchetype carries only {id, kind} with no name, so the
- * original hardcodes four archetype id tables (plus one lone
- * Unidad id) and falls back to the engine's kind value.  Those
- * tables are reproduced verbatim below; the evidence for them
- * is in docs/npcspawner-reverse.md.
+ * The group filter, the formation maths and the batch spawn now
+ * live in the framework - ShNpcGroupOfArchetype,
+ * ShNpcGroupSize, ShNpcAtInGroup, ShNpcPlanFormation and
+ * ShNpcSpawnFormation - so this plugin keeps only what is its
+ * own: the menu, the spinner, the tracked list and the undo.
+ * Another plugin gets the same summon by calling those exports;
+ * see scripthook.h and docs/npcspawner-reverse.md.
  *
  * Deviations from the original, all deliberate (see the report):
  *   - the tracked list is pruned of dead handles before the
@@ -32,7 +33,10 @@
  *     with ShMenuSetValue instead of clearing and rebuilding the
  *     whole menu;
  *   - status lines go through ShMenuStatusF rather than a local
- *     sprintf buffer.
+ *     sprintf buffer;
+ *   - the F field of the spawn status is how many of the batch
+ *     did not appear, where the original counted failed facing
+ *     transforms, which were almost always zero.
  *
  * Logs to <gamedir>\logs\
  */
@@ -40,15 +44,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 
 #include "scripthook.h"
 #include "log.h"
 
 /* ---- catalogue limits and defaults ------------------------------ */
 
-#define GROUP_MAX     5
-#define PLAN_MAX      8      /* the menu only ever asks for 1..5 */
 #define TRACK_MAX     128
 #define SPAWN_LIMIT   50     /* total tracked, as in the original  */
 
@@ -56,34 +57,14 @@
  * denominator (0x32). */
 #define REPORT_LIMIT  50
 
-enum {
-    G_SANTA_BLANCA = 0, G_UNIDAD, G_REBELS, G_CIVILIANS, G_SPECIAL
-};
-
-enum {
-    F_LINE = 0, F_SPREAD, F_SEMICIRCLE, F_CIRCLE, F_RANDOM
-};
-
-enum {
-    FACE_PLAYER = 0, FACE_FORWARD
-};
-
 /* ---- late binding ----------------------------------------------- */
 
 typedef int      (*GetVersion_t)(void);
 typedef int      (*GetGameState_t)(void);
-typedef int      (*GetPlayer_t)(ShPlayer *);
-typedef int      (*GetPlayerPosition_t)(ShVec3 *);
-typedef int      (*GetEntityTransform_t)(uint64_t, ShVec3 *,
-                                         float *, float *, float *);
 typedef int      (*GetEntityKind_t)(uint64_t);
 typedef int      (*GetHealthEntity_t)(uint64_t, uint32_t *, uint32_t *);
-typedef int      (*QueueTransform_t)(uint64_t, const ShVec3 *,
-                                     float, float, float);
-typedef int      (*NpcCount_t)(void);
-typedef const ShNpcArchetype *(*NpcAt_t)(int);
-typedef uint64_t (*SpawnNpc_t)(uint64_t, const ShVec3 *);
 typedef int      (*Despawn_t)(uint64_t);
+typedef int      (*LastError_t)(void);
 typedef uint32_t (*MenuCreate_t)(const char *);
 typedef int      (*MenuList_t)(uint32_t, const char *, const char **,
                                int, int, ShMenuFn, void *);
@@ -92,25 +73,38 @@ typedef int      (*MenuAction_t)(uint32_t, const char *,
 typedef int      (*MenuStatus_t)(uint32_t, const char *);
 typedef int      (*MenuStatusF_t)(uint32_t, const char *, ...);
 typedef int      (*MenuSetValue_t)(uint32_t, const char *, int);
+typedef int      (*NpcGroupSize_t)(int);
+typedef int      (*NpcAtInGroup_t)(int, int, ShNpcArchetype *);
+typedef int      (*SpawnFormation_t)(const ShNpcSpawnRequest *,
+                                     uint64_t *, int);
+typedef uint32_t (*SpawnBegin_t)(const ShNpcSpawnRequest *);
+typedef int      (*SpawnPoll_t)(uint32_t, uint64_t *, int, int *);
+typedef int      (*SpawnCancel_t)(uint32_t);
+typedef int      (*SpawnEnd_t)(uint32_t);
 
+/* The summon itself - the layout, the spawn and the facing - is
+ * the framework's job now, reached through the last three.  This
+ * plugin binds only what its own menu needs. */
 static GetVersion_t        pGetVersion;
 static GetGameState_t      pGetGameState;
-static GetPlayer_t         pGetPlayer;
-static GetPlayerPosition_t pGetPlayerPosition;
-static GetEntityTransform_t pGetEntityTransform;
 static GetEntityKind_t     pGetEntityKind;
 static GetHealthEntity_t   pGetHealthEntity;
-static QueueTransform_t    pQueueTransform;
-static NpcCount_t          pNpcCount;
-static NpcAt_t             pNpcAt;
-static SpawnNpc_t          pSpawnNpc;
 static Despawn_t           pDespawn;
+static LastError_t         pLastError;
 static MenuCreate_t        pMenuCreate;
 static MenuList_t          pMenuList;
 static MenuAction_t        pMenuAction;
 static MenuStatus_t        pMenuStatus;
 static MenuStatusF_t       pMenuStatusF;
 static MenuSetValue_t      pMenuSetValue;
+static NpcGroupSize_t      pNpcGroupSize;
+static NpcAtInGroup_t      pNpcAtInGroup;
+static SpawnFormation_t    pSpawnFormation;
+/* Optional: only the self test row needs the batch handle. */
+static SpawnBegin_t        pSpawnBegin;
+static SpawnPoll_t         pSpawnPoll;
+static SpawnCancel_t       pSpawnCancel;
+static SpawnEnd_t          pSpawnEnd;
 
 /* ---- option labels (the original's .rdata tables) --------------- */
 
@@ -135,12 +129,12 @@ static const int   g_countN[3]    = { 1, 3, 5 };
 
 static uint32_t g_menu = 0;
 
-static int g_group     = G_SANTA_BLANCA;
-static int g_sel[GROUP_MAX] = { 1, 1, 1, 1, 1 };  /* 1 based, per group */
+static int g_group     = SH_NPC_GROUP_SANTA_BLANCA;
+static int g_sel[SH_NPC_GROUP_MAX] = { 1, 1, 1, 1, 1 }; /* 1 based */
 static int g_distIdx   = 2;      /* 30 m   */
 static int g_countIdx  = 0;      /* 1      */
-static int g_formation = F_RANDOM;
-static int g_facing    = FACE_PLAYER;
+static int g_formation = SH_NPC_FORMATION_RANDOM;
+static int g_facing    = SH_NPC_FACING_PLAYER;
 
 static int g_groupCount = 0;     /* size of the current group */
 
@@ -162,91 +156,50 @@ static uint64_t g_last = 0;
 /* Busy flag: a spawn or undo is in flight. */
 static volatile LONG g_busy = 0;
 
-/* ---- the archetype group tables (verbatim from the binary) ------ */
+/* Held while the self test thread runs, so two clicks do not
+ * stack up. */
+static volatile LONG g_selfRun = 0;
+/* [Settings] selftest from our own ini; shows the row when on. */
+static int g_selfOn = 0;
 
-/* Never spawned: blacklisted by the original. @0x180007C00 */
-static const uint64_t g_blacklist[44] = {
-    0x5325BD7A52ULL, 0x78FADA79FFULL, 0x5325BD7A4DULL, 0x78FADA4D05ULL,
-    0x5325BD7A48ULL, 0x31B65512F7ULL, 0x10F2A192C3DULL, 0x10F2A192C35ULL,
-    0x3D66E0ABDFULL, 0x2309B3C694ULL, 0x5325BD7627ULL, 0x2FD455483EULL,
-    0x237A1CBFBAULL, 0x237A1CBFB9ULL, 0x10F2A192C39ULL, 0x4738A95B71ULL,
-    0x51021FED77ULL, 0x4FEB645A8DULL, 0x4FEB645A8EULL, 0x4AC59FEDD9ULL,
-    0x4FEB647516ULL, 0x4FEB6459B2ULL, 0x4AC59FEDD7ULL, 0x4FEB6459EBULL,
-    0x4D8AB38F5AULL, 0x4FEB6459ECULL, 0x4AC59FEDD6ULL, 0x4FEB647517ULL,
-    0x4AC59FEDD8ULL, 0x4D8AB38F5BULL, 0x4AC59FEDDAULL, 0x4FEB6459B1ULL,
-    0x7C33CC49CAULL, 0x3456303A13ULL, 0x5B708516B0ULL, 0x3F73BD8D99ULL,
-    0x3F4892BDFDULL, 0x8AFE25F47FULL, 0x6E164F05B3ULL, 0x3F4892BCF7ULL,
-    0x3456303D78ULL, 0x2EC3CD6993ULL, 0x2DF374C80CULL, 0xBBE631D833ULL
-};
+/* ---- our own ini ------------------------------------------------ */
 
-/* Special, explicitly listed. @0x180007D60 */
-static const uint64_t g_special[76] = {
-    0x1A987A8752DULL, 0x1AFB8794FE6ULL, 0x1B155F83D72ULL, 0x1AFB8751E8EULL,
-    0x1A987A5256FULL, 0x1B155F6628CULL, 0x1AFB8794FEAULL, 0x1A987A5FFD7ULL,
-    0x183A1B02363ULL, 0x185B81997B0ULL, 0x18173A2EB26ULL, 0x18173A5399AULL,
-    0x187334C4DB7ULL, 0x185B81B4750ULL, 0x187E427E5C5ULL, 0x18173A30AC6ULL,
-    0x18173A2FCA4ULL, 0x18173A3102FULL, 0x197A932C062ULL, 0x18F3D2B2FA2ULL,
-    0x1A16C520991ULL, 0x18D7BD5327EULL, 0x1994707A751ULL, 0x8A9482DAC2ULL,
-    0x7C0B092643ULL,  0x8A9482DACCULL, 0x14397E627AEULL, 0x154BBBC37D0ULL,
-    0x154BBB495E1ULL, 0x537991063FULL, 0x4AC59FCA66ULL, 0x5379910630ULL,
-    0x537991063EULL,  0x4AC59FCA65ULL, 0x5379910631ULL, 0x4AC59FCA64ULL,
-    0x68EB25F118ULL,  0x433A9B6E26ULL, 0x68EB25EB16ULL, 0x7D662A1D27ULL,
-    0x78C9B348CFULL,  0x45F1E58279ULL, 0x792C60E200ULL, 0x18B72EE403DULL,
-    0x198B997684CULL, 0x71CBB77732ULL, 0x71CBB77725ULL, 0x71CBB77721ULL,
-    0x71CBB77722ULL,  0x71CBB7772DULL, 0x71CBB77720ULL, 0x71CBB77739ULL,
-    0x7929219EF8ULL,  0x45F1E58223ULL, 0x71CBB77729ULL, 0x71CBB77724ULL,
-    0x71CBB77727ULL,  0x71CBB77736ULL, 0x147CD1A13C3ULL, 0x82AF1233BCULL,
-    0x71CBB77735ULL,  0x71CBB77731ULL, 0x71CBB7772CULL, 0x71CBB77728ULL,
-    0x71CBB7772BULL,  0x71CBB77726ULL, 0x71CBB77734ULL, 0x71CBB7772AULL,
-    0x71CBB77730ULL,  0x71CBB7773AULL, 0x71CBB77738ULL, 0x7926908976ULL,
-    0x71CBB77737ULL,  0xCA9DCD4408ULL, 0x71CBB77723ULL, 0x7C33CCA452ULL
-};
+static HINSTANCE g_inst = NULL;
+static char      g_iniPath[MAX_PATH];
 
-/* @0x180007FC0 */
-static const uint64_t g_santaBlanca[2] = {
-    0xF645ED5E6DULL, 0x154BBBC8ADAULL
-};
+/* plugins\<name>\<name>.ini, derived from our own module file
+ * name, so the pairing survives a rename.  Same shape as
+ * firstperson's and GhostNoWipe's. */
+static void ResolveIniPath(void) {
+    char mod[MAX_PATH];
+    const char *base, *dot;
+    size_t n;
 
-/* @0x180007FE8 */
-static const uint64_t g_civilians[3] = {
-    0x1AFB8765956ULL, 0x7DECAB61CDULL, 0x7DECAB1E1DULL
-};
+    g_iniPath[0] = 0;
+    if (!g_inst || !GetModuleFileNameA(g_inst, mod, sizeof(mod))) return;
 
-/* The one explicitly listed Unidad archetype. */
-#define NPC_ID_UNIDAD 0x1A987A7937CULL
+    /* Only a dot in the file name counts: a folder may hold one. */
+    base = strrchr(mod, '\\');
+    dot = strrchr(mod, '.');
+    if (dot && base && dot < base) dot = NULL;
 
-static int InTable(const uint64_t *t, int n, uint64_t v) {
-    int i;
-    for (i = 0; i < n; i++) if (t[i] == v) return 1;
-    return 0;
+    n = dot ? (size_t)(dot - mod) : strlen(mod);
+    if (n >= sizeof(g_iniPath)) n = sizeof(g_iniPath) - 1;
+    memcpy(g_iniPath, mod, n);
+    g_iniPath[n] = 0;
+    strncat(g_iniPath, ".ini", sizeof(g_iniPath) - n - 1);
 }
 
-/* Mirrors the original's classifier at 0x1800011C0: the tables
- * win, the engine's kind is the fallback.
+static int IniInt(const char *key, int def) {
+    if (!g_iniPath[0]) return def;
+    return GetPrivateProfileIntA("Settings", key, def, g_iniPath);
+}
+
+/* The archetype id tables and the classifier that used them now
+ * live in the framework (scripthook_npc.c), reached through
+ * ShNpcGroupOfArchetype.  Keeping one copy here as well is how
+ * the two drift apart.
  */
-static int NpcInGroup(int group, const ShNpcArchetype *a) {
-    uint64_t id;
-    int kind;
-
-    if (!a) return 0;
-    id = a->id;
-    kind = a->kind;
-
-    if (InTable(g_blacklist, 44, id)) return 0;
-    if (InTable(g_santaBlanca, 2, id)) return group == G_SANTA_BLANCA;
-    if (id == NPC_ID_UNIDAD) return group == G_UNIDAD;
-    if (InTable(g_civilians, 3, id)) return group == G_CIVILIANS;
-    if (InTable(g_special, 76, id)) return group == G_SPECIAL;
-
-    switch (group) {
-    case G_SANTA_BLANCA: return kind == 3;
-    case G_UNIDAD:       return kind == 5;
-    case G_REBELS:       return kind == 6 || kind == 7;
-    case G_CIVILIANS:    return kind <= 1;
-    case G_SPECIAL:      return kind == 4;
-    }
-    return 0;
-}
 
 /* ---- helpers ---------------------------------------------------- */
 
@@ -280,37 +233,31 @@ static int WorldBusy(void) {
     return s == SH_STATE_LOADING || s == SH_STATE_RELOADING;
 }
 
-/* Walk the catalogue and count this group, then return the
- * catalogue index and archetype id of the g_sel[group]-th entry
- * of it (or -1).  sel wraps rather than clamps, exactly as the
- * original's 0x180001340 does, so the spinner is endless.
+/* Count the group, wrap this group's spinner back into range,
+ * then return the catalogue index and archetype id it points at
+ * (or -1).  sel wraps rather than clamps, exactly as the
+ * original's 0x180001340 does, so the spinner is endless.  The
+ * walk itself is the framework's.
  */
 static int GroupScan(int group, int *outCount, uint64_t *outId) {
-    int n, i, c = 0, idx = -1, k = 0;
-    uint64_t id = 0;
+    ShNpcArchetype a;
+    int c, idx;
 
     if (outCount) *outCount = 0;
     if (outId) *outId = 0;
-    if (!pNpcCount || !pNpcAt) return -1;
+    if (!pNpcGroupSize || !pNpcAtInGroup) return -1;
 
-    n = pNpcCount();
-    if (n <= 0) return -1;
+    c = pNpcGroupSize(group);
+    if (c <= 0) return -1;
 
-    for (i = 0; i < n; i++)
-        if (NpcInGroup(group, pNpcAt(i))) c++;
+    if (g_sel[group] < 1) g_sel[group] = c;
+    else if (g_sel[group] > c) g_sel[group] = 1;
 
-    if (c > 0) {
-        if (g_sel[group] < 1) g_sel[group] = c;
-        else if (g_sel[group] > c) g_sel[group] = 1;
+    memset(&a, 0, sizeof(a));
+    idx = pNpcAtInGroup(group, g_sel[group] - 1, &a);
 
-        for (i = 0; i < n; i++) {
-            const ShNpcArchetype *a = pNpcAt(i);
-            if (!NpcInGroup(group, a)) continue;
-            if (++k == g_sel[group]) { idx = i; id = a->id; break; }
-        }
-    }
     if (outCount) *outCount = c;
-    if (outId) *outId = id;
+    if (outId) *outId = a.id;
     return idx;
 }
 
@@ -362,13 +309,6 @@ static void PruneTrack(void) {
     LeaveCriticalSection(&g_trackLock);
 }
 
-static void TrackAdd(uint64_t e) {
-    EnterCriticalSection(&g_trackLock);
-    if (g_trackN < TRACK_MAX) g_track[g_trackN++] = e;
-    g_last = e;
-    LeaveCriticalSection(&g_trackLock);
-}
-
 static void TrackRemove(uint64_t e) {
     int i, w = 0;
 
@@ -380,172 +320,46 @@ static void TrackRemove(uint64_t e) {
     LeaveCriticalSection(&g_trackLock);
 }
 
-/* ---- formation geometry (mirrors 0x180001530 / 0x180001770) ------ */
-
-#define PI_F      3.14159265f
-#define TWO_PI_F  6.28318531f
-#define INV_2P24  5.9604645e-8f   /* 2^-24, the 24 bit PRNG scale */
-
-/* One point of the formation, in the plane the caller then
- * rotates by the player's yaw.  n <= 1 is a single point at the
- * formation centre.
- */
-static void FormationPoint(int formation, int i, int n,
-                           unsigned *seed, float *ox, float *oy) {
-    float a;
-
-    *ox = 0.0f;
-    *oy = 0.0f;
-    if (n <= 1) return;
-
-    switch (formation) {
-    case F_LINE:
-        *ox = ((float)i - (float)(n - 1) * 0.5f) * 3.0f;
-        break;
-
-    case F_SPREAD: {
-        /* A three column grid, each row centred on its own. */
-        int q = i / 3, r = i % 3;
-        int rowLen = n - 3 * q;
-        int rows = (n + 2) / 3;
-        *ox = ((float)r - (float)(rowLen - 1) * 0.5f) * 3.5f;
-        *oy = ((float)q - ((float)rows - 1.0f) * 0.5f) * 3.5f;
-        break;
-    }
-
-    case F_SEMICIRCLE:
-        a = PI_F * ((float)i / (float)(n - 1)) - PI_F * 0.5f;
-        *ox = 5.0f * cosf(a);
-        *oy = 5.0f * sinf(a);
-        break;
-
-    case F_CIRCLE:
-        a = TWO_PI_F * (float)i / (float)n;
-        *ox = 4.0f * cosf(a);
-        *oy = 4.0f * sinf(a);
-        break;
-
-    default: {
-        /* Random: a 24 bit hash of the running seed, giving the
-         * angle a jitter inside its slice and the radius a value
-         * in [2.5, 7.0). */
-        unsigned s = *seed;
-        unsigned h1 = (s * 0x19660Du + 0x3C6EF35Fu) & 0xFFFFFFu;
-        float r1, r2, rad;
-
-        s = s * 0x17385CA9u + 0x47502932u;
-        *seed = s;
-
-        r1 = (float)h1 * INV_2P24;
-        r2 = (float)(s & 0xFFFFFFu) * INV_2P24;
-
-        a = (TWO_PI_F / (float)n) * ((float)i + r1);
-        rad = 2.5f + 4.5f * r2;
-        *ox = rad * cosf(a);
-        *oy = rad * sinf(a);
-        break;
-    }
-    }
-}
-
-/* Lay the whole formation out: the centre goes `dist` metres
- * along the player's facing, every point is then rotated by the
- * same yaw, and z is the player's own (the original does no
- * ground probe).  Returns how many points were written.
- */
-static int PlanFormation(int formation, float dist, int n,
-                         const ShVec3 *pp, float yaw, ShVec3 *out) {
-    unsigned seed = (unsigned)GetTickCount() ^ (unsigned)(uintptr_t)out;
-    float cy = cosf(yaw), sy = sinf(yaw);
-    float bx, by;
-    int i;
-
-    if (n > PLAN_MAX) n = PLAN_MAX;
-    if (n < 1) return 0;
-
-    bx = pp->x + dist * cy;
-    by = pp->y + dist * sy;
-
-    for (i = 0; i < n; i++) {
-        float ox, oy;
-        FormationPoint(formation, i, n, &seed, &ox, &oy);
-        out[i].x = bx + ox * sy + oy * cy;
-        out[i].y = by - ox * cy + oy * sy;
-        out[i].z = pp->z;
-    }
-    return n;
-}
-
 /* ---- the spawn worker (mirrors 0x180002070) --------------------- */
 
-typedef struct {
-    uint64_t id;
-    float    dist;
-    int      count;
-    int      formation;
-    int      facing;
-} SpawnReq;
-
+/* The layout, the spawn and the facing all belong to
+ * ShNpcSpawnFormation now.  This thread exists only so the menu
+ * callback does not block on it: a batch of five waits on five
+ * entities in turn, and the first spawn of an archetype streams
+ * its assets in.
+ */
 static DWORD WINAPI SpawnWorker(LPVOID p) {
-    SpawnReq *r = (SpawnReq *)p;
-    ShPlayer pl;
-    ShVec3 pp = { 0.0f, 0.0f, 0.0f };
-    ShVec3 tmp;
-    ShVec3 pos[PLAN_MAX];
-    float yaw = 0.0f, pitch = 0.0f, roll = 0.0f;
-    uint64_t id;
-    float dist;
-    int count, formation, facing;
-    int n, i, spawned = 0, faceFail = 0, alive;
+    ShNpcSpawnRequest req;
+    uint64_t ent[SH_NPC_SPAWN_MAX];
+    int got = 0, i, count, alive;
 
-    if (!r) { ReleaseBusy(); return 0; }
-    id = r->id;
-    dist = r->dist;
-    count = r->count;
-    formation = r->formation;
-    facing = r->facing;
-    free(r);
+    if (!p) { ReleaseBusy(); return 0; }
+    req = *(ShNpcSpawnRequest *)p;
+    free(p);
 
-    if (!pGetPlayer(&pl) || !pGetPlayerPosition(&pp) ||
-        !pGetEntityTransform(pl.entity, &tmp, &yaw, &pitch, &roll)) {
-        Log("npcspawner: player unavailable");
-        SetStatus("Player unavailable");
-        ReleaseBusy();
-        return 0;
+    count = req.count;
+    got = pSpawnFormation(&req, ent, SH_NPC_SPAWN_MAX);
+
+    Log("npcspawner: spawn id=%llx n=%d form=%d face=%d dist=%.0f got=%d",
+        (unsigned long long)req.id, count, req.formation, req.facing,
+        req.distance, got);
+
+    EnterCriticalSection(&g_trackLock);
+    for (i = 0; i < got; i++) {
+        if (g_trackN < TRACK_MAX) g_track[g_trackN++] = ent[i];
+        g_last = ent[i];
     }
-
-    n = PlanFormation(formation, dist, count, &pp, yaw, pos);
-    Log("npcspawner: spawn id=%llx n=%d form=%d face=%d dist=%.0f yaw=%.2f",
-        (unsigned long long)id, n, formation, facing, dist, yaw);
-
-    for (i = 0; i < n; i++) {
-        uint64_t e;
-
-        if (WorldBusy()) break;
-
-        e = pSpawnNpc(id, &pos[i]);
-        if (!e) continue;                 /* not counted, as in the original */
-        if (WorldBusy()) continue;        /* spawned, but do not track it */
-
-        TrackAdd(e);
-        spawned++;
-
-        if (facing == FACE_PLAYER) {
-            /* Turn it to look at the player, in radians. */
-            float dx = pp.x - pos[i].x;
-            float dy = pp.y - pos[i].y;
-            if (!pQueueTransform(e, &pos[i], atan2f(dy, dx), 0.0f, 0.0f))
-                faceFail++;
-        }
-    }
+    LeaveCriticalSection(&g_trackLock);
 
     ReleaseBusy();
 
     if (WorldBusy()) return 0;
-    Log("npcspawner: spawned %d/%d, faceFail %d", spawned, count, faceFail);
 
-    if (spawned == 0) {
-        SetStatus("Spawn failed");
+    if (got == 0) {
+        if (pLastError && pLastError() == SH_ERR_NO_POSITION)
+            SetStatus("Player unavailable");
+        else
+            SetStatus("Spawn failed");
         return 0;
     }
 
@@ -553,13 +367,15 @@ static DWORD WINAPI SpawnWorker(LPVOID p) {
     alive = g_trackN;
     LeaveCriticalSection(&g_trackLock);
 
-    if (spawned == count && faceFail == 0) {
+    if (got == count) {
         RefreshStatus();
         return 0;
     }
+    /* F is what did not turn up; the original counted failed
+     * facing transforms here instead. */
     if (pMenuStatusF)
         pMenuStatusF(g_menu, "Spawn %d/%d | F %d | Total %d/%d",
-                     spawned, count, faceFail, alive, REPORT_LIMIT);
+                     got, count, count - got, alive, REPORT_LIMIT);
     return 0;
 }
 
@@ -634,7 +450,7 @@ static void OnNumber(uint32_t menu, uint32_t item, int value, void *user) {
 
 static void OnSpawnSelected(uint32_t menu, uint32_t item, int value,
                             void *user) {
-    SpawnReq *r;
+    ShNpcSpawnRequest *r;
     HANDLE h;
     int count = 0, idx, alive;
     uint64_t id = 0;
@@ -662,14 +478,14 @@ static void OnSpawnSelected(uint32_t menu, uint32_t item, int value,
         return;
     }
 
-    r = (SpawnReq *)malloc(sizeof(*r));
+    r = (ShNpcSpawnRequest *)malloc(sizeof(*r));
     if (!r) {
         SetStatus("Spawn request failed");
         ReleaseBusy();
         return;
     }
     r->id = id;
-    r->dist = g_distanceM[g_distIdx];
+    r->distance = g_distanceM[g_distIdx];
     r->count = g_countN[g_countIdx];
     r->formation = g_formation;
     r->facing = g_facing;
@@ -725,10 +541,144 @@ static void OnFacing(uint32_t menu, uint32_t item, int value, void *user) {
 
 static void OnGroup(uint32_t menu, uint32_t item, int value, void *user) {
     (void)menu; (void)item; (void)user;
-    if (value < 0 || value >= GROUP_MAX) return;
+    if (value < 0 || value >= SH_NPC_GROUP_MAX) return;
     g_group = value;
     Log("npcspawner: group %d", g_group);
     RefreshStatus();
+}
+
+/* ---- the self test ----------------------------------------------- */
+
+/* A scripted walk of the batch API, off by default and toggled by
+ * [Settings] selftest in this plugin's own ini.  It exists to be
+ * read back in the log: every expected value is printed beside
+ * what actually came back.  It spawns real NPCs and deliberately
+ * leaves them out of the undo list, so a diagnostic never spends
+ * the 50 budget the menu is tracking.
+ */
+static void SelfTestRun(void) {
+    ShNpcSpawnRequest req;
+    int count = 0, idx, n, done, i;
+    uint64_t id = 0;
+    uint32_t job;
+
+    idx = GroupScan(g_group, &count, &id);
+    if (count <= 0 || idx < 0 || !id) {
+        Log("selftest: no selection in group %d, nothing to do", g_group);
+        SetStatus("Selection unavailable");
+        return;
+    }
+    Log("selftest: start, group %d id %llx", g_group,
+        (unsigned long long)id);
+
+    req.id = id;
+    req.count = 5;
+    req.distance = g_distanceM[g_distIdx];
+    req.facing = SH_NPC_FACING_PLAYER;
+
+    /* 1: handle semantics - End refuses while running, Cancel is
+     *    safe, End frees, and the id is dead afterwards. */
+    req.formation = SH_NPC_FORMATION_RANDOM;
+    job = pSpawnBegin(&req);
+    Log("selftest: 1 begin -> %u (want non-zero)", (unsigned)job);
+    if (!job) goto done;
+
+    Log("selftest: 1 End while running -> %d (want 0)", pSpawnEnd(job));
+    Log("selftest: 1 Cancel -> %d (want 1)", pSpawnCancel(job));
+
+    done = 0;
+    for (i = 0; i < 60 && !done; i++) {
+        Sleep(200);
+        pSpawnPoll(job, NULL, 0, &done);
+    }
+    n = pSpawnPoll(job, NULL, 0, &done);
+    Log("selftest: 1 stopped at n=%d done=%d (n should be small)", n, done);
+    Log("selftest: 1 End -> %d (want 1)", pSpawnEnd(job));
+    Log("selftest: 1 Poll after End -> %d (want -1)",
+        pSpawnPoll(job, NULL, 0, NULL));
+
+    /* 2: a batch left alone, so the poll can be watched rising */
+    req.formation = SH_NPC_FORMATION_SPREAD;
+    job = pSpawnBegin(&req);
+    Log("selftest: 2 begin -> %u (want non-zero)", (unsigned)job);
+    if (!job) goto done;
+
+    n = 0;
+    done = 0;
+    /* 30 ms, because the engine is quick once the archetype is
+     * streamed: five of them land in about 275 ms, so a coarse
+     * sample only ever catches the final count. */
+    for (i = 0; i < 200 && !done; i++) {
+        int was = n, d2 = 0;
+        Sleep(30);
+        n = pSpawnPoll(job, NULL, 0, &d2);
+        if (n != was || d2 != done)
+            Log("selftest: 2 poll n=%d done=%d", n, d2);
+        done = d2;
+    }
+    Log("selftest: 2 final n=%d done=%d (want n=5)", n, done);
+    Log("selftest: 2 End -> %d (want 1)", pSpawnEnd(job));
+
+    /* 3: cancel in the middle of a batch big enough to catch */
+    req.count = 20;
+    job = pSpawnBegin(&req);
+    Log("selftest: 3 begin count=20 -> %u (want non-zero)", (unsigned)job);
+    if (!job) goto done;
+
+    /* Watch it fill up first, then pull the plug at about half.
+     * Twenty take roughly 1.1 s, so cancelling at 1 s sat on the
+     * edge of being finished anyway and could report n=20 by
+     * luck. */
+    n = 0;
+    done = 0;
+    for (i = 0; i < 5 && !done; i++) {
+        int was = n, d2 = 0;
+        Sleep(100);
+        n = pSpawnPoll(job, NULL, 0, &d2);
+        if (n != was) Log("selftest: 3 poll n=%d done=%d", n, d2);
+        done = d2;
+    }
+    Log("selftest: 3 Cancel at ~0.5s -> %d (want 1)", pSpawnCancel(job));
+
+    done = 0;
+    for (i = 0; i < 120 && !done; i++) {
+        Sleep(200);
+        pSpawnPoll(job, NULL, 0, &done);
+    }
+    n = pSpawnPoll(job, NULL, 0, &done);
+    Log("selftest: 3 stopped at n=%d of 20 done=%d (want n below 20)",
+        n, done);
+    Log("selftest: 3 End -> %d (want 1)", pSpawnEnd(job));
+
+done:
+    Log("selftest: finished; the NPCs it made are NOT in the undo list");
+    SetStatus("Self test done");
+}
+
+static DWORD WINAPI SelfTestThread(LPVOID p) {
+    (void)p;
+    SelfTestRun();
+    InterlockedExchange(&g_selfRun, 0);
+    return 0;
+}
+
+static void OnSelfTest(uint32_t menu, uint32_t item, int value,
+                       void *user) {
+    HANDLE h;
+    (void)menu; (void)item; (void)value; (void)user;
+
+    if (InterlockedCompareExchange(&g_selfRun, 1, 0)) {
+        SetStatus("Self test already running");
+        return;
+    }
+    h = CreateThread(NULL, 0, SelfTestThread, NULL, 0, NULL);
+    if (!h) {
+        InterlockedExchange(&g_selfRun, 0);
+        SetStatus("Could not start worker");
+        return;
+    }
+    CloseHandle(h);
+    SetStatus("Self test running");
 }
 
 /* ---- menu build ------------------------------------------------- */
@@ -761,6 +711,13 @@ static uint32_t BuildMenu(void) {
     pMenuList(m, "Facing", g_facingOpts, 2, g_facing, OnFacing, NULL);
     pMenuList(m, "NPC Group", g_groupOpts, 5, g_group, OnGroup, NULL);
 
+    /* Last, and only when asked for: [Settings] selftest in this
+     * plugin's own ini.  It is a diagnostic, not part of the
+     * summon the original offered. */
+    if (g_selfOn && pSpawnBegin && pSpawnPoll && pSpawnCancel &&
+        pSpawnEnd)
+        pMenuAction(m, "Self test", OnSelfTest, NULL);
+
     RefreshStatus();
     return m;
 }
@@ -783,17 +740,8 @@ static DWORD WINAPI BindThread(LPVOID p) {
 
     *(FARPROC *)&pGetVersion = GetProcAddress(mod, "ShGetVersion");
     *(FARPROC *)&pGetGameState = GetProcAddress(mod, "ShGetGameState");
-    *(FARPROC *)&pGetPlayer = GetProcAddress(mod, "ShGetPlayer");
-    *(FARPROC *)&pGetPlayerPosition =
-        GetProcAddress(mod, "ShGetPlayerPosition");
-    *(FARPROC *)&pGetEntityTransform =
-        GetProcAddress(mod, "ShGetEntityTransform");
     *(FARPROC *)&pGetEntityKind = GetProcAddress(mod, "ShGetEntityKind");
     *(FARPROC *)&pGetHealthEntity = GetProcAddress(mod, "ShGetHealthEntity");
-    *(FARPROC *)&pQueueTransform = GetProcAddress(mod, "ShQueueTransform");
-    *(FARPROC *)&pNpcCount = GetProcAddress(mod, "ShNpcCount");
-    *(FARPROC *)&pNpcAt = GetProcAddress(mod, "ShNpcAt");
-    *(FARPROC *)&pSpawnNpc = GetProcAddress(mod, "ShSpawnNpc");
     *(FARPROC *)&pDespawn = GetProcAddress(mod, "ShDespawn");
     *(FARPROC *)&pMenuCreate = GetProcAddress(mod, "ShMenuCreate");
     *(FARPROC *)&pMenuList = GetProcAddress(mod, "ShMenuList");
@@ -801,12 +749,22 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&pMenuStatus = GetProcAddress(mod, "ShMenuStatus");
     *(FARPROC *)&pMenuStatusF = GetProcAddress(mod, "ShMenuStatusF");
     *(FARPROC *)&pMenuSetValue = GetProcAddress(mod, "ShMenuSetValue");
+    /* Optional: it only tells a missing player apart from a
+     * batch that simply would not appear. */
+    *(FARPROC *)&pLastError = GetProcAddress(mod, "ShLastError");
 
-    if (!pGetVersion || !pGetGameState || !pGetPlayer ||
-        !pGetPlayerPosition || !pGetEntityTransform || !pGetEntityKind ||
-        !pGetHealthEntity || !pQueueTransform || !pNpcCount || !pNpcAt ||
-        !pSpawnNpc || !pDespawn || !pMenuCreate || !pMenuList ||
-        !pMenuAction || !pMenuStatus) {
+    /* The summon API itself.  Without it this menu has nothing to
+     * offer, so the plugin stands down rather than adding rows
+     * that cannot work. */
+    *(FARPROC *)&pNpcGroupSize = GetProcAddress(mod, "ShNpcGroupSize");
+    *(FARPROC *)&pNpcAtInGroup = GetProcAddress(mod, "ShNpcAtInGroup");
+    *(FARPROC *)&pSpawnFormation =
+        GetProcAddress(mod, "ShNpcSpawnFormation");
+
+    if (!pGetVersion || !pGetGameState || !pGetEntityKind ||
+        !pGetHealthEntity || !pDespawn || !pMenuCreate || !pMenuList ||
+        !pMenuAction || !pMenuStatus || !pNpcGroupSize ||
+        !pNpcAtInGroup || !pSpawnFormation) {
         Log("npcspawner: required export missing, giving up");
         return 1;
     }
@@ -814,7 +772,20 @@ static DWORD WINAPI BindThread(LPVOID p) {
     /* The API is up once ShGetVersion answers. */
     while (!pGetVersion()) Sleep(500);
 
-    Log("npcspawner: up");
+    ResolveIniPath();
+    g_selfOn = IniInt("selftest", 0) ? 1 : 0;
+
+    /* Optional: the batch handle, which only the self test uses. */
+    *(FARPROC *)&pSpawnBegin = GetProcAddress(mod, "ShNpcSpawnBegin");
+    *(FARPROC *)&pSpawnPoll = GetProcAddress(mod, "ShNpcSpawnPoll");
+    *(FARPROC *)&pSpawnCancel = GetProcAddress(mod, "ShNpcSpawnCancel");
+    *(FARPROC *)&pSpawnEnd = GetProcAddress(mod, "ShNpcSpawnEnd");
+
+    Log("npcspawner: up, ini=%s selftest=%d",
+        g_iniPath[0] ? g_iniPath : "(none)", g_selfOn);
+    if (g_selfOn &&
+        (!pSpawnBegin || !pSpawnPoll || !pSpawnCancel || !pSpawnEnd))
+        Log("npcspawner: selftest asked for but the batch exports are gone");
     menu = BuildMenu();
     if (!menu) {
         Log("npcspawner: menu create failed");
@@ -829,6 +800,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
+        g_inst = inst;
         CreateThread(NULL, 0, BindThread, NULL, 0, NULL);
     }
     return TRUE;

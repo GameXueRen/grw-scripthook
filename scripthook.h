@@ -409,6 +409,134 @@ SH_API uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos);
  *  have no spec and refuse. */
 SH_API int ShDespawn(uint64_t entity);
 
+/* ---- factions ----------------------------------------------------
+ *
+ * The engine keeps an archetype's faction private, and
+ * ShNpcArchetype carries only {id, kind} with no name, so the
+ * grouping cannot be derived: it is the four id tables
+ * NPCSpawner.asi shipped plus the engine's own kind value as the
+ * fallback. See docs/npcspawner-reverse.md for the evidence.
+ */
+
+#define SH_NPC_GROUP_SANTA_BLANCA 0
+#define SH_NPC_GROUP_UNIDAD       1
+#define SH_NPC_GROUP_REBELS       2
+#define SH_NPC_GROUP_CIVILIANS    3
+#define SH_NPC_GROUP_SPECIAL      4
+#define SH_NPC_GROUP_MAX          5
+
+/** SH_NPC_GROUP_MAX. */
+SH_API int ShNpcGroupCount(void);
+/** "Santa Blanca", "Unidad", "Rebels", "Civilians", "Special",
+ *  or "" for a group out of range. These are the menu labels
+ *  NPCSpawner.asi used, so they double as its translation keys. */
+SH_API const char *ShNpcGroupName(int group);
+
+/** The group an archetype belongs to, or -1 for one in none of
+ *  them (the blacklist, or a kind no group claims). The tables
+ *  are tried first and the engine's kind decides the rest. */
+SH_API int ShNpcGroupOfArchetype(const ShNpcArchetype *a);
+
+/** The same, looked up by id: walks the catalogue, so the first
+ *  call waits for the registry like ShNpcCount does. -1 when no
+ *  archetype carries that id. */
+SH_API int ShNpcGroupOf(uint64_t archetypeId);
+
+/** How many archetypes the group holds. 0 for a group out of
+ *  range or a catalogue that is not readable yet. */
+SH_API int ShNpcGroupSize(int group);
+
+/** The index-th archetype of a group, 0 based, as the group is
+ *  walked. Fills out when it is not NULL. Returns that
+ *  archetype's index in the whole catalogue, or -1 past the end. */
+SH_API int ShNpcAtInGroup(int group, int index, ShNpcArchetype *out);
+
+/* ---- formations and batches ------------------------------------- */
+
+/** The five layouts NPCSpawner.asi offered. */
+enum ShNpcFormation {
+    SH_NPC_FORMATION_LINE = 0,   /**< abreast, 3 m apart        */
+    SH_NPC_FORMATION_SPREAD,     /**< a 3 column grid, 3.5 m    */
+    SH_NPC_FORMATION_SEMICIRCLE, /**< an arc, radius 5 m        */
+    SH_NPC_FORMATION_CIRCLE,     /**< a ring, radius 4 m        */
+    SH_NPC_FORMATION_RANDOM      /**< jittered, radius 2.5-7 m  */
+};
+
+/** Where a spawned batch looks. */
+enum ShNpcFacing {
+    /** Each one is turned to look at the player. */
+    SH_NPC_FACING_PLAYER = 0,
+    /** The orientation spawn already gave it, which is the
+     *  player's own. Nothing is written. */
+    SH_NPC_FACING_FORWARD
+};
+
+/** Most NPCs one batch may ask for. */
+#define SH_NPC_SPAWN_MAX  50
+/** Batches that may be in flight at once. */
+#define SH_NPC_SPAWN_JOBS 4
+
+/** Lay a formation out, and only that: no engine call, no lane
+ *  to the game thread. The centre goes `distance` metres from
+ *  origin along yaw, every point is rotated by the same yaw, and
+ *  z is origin's own (a batch is not ground probed, matching the
+ *  original). Writes up to max points, and at most
+ *  SH_NPC_SPAWN_MAX. Returns how many were written, 0 on a bad
+ *  argument. yaw is radians, world axes, x east y north z up. */
+SH_API int ShNpcPlanFormation(int formation, int count, float distance,
+                              const ShVec3 *origin, float yaw,
+                              ShVec3 *out, int max);
+
+/** One batch. id is an archetype id; count and facing are as the
+ *  two enums above. */
+typedef struct {
+    uint64_t id;        /**< archetype id                        */
+    int      count;     /**< 1 .. SH_NPC_SPAWN_MAX                */
+    float    distance;  /**< metres ahead of the player           */
+    int      formation; /**< an ShNpcFormation                    */
+    int      facing;    /**< an ShNpcFacing                       */
+} ShNpcSpawnRequest;
+
+/** Spawn a whole batch and wait for it. Fills out with the
+ *  entities that appeared, up to maxOut and at most
+ *  SH_NPC_SPAWN_MAX, and returns how many. The count is clamped
+ *  to those limits rather than refused.
+ *
+ *  BLOCKING, and each NPC is waited on separately, so a batch of
+ *  50 can take a long time and the first spawn of a new
+ *  archetype streams its assets in. NEVER call this from the
+ *  game thread - a frame callback or a menu engine call - or
+ *  from any thread the engine is waiting on: ShSpawnNpc waits
+ *  for the physics pump, which runs on the game thread, and that
+ *  would deadlock. Use ShNpcSpawnBegin from anywhere. */
+SH_API int ShNpcSpawnFormation(const ShNpcSpawnRequest *req,
+                               uint64_t *out, int maxOut);
+
+/** The same batch on a worker thread of the API's own, with a
+ *  handle to poll. Returns a job id, 0 when no job is free or
+ *  the thread could not be started. */
+SH_API uint32_t ShNpcSpawnBegin(const ShNpcSpawnRequest *req);
+
+/** The entities a job has produced so far, copied into out, up
+ *  to maxOut. Returns how many there are, or -1 for a job id
+ *  that is not live. done is set to 1 once the worker has
+ *  stopped, whether it finished, failed or was cancelled.
+ *  Safe to call while the job is still running. */
+SH_API int ShNpcSpawnPoll(uint32_t job, uint64_t *out, int maxOut,
+                          int *done);
+
+/** Ask a job to stop. The worker checks between NPCs, so a
+ *  cancel lands within one spawn (a few seconds at worst); what
+ *  it already produced stays readable through ShNpcSpawnPoll.
+ *  Does not free the job - ShNpcSpawnEnd does. Safe, and a
+ *  no-op, on a job that has already finished. */
+SH_API int ShNpcSpawnCancel(uint32_t job);
+
+/** Free a job. Refuses while it is still running, and asks it to
+ *  stop first, so the caller polls until done and calls again.
+ *  The job id is dead afterwards. */
+SH_API int ShNpcSpawnEnd(uint32_t job);
+
 /** @} */
 /** @addtogroup player
  *  @{ */

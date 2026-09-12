@@ -181,6 +181,13 @@ Spawn Count 真值     @0x180007BF0  int[3]   = {1, 3, 5}
 
 ## 五、阵营分组：分类函数 `0x1800011C0`（核心）
 
+> **实现位置已变更（2026-09-12）**：这 4 张 id 表与分类器已从插件搬进**框架**
+> （`scripthook_npc.c`），对外暴露为 `ShNpcGroupOfArchetype` /
+> `ShNpcGroupOf` / `ShNpcGroupSize` / `ShNpcAtInGroup` / `ShNpcGroupName`；
+> `NPCSpawner.c` 改为调用它们，仓库里只保留一份数据。阵型几何与朝向同样移入框架
+> （`ShNpcPlanFormation` / `ShNpcSpawnFormation`）。下文的规则即框架现在的实现，
+> 换个插件也能直接用。
+
 签名（推断）：`bool NpcInGroup(int group /*ecx*/, const ShNpcArchetype *a /*rdx*/)`
 
 ```
@@ -452,6 +459,15 @@ else        → "%d/%d | Total %d/%d" (0x78F8, sel, inGroup, idx, 50)
    `NPCSpawner.ini` 中给出翻译，因此回退为原文。
 4. 重写件为 **C17**（本项目插件层规范），不引入 MSVC C++/STL 依赖；
    原件的 `std::vector` / `std::mutex` 换成固定数组 + `CRITICAL_SECTION`。
+5. **状态行 `F` 字段改为「本批未出现的人数」**。原件这里统计的是
+   `ShQueueTransform` 的失败次数（几乎恒为 0）；召唤改由框架
+   `ShNpcSpawnFormation` 完成后插件拿不到那个计数，于是改为 `count - 生成数`。
+   信息量更大，且格式串 `Spawn %d/%d | F %d | Total %d/%d` 不变，
+   只有 `NPCSpawner.ini` 里的中文措辞跟着调整。
+6. **分组表、阵型几何与生成循环已移入框架**（见第五节开头的说明），
+   插件只保留菜单、转盘、撤销列表与上限——因此本插件现在**依赖**
+   `ShNpcGroupSize` / `ShNpcAtInGroup` / `ShNpcSpawnFormation`：
+   绑不到就记日志并放弃注册菜单，而不是给出一个点不动的菜单。
 
 ---
 
