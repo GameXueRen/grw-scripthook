@@ -196,41 +196,67 @@ static Item *NewItem(Menu *m, int kind, const char *label,
  * ------------------------------------------------------------------ */
 #define VK_NONE 0
 
-/* Render the friendly name of a virtual key into out (>= n bytes). */
+/* Render the friendly name of a virtual key into out (>= n bytes).
+ * The keypad and the punctuation keys are spelled out ("Num1",
+ * "Oem+") so a hotkey the player set there reads as the key that
+ * was pressed rather than a bare VK61.  Only a key with no name
+ * of its own falls back to the raw code. */
 static void VkName(int vk, char *out, int n) {
-    char *p = out;
-    int left = n;
-#define PUSH1(c)   do { if (left > 1) { *p++ = (c); left--; } } while (0)
-#define PUSH2(a,b) do { PUSH1(a); PUSH1(b); } while (0)
+    int i;
+
     if (n <= 0) return;
     out[0] = 0;
-    if (vk == VK_NONE) { PUSH2('?', '?'); }
-    else if (vk >= '0' && vk <= '9') PUSH1((char)vk);
-    else if (vk >= 'A' && vk <= 'Z') PUSH1((char)vk);
-    else if (vk >= VK_F1 && vk <= VK_F24) {
-        PUSH1('F');
-        if (vk - VK_F1 + 1 >= 10) PUSH1((char)('0' + (vk - VK_F1 + 1) / 10));
-        PUSH1((char)('0' + (vk - VK_F1 + 1) % 10));
+
+    if (vk == VK_NONE) { snprintf(out, n, "--"); return; }
+    if (vk >= '0' && vk <= '9') { snprintf(out, n, "%c", (char)vk); return; }
+    if (vk >= 'A' && vk <= 'Z') { snprintf(out, n, "%c", (char)vk); return; }
+    if (vk >= VK_F1 && vk <= VK_F24) {
+        snprintf(out, n, "F%d", vk - VK_F1 + 1);
+        return;
     }
-    else switch (vk) {
-    case VK_ESCAPE:   memcpy(p, "Esc", 4); break;
-    case VK_RETURN:   memcpy(p, "Enter", 6); break;
-    case VK_TAB:      memcpy(p, "Tab", 4); break;
-    case VK_BACK:     memcpy(p, "Bksp", 5); break;
-    case VK_SPACE:    memcpy(p, "Space", 6); break;
-    case VK_UP:       memcpy(p, "Up", 3); break;
-    case VK_DOWN:     memcpy(p, "Down", 5); break;
-    case VK_LEFT:     memcpy(p, "Left", 5); break;
-    case VK_RIGHT:    memcpy(p, "Right", 6); break;
-    case VK_HOME:     memcpy(p, "Home", 5); break;
-    case VK_END:      memcpy(p, "End", 4); break;
-    case VK_DELETE:   memcpy(p, "Del", 4); break;
-    case VK_INSERT:   memcpy(p, "Ins", 4); break;
-    default:          snprintf(out, n - 1, "VK%02X", vk); return;
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
+        snprintf(out, n, "Num%d", vk - VK_NUMPAD0);
+        return;
     }
-#undef PUSH1
-#undef PUSH2
-    out[n - 1] = 0;
+
+    {
+        static const struct { int vk; const char *name; } names[] = {
+            { VK_MULTIPLY, "Num*" }, { VK_ADD, "Num+" },
+            { VK_SUBTRACT, "Num-" }, { VK_DECIMAL, "Num." },
+            { VK_DIVIDE, "Num/" },
+            { VK_ESCAPE, "Esc" },   { VK_RETURN, "Enter" },
+            { VK_TAB, "Tab" },      { VK_BACK, "Bksp" },
+            { VK_SPACE, "Space" },
+            { VK_UP, "Up" },        { VK_DOWN, "Down" },
+            { VK_LEFT, "Left" },    { VK_RIGHT, "Right" },
+            { VK_HOME, "Home" },    { VK_END, "End" },
+            { VK_DELETE, "Del" },   { VK_INSERT, "Ins" },
+            { VK_PRIOR, "PgUp" },   { VK_NEXT, "PgDn" },
+            { VK_CAPITAL, "Caps" }, { VK_NUMLOCK, "NumLk" },
+            { VK_SCROLL, "ScrLk" }, { VK_SNAPSHOT, "PrtSc" },
+            { VK_PAUSE, "Pause" },  { VK_APPS, "Menu" },
+            { VK_SHIFT, "Shift" },  { VK_LSHIFT, "LShift" },
+            { VK_RSHIFT, "RShift" },
+            { VK_CONTROL, "Ctrl" }, { VK_LCONTROL, "LCtrl" },
+            { VK_RCONTROL, "RCtrl" },
+            { VK_MENU, "Alt" },     { VK_LMENU, "LAlt" },
+            { VK_RMENU, "RAlt" },
+            { VK_LWIN, "LWin" },    { VK_RWIN, "RWin" },
+            { VK_OEM_1, "Oem;" },   { VK_OEM_PLUS, "Oem+" },
+            { VK_OEM_COMMA, "Oem," }, { VK_OEM_MINUS, "Oem-" },
+            { VK_OEM_PERIOD, "Oem." }, { VK_OEM_2, "Oem/" },
+            { VK_OEM_3, "Oem`" },   { VK_OEM_4, "Oem[" },
+            { VK_OEM_5, "Oem\\" },  { VK_OEM_6, "Oem]" },
+            { VK_OEM_7, "Oem'" },   { VK_OEM_102, "Oem<>" }
+        };
+
+        for (i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++)
+            if (names[i].vk == vk) {
+                snprintf(out, n, "%s", names[i].name);
+                return;
+            }
+    }
+    snprintf(out, n, "VK%02X", vk);
 }
 
 /* Rendered text for the value side of a row. Fixed words and list
