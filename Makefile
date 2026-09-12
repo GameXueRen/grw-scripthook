@@ -14,7 +14,7 @@ GAMEDIR = ../..
 # plugin, which is what the loader scans for. Logs go into
 # <gamedir>/logs at runtime.
 
-.PHONY: all roulette fling spawner crazycars freecam fov fps \
+.PHONY: all roulette fling spawner npcspawner crazycars freecam fov fps \
         chaos sample skipintro docs clean
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
@@ -76,6 +76,12 @@ spawner: $(GAMEDIR)/plugins/spawner/spawner.asi
 $(GAMEDIR)/plugins/spawner/spawner.asi: spawner.c scripthook.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ spawner.c -lgdi32 -luser32
+
+npcspawner: $(GAMEDIR)/plugins/NPCSpawner/NPCSpawner.asi
+
+$(GAMEDIR)/plugins/NPCSpawner/NPCSpawner.asi: NPCSpawner.c scripthook.h log.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ NPCSpawner.c
 
 crazycars: $(GAMEDIR)/plugins/CrazyCars/CrazyCars.asi
 

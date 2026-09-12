@@ -267,6 +267,10 @@ Build-Plugin -Name 'GhostRevive' -Source 'GhostRevive.c' -LinkArgs @()
 #    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 #)
 Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')
+# NPCSpawner is a behaviour-equivalent C rewrite of the third-party
+# NPCSpawner.asi (see docs/npcspawner-reverse.md). It late-binds the
+# same exports the original did, so it needs no import library.
+Build-Plugin 'NPCSpawner'   'NPCSpawner.c'   @()
 Build-Plugin 'CrazyCars'    'crazycars.c'    @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tp_roulette'  'tp_roulette.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
