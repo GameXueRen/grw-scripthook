@@ -66,6 +66,12 @@ extern void ShCoreFixStartup(void);
 extern void ShCoreFixLateStartup(void);
 extern void ShModSettingsStartup(void);
 extern void ShChatStartup(void);
+/* Temporary, until the mod loader replaces it: the evidence round that
+ * records how the engine reads .forge. See scripthook_forgeprobe.c. */
+extern void ShForgeProbeStartup(void);
+/* Forge Mod Loader: reads [forgemod], scans mods\ and registers its
+ * menu. The file I/O half installs from the loader thread too. */
+extern void ShForgeStartup(void);
 
 /* Plugins live one folder each under plugins\, named after
  * the plugin:
@@ -147,6 +153,12 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     (void)p;
     ShConfigInit();
     Log("config loaded from scripthook.ini");
+    /* Forge Mod Loader, evidence round: watch how the engine reads
+     * .forge. Off unless [forgemod] probe=1, because both this and the
+     * loader's own I/O hooks want ReadFile and MinHook keeps one hook
+     * per target. Nothing is blocked, nothing is changed. */
+    if (ShConfigGetBool("forgemod", "probe", 0))
+        ShForgeProbeStartup();
     /* The play-time half of the CPU trims: the deferred processor-0
      * drop. Started here rather than in DllMain, where creating a
      * thread can deadlock against the loader lock. A no-op unless
@@ -162,6 +174,9 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     /* Chinese chat input: in-process version of the GRW-CNChat
      * AutoHotkey tool (the game's own chat field cannot take IME). */
     ShChatStartup();
+    /* Forge Mod Loader: scan mods\ and build the per-archive overrides
+     * before the plugins load, so the menu is up with the rest. */
+    ShForgeStartup();
     LoadASIPlugins();
     return 0;
 }

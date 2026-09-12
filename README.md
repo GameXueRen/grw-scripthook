@@ -60,7 +60,7 @@ C ABI，并按 ASI 插件约定加载 `plugins\` 下的 `.asi` 插件。
 | CPU 核心调度（Logo / 窗口加载 / 游玩三阶段分档 + 最大核心数上限） | 已实现，待大规模验证 |
 | 「最后的仪式」闪退修复（LastRites_dlcfix：单开关，条目 3718 写死） | 已完成，已验证 |
 | 魅影模式不删档（GhostNoWipe：单开关，写入守卫 + 拦改名 + 状态提示条） | 已完成，已验证 |
-| Forge Mod Loader | 游戏资源侧载热替换模块，调试中 |
+| Forge Mod Loader | 游戏资源侧载热替换（mods\ 目录，免解包免重打包、不改原版、不写盘） | 已完成，机制已验证 |
 
 
 ---
@@ -71,8 +71,8 @@ C ABI，并按 ASI 插件约定加载 `plugins\` 下的 `.asi` 插件。
 
 | 功能清单 | 状态 | 备注 |
 | --- | --- | --- |
-| Forge Mod Loader支持载具皮肤替换 | 调试中 | 游戏资源文件免解包免重打包侧载热替换 |
-| Forge Mod Loader支持武器数据修改替换 | 验证中 |  |
+| Forge Mod Loader支持载具皮肤替换 | 已完成（机制已验证） | 游戏资源文件免解包免重打包侧载热替换；替换内容需 ≤ 原条目长度，详见 docs/forge-mod-loader.md |
+| Forge Mod Loader支持武器数据修改替换 | 已完成（机制已验证） | 同上；只替换已有条目，不新增/删除 |
 | 集成自动修复游戏麦识别故障方案 | 验证中 |  |
 | 集成修复新DLC闪退方案 | 已完成 | 见 LastRites_dlcfix 插件：单开关，仅对条目 3718 放行 |
 | 长按4键快速选择道具轮盘界面 | 计划中 |  |
@@ -100,6 +100,7 @@ Tom Clancy's Ghost Recon Wildlands/
 ├── dinput8.dll
 ├── scripthook.ini     主配置文件
 ├── logs/              运行日志
+├── mods/              Forge Mod Loader 的 mod 目录（可选，见下）
 └── plugins/           插件目录（每个插件一个子文件夹）
 ```
 
@@ -121,10 +122,53 @@ cpu_cores=0             ; 游玩阶段最大逻辑核心数（0 = 不限制；�
 [plugins]
 chaos=0                 ; 每个插件一行，1 启用 / 0 禁用
 
+[forgemod]
+enabled=0               ; Forge Mod Loader：1 = 加载 mods\（默认关）
+dry_run=0               ; 1 = 只解析并写日志，不实际叠加
+report_copies=1         ; 1 = 检测同一资源在其它归档里的副本并提示
+apply_all_copies=0      ; 1 = 把 mod 自动叠加到那些副本
+probe=0                 ; 1 = 安装取证探针（排查用）
+log_reads=0             ; 1 = 记录每次读取（排查用）
+
 [Settings]
 Languages=zh_cn,en      ; 设置菜单中可选的语言列表（逗号分隔）
 Language=zh_cn          ; 当前菜单语言
 ```
+
+---
+
+## Forge Mod Loader（游戏资源侧载热替换）
+
+把 `mods\` 目录下的松散文件**侧载**到已有的 `.forge` 条目上：**不解包、不重打包、
+不改动原版归档、不写盘**。原理与 FusionFix ModLoader 一致——不是替换文件，而是
+在引擎读取的那一刻把被替换的字节区间换成 mod 的内容。
+
+**开启**：在游戏根目录建 `mods\`，并在 `scripthook.ini` 里设 `[forgemod] enabled=1`
+（默认关）。F4 菜单里的「Forge 资源侧载」页有开关与状态行。
+
+```
+mods/<归档名>/<文件>                  扁平布局，优先级最高
+mods/<mod名>/<归档名>/<文件>          按 mod 文件夹名升序，先者优先
+mods/~<名字>/...                      "~" 前缀 = 该 mod 被禁用
+.../<序号>_-_<条目名>.data            文件名里的序号指定条目
+```
+
+**两条硬性约束**（务必先读）：
+
+1. **替换内容必须 ≤ 原条目长度**。该容器里 payload 是紧挨着存放的（没有空隙），
+   所以「可用空间」就等于原长度；更大的替换需要移动其它条目，本版本不做，会被
+   拒绝并写入日志。
+2. **只替换已有条目**，不新增、不删除。`.delete` 后缀会被识别但暂不执行。
+
+**同一资源常存在于多个归档**（例如 `W_ASR_AK47_body_LOD0` 同时存在于
+`DataPC.forge`、`DataPC_patch_01.forge` 及 DLC 归档）。只改一份可能被另一份遮蔽，
+看起来像「mod 没生效」。loader 会**按 FileDataID 跨归档检索**并把其它副本写进
+日志；`apply_all_copies=1` 可自动一并覆盖。改动应优先打到 `*_patch_01`（它胜过其
+base 家族）；外观类 3D 模型多位于 `DataPC_GRN_WorldMap*`。
+
+**做 mod**：用 WildlandsToolkit 的 `wlcli` 导出条目（`wlcli entry <forge> <index> <out>`）
+→ 修改 → 放回 `mods\<归档名>\`。完整说明、归档角色对照表与实测结论见
+[`docs/forge-mod-loader.md`](docs/forge-mod-loader.md)。
 
 ### 插件菜单的汉化（翻译表用法示例）
 

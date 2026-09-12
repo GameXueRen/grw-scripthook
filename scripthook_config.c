@@ -236,6 +236,28 @@ static const char *DEFAULT_CONFIG =
     "; 1 so the menu is there, but the plugin's own enabled=0 means it\n"
     "; registers nothing until asked. Single player only.\n"
     "\n"
+    "[forgemod]\n"
+    "; Forge Mod Loader: loose files under <gamedir>\\mods override entries\n"
+    "; that already exist in the .forge archives. No archive is modified and\n"
+    "; nothing is written to disk. Layout:\n"
+    ";     mods\\<archive name>\\<file>              flat, wins over\n"
+    ";     mods\\<mod name>\\<archive name>\\<file>   ordered by folder name\n"
+    "; A folder whose name starts with \"~\" is skipped, a file ending in\n"
+    "; \".delete\" is recognised and skipped, and \"<n>_-_<name>.data\" names\n"
+    "; the entry by index and name. A replacement has to fit the room the\n"
+    "; entry already has, because no other entry is ever moved.\n"
+    "; Off by default: create mods\\ and set enabled=1 to use it.\n"
+    "enabled=0\n"
+    "; 1 = resolve and log only; nothing is served.\n"
+    "dry_run=0\n"
+    "; 1 = report the other archives a targeted resource also lives in.\n"
+    "report_copies=1\n"
+    "; 1 = override those other copies as well.\n"
+    "apply_all_copies=0\n"
+    "; Diagnostic rounds, off in normal use.\n"
+    "probe=0\n"
+    "log_reads=0\n"
+    "\n"
     "[Settings]\n"
     "; Menu language: zh_cn = Chinese (default), en = English.\n"
     "Language=zh_cn\n"
@@ -541,6 +563,23 @@ static int ParseIniLine(char *line, char *section, size_t secCap,
         size_t l = strlen(s);
         if (l > 1 && s[l - 1] == *s) s[l - 1] = 0;
         s++;
+    } else if (!IsLangSection(section)) {
+        /* A trailing comment, but only when the ';' or '#' is separated
+         * by whitespace - the rule this parser has always stated. It has
+         * to be applied here or "probe=1  ; why" reads back as the whole
+         * string and a value silently falls back to its default. The
+         * translation tables are left verbatim, so a translation may
+         * still contain one. */
+        char *c = s;
+        while (*c) {
+            if ((*c == ';' || *c == '#') && c > s &&
+                (c[-1] == ' ' || c[-1] == '\t')) {
+                *c = 0;
+                while (c > s && (c[-1] == ' ' || c[-1] == '\t')) *--c = 0;
+                break;
+            }
+            c++;
+        }
     }
     *valueOut = s;
     return 1;

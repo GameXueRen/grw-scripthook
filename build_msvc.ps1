@@ -154,6 +154,8 @@ $fwSources = @(
     'scripthook_hud.c', 'scripthook_menu.c',
     'scripthook_cnchat.c', 'guard.c',
     'scripthook_corefix.c', 'scripthook_modsettings.c',
+    'forge.c', 'scripthook_forge.c', 'scripthook_forge_io.c',
+    'scripthook_forgeprobe.c',
     'third_party/minhook/src/buffer.c',
     'third_party/minhook/src/hook.c',
     'third_party/minhook/src/trampoline.c',
