@@ -14,8 +14,8 @@ GAMEDIR = ../..
 # plugin, which is what the loader scans for. Logs go into
 # <gamedir>/logs at runtime.
 
-.PHONY: all roulette fling spawner npcspawner crazycars freecam fov fps \
-        chaos sample skipintro docs clean
+.PHONY: all roulette fling spawner npcspawner enemyreinforce crazycars \
+        freecam fov fps chaos sample skipintro docs clean
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 
@@ -82,6 +82,14 @@ npcspawner: $(GAMEDIR)/plugins/NPCSpawner/NPCSpawner.asi
 $(GAMEDIR)/plugins/NPCSpawner/NPCSpawner.asi: NPCSpawner.c scripthook.h log.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ NPCSpawner.c
+
+enemyreinforce: $(GAMEDIR)/plugins/EnemyReinforce/EnemyReinforce.asi
+
+# EnemyReinforce.ini sits beside the source and is seeded into the
+# plugin folder by build_msvc.ps1; this target only builds the .asi.
+$(GAMEDIR)/plugins/EnemyReinforce/EnemyReinforce.asi: EnemyReinforce.c scripthook.h log.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ EnemyReinforce.c
 
 crazycars: $(GAMEDIR)/plugins/CrazyCars/CrazyCars.asi
 

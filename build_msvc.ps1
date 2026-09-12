@@ -271,10 +271,31 @@ Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')
 # NPCSpawner.asi (see docs/npcspawner-reverse.md). It late-binds the
 # same exports the original did, so it needs no import library.
 Build-Plugin 'NPCSpawner'   'NPCSpawner.c'   @()
+# EnemyReinforce sends reinforcements while a fight is on and hardens
+# the enemies it can prove are fighting. It late-binds as well, and
+# keeps its defaults and translations in EnemyReinforce.ini beside
+# the source, which is seeded next to the .asi further down.
+Build-Plugin 'EnemyReinforce' 'EnemyReinforce.c' @()
 Build-Plugin 'CrazyCars'    'crazycars.c'    @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tp_roulette'  'tp_roulette.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'test_plugin'  'test_plugin.c'  @('ws2_32.lib', 'gdi32.lib', 'user32.lib')
+
+# A plugin that keeps its defaults and translations in a file beside
+# its source gets that file seeded next to the .asi, the first time
+# only: a later build must never overwrite settings changed in game,
+# and the plugin itself never writes this file (that would re-encode
+# its UTF-8 translations through the ANSI code page).
+foreach ($name in @('EnemyReinforce')) {
+    $iniSrc = Join-Path $root "$name.ini"
+    $iniDst = Join-Path $plugins "$name\$name.ini"
+    if ((Test-Path $iniSrc) -and -not (Test-Path $iniDst)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $iniDst) |
+            Out-Null
+        Copy-Item $iniSrc $iniDst -Force
+        Write-Host "seeded $iniDst"
+    }
+}
 
 # cl generates a .lib/.exp beside any plugin that exports
 # symbols (chaos exports ChaosCount & friends). They are not

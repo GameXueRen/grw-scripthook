@@ -8,4 +8,5 @@ out/
 
 # Editor and tool state
 .claude/
+.codebuddy/
 __pycache__/
