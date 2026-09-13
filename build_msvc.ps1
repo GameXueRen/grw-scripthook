@@ -156,7 +156,7 @@ $fwSources = @(
     'scripthook_cnchat.c', 'guard.c',
     'scripthook_corefix.c', 'scripthook_modsettings.c',
     'forge.c', 'scripthook_forge.c', 'scripthook_forge_io.c',
-    'scripthook_forgeprobe.c',
+    'scripthook_forgeprobe.c', 'scripthook_files.c',
     'third_party/minhook/src/buffer.c',
     'third_party/minhook/src/hook.c',
     'third_party/minhook/src/trampoline.c',
@@ -207,6 +207,9 @@ Build-Plugin 'ui_sample'    'ui_sample.c'    @($libPath, 'libscripthook.lib', 'u
 # itself blocked in Ghost Mode - the single player one - so it can be tried
 # without a second player. Late binds, so it needs no import library.
 Build-Plugin 'blacklist_sample' 'blacklist_sample.c' @()
+# The file interception worked example: one watcher, one hide rule and the
+# query calls, so docs/file-interception.md points at something runnable.
+Build-Plugin 'file_watch_sample' 'file_watch_sample.c' @($libPath, 'libscripthook.lib')
 Build-Plugin 'hitfling'     'hitfling.c'     @('gdi32.lib', 'user32.lib')
 Build-Plugin 'freecam'      'freecam.c'      @('gdi32.lib', 'user32.lib')
 Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')
@@ -215,7 +218,7 @@ Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')
 #Build-Plugin 'Reinforcement' 'reinf_boost.c' @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'chaos'        'chaos.c'        @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib', 'winmm.lib')
 Build-Plugin 'fov_changer'  'fov_changer.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
-Build-Plugin 'skipintro'     'skipintro.c'
+Build-Plugin 'skipintro'     'skipintro.c'    @($libPath, 'libscripthook.lib')
 # LastRites_dlcfix hooks the function's own entry point rather than the
 # game's lookup of it, so the hook does not depend on being installed
 # before the game asks. That needs MinHook, which the framework already
@@ -236,21 +239,11 @@ Build-Plugin -Name 'LastRites_dlcfix' -Source 'LastRites_dlcfix.c' -LinkArgs @()
 # Not built by default: it and GhostNoWipe both hook MoveFileExW, and
 # MinHook keeps its state per DLL, so the two plugins tread on each
 # other. Run it with the other one switched off.
-Build-Plugin -Name 'GhostWipeProbe' -Source 'GhostWipeProbe.c' -LinkArgs @() -ExtraSources @(
-    (Join-Path $root 'third_party/minhook/src/buffer.c'),
-    (Join-Path $root 'third_party/minhook/src/hook.c'),
-    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
-    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
-)
+Build-Plugin -Name 'GhostWipeProbe' -Source 'GhostWipeProbe.c' -LinkArgs @($libPath, 'libscripthook.lib')
 
 # GhostNoWipe keeps a Ghost Mode save when a death ends the run: the
 # rename the game performs is turned into a copy. MinHook as well.
-Build-Plugin -Name 'GhostNoWipe' -Source 'GhostNoWipe.c' -LinkArgs @() -ExtraSources @(
-    (Join-Path $root 'third_party/minhook/src/buffer.c'),
-    (Join-Path $root 'third_party/minhook/src/hook.c'),
-    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
-    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
-)
+Build-Plugin -Name 'GhostNoWipe' -Source 'GhostNoWipe.c' -LinkArgs @($libPath, 'libscripthook.lib')
 
 # GhostRevive asked whether a Ghost Mode death could be sent down the
 # reviving path instead of the run-ending one. It cannot: the branch is

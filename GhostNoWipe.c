@@ -127,7 +127,12 @@
 #include <string.h>
 #include <wchar.h>
 
-#include "third_party/minhook/include/MinHook.h"
+/* The framework's file interception layer: the guard registers one
+ * decision rule with it instead of owning three hooks of its own, which is
+ * what used to make it and every other module that wanted CreateFileW or
+ * MoveFileExW fight over a target. Linked, not late-bound: the types are
+ * the contract. */
+#include "scripthook.h"
 
 /* From scripthook.h's ShGameState: UNKNOWN, MENU, LOADING, LOBBY,
  * INGAME, RELOADING, PAUSED, GAMEOVER. Kept as a number because a
@@ -679,179 +684,183 @@ static int StripDeleteSuffix(const wchar_t *name, wchar_t *out, size_t cap) {
 
 /* ---- the hooks --------------------------------------------------------- */
 
-static BOOL WINAPI HookMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
-    if (Enabled()) {
-        SampleFor(from, to);
-        /* The wipe, at whatever moment it comes - the game redoes it on
-         * every pass over the save list. Dropped, and the save repaired
-         * in case the mark was written before the screen was noticed. */
-        if (IsDeathRename(from, to)) {
-            int slot = 0;
-            if (SlotOfName(from, &slot) && ShouldTouchSlot(slot)) {
-                GuardLog("keep  %ls", from);
-                GuardLog("      the rename is dropped and nothing takes its "
-                         "place; the .delete write goes to the temp folder");
-                MarkGhostSlot(slot);
-                RestoreSave(from);
-                ShowKeptNotice();
-                return TRUE;
-            }
-            GuardLog("pass  %ls", from);
-            GuardLog("      a slot this plugin is not watching; the rename "
-                     "goes through");
+/* ---- what the layer runs ----------------------------------------------
+ *
+ * Two callbacks, one decision rule, registered at startup. The before runs
+ * inside the call and either answers it (the rename is dropped) or lets it
+ * run with its own work already done (the .tmp rewritten from the clean
+ * copy); the after records what came of the call that ran. They are the
+ * same call on the same thread, which is what the scratch between them
+ * relies on.
+ */
+#ifdef _MSC_VER
+#define GNV_TLS __declspec(thread)
+#else
+#define GNV_TLS __thread
+#endif
+
+typedef enum { GNV_NONE = 0, GNV_PROMOTED, GNV_SWAPPED } GnvPending;
+
+static GNV_TLS int     t_pending;
+static GNV_TLS wchar_t t_to[MAX_PATH];
+
+/* Opening the redirect target: the open's own arguments, re-issued with
+ * another path. Inside a callback the layer passes our own calls straight
+ * through, so this is the real CreateFileW and it cannot come back here. */
+static HANDLE GnvOpen(const ShFileCall *c, const wchar_t *path) {
+    return CreateFileW(path, c->access, c->share, NULL, c->disp, c->flags,
+                       NULL);
+}
+
+/* The two moves. The rename the wipe performs is dropped, and the .tmp
+ * promotion is let through with its content already rewritten. */
+static int GnvMove(ShFileCall *c) {
+    const wchar_t *from = c->path;
+    const wchar_t *to   = c->to;
+    int slot = 0;
+
+    SampleFor(from, to);
+
+    /* The wipe, at whatever moment it comes - the game redoes it on every
+     * pass over the save list. Dropped, and the save repaired in case the
+     * mark was written before the screen was noticed. */
+    if (IsDeathRename(from, to)) {
+        if (SlotOfName(from, &slot) && ShouldTouchSlot(slot)) {
+            GuardLog("keep  %ls", from);
+            GuardLog("      the rename is dropped and nothing takes its "
+                     "place%s",
+                     _stricmp(c->api, "MoveFileExW") == 0
+                         ? "; the .delete write goes to the temp folder" : "");
+            MarkGhostSlot(slot);
+            RestoreSave(from);
+            ShowKeptNotice();
+            c->result = (void *)1;      /* the caller sees the rename done */
+            c->error  = 0;
+            return 1;
         }
-        /* The last step of a save: the .tmp takes the save's place.
+        GuardLog("pass  %ls", from);
+        GuardLog("      a slot this plugin is not watching; the rename "
+                 "goes through");
+    }
+
+    /* The last step of a save: the .tmp takes the save's place.
+     *
+     * While the run is ending this is where the mark would land, and
+     * waiting for the rename to drop it is far too late - measured, the
+     * game writes the marked save anywhere from the same instant as the
+     * game over screen to ten seconds after it, and it redoes the rename
+     * on every pass over the list afterwards.
+     *
+     * The move is not refused; see CleanCopyOver. The .tmp is rewritten
+     * from the clean copy and the move goes ahead, so the game gets the
+     * save it asked for with the content the save held while the player
+     * was alive - and no .tmp is left behind. */
+    if (IsPromotion(from, to)) {
+        t_pending = GNV_PROMOTED;
+        wcsncpy(t_to, to, MAX_PATH - 1);
+        t_to[MAX_PATH - 1] = 0;
+
+        if (InDeathWindow() && SlotOfName(to, &slot) &&
+            ShouldTouchSlot(slot) && CleanCopyOver(from, to)) {
+            GuardLog("swap  %ls", to);
+            GuardLog("      the run has ended; the .tmp was rewritten from "
+                     "the clean copy, so the save lands holding the content "
+                     "it had before it");
+            t_pending = GNV_SWAPPED;
+            ShowKeptNotice();
+        }
+    }
+    return 0;                           /* the layer runs the real call */
+}
+
+/* The opens: the tombstone write goes to the temp folder, a write into the
+ * save while the run is ending goes there too, and a read is a chance to
+ * take a copy if there is none yet. */
+static int GnvOpenCall(ShFileCall *c) {
+    const wchar_t *name = c->path;
+    wchar_t  source[MAX_PATH], target[MAX_PATH];
+    int slot = 0;
+
+    /* Every file call is a chance to look at the engine state, and there
+     * are a great many of them: this is what keeps the death window
+     * honest, with the watch thread only as a second chance. A call inside
+     * the save folder is judged without the rate limit - see SampleFor.
+     * The notice is taken down from here too, on the game's own thread,
+     * which is the one that may touch the HUD. */
+    SampleFor(name, NULL);
+    if (InterlockedExchange(&g_hideWanted, 0)) HideKeptNotice();
+
+    /* A write to the tombstone: out of the save folder, for a slot this
+     * plugin is watching. */
+    if (IsDeleteMarkedSave(name)) {
+        if (StripDeleteSuffix(name, source, MAX_PATH) &&
+            SlotOfName(name, &slot) && ShouldTouchSlot(slot) &&
+            RedirectToTemp(name, source, target, MAX_PATH)) {
+            GuardLog("write %ls", name);
+            GuardLog("      goes to %ls - no tombstone lands in the save "
+                     "folder", target);
+            c->result = (void *)GnvOpen(c, target);
+            c->error  = GetLastError();
+            return 1;
+        }
+    } else if (IsPlainSaveName(name)) {
+        /* A write into the save itself while the run is ending is kept out
+         * of the file. Any right that can write counts, not just
+         * GENERIC_WRITE: the game asks for FILE_WRITE_DATA rather than the
+         * generic one, and checking only the generic right is how one
+         * attempt let the mark through.
          *
-         * While the run is ending this is where the mark would land, and
-         * waiting for the rename to drop it is far too late - measured,
-         * the game writes the marked save anywhere from the same instant
-         * as the game over screen to ten seconds after it, and it redoes
-         * the rename on every pass over the list afterwards.
-         *
-         * The move is not refused; see CleanCopyOver. The .tmp is
-         * rewritten from the clean copy and the move goes ahead, so the
-         * game gets the save it asked for with the content the save held
-         * while the player was alive - and no .tmp is left behind. */
-        if (IsPromotion(from, to)) {
-            int slot = 0;
-
-            if (InDeathWindow() && SlotOfName(to, &slot) &&
-                ShouldTouchSlot(slot) && CleanCopyOver(from, to)) {
-                GuardLog("swap  %ls", to);
-                GuardLog("      the run has ended; the .tmp was rewritten "
-                         "from the clean copy, so the save lands holding "
-                         "the content it had before it");
-                ShowKeptNotice();
-                return g_realMoveFileExW(from, to, flags);
-            }
-            BOOL ok = g_realMoveFileExW(from, to, flags);
-            if (ok) {
-                if (InDeathWindow())
-                    GuardLog("note  %ls was written as the run ended - the "
-                             "copy to go back to is left as it was", to);
-                else if (IsGlobalProfileName(to))
-                    GuardLog("note  %ls was rewritten - the profile copy "
-                             "keeps the version from before the run ended",
-                             to);
-                else
-                    BackupSave(to);
-            }
-            return ok;
+         * The global profile (1.save / 2.save) is not a slot and gets none
+         * of this: it is rewritten for ordinary reasons as well - changing
+         * a setting writes it - so an attempt to read its rewrites as the
+         * wipe's record was a dead end. */
+        if ((c->access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA |
+                          FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES)) &&
+            SlotOfName(name, &slot) && ShouldTouchSlot(slot) &&
+            RedirectToTemp(name, name, target, MAX_PATH)) {
+            GuardLog("write %ls", name);
+            GuardLog("      the run has ended; it goes to %ls instead",
+                     target);
+            c->result = (void *)GnvOpen(c, target);
+            c->error  = GetLastError();
+            return 1;
         }
+        /* Reading it is how the game loads a slot: a good moment to take a
+         * copy if there is none yet. */
+        if (!IsGlobalProfileName(name))
+            BackupSaveIfMissing(name);
     }
-    return g_realMoveFileExW(from, to, flags);
+    return 0;
 }
 
-static BOOL WINAPI HookMoveFileW(LPCWSTR from, LPCWSTR to) {
-    if (Enabled()) {
-        SampleFor(from, to);
-        if (IsDeathRename(from, to)) {
-            int slot = 0;
-            if (SlotOfName(from, &slot) && ShouldTouchSlot(slot)) {
-                GuardLog("keep  %ls", from);
-                GuardLog("      the rename is dropped and nothing takes its "
-                         "place");
-                MarkGhostSlot(slot);
-                RestoreSave(from);
-                ShowKeptNotice();
-                return TRUE;
-            }
-            GuardLog("pass  %ls", from);
-            GuardLog("      a slot this plugin is not watching; the rename "
-                     "goes through");
-        }
-        /* Same as above: the .tmp is rewritten from the clean copy rather
-         * than the move refused. */
-        if (IsPromotion(from, to)) {
-            int slot = 0;
-
-            if (InDeathWindow() && SlotOfName(to, &slot) &&
-                ShouldTouchSlot(slot) && CleanCopyOver(from, to)) {
-                GuardLog("swap  %ls", to);
-                GuardLog("      the run has ended; the .tmp was rewritten "
-                         "from the clean copy, so the save lands holding "
-                         "the content it had before it");
-                ShowKeptNotice();
-                return g_realMoveFileW(from, to);
-            }
-            BOOL ok = g_realMoveFileW(from, to);
-            if (ok) {
-                if (InDeathWindow())
-                    GuardLog("note  %ls was written as the run ended - the "
-                             "copy to go back to is left as it was", to);
-                else if (IsGlobalProfileName(to))
-                    GuardLog("note  %ls was rewritten - the profile copy "
-                             "keeps the version from before the run ended",
-                             to);
-                else
-                    BackupSave(to);
-            }
-            return ok;
-        }
-    }
-    return g_realMoveFileW(from, to);
+static int GnvBefore(ShFileCall *c, void *user) {
+    (void)user;
+    if (!c->wide || !Enabled()) return 0;
+    t_pending = GNV_NONE;
+    if (c->group == SH_FILE_MOVE && c->path && c->to) return GnvMove(c);
+    if (c->group == SH_FILE_OPEN && c->path)        return GnvOpenCall(c);
+    return 0;
 }
 
-static HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share,
-                                     LPSECURITY_ATTRIBUTES sa, DWORD disp,
-                                     DWORD flags, HANDLE tmpl) {
-    wchar_t target[MAX_PATH];
+/* What came of a promotion that was let through. A swap already rewrote the
+ * content, so that one is not copied again. */
+static void GnvAfter(ShFileCall *c, void *user) {
+    int was = t_pending;
 
-    if (Enabled()) {
-        /* Every file call is a chance to look at the engine state, and
-         * there are a great many of them: this is what keeps the death
-         * window honest, with the watch thread only as a second chance.
-         * A call inside the save folder is judged without the rate
-         * limit - see SampleFor. The notice is taken down from here too,
-         * on the game's own thread, which is the one that may touch the
-         * HUD. */
-        SampleFor(name, NULL);
-        if (InterlockedExchange(&g_hideWanted, 0)) HideKeptNotice();
+    (void)user;
+    t_pending = GNV_NONE;
+    if (was != GNV_PROMOTED || !c->result) return;
 
-        /* A write to the tombstone: out of the save folder, for a slot
-         * this plugin is watching. */
-        if (IsDeleteMarkedSave(name)) {
-            wchar_t source[MAX_PATH];
-            int slot = 0;
-            if (StripDeleteSuffix(name, source, MAX_PATH) &&
-                SlotOfName(name, &slot) && ShouldTouchSlot(slot) &&
-                RedirectToTemp(name, source, target, MAX_PATH)) {
-                GuardLog("write %ls", name);
-                GuardLog("      goes to %ls - no tombstone lands in the save "
-                         "folder", target);
-                return g_realCreateFileW(target, access, share, sa, disp,
-                                         flags, tmpl);
-            }
-        } else if (IsPlainSaveName(name)) {
-            /* A write into the save itself while the run is ending is
-             * kept out of the file. Any right that can write counts, not
-             * just GENERIC_WRITE: the game asks for FILE_WRITE_DATA
-             * rather than the generic one, and checking only the generic
-             * right is how one attempt let the mark through.
-             *
-             * The global profile (1.save / 2.save) is not a slot and gets
-             * none of this: it is rewritten for ordinary reasons as well -
-             * changing a setting writes it - so an attempt to read its
-             * rewrites as the wipe's record was a dead end. */
-            int slot = 0;
-            if ((access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA |
-                           FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES)) &&
-                SlotOfName(name, &slot) && ShouldTouchSlot(slot) &&
-                RedirectToTemp(name, name, target, MAX_PATH)) {
-                GuardLog("write %ls", name);
-                GuardLog("      the run has ended; it goes to %ls instead",
-                         target);
-                return g_realCreateFileW(target, access, share, sa, disp,
-                                         flags, tmpl);
-            }
-            /* Reading it is how the game loads a slot: a good moment to
-             * take a copy if there is none yet. */
-            if (!IsGlobalProfileName(name))
-                BackupSaveIfMissing(name);
-        }
-    }
-    return g_realCreateFileW(name, access, share, sa, disp, flags, tmpl);
+    if (InDeathWindow())
+        GuardLog("note  %ls was written as the run ended - the copy to go "
+                 "back to is left as it was", t_to);
+    else if (IsGlobalProfileName(t_to))
+        GuardLog("note  %ls was rewritten - the profile copy keeps the "
+                 "version from before the run ended", t_to);
+    else
+        BackupSave(t_to);
 }
+
 
 /* ---- watching for the death screen ------------------------------------ */
 
@@ -1074,33 +1083,28 @@ static void BuildMenu(HMODULE m) {
 
 static void InstallHooks(void) {
     HMODULE k32 = GetModuleHandleA("kernel32.dll");
-    MH_STATUS st;
+    ShFileRuleDesc d;
 
-    st = MH_Initialize();
-    if (st != MH_OK) {
-        GuardLog("install: MH_Initialize failed (%d) - the wipe goes ahead "
-                 "as usual", (int)st);
-        return;
-    }
-
-    MH_CreateHookApi(L"kernel32.dll", "MoveFileExW",
-                     (LPVOID)HookMoveFileExW, (LPVOID *)&g_realMoveFileExW);
-    MH_CreateHookApi(L"kernel32.dll", "MoveFileW",
-                     (LPVOID)HookMoveFileW, (LPVOID *)&g_realMoveFileW);
-    MH_CreateHookApi(L"kernel32.dll", "CreateFileW",
-                     (LPVOID)HookCreateFileW, (LPVOID *)&g_realCreateFileW);
-
-    /* CopyFileW is called, not hooked: the pointer is all that is needed,
-     * and an untouched entry point is one less thing in the way of a save
-     * being written. */
+    /* CopyFileW is called, not hooked: the guard makes its copies with it,
+     * and inside a callback the layer passes our own calls straight
+     * through. An untouched entry point is also one less thing in the way
+     * of a save being written. */
     if (k32)
         *(FARPROC *)&g_realCopyFileW = GetProcAddress(k32, "CopyFileW");
     if (!g_realCopyFileW)
         GuardLog("install: CopyFileW not found - nothing can be copied");
 
-    st = MH_EnableHook(MH_ALL_HOOKS);
-    if (st != MH_OK) {
-        GuardLog("install: MH_EnableHook failed (%d)", (int)st);
+    /* One decision rule over the two calls the guard watches: it either
+     * answers a call (the rename is dropped) or lets it run with its own
+     * work done first (the .tmp rewritten from the clean copy). */
+    memset(&d, 0, sizeof(d));
+    d.group  = SH_FILE_MOVE | SH_FILE_OPEN;
+    d.action = SH_FILE_DECIDE;
+    d.before = GnvBefore;
+    d.after  = GnvAfter;
+    if (!ShFileRuleAdd(&d)) {
+        GuardLog("install: the layer refused the rule - the wipe goes ahead "
+                 "as usual");
         return;
     }
     GuardLog("install: MoveFileExW=%p MoveFileW=%p CreateFileW=%p "

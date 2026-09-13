@@ -87,7 +87,9 @@
 #include <stdarg.h>
 #include <string.h>
 
-#include "third_party/minhook/include/MinHook.h"
+/* The framework's file interception layer, whose watcher this plugin is
+ * now: linked, not late-bound, so the types are checked. */
+#include "scripthook.h"
 
 /* Frames of the calling stack to record per event. */
 #define STACK_MAX 8
@@ -258,183 +260,55 @@ static void Note(const char *api, const wchar_t *path, const char *extra,
     }
 }
 
-/* ---- the hooks -------------------------------------------------------- */
+/* ---- what the layer runs ----------------------------------------------
+ *
+ * One watcher over the groups this probe used to hook by hand - the opens,
+ * the moves, the deletes, the finds, the attributes and the file
+ * information - and the same Note(): what was asked, to which file,
+ * whether it worked, which state the engine was in, and the caller's
+ * stack. The path decides whether a line is written, exactly as before.
+ *
+ * A handle-carrying call has no path in it, so it is recorded when the
+ * call itself says it is about a rename or a delete: that is what the
+ * information class is for, and it is the case this probe was written to
+ * see in the first place.
+ */
+static void ProbeFile(ShFileCall *c, void *user) {
+    const char *api = c->api ? c->api : "?";
+    char        extra[600];
+    wchar_t     wpath[512];
+    int         ok = c->result ? 1 : 0;
+    int         isSave;
 
-typedef BOOL  (WINAPI *DeleteFileW_t)(LPCWSTR);
-typedef BOOL  (WINAPI *DeleteFileA_t)(LPCSTR);
-typedef BOOL  (WINAPI *MoveFileExW_t)(LPCWSTR, LPCWSTR, DWORD);
-typedef BOOL  (WINAPI *MoveFileW_t)(LPCWSTR, LPCWSTR);
-typedef BOOL  (WINAPI *SetFileInformationByHandle_t)(HANDLE,
-                                                     FILE_INFO_BY_HANDLE_CLASS,
-                                                     LPVOID, DWORD);
-typedef HANDLE(WINAPI *CreateFileW_t)(LPCWSTR, DWORD, DWORD,
-                                      LPSECURITY_ATTRIBUTES, DWORD, DWORD,
-                                      HANDLE);
-typedef BOOL  (WINAPI *RemoveDirectoryW_t)(LPCWSTR);
-typedef BOOL  (WINAPI *CopyFileW_t)(LPCWSTR, LPCWSTR, BOOL);
-typedef HANDLE(WINAPI *FindFirstFileW_t)(LPCWSTR, LPWIN32_FIND_DATAW);
-typedef HANDLE(WINAPI *FindFirstFileExW_t)(LPCWSTR, FINDEX_INFO_LEVELS,
-                                           LPVOID, FINDEX_SEARCH_OPS,
-                                           LPVOID, DWORD);
-typedef BOOL  (WINAPI *FindNextFileW_t)(HANDLE, LPWIN32_FIND_DATAW);
-typedef DWORD (WINAPI *GetFileAttributesW_t)(LPCWSTR);
+    (void)user;
 
-static DeleteFileW_t      g_realDeleteFileW;
-static DeleteFileA_t      g_realDeleteFileA;
-static MoveFileExW_t      g_realMoveFileExW;
-static MoveFileW_t        g_realMoveFileW;
-static SetFileInformationByHandle_t g_realSetFileInformationByHandle;
-static CreateFileW_t      g_realCreateFileW;
-static RemoveDirectoryW_t g_realRemoveDirectoryW;
-static CopyFileW_t        g_realCopyFileW;
-static FindFirstFileW_t   g_realFindFirstFileW;
-static FindFirstFileExW_t g_realFindFirstFileExW;
-static FindNextFileW_t    g_realFindNextFileW;
-static GetFileAttributesW_t g_realGetFileAttributesW;
+    extra[0] = 0;
+    if (c->to)
+        snprintf(extra, sizeof(extra), "-> %ls", c->to);
+    else if (c->toA)
+        snprintf(extra, sizeof(extra), "-> %s", c->toA);
 
-static BOOL WINAPI HookDeleteFileW(LPCWSTR name) {
-    BOOL ok = g_realDeleteFileW(name);
-    if (IsSavePathW(name)) Note("DeleteFileW", name, "", ok, GetLastError());
-    return ok;
-}
-
-static BOOL WINAPI HookDeleteFileA(LPCSTR name) {
-    BOOL ok = g_realDeleteFileA(name);
-    if (IsSavePathA(name)) {
-        wchar_t w[512];
-        MultiByteToWideChar(CP_ACP, 0, name, -1, w, 512);
-        Note("DeleteFileA", w, "", ok, GetLastError());
+    if (c->path) {
+        isSave = IsSavePathW(c->path) || (c->to && IsSavePathW(c->to));
+        if (isSave) Note(api, c->path, extra, ok, c->error);
+        return;
     }
-    return ok;
-}
 
-static BOOL WINAPI HookMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
-    BOOL ok = g_realMoveFileExW(from, to, flags);
-    if (IsSavePathW(from) || IsSavePathW(to)) {
-        char extra[600];
-        snprintf(extra, sizeof(extra), "-> %ls flags=0x%lX",
-                 to ? to : L"(null)", (unsigned long)flags);
-        Note("MoveFileExW", from, extra, ok, GetLastError());
+    if (c->pathA) {
+        isSave = IsSavePathA(c->pathA) || (c->toA && IsSavePathA(c->toA));
+        if (!isSave) return;
+        if (MultiByteToWideChar(CP_ACP, 0, c->pathA, -1, wpath, 512) <= 0)
+            return;
+        Note(api, wpath, extra, ok, c->error);
+        return;
     }
-    return ok;
-}
 
-static BOOL WINAPI HookMoveFileW(LPCWSTR from, LPCWSTR to) {
-    BOOL ok = g_realMoveFileW(from, to);
-    if (IsSavePathW(from) || IsSavePathW(to)) {
-        char extra[600];
-        snprintf(extra, sizeof(extra), "-> %ls", to ? to : L"(null)");
-        Note("MoveFileW", from, extra, ok, GetLastError());
-    }
-    return ok;
-}
-
-/* The modern delete: hand the file a disposition of "delete on
- * close". Reached through a handle, so the path has to be read back
- * from it. */
-static BOOL WINAPI HookSetFileInformationByHandle(HANDLE h,
-                                                  FILE_INFO_BY_HANDLE_CLASS cls,
-                                                  LPVOID info, DWORD size) {
-    BOOL ok = g_realSetFileInformationByHandle(h, cls, info, size);
-    const char *what = NULL;
-    wchar_t path[MAX_PATH * 2];
-
-    switch (cls) {
-    case FileDispositionInfo:   what = "FileDispositionInfo";   break;
-    case FileDispositionInfoEx: what = "FileDispositionInfoEx"; break;
-    case FileRenameInfo:        what = "FileRenameInfo";        break;
-    case FileRenameInfoEx:      what = "FileRenameInfoEx";      break;
-    default:                    return ok;
-    }
-    path[0] = 0;
-    if (GetFinalPathNameByHandleW(h, path, MAX_PATH * 2, 0) && IsSavePathW(path))
-        Note("SetFileInformationByHandle", path, what, ok, GetLastError());
-    return ok;
-}
-
-static HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share,
-                                     LPSECURITY_ATTRIBUTES sa, DWORD disp,
-                                     DWORD flags, HANDLE tmpl) {
-    HANDLE h = g_realCreateFileW(name, access, share, sa, disp, flags, tmpl);
-
-    /* Every open of a save path is recorded now, reads included. The
-     * question this round is what the save list reads when it is rebuilt
-     * after a death - and a read is exactly what that would look like, so
-     * filtering to writes would filter out the answer. */
-    if (IsSavePathW(name)) {
-        char extra[160];
-        snprintf(extra, sizeof(extra), "access=0x%lX disp=%lu flags=0x%lX",
-                 (unsigned long)access, (unsigned long)disp,
-                 (unsigned long)flags);
-        Note("CreateFileW", name, extra, h != INVALID_HANDLE_VALUE,
-             GetLastError());
-    }
-    return h;
-}
-
-static BOOL WINAPI HookRemoveDirectoryW(LPCWSTR name) {
-    BOOL ok = g_realRemoveDirectoryW(name);
-    if (IsSavePathW(name)) Note("RemoveDirectoryW", name, "", ok, GetLastError());
-    return ok;
-}
-
-static BOOL WINAPI HookCopyFileW(LPCWSTR from, LPCWSTR to, BOOL failIfExists) {
-    BOOL ok = g_realCopyFileW(from, to, failIfExists);
-    if (IsSavePathW(from) || IsSavePathW(to)) {
-        char extra[600];
-        snprintf(extra, sizeof(extra), "-> %ls", to ? to : L"(null)");
-        Note("CopyFileW", from, extra, ok, GetLastError());
-    }
-    return ok;
-}
-
-/* The decisive one for "does the slot come back without a restart":
- * if the save list is built by walking the folder, a kept file shows
- * up again on the spot. */
-static HANDLE WINAPI HookFindFirstFileW(LPCWSTR name, LPWIN32_FIND_DATAW fd) {
-    HANDLE h = g_realFindFirstFileW(name, fd);
-    if (IsSavePathW(name)) {
-        char extra[320];
-        snprintf(extra, sizeof(extra), "first=%ls",
-                 (h != INVALID_HANDLE_VALUE && fd) ? fd->cFileName : L"(none)");
-        Note("FindFirstFileW", name, extra, h != INVALID_HANDLE_VALUE,
-             GetLastError());
-    }
-    return h;
-}
-
-static HANDLE WINAPI HookFindFirstFileExW(LPCWSTR name,
-                                          FINDEX_INFO_LEVELS lvl,
-                                          LPVOID data, FINDEX_SEARCH_OPS op,
-                                          LPVOID filter, DWORD flags) {
-    HANDLE h = g_realFindFirstFileExW(name, lvl, data, op, filter, flags);
-    if (IsSavePathW(name))
-        Note("FindFirstFileExW", name, "", h != INVALID_HANDLE_VALUE,
-             GetLastError());
-    return h;
-}
-
-static BOOL WINAPI HookFindNextFileW(HANDLE h, LPWIN32_FIND_DATAW fd) {
-    BOOL ok = g_realFindNextFileW(h, fd);
-    if (ok && fd && IsSavePathW(fd->cFileName)) {
-        char extra[320];
-        snprintf(extra, sizeof(extra), "next=%ls", fd->cFileName);
-        Note("FindNextFileW", fd->cFileName, extra, ok, GetLastError());
-    }
-    return ok;
-}
-
-static DWORD WINAPI HookGetFileAttributesW(LPCWSTR name) {
-    DWORD r = g_realGetFileAttributesW(name);
-
-    /* Every existence check on a save path is recorded now. The list may
-     * be building itself by probing for the files rather than by walking
-     * the folder, and that is one of the two answers this round is
-     * after - narrowing to ".save" would hide the probe on a .delete. */
-    if (IsSavePathW(name))
-        Note("GetFileAttributesW", name, "", r != INVALID_FILE_ATTRIBUTES,
-             GetLastError());
-    return r;
+    if (c->group == SH_FILE_INFO &&
+        (c->offset == FileDispositionInfo ||
+         c->offset == FileDispositionInfoEx ||
+         c->offset == FileRenameInfo ||
+         c->offset == FileRenameInfoEx))
+        Note(api, L"(handle)", extra, ok, c->error);
 }
 
 /* ---- listing the folder once, at startup ------------------------------ */
@@ -563,52 +437,22 @@ static void BuildMenu(HMODULE m) {
 /* ---- startup ----------------------------------------------------------- */
 
 static void InstallHooks(void) {
-    MH_STATUS st;
+    ShFileRuleDesc d;
 
-    st = MH_Initialize();
-    if (st != MH_OK) {
-        ProbeLog("install: MH_Initialize failed (%d) - nothing is recorded",
-                 (int)st);
+    /* The layer owns the target and the hooks; all this asks for is to be
+     * shown the calls. It changes nothing and answers nothing, so it is a
+     * decision rule with an after callback and no before - a watcher. */
+    memset(&d, 0, sizeof(d));
+    d.group  = SH_FILE_DELETE | SH_FILE_MOVE | SH_FILE_OPEN |
+               SH_FILE_FIND   | SH_FILE_ATTR | SH_FILE_INFO;
+    d.action = SH_FILE_DECIDE;
+    d.after  = ProbeFile;
+    if (!ShFileRuleAdd(&d)) {
+        ProbeLog("install: the layer refused the rule - nothing is recorded");
         return;
     }
-
-    MH_CreateHookApi(L"kernel32.dll", "DeleteFileW",
-                     (LPVOID)HookDeleteFileW, (LPVOID *)&g_realDeleteFileW);
-    MH_CreateHookApi(L"kernel32.dll", "DeleteFileA",
-                     (LPVOID)HookDeleteFileA, (LPVOID *)&g_realDeleteFileA);
-    MH_CreateHookApi(L"kernel32.dll", "MoveFileExW",
-                     (LPVOID)HookMoveFileExW, (LPVOID *)&g_realMoveFileExW);
-    MH_CreateHookApi(L"kernel32.dll", "MoveFileW",
-                     (LPVOID)HookMoveFileW, (LPVOID *)&g_realMoveFileW);
-    MH_CreateHookApi(L"kernel32.dll", "SetFileInformationByHandle",
-                     (LPVOID)HookSetFileInformationByHandle,
-                     (LPVOID *)&g_realSetFileInformationByHandle);
-    MH_CreateHookApi(L"kernel32.dll", "CreateFileW",
-                     (LPVOID)HookCreateFileW, (LPVOID *)&g_realCreateFileW);
-    MH_CreateHookApi(L"kernel32.dll", "RemoveDirectoryW",
-                     (LPVOID)HookRemoveDirectoryW,
-                     (LPVOID *)&g_realRemoveDirectoryW);
-    MH_CreateHookApi(L"kernel32.dll", "CopyFileW",
-                     (LPVOID)HookCopyFileW, (LPVOID *)&g_realCopyFileW);
-    MH_CreateHookApi(L"kernel32.dll", "FindFirstFileW",
-                     (LPVOID)HookFindFirstFileW,
-                     (LPVOID *)&g_realFindFirstFileW);
-    MH_CreateHookApi(L"kernel32.dll", "FindFirstFileExW",
-                     (LPVOID)HookFindFirstFileExW,
-                     (LPVOID *)&g_realFindFirstFileExW);
-    MH_CreateHookApi(L"kernel32.dll", "FindNextFileW",
-                     (LPVOID)HookFindNextFileW,
-                     (LPVOID *)&g_realFindNextFileW);
-    MH_CreateHookApi(L"kernel32.dll", "GetFileAttributesW",
-                     (LPVOID)HookGetFileAttributesW,
-                     (LPVOID *)&g_realGetFileAttributesW);
-
-    st = MH_EnableHook(MH_ALL_HOOKS);
-    if (st != MH_OK) {
-        ProbeLog("install: MH_EnableHook failed (%d)", (int)st);
-        return;
-    }
-    ProbeLog("install: twelve hooks in place, recording savegames only");
+    ProbeLog("install: watching through the framework's layer, recording "
+             "savegames only");
     ProbeLog("install: walk the save folder now, then die in Ghost Mode");
 }
 

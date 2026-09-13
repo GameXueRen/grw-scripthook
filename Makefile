@@ -15,8 +15,8 @@ GAMEDIR = ../..
 # <gamedir>/logs at runtime.
 
 .PHONY: all roulette fling spawner npcspawner enemyreinforce modeprobe \
-        modecallprobe blacklistsample crazycars freecam fov fps chaos \
-        sample skipintro docs clean
+        modecallprobe blacklistsample filewatchsample crazycars freecam fov \
+        fps chaos sample skipintro docs clean
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 
@@ -31,6 +31,15 @@ blacklistsample: $(GAMEDIR)/plugins/blacklist_sample/blacklist_sample.asi
 $(GAMEDIR)/plugins/blacklist_sample/blacklist_sample.asi: blacklist_sample.c scripthook.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ blacklist_sample.c
+
+filewatchsample: $(GAMEDIR)/plugins/file_watch_sample/file_watch_sample.asi
+
+# The worked example docs/file-interception.md points at. It links the
+# framework (unlike blacklist_sample, which late binds), because its rules
+# are made with the ShFile* calls whose types only the header carries.
+$(GAMEDIR)/plugins/file_watch_sample/file_watch_sample.asi: file_watch_sample.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ file_watch_sample.c -L. -lscripthook
 
 docs:
 	doxygen Doxyfile
@@ -69,9 +78,9 @@ $(GAMEDIR)/plugins/chaos/chaos.asi: chaos.c scripthook.h libscripthook.a
 
 skipintro: $(GAMEDIR)/plugins/skipintro/skipintro.asi
 
-$(GAMEDIR)/plugins/skipintro/skipintro.asi: skipintro.c scripthook.h
+$(GAMEDIR)/plugins/skipintro/skipintro.asi: skipintro.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -o $@ skipintro.c
+	$(CC) $(CFLAGS) -o $@ skipintro.c -L. -lscripthook
 
 fov: $(GAMEDIR)/plugins/fov_changer/fov_changer.asi
 
@@ -165,7 +174,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
                         guard.c scripthook.h log.h \
                         scripthook_corefix.c scripthook_modsettings.c \
                         forge.c scripthook_forge.c scripthook_forge_io.c \
-                        scripthook_forgeprobe.c \
+                        scripthook_forgeprobe.c scripthook_files.c \
                         third_party/minhook/src/buffer.c \
                         third_party/minhook/src/hook.c \
                         third_party/minhook/src/trampoline.c \
@@ -188,7 +197,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
 		scripthook_hud.c scripthook_menu.c scripthook_cnchat.c guard.c \
 		scripthook_corefix.c scripthook_modsettings.c \
 		forge.c scripthook_forge.c scripthook_forge_io.c \
-		scripthook_forgeprobe.c \
+		scripthook_forgeprobe.c scripthook_files.c \
 		third_party/minhook/src/buffer.c \
 		third_party/minhook/src/hook.c \
 		third_party/minhook/src/trampoline.c \

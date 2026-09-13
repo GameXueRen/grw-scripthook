@@ -40,8 +40,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "scripthook.h"
 #include "log.h"
-#include "third_party/minhook/include/MinHook.h"
 
 /* ---- limits kept small enough that the log stays readable ---------- */
 
@@ -51,13 +51,14 @@
                                   * running total only                   */
 #define SEEK_PER_HANDLE  8
 
-#ifdef _MSC_VER
-#define PROBE_TLS __declspec(thread)
-#else
-#define PROBE_TLS __thread
-#endif
-
-static PROBE_TLS int t_busy;      /* re-entrancy guard, per thread      */
+/* The one API this module still calls rather than watches: a synchronous
+ * read's offset is not in the call, so the file pointer is asked where it
+ * ended up and the transferred count is taken back off it. Resolved at
+ * startup; the layer passes a callback's own calls straight through, so
+ * this cannot come back into the probe. */
+typedef BOOL (WINAPI *SetFilePointerEx_t)(HANDLE, LARGE_INTEGER,
+                                          PLARGE_INTEGER, DWORD);
+static SetFilePointerEx_t p_SeekEx;
 
 /* log.h is included, so this translation unit gets its own static
  * g_logFile / LogInit / Log: the probe writes its own file and does not
@@ -203,224 +204,163 @@ static FindFirstFileExW_t   r_FindFirstFileExW;
 
 /* ---- hooks --------------------------------------------------------- */
 
-static HANDLE WINAPI H_CreateFileW(LPCWSTR name, DWORD access, DWORD share,
-                                   LPSECURITY_ATTRIBUTES sa, DWORD disp,
-                                   DWORD flags, HANDLE tmpl) {
-    HANDLE h = r_CreateFileW(name, access, share, sa, disp, flags, tmpl);
-    if (!t_busy && ContainsForgeW(name)) {
-        char ansi[MAX_PATH];
-        Wide2Ansi(name, ansi, sizeof(ansi));
-        t_busy = 1;
-        P("CreateFileW  ok=%d err=%lu access=0x%08lX share=0x%lX disp=%lu "
-          "flags=0x%08lX\n             %s",
-          h != INVALID_HANDLE_VALUE, (unsigned long)GetLastError(),
-          (unsigned long)access, (unsigned long)share,
-          (unsigned long)disp, (unsigned long)flags, ansi);
-        t_busy = 0;
-        TrackHandle(h, ansi);
+/* ---- what the layer runs -------------------------------------------
+ *
+ * One watcher, registered at startup, and this callback. It runs inside
+ * the call, on the engine's own thread, so it is the same evidence the
+ * old per-API detours recorded - with one reduction: the arguments the
+ * layer's context does not carry are no longer in the log (a CreateFile's
+ * access/share/disp/flags, a view's access mask). Those were colour. What
+ * this probe was built to answer - which calls the engine makes against a
+ * .forge, and whether it reads them or maps them - is all still here, one
+ * line per call, first few per archive.
+ */
+
+/* The path of a call in ANSI, for the log and for the handle table. */
+static int PathAnsiOf(const ShFileCall *c, char *out, int n) {
+    if (c->pathA) {
+        snprintf(out, n, "%s", c->pathA);
+        return 1;
     }
-    return h;
+    if (c->path) {
+        Wide2Ansi(c->path, out, n);
+        return out[0] != 0;
+    }
+    return 0;
 }
 
-static HANDLE WINAPI H_CreateFileA(LPCSTR name, DWORD access, DWORD share,
-                                   LPSECURITY_ATTRIBUTES sa, DWORD disp,
-                                   DWORD flags, HANDLE tmpl) {
-    HANDLE h = r_CreateFileA(name, access, share, sa, disp, flags, tmpl);
-    if (!t_busy && ContainsForgeA(name)) {
-        t_busy = 1;
-        P("CreateFileA  ok=%d err=%lu access=0x%08lX disp=%lu flags=0x%08lX\n"
-          "             %s",
-          h != INVALID_HANDLE_VALUE, (unsigned long)GetLastError(),
-          (unsigned long)access, (unsigned long)disp, (unsigned long)flags,
-          name);
-        t_busy = 0;
-        TrackHandle(h, name);
-    }
-    return h;
-}
+static void ProbeAfter(ShFileCall *c, void *user) {
+    const char *api = c->api ? c->api : "?";
+    char        ansi[MAX_PATH];
+    ForgeHandle *fh;
 
-static BOOL WINAPI H_ReadFile(HANDLE h, LPVOID buf, DWORD len, LPDWORD got,
-                              LPOVERLAPPED ov) {
-    ForgeHandle *fh = t_busy ? NULL : FindHandle(h);
-    LARGE_INTEGER off;
-    BOOL ok;
+    (void)user;
 
-    off.QuadPart = -1;
-    if (fh && r_SetFilePointerEx) {
-        LARGE_INTEGER zero;
-        zero.QuadPart = 0;
-        r_SetFilePointerEx(h, zero, &off, FILE_CURRENT);
+    /* An open: only the archives are interesting, and the handle has to be
+     * remembered whatever else happens. */
+    if (_stricmp(api, "CreateFileW") == 0 || _stricmp(api, "CreateFileA") == 0) {
+        HANDLE h = (HANDLE)c->result;
+
+        if (!PathAnsiOf(c, ansi, sizeof(ansi))) return;
+        if (!ContainsForgeA(ansi)) return;
+        P("%-12s ok=%d err=%lu\n             %s", api,
+          h && h != INVALID_HANDLE_VALUE, (unsigned long)c->error, ansi);
+        if (h && h != INVALID_HANDLE_VALUE) TrackHandle(h, ansi);
+        return;
     }
-    ok = r_ReadFile(h, buf, len, got, ov);
-    if (fh) {
-        DWORD n = (ok && got) ? *got : 0;
-        fh->bytes += n;
+
+    if (_stricmp(api, "ReadFile") == 0) {
+        fh = FindHandle(c->handle);
+        if (!fh) return;
+        fh->bytes += c->done;
         if (fh->reads < READS_PER_HANDLE) {
-            t_busy = 1;
+            /* A synchronous read has no OVERLAPPED, so its offset is not in
+             * the call: the file pointer has already moved by the time this
+             * runs, which is exactly enough to recover where it started. */
+            long long off = (long long)c->offset;
+            if (!c->overlapped && c->result && p_SeekEx) {
+                LARGE_INTEGER cur, zero;
+                zero.QuadPart = 0;
+                if (p_SeekEx(c->handle, zero, &cur, FILE_CURRENT))
+                    off = (long long)cur.QuadPart - (long long)c->done;
+            }
             P("ReadFile     %s\n             off=%lld len=%lu got=%lu ok=%d",
-              fh->path, (long long)off.QuadPart, (unsigned long)len,
-              (unsigned long)n, ok);
-            t_busy = 0;
+              fh->path, off, (unsigned long)c->bytes,
+              (unsigned long)c->done, c->result ? 1 : 0);
         } else if (fh->reads == READS_PER_HANDLE) {
-            t_busy = 1;
             P("ReadFile     %s  (further reads counted only)", fh->path);
-            t_busy = 0;
         }
         fh->reads++;
+        return;
     }
-    return ok;
+
+    if (_stricmp(api, "SetFilePointerEx") == 0) {
+        fh = FindHandle(c->handle);
+        if (fh && fh->seeks < SEEK_PER_HANDLE)
+            P("SeekEx       %s  -> off=%lld ok=%d", fh->path,
+              (long long)c->offset, c->result ? 1 : 0);
+        if (fh) fh->seeks++;
+        return;
+    }
+
+    if (_stricmp(api, "SetFilePointer") == 0) {
+        fh = FindHandle(c->handle);
+        if (fh && fh->seeks < SEEK_PER_HANDLE)
+            P("Seek         %s  method=%lu -> %lu", fh->path,
+              (unsigned long)c->bytes, (unsigned long)(uintptr_t)c->result);
+        if (fh) fh->seeks++;
+        return;
+    }
+
+    if (_stricmp(api, "GetFileSizeEx") == 0 ||
+        _stricmp(api, "GetFileSize") == 0) {
+        fh = FindHandle(c->handle);
+        if (fh && !fh->sizeLogged) {
+            P("GetFileSize  %s  size=%lld ok=%d", fh->path,
+              (long long)c->offset, c->result ? 1 : 0);
+            fh->sizeLogged = 1;
+        }
+        return;
+    }
+
+    if (_stricmp(api, "CreateFileMappingA") == 0 ||
+        _stricmp(api, "CreateFileMappingW") == 0) {
+        HANDLE m = (HANDLE)c->result;
+
+        fh = FindHandle(c->handle);
+        if (!fh) return;
+        P("MapCreate    %s  protect=0x%08lX size=%08llX -> %p", fh->path,
+          (unsigned long)c->bytes, (unsigned long long)c->offset, (void *)m);
+        if (m) TrackMap(m, c->handle);
+        return;
+    }
+
+    if (_stricmp(api, "MapViewOfFile") == 0) {
+        fh = MapFile(c->handle);
+        if (fh)
+            P("MapView      %s  off=%08llX size=%lu -> %p", fh->path,
+              (unsigned long long)c->offset, (unsigned long)c->bytes,
+              c->result);
+        return;
+    }
+
+    if (_stricmp(api, "UnmapViewOfFile") == 0) {
+        P("UnmapView    %p", c->buffer);
+        return;
+    }
+
+    if (_stricmp(api, "FindFirstFileW") == 0 ||
+        _stricmp(api, "FindFirstFileExW") == 0) {
+        HANDLE h = (HANDLE)c->result;
+
+        if (!PathAnsiOf(c, ansi, sizeof(ansi))) return;
+        if (!ContainsForgeA(ansi)) return;
+        if (h && h != INVALID_HANDLE_VALUE && c->buffer &&
+            _stricmp(api, "FindFirstFileW") == 0)
+            P("FindFirstW   %s  -> first=%ls", ansi,
+              ((LPWIN32_FIND_DATAW)c->buffer)->cFileName);
+        else
+            P("FindFirstW   %s  -> %s", ansi,
+              h != INVALID_HANDLE_VALUE ? "ok" : "none");
+        return;
+    }
+
+    (void)fh;
 }
 
-static BOOL WINAPI H_SetFilePointerEx(HANDLE h, LARGE_INTEGER dist,
-                                      PLARGE_INTEGER out, DWORD method) {
-    BOOL ok = r_SetFilePointerEx(h, dist, out, method);
-    ForgeHandle *fh = t_busy ? NULL : FindHandle(h);
-    if (fh && fh->seeks < SEEK_PER_HANDLE) {
-        t_busy = 1;
-        P("SeekEx       %s  dist=%lld method=%lu -> off=%lld",
-          fh->path, (long long)dist.QuadPart, (unsigned long)method,
-          (long long)((out && ok) ? out->QuadPart : -1));
-        t_busy = 0;
-    }
-    if (fh) fh->seeks++;
-    return ok;
-}
 
-static DWORD WINAPI H_SetFilePointer(HANDLE h, LONG dist, PLONG outHigh,
-                                     DWORD method) {
-    DWORD r = r_SetFilePointer(h, dist, outHigh, method);
-    ForgeHandle *fh = t_busy ? NULL : FindHandle(h);
-    if (fh && fh->seeks < SEEK_PER_HANDLE) {
-        t_busy = 1;
-        P("Seek         %s  dist=%ld method=%lu -> %lu",
-          fh->path, (long)dist, (unsigned long)method, (unsigned long)r);
-        t_busy = 0;
-    }
-    if (fh) fh->seeks++;
-    return r;
-}
-
-static BOOL WINAPI H_GetFileSizeEx(HANDLE h, PLARGE_INTEGER out) {
-    BOOL ok = r_GetFileSizeEx(h, out);
-    ForgeHandle *fh = t_busy ? NULL : FindHandle(h);
-    if (fh && !fh->sizeLogged) {
-        t_busy = 1;
-        P("GetFileSizeEx %s  size=%lld", fh->path,
-          (long long)((ok && out) ? out->QuadPart : -1));
-        t_busy = 0;
-        fh->sizeLogged = 1;
-    }
-    return ok;
-}
-
-static DWORD WINAPI H_GetFileSize(HANDLE h, LPDWORD outHigh) {
-    DWORD r = r_GetFileSize(h, outHigh);
-    ForgeHandle *fh = t_busy ? NULL : FindHandle(h);
-    if (fh && !fh->sizeLogged) {
-        t_busy = 1;
-        P("GetFileSize   %s  size=%lu hi=%lu", fh->path,
-          (unsigned long)r,
-          (unsigned long)(outHigh ? *outHigh : 0));
-        t_busy = 0;
-        fh->sizeLogged = 1;
-    }
-    return r;
-}
-
-static HANDLE WINAPI H_CreateFileMappingA(HANDLE file,
-                                          LPSECURITY_ATTRIBUTES sa,
-                                          DWORD protect, DWORD hi, DWORD lo,
-                                          LPCSTR name) {
-    HANDLE m = r_CreateFileMappingA(file, sa, protect, hi, lo, name);
-    ForgeHandle *fh = t_busy ? NULL : FindHandle(file);
-    if (fh) {
-        t_busy = 1;
-        P("MapCreateA   %s  protect=0x%08lX size=%08lX%08lX -> %p",
-          fh->path, (unsigned long)protect, (unsigned)hi, (unsigned)lo,
-          (void *)m);
-        t_busy = 0;
-        TrackMap(m, file);
-    }
-    return m;
-}
-
-static HANDLE WINAPI H_CreateFileMappingW(HANDLE file,
-                                          LPSECURITY_ATTRIBUTES sa,
-                                          DWORD protect, DWORD hi, DWORD lo,
-                                          LPCWSTR name) {
-    HANDLE m = r_CreateFileMappingW(file, sa, protect, hi, lo, name);
-    ForgeHandle *fh = t_busy ? NULL : FindHandle(file);
-    if (fh) {
-        t_busy = 1;
-        P("MapCreateW   %s  protect=0x%08lX size=%08lX%08lX -> %p",
-          fh->path, (unsigned long)protect, (unsigned)hi, (unsigned)lo,
-          (void *)m);
-        t_busy = 0;
-        TrackMap(m, file);
-    }
-    return m;
-}
-
-static LPVOID WINAPI H_MapViewOfFile(HANDLE map, DWORD access, DWORD hi,
-                                     DWORD lo, SIZE_T size) {
-    LPVOID p = r_MapViewOfFile(map, access, hi, lo, size);
-    ForgeHandle *fh = t_busy ? NULL : MapFile(map);
-    if (fh) {
-        t_busy = 1;
-        P("MapView      %s  access=0x%08lX off=%08lX%08lX size=%llu -> %p",
-          fh->path, (unsigned long)access, (unsigned)hi, (unsigned)lo,
-          (unsigned long long)size, p);
-        t_busy = 0;
-    }
-    return p;
-}
-
-static BOOL WINAPI H_UnmapViewOfFile(LPCVOID base) {
-    t_busy = 1;
-    P("UnmapView    %p", (const void *)base);
-    t_busy = 0;
-    return r_UnmapViewOfFile(base);
-}
-
-static HANDLE WINAPI H_FindFirstFileW(LPCWSTR pat, LPWIN32_FIND_DATAW fd) {
-    HANDLE h = r_FindFirstFileW(pat, fd);
-    if (!t_busy && ContainsForgeW(pat)) {
-        char ansi[MAX_PATH];
-        Wide2Ansi(pat, ansi, sizeof(ansi));
-        t_busy = 1;
-        P("FindFirstW   %s  -> first=%ls", ansi,
-          (h != INVALID_HANDLE_VALUE && fd) ? fd->cFileName : L"(none)");
-        t_busy = 0;
-    }
-    return h;
-}
-
-static HANDLE WINAPI H_FindFirstFileExW(LPCWSTR pat, FINDEX_INFO_LEVELS lvl,
-                                        LPVOID data, FINDEX_SEARCH_OPS ops,
-                                        LPVOID filter, DWORD flags) {
-    HANDLE h = r_FindFirstFileExW(pat, lvl, data, ops, filter, flags);
-    if (!t_busy && ContainsForgeW(pat)) {
-        char ansi[MAX_PATH];
-        Wide2Ansi(pat, ansi, sizeof(ansi));
-        t_busy = 1;
-        P("FindFirstExW %s  -> %s", ansi,
-          h != INVALID_HANDLE_VALUE ? "ok" : "none");
-        t_busy = 0;
-    }
-    return h;
-}
 
 /* ---- install ------------------------------------------------------- */
 
-#define HOOK(fn, det, real)                                              \
-    do {                                                                 \
-        MH_STATUS s_ = MH_CreateHookApi(L"kernel32.dll", fn,             \
-                                        (LPVOID)(det), (LPVOID *)(real));\
-        Log("  %-20s %s", fn, s_ == MH_OK ? "ok" : MH_StatusToString(s_));\
-    } while (0)
-
+/* One watcher, over the three groups this probe used to hook by hand: the
+ * opens, the reads (the read itself, the position it starts from, the size
+ * and the mapping calls) and the finds. A DECIDE rule with only an after
+ * callback changes nothing - it looks - and the layer owns the hooks, so
+ * this fires whatever the rest of the process is doing and costs a
+ * trampoline nothing when the probe is switched off in scripthook.ini. */
 void ShForgeProbeStartup(void) {
     static LONG started = 0;
+    ShFileRuleDesc d;
 
     if (InterlockedExchange(&started, 1)) return;
 
@@ -428,32 +368,17 @@ void ShForgeProbeStartup(void) {
     InitializeCriticalSection(&g_lock);
 
     Log("forge probe starting (built " __DATE__ " " __TIME__ ")");
-    /* MinHook is per-DLL, and scripthook_corefix.c already initialises it
-     * from DllMain, so "already initialized" is the normal case here and
-     * not a failure. */
-    {
-        MH_STATUS s = MH_Initialize();
-        if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
-            Log("MH_Initialize failed (%s); probe not installed",
-                MH_StatusToString(s));
-            return;
-        }
+
+    p_SeekEx = (SetFilePointerEx_t)GetProcAddress(
+        GetModuleHandleA("kernel32.dll"), "SetFilePointerEx");
+
+    memset(&d, 0, sizeof(d));
+    d.group  = SH_FILE_OPEN | SH_FILE_READ | SH_FILE_FIND;
+    d.action = SH_FILE_DECIDE;
+    d.after  = ProbeAfter;
+    if (!ShFileRuleAdd(&d)) {
+        Log("forge probe: the layer refused the rule - not installed");
+        return;
     }
-
-    HOOK("CreateFileW",         H_CreateFileW,         &r_CreateFileW);
-    HOOK("CreateFileA",         H_CreateFileA,         &r_CreateFileA);
-    HOOK("ReadFile",            H_ReadFile,            &r_ReadFile);
-    HOOK("SetFilePointerEx",    H_SetFilePointerEx,    &r_SetFilePointerEx);
-    HOOK("SetFilePointer",      H_SetFilePointer,      &r_SetFilePointer);
-    HOOK("GetFileSizeEx",       H_GetFileSizeEx,       &r_GetFileSizeEx);
-    HOOK("GetFileSize",         H_GetFileSize,         &r_GetFileSize);
-    HOOK("CreateFileMappingA",  H_CreateFileMappingA,  &r_CreateFileMappingA);
-    HOOK("CreateFileMappingW",  H_CreateFileMappingW,  &r_CreateFileMappingW);
-    HOOK("MapViewOfFile",       H_MapViewOfFile,       &r_MapViewOfFile);
-    HOOK("UnmapViewOfFile",     H_UnmapViewOfFile,     &r_UnmapViewOfFile);
-    HOOK("FindFirstFileW",      H_FindFirstFileW,      &r_FindFirstFileW);
-    HOOK("FindFirstFileExW",    H_FindFirstFileExW,    &r_FindFirstFileExW);
-
-    MH_EnableHook(MH_ALL_HOOKS);
-    Log("forge probe installed");
+    Log("forge probe installed (watching through the framework's layer)");
 }

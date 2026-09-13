@@ -1734,6 +1734,224 @@ SH_API int      ShCpuOnStageChange(ShCpuStageFn fn, void *user);
  */
 void ShCoreFixLateStartup(void);
 
+/** @defgroup files File interception
+ *  One owner for the file APIs, and rules instead of hooks.
+ *
+ *  Five parts of this repository used to intercept the same kernel32 file
+ *  calls with five private arrangements: skipintro patched the main
+ *  module's import table by hand, while GhostNoWipe, GhostWipeProbe,
+ *  forgeprobe and scripthook_forge_io each built their own MinHook set.
+ *  MinHook keeps one hook per target per module, so those arrangements
+ *  have been shaping the code around them - forge_io asks a handle where
+ *  its file is with GetFinalPathNameByHandleW because CreateFileW was
+ *  taken, and skipintro wrote a PE parser because a slot was easier to own
+ *  than a target.
+ *
+ *  This layer is that owner. It hooks the file APIs once, in the framework
+ *  DLL, and everything else - framework modules and plugins alike -
+ *  registers a rule. A rule says which file it is about, which calls it
+ *  covers, and what to do when one matches:
+ *
+ *   - SH_FILE_HIDE     answer "no such file" without calling anything;
+ *   - SH_FILE_REDIRECT run the call against another path;
+ *   - SH_FILE_DECIDE   hand the call to desc->before, which either answers
+ *                      it or lets it through.
+ *
+ *  plus an optional desc->after, which sees the call once it has run (or
+ *  been answered) and may change what the caller gets - ReadFile's buffer
+ *  among it. A watcher is a rule with only an after callback: it looks at
+ *  everything and changes nothing.
+ *
+ *  More than one rule can match one call. They are weighed, not raced:
+ *  HIDE beats REDIRECT beats DECIDE, and within one action the rule
+ *  registered first wins. Hiding first is deliberate - "the file is not
+ *  there" is the most conservative answer available, and the only one that
+ *  cannot hand a caller something wrong.
+ *
+ *  The hooks are inline, so they answer for the whole process: the game,
+ *  every plugin and the framework's own modules go through this one place,
+ *  and a pointer taken with GetProcAddress is intercepted exactly like a
+ *  static import. That is the point - and it is why the layer also has to
+ *  know when NOT to look: its own pass is marked, a thread can mark its
+ *  own I/O with ShFileOwn, and a callback's own file calls pass straight
+ *  through untouched.
+ *
+ *  Nothing is installed until a rule is registered, and the last
+ *  unregistration takes every hook and trampoline back out: a session that
+ *  registers nothing runs with not one intercepted call. That is what lets
+ *  a one-shot user keep its promise - skipintro releases its rule when it
+ *  is done, and the layer uninstalls itself if nobody else is left.
+ *
+ *  The callbacks run on the calling thread, inside the file call they are
+ *  about, with the caller's stack below them: keep them short, never
+ *  block, and never wait for another thread that needs the same thread to
+ *  make a file call. A callback may call any file API it likes - the layer
+ *  recognises its own threads and passes those calls through - but it
+ *  should not expect its own rules to apply to them: they do not, on
+ *  purpose, which is what keeps "look at the real state of the disk"
+ *  possible from inside a rule.
+ *
+ *  Not here, on purpose: no priority field (three actions and registration
+ *  order are the whole ordering rule), no directory virtualization, no way
+ *  for a plugin to hold or call the real functions, and no global switch.
+ *  A rule is a registration, and two writers of one answer is the thing
+ *  this layer exists to prevent.
+ *  @{ */
+
+/** What a rule does when a call matches it. */
+#define SH_FILE_HIDE     1  /**< answer "no such file" without a call   */
+#define SH_FILE_REDIRECT 2  /**< run the call on desc->to instead        */
+#define SH_FILE_DECIDE   3  /**< ask desc->before: answer, or let it run */
+
+/** Which calls a rule is about; or the bits together. A group with a file
+ *  name in it (OPEN, ATTR, MOVE, DELETE, FIND) is one a HIDE or a REDIRECT
+ *  can apply to; the others carry a handle instead, and a rule for them is
+ *  either a decision or a watch. */
+#define SH_FILE_OPEN    0x0001u  /**< CreateFileA/W                     */
+#define SH_FILE_ATTR    0x0002u  /**< GetFileAttributesA/W/ExA/ExW      */
+#define SH_FILE_MOVE    0x0004u  /**< MoveFileA/W, MoveFileExA/W        */
+#define SH_FILE_DELETE  0x0008u  /**< DeleteFileA/W, RemoveDirectoryA/W */
+#define SH_FILE_FIND    0x0010u  /**< FindFirstFileA/W/ExA/ExW,
+                                      FindNextFileA/W                   */
+#define SH_FILE_READ    0x0020u  /**< ReadFile, and where a read will
+                                      start or end: SetFilePointer(Ex),
+                                      GetFileSize(Ex), CreateFileMapping,
+                                      MapViewOfFile, UnmapViewOfFile   */
+#define SH_FILE_WAIT    0x0040u  /**< the completion path: the WaitFor*
+                                      calls, GetOverlappedResult(Ex),
+                                      CloseHandle                       */
+#define SH_FILE_INFO    0x0080u  /**< SetFileInformationByHandle,
+                                      CopyFileA/W                       */
+#define SH_FILE_ANY     0x00FFu  /**< every group of them               */
+
+/** One file call, as the layer hands it to a rule's callbacks. Filled in
+ *  by the layer on the caller's stack - nothing here is ever allocated,
+ *  and none of it outlives the call. */
+typedef struct {
+    const char    *api;      /**< the call itself: "CreateFileW",
+                                  "MoveFileExW", "DeleteFileA" ... the
+                                  kernel32 name, which is what a watcher
+                                  logs and a rule keys on              */
+    uint32_t       group;    /**< the SH_FILE_* bit this call is in      */
+    int            wide;     /**< 1 for the W variant of the call, and
+                                  so for `path`, `asked` and `to`       */
+    const wchar_t *path;     /**< the file the call is about, as it will
+                                  be used - the redirect target, after a
+                                  redirect. NULL on an A call.          */
+    const char    *pathA;    /**< the same for an A call: NULL when wide */
+    const wchar_t *asked;    /**< the file the caller named, before any
+                                  redirect (NULL on an A call)          */
+    const char    *askedA;   /**< the same for an A call: NULL when W    */
+    const wchar_t *to;       /**< the second path, on the calls that have
+                                  one: where a move or a copy is going
+                                  (NULL on an A call)                    */
+    const char    *toA;      /**< the same for an A call: NULL when W    */
+    DWORD          access;   /**< an open's own arguments, so a rule that
+                                  answers one can open something else
+                                  (SH_FILE_OPEN)                       */
+    DWORD          share;
+    DWORD          disp;
+    DWORD          flags;
+    HANDLE         handle;   /**< the handle, on the calls that carry one */
+    void          *buffer;   /**< ReadFile's buffer                      */
+    DWORD          bytes;    /**< the size the call was made with: what
+                                  ReadFile was asked for, a mapping's
+                                  length, an info size, a wait's timeout  */
+    DWORD          done;     /**< how much it says it did - the bytes a
+                                  ReadFile transferred, when the call
+                                  reports one (0 when it does not)      */
+    void          *overlapped; /**< the OVERLAPPED, when there is one    */
+    uint64_t       offset;   /**< where the I/O starts, when the call or
+                                  the layer knows it                    */
+    void          *result;   /**< what the call returned, or what a
+                                  callback answered it with             */
+    DWORD          error;    /**< GetLastError at that moment, or the
+                                  error a callback answered with       */
+    int            answered; /**< 1: no real call was made - a rule
+                                  answered (see `result` and `error`)   */
+    int            matched;  /**< 1 when a rule matched this call, and so
+                                  when the after callbacks were run      */
+    void          *user;     /**< the rule's own pointer, for a callback */
+} ShFileCall;
+
+/** A rule's before callback, asked only for SH_FILE_DECIDE: 1 when it has
+ *  answered the call (the layer returns `result` and raises `error`), 0 to
+ *  let the real call run. */
+typedef int (*ShFileDecideFn)(ShFileCall *call, void *user);
+
+/** A rule's after callback, run once per matching call - whether it ran or
+ *  a rule answered it - and able to change `result`, `error`, and for
+ *  ReadFile the data in `buffer`. It runs for every matching rule that has
+ *  one, in registration order. */
+typedef void (*ShFileAfterFn)(ShFileCall *call, void *user);
+
+/** One rule. `name` is matched against the file's own name, the part after
+ *  the last separator, case insensitively; NULL or "" matches every file
+ *  the group covers (which is how a watcher is written). `suffix`, when
+ *  given, must also match the end of the whole path - for a file that
+ *  moves around inside a tree but keeps its tail. `to` is read only for
+ *  SH_FILE_REDIRECT, and `before` only for SH_FILE_DECIDE. Every string is
+ *  copied, so the caller's own may go away as soon as this returns. */
+typedef struct {
+    const wchar_t  *name;
+    const wchar_t  *suffix;
+    uint32_t        group;   /**< SH_FILE_* bits                         */
+    int             action;  /**< SH_FILE_HIDE / _REDIRECT / _DECIDE     */
+    const wchar_t  *to;      /**< the redirect target, SH_FILE_REDIRECT  */
+    ShFileDecideFn  before;
+    ShFileAfterFn   after;
+    void           *user;
+} ShFileRuleDesc;
+
+/** A registration. Opaque: hand it back to ShFileRuleDel and forget it. */
+typedef struct ShFileRule ShFileRule;
+
+/** Register a rule. 1 = installed, and the layer's hooks go up with it.
+ *  0 = refused, with the reason in logs\scripthook_files.log (no slot
+ *  left, a group with no bit in it, SH_FILE_REDIRECT with no `to`,
+ *  SH_FILE_DECIDE with no `before` and no `after`, or a name longer than
+ *  the table holds). The caller's module is the identity the log and
+ *  ShFileRuleOwner report, so a plugin does not name itself. */
+SH_API ShFileRule *ShFileRuleAdd(const ShFileRuleDesc *desc);
+
+/** Take a rule back out. 1 = it was live and is not any more; 0 = it was
+ *  already gone (never fails otherwise). The hooks come down with the last
+ *  rule, so this is also how a one-shot user puts the process back the way
+ *  it found it. */
+SH_API int      ShFileRuleDel(ShFileRule *rule);
+
+/** How many rules are registered right now. */
+SH_API int      ShFileMatchCount(void);
+
+/** Whether the layer's hooks are in place - 1 while at least one target is
+ *  hooked, 0 after the last rule has gone. */
+SH_API int      ShFileInstalled(void);
+
+/** How many calls the layer has looked at this session: every call that
+ *  reached the dispatch, whether a rule matched it or not. */
+SH_API uint32_t ShFileCallCount(void);
+
+/** Mark this thread's own file calls. While `on`, the layer does not look
+ *  at anything this thread does: no rule is applied and no observer sees
+ *  it. For a module that reads files as part of serving one (the forge
+ *  loader's own reads are the reason this exists), which would otherwise
+ *  be fed back through its own rules. Every turn on must be matched by one
+ *  off, and it does not nest. */
+SH_API void     ShFileOwn(int on);
+
+/** The name of one action, for a log line or a menu row: "hide",
+ *  "redirect", "decide", "watch", "" for anything else. A translation key:
+ *  pass it through ShLang before showing it. */
+SH_API const char *ShFileActionName(int action);
+
+/** One line about what the layer is doing, for a status row or a log:
+ *  how many rules, which of them are watching or deciding, whether the
+ *  hooks are in place and how many calls have been looked at. Returns the
+ *  length written, 0 when `buf` is too small. */
+SH_API int      ShFileStatus(char *buf, int n);
+
+/** @} */
+
 /** @addtogroup state
  *  @{ */
 

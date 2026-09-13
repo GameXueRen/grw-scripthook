@@ -804,10 +804,33 @@ static LONG WINAPI hook_NtSIP(HANDLE proc, ULONG cls, PVOID info, ULONG len)
 /* ========================================================================= */
 /* Installation.                                                              */
 /* ========================================================================= */
+/* Created and enabled one target at a time, and never with
+ * MH_EnableHook(MH_ALL_HOOKS): that call switches on every hook this DLL
+ * owns, including one another module created but has not enabled yet -
+ * scripthook_files.c creates its file hooks when the first rule asks for
+ * them, and a future module that wants one armed later would be broken by
+ * it. MinHook keeps its state per module, so this is about this DLL's own
+ * hooks, not a plugin's. */
 static int hook_api(const wchar_t *mod, const char *name, LPVOID detour, LPVOID *real_out)
 {
-    MH_STATUS s = MH_CreateHookApi(mod, name, detour, real_out);
+    HMODULE   h;
+    void     *target;
+    MH_STATUS s;
+
+    h = GetModuleHandleW(mod);
+    if (!h) { core_log("  hook %-32s FAILED (no %ls)", name, mod); return 0; }
+
+    target = (void *)GetProcAddress(h, name);
+    if (!target) { core_log("  hook %-32s FAILED (not exported)", name); return 0; }
+
+    s = MH_CreateHook(target, detour, real_out);
     if (s != MH_OK) { core_log("  hook %-32s FAILED (MH_STATUS=%d)", name, (int)s); return 0; }
+
+    s = MH_EnableHook(target);
+    if (s != MH_OK) {
+        core_log("  enable %-30s FAILED (MH_STATUS=%d)", name, (int)s);
+        return 0;
+    }
     return 1;
 }
 
@@ -835,7 +858,6 @@ static int install_hooks(void)
     hook_api(L"ntdll", "NtQuerySystemInformation", (LPVOID)hook_NtQSI, (LPVOID *)&real_NtQSI);
     hook_api(L"ntdll", "NtSetInformationProcess",  (LPVOID)hook_NtSIP, (LPVOID *)&real_NtSIP);
 
-    if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) { core_log("MH_EnableHook failed"); ok = 0; }
     return ok;
 }
 

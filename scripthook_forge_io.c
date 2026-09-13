@@ -51,17 +51,27 @@
  * If an engine never calls GetOverlappedResult for some read, the patch
  * for that one read simply does not land - a missing mod, not a crash.
  *
- * Which handle is which is not learned from CreateFile: hooks on
- * CreateFileW would collide with GhostNoWipe and skipintro, which both
- * want it, and MinHook keeps one hook per target address. Instead a
- * handle is resolved LATE, the first time it is read, with
- * GetFinalPathNameByHandleW - and the answer, found or not, is cached,
- * so each handle costs one lookup for the whole session. Reading is what
- * matters anyway: an archive that is never read is never a problem.
+ * Which handle is which comes from the interception layer
+ * (scripthook_files.c), which owns CreateFileW for the whole process:
+ * this module registers an open rule and is told the path at the moment
+ * the file is opened, so a .forge handle never has to be asked who it is.
+ * GetFinalPathNameByHandleW stays as the fallback for a handle opened
+ * before these rules went in - the engine opens some of its archives
+ * during start up, ahead of the loader thread - and the answer, found or
+ * not, is cached either way, so each handle costs one resolve for the
+ * session. Reading is what matters anyway: an archive that is never read
+ * is never a problem.
  *
- * This also means the overlay is built at the first read of an archive
- * rather than at open, which is where the tables (a few MB) are parsed
- * and the mod payloads are read into memory.
+ * The overlay is still built at the first read of an archive rather than
+ * at open, which is where the tables (a few MB) are parsed and the mod
+ * payloads are read into memory.
+ *
+ * The hooks this module used to install are gone. It asks the layer for
+ * two groups - the reads and the completion path - and the callbacks
+ * below run from the layer's dispatch, on the engine's own thread, at the
+ * point in the call where they used to run. Reentrancy is the layer's
+ * (its own dispatch never comes back here), so the thread-local busy flag
+ * this module used to keep is gone with the hooks.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -75,53 +85,32 @@
 #include "scripthook.h"
 #include "forge.h"
 #include "log.h"
-#include "third_party/minhook/include/MinHook.h"
 
 #define IO_CACHE    256    /* direct mapped by handle; handles are few */
 #define PENDING_MAX 64     /* asynchronous reads in flight that matter */
 
-#ifdef _MSC_VER
-#define IO_TLS __declspec(thread)
-#else
-#define IO_TLS __thread
-#endif
-
-typedef BOOL   (WINAPI *ReadFile_t)(HANDLE, LPVOID, DWORD, LPDWORD,
-                                    LPOVERLAPPED);
-typedef BOOL   (WINAPI *CloseHandle_t)(HANDLE);
-typedef BOOL   (WINAPI *GetOverlappedResult_t)(HANDLE, LPOVERLAPPED, LPDWORD,
-                                               BOOL);
-typedef BOOL   (WINAPI *GetOverlappedResultEx_t)(HANDLE, LPOVERLAPPED,
-                                                 LPDWORD, DWORD, BOOL);
 typedef BOOL   (WINAPI *SetFilePointerEx_t)(HANDLE, LARGE_INTEGER,
                                             PLARGE_INTEGER, DWORD);
 typedef DWORD  (WINAPI *GetFinalPathNameByHandleW_t)(HANDLE, LPWSTR, DWORD,
                                                      DWORD);
-typedef DWORD  (WINAPI *WaitForSingleObject_t)(HANDLE, DWORD);
-typedef DWORD  (WINAPI *WaitForSingleObjectEx_t)(HANDLE, DWORD, BOOL);
-typedef DWORD  (WINAPI *WaitForMultipleObjects_t)(DWORD, const HANDLE *, BOOL,
-                                                  DWORD);
-typedef DWORD  (WINAPI *WaitForMultipleObjectsEx_t)(DWORD, const HANDLE *,
-                                                    BOOL, DWORD, BOOL);
 
-static ReadFile_t            r_ReadFile;
-static CloseHandle_t         r_CloseHandle;
-static GetOverlappedResult_t r_GetOverlappedResult;
-static GetOverlappedResultEx_t r_GetOverlappedResultEx;
-static WaitForSingleObject_t      r_WaitForSingleObject;
-static WaitForSingleObjectEx_t    r_WaitForSingleObjectEx;
-static WaitForMultipleObjects_t   r_WaitForMultipleObjects;
-static WaitForMultipleObjectsEx_t r_WaitForMultipleObjectsEx;
+/* The two this module still calls rather than hooks: SetFilePointerEx to
+ * ask a synchronous read where it starts, GetFinalPathNameByHandleW to
+ * name a handle that was opened before the layer's rules went in. Both
+ * are resolved at startup and called from inside a callback, where the
+ * layer passes its own calls straight through. */
 static SetFilePointerEx_t            p_SetFilePointerEx;
 static GetFinalPathNameByHandleW_t   p_FinalPath;
 
+/* Handles by what they are. `g_pathH/g_pathP` is the layer's open rule
+ * saying "this handle is this .forge", written at open; `g_cacheH/g_cacheO`
+ * is the overlay resolved at the first read, which is the expensive part
+ * and stays lazy. A handle that is in neither is resolved the old way, by
+ * asking it. */
 static HANDLE          g_cacheH[IO_CACHE];
 static ShForgeOverlay *g_cacheO[IO_CACHE];
-static IO_TLS int      t_busy;
-/* Set while the loader is doing its OWN archive I/O (the FileDataID
- * index pass, the mod resolve). Thread local, because the engine reads
- * on its own threads and those are the reads the ledger wants. */
-static IO_TLS int      t_own;
+static HANDLE          g_pathH[IO_CACHE];
+static char            g_pathP[IO_CACHE][SH_FORGE_PATH_MAX + 8];
 static volatile LONG   g_fixups;
 static volatile LONG   g_gorCalls;
 
@@ -234,11 +223,14 @@ SH_API int ShForgeReadSeen(const char *name) {
     return found;
 }
 
-/* Marks the calling thread as doing the loader's own archive I/O, so
- * those reads stay out of the ledger. Thread local by design: the
- * engine's reads happen on its own threads and are the ones wanted. */
+/* The loader's own archive I/O: the FileDataID index pass and the mod
+ * resolve read every archive on disk, and those reads must stay out of
+ * the ledger (which is what the ENGINE read) and out of this module's own
+ * rules while an overlay is being built. That mark is the layer's now
+ * (ShFileOwn); this is the same flag, under the name the loader calls it
+ * by. */
 void ShForgeIoOwn(int on) {
-    t_own = on ? 1 : 0;
+    ShFileOwn(on);
 }
 
 /* An asynchronous read that covers a patch: remembered at ReadFile time
@@ -335,18 +327,6 @@ static int PendingTake(LPOVERLAPPED ov, PendingRead *out) {
     return found;
 }
 
-static void PendingDrop(LPOVERLAPPED ov) {
-    int i;
-    if (!g_lockReady) return;
-    EnterCriticalSection(&g_lock);
-    for (i = 0; i < PENDING_MAX; i++)
-        if (g_pending[i].ov == ov) {
-            g_pending[i].ov = NULL;
-            InterlockedDecrement(&g_pendingCount);
-        }
-    LeaveCriticalSection(&g_lock);
-}
-
 /* Patch every recorded read whose transfer has finished. This is what
  * makes the asynchronous half mechanism-agnostic: it does not matter
  * whether the caller collects the result with GetOverlappedResult, waits
@@ -357,7 +337,7 @@ static void PendingDrop(LPOVERLAPPED ov) {
  * costs one compare when nothing is outstanding. */
 static void PendingSweep(void) {
     int i;
-    if (!g_lockReady || t_busy || g_pendingCount == 0) return;
+    if (!g_lockReady || g_pendingCount == 0) return;
 
     for (i = 0; i < PENDING_MAX; i++) {
         PendingRead pr;
@@ -379,11 +359,7 @@ static void PendingSweep(void) {
         if (pr.ov->Internal != 0) continue;
         n = (DWORD)pr.ov->InternalHigh;
         if (n > pr.len) n = pr.len;
-        if (n) {
-            t_busy = 1;
-            CountFixup(pr.o, pr.off, pr.buf, n, "async-done");
-            t_busy = 0;
-        }
+        if (n) CountFixup(pr.o, pr.off, pr.buf, n, "async-done");
     }
 }
 
@@ -401,6 +377,18 @@ static ShForgeOverlay *LookupOrResolve(HANDLE h) {
 
     g_cacheH[slot] = h;
     g_cacheO[slot] = NULL;
+
+    /* The layer's open rule said where this handle came from, so the usual
+     * case is a table lookup and the archive is resolved from the name it
+     * was opened with. Asking the handle is what is left for one opened
+     * before those rules went in - the engine opens archives during start
+     * up, ahead of the loader thread. */
+    if (g_pathH[slot] == h && g_pathP[slot][0]) {
+        LedgerAdd(g_pathP[slot]);
+        o = ShForgeDryRun() ? NULL : ShForgeOverlayFor(g_pathP[slot]);
+        if (o) g_cacheO[slot] = o;
+        return o;
+    }
 
     if (!p_FinalPath || !h || h == INVALID_HANDLE_VALUE) return NULL;
     if (!p_FinalPath(h, wpath, SH_FORGE_PATH_MAX + 4, 0)) return NULL;
@@ -427,35 +415,92 @@ static ShForgeOverlay *LookupOrResolve(HANDLE h) {
     return o;
 }
 
-/* ---- hooks --------------------------------------------------------- */
+/* ---- what the layer runs -------------------------------------------
+ *
+ * Three rules, registered at startup (ShForgeIoStartup below), and the
+ * callbacks they name. Each one runs on the engine's own thread, inside
+ * the call it is about, which is exactly where the old detours ran - so
+ * the logic below is that logic with the call already made and its result
+ * in the context. Reentrancy is the layer's: anything these callbacks do
+ * themselves - resolving an overlay reads the mod files - passes straight
+ * through without coming back here.
+ */
 
-static BOOL WINAPI H_ReadFile(HANDLE h, LPVOID buf, DWORD len, LPDWORD got,
-                              LPOVERLAPPED ov) {
-    int was = t_busy;
+/* The path of an open call in ANSI, with the \\?\ form folded away. 1 when
+ * it is a .forge, and then `out` holds the name the overlay is keyed by. */
+static int ForgePathOf(const ShFileCall *c, char *out, int n) {
+    char tmp[SH_FORGE_PATH_MAX + 8];
+    const char *p;
+
+    if (c->pathA) {
+        snprintf(tmp, sizeof(tmp), "%s", c->pathA);
+    } else if (c->path) {
+        if (WideCharToMultiByte(CP_ACP, 0, c->path, -1, tmp, sizeof(tmp),
+                                NULL, NULL) <= 0)
+            return 0;
+    } else {
+        return 0;
+    }
+
+    p = tmp;
+    if (p[0] == '\\' && p[1] == '\\' && p[2] == '?' && p[3] == '\\') p += 4;
+    if (!EndsWithForge(p)) return 0;
+    snprintf(out, n, "%s", p);
+    return 1;
+}
+
+/* Where a .forge handle came from, remembered at the moment it is opened.
+ * The ledger is NOT written here: it records what the engine READ, and an
+ * archive that is opened but never read is not loaded. */
+static void ForgeOpenAfter(ShFileCall *c, void *user) {
+    unsigned slot;
+    HANDLE   h = (HANDLE)c->result;
+
+    (void)user;
+    if (!h || h == INVALID_HANDLE_VALUE) return;
+
+    slot = SlotOf(h);
+    if (!ForgePathOf(c, g_pathP[slot], (int)sizeof(g_pathP[slot]))) {
+        /* Not an archive this module serves - and a recycled handle value
+         * must not inherit an older mapping. */
+        if (g_pathH[slot]) {
+            g_pathH[slot] = NULL;
+            g_pathP[slot][0] = 0;
+        }
+        return;
+    }
+    g_pathH[slot] = h;
+}
+
+/* A read: patch the buffer when it covers a byte a mod replaced. The
+ * asynchronous half is mechanism-agnostic on purpose - a read that came
+ * back pending is remembered and patched by whichever completion the
+ * engine uses (see ForgeWaitAfter). */
+static void ForgeReadAfter(ShFileCall *c, void *user) {
     ShForgeOverlay *o = NULL;
     uint64_t off = 0;
     int haveOff = 0;
-    BOOL ok;
-    DWORD err;
+    HANDLE h;
 
-    /* Our own table and payload reads run through here too; they must
-     * pass straight through or the overlay build would recurse. t_own is
-     * the loader's own archive I/O, and it is kept out of the ledger for
-     * a different reason: the index pass reads EVERY archive on disk, so
-     * letting it through would put all of them in the ledger and destroy
-     * the one thing the ledger is for - which archives the ENGINE read. */
-    if (was || t_own) return r_ReadFile(h, buf, len, got, ov);
+    (void)user;
+    if (!c->api || _stricmp(c->api, "ReadFile") != 0) return;
+    if (!c->buffer) return;
+    /* A call that failed outright, and is not in flight, read nothing: it
+     * has no patch, and it is not a read of an archive either. */
+    if (!c->result && c->error != ERROR_IO_PENDING) return;
+
+    h = c->handle;
 
     /* Also covers a caller that polls instead of waiting. */
     PendingSweep();
 
-    t_busy = 1;
     o = LookupOrResolve(h);
     if (o) {
-        if (ov) {
+        if (c->overlapped) {
             /* The asynchronous handle: its file pointer never moves, so
-             * the OVERLAPPED is the only place the offset exists. */
-            off = ((uint64_t)ov->OffsetHigh << 32) | ov->Offset;
+             * the OVERLAPPED is the only place the offset exists, and the
+             * layer has already read it out for us. */
+            off = c->offset;
             haveOff = 1;
         } else if (p_SetFilePointerEx) {
             /* A zero distance at FILE_CURRENT only asks. It is the only
@@ -471,221 +516,154 @@ static BOOL WINAPI H_ReadFile(HANDLE h, LPVOID buf, DWORD len, LPDWORD got,
 
     if (o && haveOff && ShForgeLogReads())
         Log("read: off=%llu len=%lu %s hit=%d",
-            (unsigned long long)off, (unsigned long)len,
-            ov ? "async" : "sync", TouchesOverlay(o, off, len));
+            (unsigned long long)off, (unsigned long)c->bytes,
+            c->overlapped ? "async" : "sync", TouchesOverlay(o, off, c->bytes));
 
-    if (!o || !haveOff || !TouchesOverlay(o, off, len)) {
+    if (!o || !haveOff || !TouchesOverlay(o, off, c->bytes)) {
         /* Nothing to patch in this read; leave it entirely alone, its
          * asynchronous behaviour included. */
-        ok = r_ReadFile(h, buf, len, got, ov);
-        err = GetLastError();
-        SetLastError(err);
-        t_busy = was;
-        return ok;
+        return;
     }
 
-    if (ov) {
-        /* Asynchronous by construction: remember it and patch once the
-         * engine asks for the result - unless it completed right here,
-         * which small reads often do. The byte count then comes from the
-         * count parameter if the caller passed one, and otherwise from
-         * the OVERLAPPED itself, because passing none is the usual thing
-         * for overlapped I/O and reading that as "no bytes" would drop
-         * the patch on the floor. */
-        PendingAdd(h, ov, buf, len, off, o);
-        ok = r_ReadFile(h, buf, len, got, ov);
-        err = GetLastError();
-        if (ok) {
-            DWORD n = got ? *got : (DWORD)ov->InternalHigh;
-            PendingDrop(ov);
-            if (n) CountFixup(o, off, (uint8_t *)buf, n, "async-now");
-            else if (ShForgeLogReads())
-                Log("read/async-now: no byte count (got=%p intHigh=%lu)",
-                    (void *)got, (unsigned long)ov->InternalHigh);
-        } else if (err != ERROR_IO_PENDING) {
-            PendingDrop(ov);   /* failed outright; nothing will complete */
-        } else if (ShForgeLogReads()) {
-            Log("read/async-pending: recorded off=%llu len=%lu",
-                (unsigned long long)off, (unsigned long)len);
+    if (c->overlapped) {
+        LPOVERLAPPED ov = (LPOVERLAPPED)c->overlapped;
+
+        if (c->result) {
+            /* It completed right here, which small reads often do. The
+             * byte count comes from the count parameter when the caller
+             * passed one and from the OVERLAPPED otherwise, because
+             * passing none is the usual thing for overlapped I/O and
+             * reading that as "no bytes" would drop the patch. */
+            DWORD n = c->done ? c->done : (DWORD)ov->InternalHigh;
+            if (n) {
+                CountFixup(o, off, (uint8_t *)c->buffer, n, "async-now");
+            } else if (ShForgeLogReads()) {
+                Log("read/async-now: no byte count (intHigh=%lu)",
+                    (unsigned long)ov->InternalHigh);
+            }
+        } else if (c->error == ERROR_IO_PENDING) {
+            /* Still in flight: remembered, and patched once the engine
+             * asks for the result or waits on it. */
+            PendingAdd(h, ov, c->buffer, c->bytes, off, o);
+            if (ShForgeLogReads())
+                Log("read/async-pending: recorded off=%llu len=%lu",
+                    (unsigned long long)off, (unsigned long)c->bytes);
         }
-        SetLastError(err);
-        t_busy = was;
-        return ok;
+        return;
     }
 
-    /* Synchronous, and it covers a patch: call it, then patch. */
-    ok = r_ReadFile(h, buf, len, got, ov);
-    err = GetLastError();
-    if (ok && got && *got) CountFixup(o, off, (uint8_t *)buf, *got, "sync");
-    SetLastError(err);
-    t_busy = was;
-    return ok;
+    /* Synchronous, and it covers a patch: patch what it read. */
+    if (c->result && c->done)
+        CountFixup(o, off, (uint8_t *)c->buffer, c->done, "sync");
 }
 
-static BOOL WINAPI H_GetOverlappedResult(HANDLE h, LPOVERLAPPED ov,
-                                         LPDWORD got, BOOL wait) {
+/* The completion path. Two of these calls name the OVERLAPPED, so the
+ * read they finish can be matched exactly; the waits cannot (they are
+ * given a handle, an event or an array of them), so they get the sweep,
+ * which patches everything whose transfer has finished. CloseHandle is
+ * here for a different reason: the handle caches have to forget it, or a
+ * later file that reuses the handle value would inherit an archive's
+ * patches - a mistake that would corrupt data silently. */
+static void ForgeWaitAfter(ShFileCall *c, void *user) {
     PendingRead pr;
-    BOOL ok, matched = FALSE;
-    DWORD err;
 
-    ok = r_GetOverlappedResult(h, ov, got, wait);
-    err = GetLastError();
+    (void)user;
+    if (!c->api) return;
 
-    /* Only consume the record once the transfer really finished. A
-     * caller that polls with bWait = FALSE reports "not yet" many times
-     * before it reports success, and treating the first of those as the
-     * end would throw the patch away. */
-    if (!t_busy && ok) matched = PendingTake(ov, &pr) ? TRUE : FALSE;
-    if (ShForgeLogReads() && (matched || InterlockedIncrement(&g_gorCalls) <= 8))
-        Log("gor: matched=%d ok=%d", matched, ok);
+    if (_stricmp(c->api, "CloseHandle") == 0) {
+        unsigned slot = SlotOf(c->handle);
 
-    if (matched) {
-        DWORD n = (ok && got) ? *got : 0;
-        if (n) {
-            if (n > pr.len) n = pr.len;
-            t_busy = 1;
-            CountFixup(pr.o, pr.off, pr.buf, n, "async-done");
-            t_busy = 0;
+        if (g_cacheH[slot] == c->handle) {
+            g_cacheH[slot] = NULL;
+            g_cacheO[slot] = NULL;
         }
-    }
-
-    SetLastError(err);
-    return ok;
-}
-
-static BOOL WINAPI H_GetOverlappedResultEx(HANDLE h, LPOVERLAPPED ov,
-                                           LPDWORD got, DWORD ms,
-                                           BOOL alertable) {
-    PendingRead pr;
-    BOOL ok, matched = FALSE;
-    DWORD err;
-
-    ok = r_GetOverlappedResultEx(h, ov, got, ms, alertable);
-    err = GetLastError();
-
-    if (!t_busy && ok) matched = PendingTake(ov, &pr) ? TRUE : FALSE;
-    if (ShForgeLogReads() && (matched || InterlockedIncrement(&g_gorCalls) <= 8))
-        Log("gor-ex: matched=%d ok=%d", matched, ok);
-
-    if (matched) {
-        DWORD n = (ok && got) ? *got : 0;
-        if (n) {
-            if (n > pr.len) n = pr.len;
-            t_busy = 1;
-            CountFixup(pr.o, pr.off, pr.buf, n, "async-done");
-            t_busy = 0;
+        if (g_pathH[slot] == c->handle) {
+            g_pathH[slot] = NULL;
+            g_pathP[slot][0] = 0;
         }
+        return;
     }
 
-    SetLastError(err);
-    return ok;
-}
+    if (_stricmp(c->api, "GetOverlappedResult") == 0 ||
+        _stricmp(c->api, "GetOverlappedResultEx") == 0) {
+        /* Only consume the record once the transfer really finished: a
+         * caller that polls with bWait = FALSE reports "not yet" many
+         * times before it reports success, and treating the first of those
+         * as the end would throw the patch away. */
+        if (c->result && PendingTake((LPOVERLAPPED)c->overlapped, &pr)) {
+            DWORD n = c->done;
 
-static BOOL WINAPI H_CloseHandle(HANDLE h) {
-    unsigned slot = SlotOf(h);
-    if (g_cacheH[slot] == h) {
-        g_cacheH[slot] = NULL;
-        g_cacheO[slot] = NULL;
+            if (ShForgeLogReads()) Log("gor: matched=1 ok=1");
+            if (n) {
+                if (n > pr.len) n = pr.len;
+                CountFixup(pr.o, pr.off, pr.buf, n, "async-done");
+            }
+        } else if (ShForgeLogReads() &&
+                   InterlockedIncrement(&g_gorCalls) <= 8) {
+            Log("gor: matched=0 ok=%d", c->result ? 1 : 0);
+        }
+        return;
     }
-    return r_CloseHandle(h);
-}
 
-/* Waits are the other way an overlapped read gets noticed, and the one
- * this engine actually uses. The patch still lands before the caller can
- * look at the buffer, because the sweep runs here, inside the wait, on
- * the way back out. */
-static DWORD WINAPI H_WaitForSingleObject(HANDLE h, DWORD ms) {
-    DWORD r = r_WaitForSingleObject(h, ms);
-    if (r != WAIT_TIMEOUT && r != WAIT_FAILED) PendingSweep();
-    return r;
-}
-
-static DWORD WINAPI H_WaitForSingleObjectEx(HANDLE h, DWORD ms,
-                                            BOOL alertable) {
-    DWORD r = r_WaitForSingleObjectEx(h, ms, alertable);
-    if (r != WAIT_TIMEOUT && r != WAIT_FAILED) PendingSweep();
-    return r;
-}
-
-static DWORD WINAPI H_WaitForMultipleObjects(DWORD n, const HANDLE *hs,
-                                             BOOL all, DWORD ms) {
-    DWORD r = r_WaitForMultipleObjects(n, hs, all, ms);
-    if (r != WAIT_TIMEOUT && r != WAIT_FAILED) PendingSweep();
-    return r;
-}
-
-static DWORD WINAPI H_WaitForMultipleObjectsEx(DWORD n, const HANDLE *hs,
-                                               BOOL all, DWORD ms,
-                                               BOOL alertable) {
-    DWORD r = r_WaitForMultipleObjectsEx(n, hs, all, ms, alertable);
-    if (r != WAIT_TIMEOUT && r != WAIT_FAILED) PendingSweep();
-    return r;
+    /* The waits - and this runs after the real wait has returned, which is
+     * the point: the patch lands before the caller can look at the buffer,
+     * on the way back out of the call that told it the read was done. */
+    PendingSweep();
 }
 
 /* ---- install ------------------------------------------------------- */
 
-#define HOOK(fn, det, real)                                                \
-    do {                                                                   \
-        MH_STATUS s_ = MH_CreateHookApi(L"kernel32.dll", fn,               \
-                                        (LPVOID)(det), (LPVOID *)(real));  \
-        Log("  %-22s %s", fn, s_ == MH_OK ? "ok" : MH_StatusToString(s_)); \
-    } while (0)
-
+/* Three rules, registered once, when the forge module comes up. The layer
+ * installs its hooks with the first of them and keeps them for as long as
+ * any rule lives, so this module owns no hook of its own - which is what
+ * removes the old CreateFile collision with GhostNoWipe and skipintro,
+ * and why forgeprobe and GhostWipeProbe can now run beside it. */
 void ShForgeIoStartup(void) {
     static LONG started = 0;
-    MH_STATUS s;
+    ShFileRuleDesc d;
+    HMODULE k32;
 
     if (InterlockedExchange(&started, 1)) return;
 
     LogInit("scripthook_forge_io.log");
 
-    /* MinHook is per-DLL and scripthook_corefix.c already initialises it
-     * from DllMain, so "already initialized" is the normal case. */
-    s = MH_Initialize();
-    if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
-        Log("MH_Initialize failed (%s); forge I/O not installed",
-            MH_StatusToString(s));
-        return;
-    }
-
     InitializeCriticalSection(&g_lock);
     g_lockReady = 1;
     InitializeCriticalSection(&g_ledgerLock);
 
-    /* Resolved, not hooked: used to ask a handle where the read is and
-     * what it is, without intercepting either call. */
+    /* Called, never hooked: SetFilePointerEx asks a synchronous read where
+     * it starts, and GetFinalPathNameByHandleW is the fallback for a
+     * handle opened before the layer's rules went in. */
+    k32 = GetModuleHandleA("kernel32.dll");
     p_SetFilePointerEx = (SetFilePointerEx_t)GetProcAddress(
-        GetModuleHandleA("kernel32.dll"), "SetFilePointerEx");
+        k32, "SetFilePointerEx");
     p_FinalPath = (GetFinalPathNameByHandleW_t)GetProcAddress(
-        GetModuleHandleA("kernel32.dll"), "GetFinalPathNameByHandleW");
+        k32, "GetFinalPathNameByHandleW");
 
     Log("forge io installing");
-    HOOK("ReadFile",              H_ReadFile,              &r_ReadFile);
-    HOOK("GetOverlappedResult",   H_GetOverlappedResult,   &r_GetOverlappedResult);
-    HOOK("WaitForSingleObject",   H_WaitForSingleObject,   &r_WaitForSingleObject);
-    HOOK("WaitForMultipleObjects", H_WaitForMultipleObjects, &r_WaitForMultipleObjects);
-    HOOK("CloseHandle",           H_CloseHandle,           &r_CloseHandle);
-    {
-        MH_STATUS s3 = MH_CreateHookApi(L"kernel32.dll", "WaitForSingleObjectEx",
-                                        (LPVOID)H_WaitForSingleObjectEx,
-                                        (LPVOID *)&r_WaitForSingleObjectEx);
-        Log("  %-22s %s", "WaitForSingleObjectEx",
-            s3 == MH_OK ? "ok" : MH_StatusToString(s3));
-        s3 = MH_CreateHookApi(L"kernel32.dll", "WaitForMultipleObjectsEx",
-                              (LPVOID)H_WaitForMultipleObjectsEx,
-                              (LPVOID *)&r_WaitForMultipleObjectsEx);
-        Log("  %-22s %s", "WaitForMultipleObjectsEx",
-            s3 == MH_OK ? "ok" : MH_StatusToString(s3));
-    }
-    {
-        /* Present since Windows 8; absent means the plain one is used. */
-        MH_STATUS s2 = MH_CreateHookApi(L"kernel32.dll", "GetOverlappedResultEx",
-                                        (LPVOID)H_GetOverlappedResultEx,
-                                        (LPVOID *)&r_GetOverlappedResultEx);
-        Log("  %-22s %s", "GetOverlappedResultEx",
-            s2 == MH_OK ? "ok" : MH_StatusToString(s2));
-    }
-    MH_EnableHook(MH_ALL_HOOKS);
+
+    /* Where a .forge handle came from: the open, watched. */
+    memset(&d, 0, sizeof(d));
+    d.group  = SH_FILE_OPEN;
+    d.action = SH_FILE_DECIDE;          /* no before: watch, never answer */
+    d.after  = ForgeOpenAfter;
+    if (!ShFileRuleAdd(&d)) Log("  open rule        REFUSED");
+
+    /* The reads themselves. */
+    memset(&d, 0, sizeof(d));
+    d.group  = SH_FILE_READ;
+    d.action = SH_FILE_DECIDE;
+    d.after  = ForgeReadAfter;
+    if (!ShFileRuleAdd(&d)) Log("  read rule        REFUSED");
+
+    /* And the completion path, which is what closes the asynchronous
+     * half: close, the results, and the waits. */
+    memset(&d, 0, sizeof(d));
+    d.group  = SH_FILE_WAIT;
+    d.action = SH_FILE_DECIDE;
+    d.after  = ForgeWaitAfter;
+    if (!ShFileRuleAdd(&d)) Log("  completion rule  REFUSED");
+
     Log("forge io installed (SetFilePointerEx=%p GetFinalPathNameByHandleW=%p)",
         (void *)p_SetFilePointerEx, (void *)p_FinalPath);
 }

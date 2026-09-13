@@ -33,7 +33,7 @@
  * fifteen sessions measured, and they are not startup clips: keeping them
  * was a standing risk of eating a cutscene, so they are gone too.
  *
- * ---- one shot, then the hooks come back out ---------------------------
+ * ---- one shot, then the rules come back out ---------------------------
  *
  * The engine probes the names it wants in ONE burst during startup: over
  * fifteen sessions (logs\skipintro.log, 10116 lines) every process had
@@ -43,7 +43,7 @@
  * intercepting buys nothing; it just sits in every file call the game
  * makes for the rest of the session.
  *
- * So the patches are taken back out, by a watcher thread, as soon as
+ * So the plugin gives its rules back, on a watcher thread, as soon as
  * either of these is true:
  *
  *   1. every name the ENABLED groups cover has been intercepted - 4/4
@@ -51,11 +51,13 @@
  *   2. the main menu has been up once - the keeper, for a session where
  *      the count never fills because the engine never asks for a name.
  *
- * After that the plugin holds no hook at all for the rest of the
+ * After that the plugin holds nothing at all for the rest of the
  * session, and the two switches can only take effect on the next launch -
- * the line under the menu says so. UnpatchAll and ReleaseThread below
- * carry the details, including what happens when a slot is no longer
- * ours.
+ * the line under the menu says so. With the interception layer behind it
+ * (scripthook_files.c) that is literally true: the layer uninstalls its
+ * own hooks when the last rule goes, so a session that started with this
+ * plugin on and released ends with not one file call intercepted, which
+ * the IAT write-back this plugin used to do could never promise.
  *
  * ---- configuration ----------------------------------------------------
  *
@@ -73,27 +75,44 @@
  * off not one slot is touched. Disable the whole plugin with
  * [plugins] skipintro=0 in scripthook.ini.
  *
- * Why the main module's import table: GRW.exe statically imports
- * kernel32 (verified), so all its existence checks go through the IAT
- * slots we patch. No hooking library is needed, and BinkOpen is not
- * touched at all: hooking it cannot skip clips (see above) and the
- * existence layer alone turns the whole sequence off.
+ * How the hiding is done: the framework's file interception layer owns
+ * the file APIs for the whole process (scripthook_files.c), so this
+ * plugin registers one SH_FILE_HIDE rule per name and gets the answer a
+ * missing file would have produced, without touching a byte of memory
+ * itself. BinkOpen is still not touched at all: hooking it cannot skip
+ * clips (see above) and the existence layer alone turns the whole
+ * sequence off.
+ *
+ * The layer is also what makes the four names a set of rules rather than
+ * four hand-written detours: the two switches add and remove their two
+ * rules live, and the layer installs itself with the first rule and takes
+ * itself out with the last. That is why this plugin no longer parses the
+ * import table: it used to write four slots in GRW.exe - which only ever
+ * affected the game's own calls - while the layer answers for every
+ * module in the process.
  *
  * ---- and there is nothing like it in the Forge mod loader ------------
  *
  * Checked 2026-09-13: Forge serves loose files from mods\ over entries
- * INSIDE .forge archives (it hooks ReadFile and friends) - it neither
- * hides nor replaces a loose file on disk, which is what these clips are.
- * It also deliberately does not hook CreateFile, because this plugin and
- * GhostNoWipe are already on it (MinHook keeps one hook per target; see
- * scripthook_forge_io.c). So there is no duplicate implementation of
- * "skip the intro" to factor out into a shared API.
+ * INSIDE .forge archives (it reads them through the same layer now) - it
+ * neither hides nor replaces a loose file on disk, which is what these
+ * clips are. It used to be the reason two modules could not both be on
+ * CreateFileW (MinHook keeps one hook per target); with the layer owning
+ * the target, that whole class of collision is gone. So there is no
+ * duplicate implementation of "skip the intro" to factor out into a
+ * shared API.
  */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+
+/* The framework's file interception layer, whose rules this plugin uses
+ * instead of patching the game's import table itself. Linked, not
+ * late-bound: the types are the contract, and getting them wrong would be
+ * worse than an unresolved symbol. */
+#include "scripthook.h"
 
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 #define NAME_MAX     64
@@ -116,31 +135,32 @@ static const char *g_legal[] = {
     "WarningSaving.bk2",
 };
 
-/* Pre-built wide copies of the blacklists, so the W hooks compare
- * without a conversion on every call. */
-static wchar_t g_launchW[ARRAY_LEN(g_launch)][NAME_MAX];
-static wchar_t g_legalW[ARRAY_LEN(g_legal)][NAME_MAX];
+/* The names are matched by the layer's own rule table now, so no wide
+ * copies are kept here: the only conversion is the one at registration. */
 
-/* ---- the one-shot state ------------------------------------------------
- * One entry per IAT slot we wrote, so it can be written back: the slot
- * address is kept, not just the original value, because the way back has
- * to check that the slot still holds OUR detour before touching it -
- * somebody else may have patched GRW.exe's import in the meantime.
+/* ---- the four rules ----------------------------------------------------
+ * One per name, and these are what the layer runs: a HIDE rule answers the
+ * call the way a missing file would, and its after callback is only there
+ * to count the name as intercepted - which is what the release condition
+ * waits for. A rule that has answered once is the proof.
+ *
+ * They are added and removed live by the two switches, and the layer
+ * installs its own hooks with the first of them and takes them out again
+ * with the last: this plugin never owns a hook.
  */
 typedef struct {
-    void       **slot;      /* the import slot we wrote              */
-    void        *detour;    /* what we wrote there                   */
-    void        *orig;      /* what it held before - the way back    */
-    char         name[64];  /* "kernel32!CreateFileW", for the log   */
-} SkipPatch;
+    ShFileRule   *rule;
+    int           group;    /* 0 launch, 1 legal                    */
+    char          name[NAME_MAX];
+    volatile LONG hit;
+} SkipRule;
 
-#define PATCH_MAX 8
+#define RULES_MAX (ARRAY_LEN(g_launch) + ARRAY_LEN(g_legal))
 
-static SkipPatch      g_patch[PATCH_MAX];
-static volatile LONG  g_npatch;     /* entries of g_patch that are live */
-static volatile LONG  g_released;   /* 1 = the hooks are out again      */
-static volatile LONG  g_calls;      /* file calls seen while intercepting */
-static DWORD          g_started;    /* when the patches went in (for ms) */
+static SkipRule       g_rules[RULES_MAX];
+static volatile LONG  g_nrules;     /* rules live right now            */
+static volatile LONG  g_released;   /* 1 = the rules are out again     */
+static DWORD          g_started;    /* when the first rule went in     */
 
 /* The menu, and the one framework call the status line needs. Bound by
  * name in BuildMenu; declared up here because the release thread updates
@@ -180,42 +200,12 @@ static void SkipLog(const char *fmt, ...) {
     InterlockedExchange(&g_logBusy, 0);
 }
 
-/* ---- name matching ----------------------------------------------------- */
-
-/* File name after the last '\' or '/'. */
-static const wchar_t *WFilePart(const wchar_t *path) {
-    const wchar_t *p = path, *f = path;
-    for (; *p; p++)
-        if (*p == L'\\' || *p == L'/') f = p + 1;
-    return f;
-}
-
-static int WMmatch(const wchar_t *file, const wchar_t (*list)[NAME_MAX],
-                   int n) {
-    int i;
-    for (i = 0; i < n; i++)
-        if (!_wcsicmp(file, list[i])) return 1;
-    return 0;
-}
-
-/* Fast reject before the string compares: every target ends in
- * ".bk2", and almost nothing else the game touches does, so this one
- * check skips the whole blacklist for every normal file call. */
-static int IsBinkNameW(const wchar_t *f) {
-    size_t n = wcslen(f);
-    return n > 4 && f[n - 4] == L'.' &&
-           (f[n - 3] | 0x20) == L'b' &&
-           (f[n - 2] | 0x20) == L'k' &&
-           (f[n - 1] | 0x20) == L'2';
-}
-
-static int IsBinkNameA(const char *f) {
-    size_t n = strlen(f);
-    return n > 4 && f[n - 4] == '.' &&
-           (f[n - 3] | 0x20) == 'b' &&
-           (f[n - 2] | 0x20) == 'k' &&
-           (f[n - 1] | 0x20) == '2';
-}
+/* ---- the switches, and the rules they own -----------------------------
+ *
+ * Both switches are live until the release; after it the layer may already
+ * have taken its hooks away, which is exactly what "takes effect after a
+ * restart" means on the line under the menu.
+ */
 
 static int WantLaunch(void) {
     return InterlockedCompareExchange(&g_skipLaunch, 0, 0) ? 1 : 0;
@@ -225,246 +215,70 @@ static int WantLegal(void) {
     return InterlockedCompareExchange(&g_skipLegal, 0, 0) ? 1 : 0;
 }
 
-/* 1 once the patches have been taken back out. Checked on the hook path so
- * a call that was already inside a detour when the release ran passes the
- * file straight through, like the rest of the session will. */
 static int Released(void) {
     return InterlockedCompareExchange(&g_released, 0, 0) ? 1 : 0;
 }
 
-static int ShouldHideW(const wchar_t *name) {
-    const wchar_t *f = WFilePart(name);
+/* The layer's after callback on a HIDE rule: the call was answered, and
+ * that is all the release needs to know about it. */
+static void NoteHidden(ShFileCall *call, void *user) {
+    SkipRule *r = (SkipRule *)user;
 
-    if (Released()) return 0;
-    if (!*f || !IsBinkNameW(f)) return 0;
-    if (WantLaunch() && WMmatch(f, g_launchW, (int)ARRAY_LEN(g_launch)))
-        return 1;
-    if (WantLegal() && WMmatch(f, g_legalW, (int)ARRAY_LEN(g_legal)))
-        return 1;
-    return 0;
+    (void)call;
+    if (r) InterlockedIncrement(&r->hit);
 }
 
-static int ShouldHideA(const char *name) {
-    const char *f;
-    const char *b = strrchr(name, '\\');
-    const char *s = strrchr(name, '/');
-    int i;
+/* The rules of one group, on or off. Each name is its own rule, because
+ * that is what the layer takes: one file, one answer. Everything the
+ * layer needs is copied at registration, so the wide name below is only
+ * alive for the call. */
+static void GroupRules(int group, int on) {
+    const char *const *list = group ? g_legal : g_launch;
+    int  count = group ? (int)ARRAY_LEN(g_legal) : (int)ARRAY_LEN(g_launch);
+    int  base  = group ? (int)ARRAY_LEN(g_launch) : 0;
+    int  i;
 
-    if (Released()) return 0;
-    f = name;
-    if (b && b > f) f = b + 1;
-    if (s && s > f) f = s + 1;
-    if (!*f || !IsBinkNameA(f)) return 0;
+    for (i = 0; i < count; i++) {
+        SkipRule *r = &g_rules[base + i];
 
-    if (WantLaunch())
-        for (i = 0; i < (int)ARRAY_LEN(g_launch); i++)
-            if (!_stricmp(f, g_launch[i])) return 1;
-    if (WantLegal())
-        for (i = 0; i < (int)ARRAY_LEN(g_legal); i++)
-            if (!_stricmp(f, g_legal[i])) return 1;
-    return 0;
-}
+        if (on) {
+            ShFileRuleDesc d;
+            wchar_t        w[NAME_MAX];
 
-/* One log line per hidden name, de-duplicated. The list is also what the
- * release condition counts (HaveCount below), so it is guarded: two
- * engine threads can ask about two clips at the same moment. */
-static char          g_hid[64][NAME_MAX];
-static volatile LONG g_nhid;          /* how many entries are filled */
-static LONG          g_hidBusy;
+            if (r->rule) continue;
+            if (MultiByteToWideChar(CP_ACP, 0, list[i], -1, w,
+                                    NAME_MAX) <= 0)
+                continue;
 
-static void LogHideW(const wchar_t *name) {
-    char  buf[NAME_MAX];
-    int   i, n, fresh = 0;
-    const wchar_t *f = WFilePart(name);
+            snprintf(r->name, sizeof(r->name), "%s", list[i]);
+            r->group = group;
 
-    n = WideCharToMultiByte(CP_ACP, 0, f, -1, buf, sizeof(buf),
-                            NULL, NULL);
-    if (n <= 0) return;
-
-    while (InterlockedExchange(&g_hidBusy, 1)) Sleep(1);
-    n = (int)InterlockedCompareExchange(&g_nhid, 0, 0);
-    for (i = 0; i < n; i++)
-        if (!strcmp(g_hid[i], buf)) break;
-    if (i == n) {
-        if (n < (int)ARRAY_LEN(g_hid)) {
-            snprintf(g_hid[n], sizeof(g_hid[n]), "%s", buf);
-            InterlockedIncrement(&g_nhid);
-        }
-        fresh = 1;
-    }
-    InterlockedExchange(&g_hidBusy, 0);
-
-    if (fresh) SkipLog("hide  %s", buf);
-}
-
-static void LogHideW_FromA(const char *name) {
-    wchar_t wide[NAME_MAX];
-
-    if (MultiByteToWideChar(CP_ACP, 0, name, -1, wide, NAME_MAX) > 0)
-        LogHideW(wide);
-}
-
-/* ---- kernel32 file API detours ----------------------------------------- */
-
-typedef DWORD  (WINAPI *GetFileAttributesA_t)(LPCSTR);
-typedef DWORD  (WINAPI *GetFileAttributesW_t)(LPCWSTR);
-typedef HANDLE (WINAPI *CreateFileA_t)(LPCSTR, DWORD, DWORD,
-                                       LPSECURITY_ATTRIBUTES, DWORD,
-                                       DWORD, HANDLE);
-typedef HANDLE (WINAPI *CreateFileW_t)(LPCWSTR, DWORD, DWORD,
-                                       LPSECURITY_ATTRIBUTES, DWORD,
-                                       DWORD, HANDLE);
-
-static GetFileAttributesA_t g_realGFA;
-static GetFileAttributesW_t g_realGFW;
-static CreateFileA_t        g_realCFA;
-static CreateFileW_t        g_realCFW;
-
-static DWORD WINAPI HookGetFileAttributesA(LPCSTR name) {
-    InterlockedIncrement(&g_calls);
-    if (name && ShouldHideA(name)) {
-        LogHideW_FromA(name);
-        SetLastError(ERROR_FILE_NOT_FOUND);
-        return INVALID_FILE_ATTRIBUTES;
-    }
-    return g_realGFA(name);
-}
-
-static DWORD WINAPI HookGetFileAttributesW(LPCWSTR name) {
-    InterlockedIncrement(&g_calls);
-    if (name && ShouldHideW(name)) {
-        LogHideW(name);
-        SetLastError(ERROR_FILE_NOT_FOUND);
-        return INVALID_FILE_ATTRIBUTES;
-    }
-    return g_realGFW(name);
-}
-
-static HANDLE WINAPI HookCreateFileA(LPCSTR name, DWORD access,
-                                     DWORD share,
-                                     LPSECURITY_ATTRIBUTES sa,
-                                     DWORD disp, DWORD flags,
-                                     HANDLE tmpl) {
-    InterlockedIncrement(&g_calls);
-    if (name && ShouldHideA(name)) {
-        LogHideW_FromA(name);
-        SetLastError(ERROR_FILE_NOT_FOUND);
-        return INVALID_HANDLE_VALUE;
-    }
-    return g_realCFA(name, access, share, sa, disp, flags, tmpl);
-}
-
-static HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access,
-                                     DWORD share,
-                                     LPSECURITY_ATTRIBUTES sa,
-                                     DWORD disp, DWORD flags,
-                                     HANDLE tmpl) {
-    InterlockedIncrement(&g_calls);
-    if (name && ShouldHideW(name)) {
-        LogHideW(name);
-        SetLastError(ERROR_FILE_NOT_FOUND);
-        return INVALID_HANDLE_VALUE;
-    }
-    return g_realCFW(name, access, share, sa, disp, flags, tmpl);
-}
-
-/* ---- import table patch ------------------------------------------------- */
-
-/* Write one detour into GRW.exe's import slot for kernel32!fnName, and
- * remember the slot so it can be written back later. realOut gets what the
- * slot held - what the detours call through to. 1 when a slot is live, 0
- * when there was nothing to patch. */
-static int PatchImport(const char *dllName, const char *fnName, void *detour,
-                       void **realOut) {
-    uint8_t *base = (uint8_t *)GetModuleHandleA(NULL);
-    IMAGE_DOS_HEADER *dos;
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_IMPORT_DESCRIPTOR *imp;
-    SkipPatch *p;
-    LONG n;
-    DWORD old;
-
-    if (!base) return 0;
-    dos = (IMAGE_DOS_HEADER *)base;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-    nt = (IMAGE_NT_HEADERS *)(base + (uintptr_t)dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-
-    imp = (IMAGE_IMPORT_DESCRIPTOR *)(
-        base + nt->OptionalHeader.DataDirectory[
-            IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
-
-    for (; imp->Name; imp++) {
-        const char *dll = (const char *)(base + imp->Name);
-        IMAGE_THUNK_DATA *oft;
-        IMAGE_THUNK_DATA *ft;
-
-        if (_stricmp(dll, dllName)) continue;
-
-        oft = (IMAGE_THUNK_DATA *)(base + imp->OriginalFirstThunk);
-        ft  = (IMAGE_THUNK_DATA *)(base + imp->FirstThunk);
-
-        for (; oft->u1.AddressOfData; oft++, ft++) {
-            IMAGE_IMPORT_BY_NAME *ibn;
-            const char *fname;
-
-            /* skip ordinal imports */
-            if (oft->u1.AddressOfData & IMAGE_ORDINAL_FLAG64) continue;
-            if (!ft->u1.Function) continue;
-
-            ibn = (IMAGE_IMPORT_BY_NAME *)(
-                base + oft->u1.AddressOfData);
-            fname = (const char *)ibn->Name;
-            if (strcmp(fname, fnName)) continue;
-
-            n = InterlockedCompareExchange(&g_npatch, 0, 0);
-            if (n >= PATCH_MAX) {
-                SkipLog("patch %s!%s: no room left in the slot table",
-                        dllName, fnName);
-                return 0;
+            memset(&d, 0, sizeof(d));
+            d.name   = w;                            /* copied by the layer */
+            d.group  = SH_FILE_ATTR | SH_FILE_OPEN;  /* what it used to hook */
+            d.action = SH_FILE_HIDE;
+            d.after  = NoteHidden;
+            d.user   = r;
+            r->rule  = ShFileRuleAdd(&d);
+            if (r->rule) {
+                InterlockedIncrement(&g_nrules);
+                SkipLog("rule  hide %s (group %s)", r->name,
+                        group ? "legal" : "launch");
+            } else {
+                SkipLog("rule for %s was refused by the layer", r->name);
             }
-            p = &g_patch[n];
-            memset(p, 0, sizeof(*p));
-            p->slot   = (void **)&ft->u1.Function;
-            p->detour = detour;
-            p->orig   = (void *)ft->u1.Function;
-            if (realOut) *realOut = p->orig;
-            snprintf(p->name, sizeof(p->name), "%s!%s", dllName, fnName);
-
-            if (!VirtualProtect(p->slot, sizeof(void *),
-                                PAGE_READWRITE, &old)) {
-                SkipLog("patch %s: VirtualProtect failed (%lu)",
-                        p->name, GetLastError());
-                return 0;
-            }
-            InterlockedExchangePointer((void *volatile *)&ft->u1.Function,
-                                       detour);
-            VirtualProtect(p->slot, sizeof(void *), old, &old);
-            InterlockedIncrement(&g_npatch);      /* publish it */
-            SkipLog("hooked %-38s (was %p)", p->name, p->orig);
-            return 1;
+        } else {
+            if (!r->rule) continue;
+            ShFileRuleDel(r->rule);
+            r->rule = NULL;
+            InterlockedDecrement(&g_nrules);
         }
     }
-    SkipLog("patch %s!%s: import slot not found", dllName, fnName);
-    return 0;
 }
 
-/* ---- the release -------------------------------------------------------
- * What has been intercepted, and taking the hooks back out.
- */
-
-/* Membership in the same two lists the matcher uses, so the count can
- * never disagree with what is actually being hidden. */
-static int ListHas(const char *name, const char *const *list, int n) {
-    int i;
-
-    for (i = 0; i < n; i++)
-        if (!_stricmp(name, list[i])) return 1;
-    return 0;
-}
-
-/* How many names the ENABLED groups cover right now: 4 with both on, 2
- * with one, 0 with neither. The switches stay live until the release. */
+/* How many names the enabled groups cover right now, and how many of them
+ * have actually been asked about: 4/4 with both on, 2/2 with one, 0 with
+ * neither. */
 static int NeedCount(void) {
     int n = 0;
 
@@ -473,20 +287,26 @@ static int NeedCount(void) {
     return n;
 }
 
-/* Of those, how many have actually been hidden this session. */
 static int HaveCount(void) {
-    int i, n, c = 0;
+    int i, c = 0;
 
-    n = (int)InterlockedCompareExchange(&g_nhid, 0, 0);
-    if (n > (int)ARRAY_LEN(g_hid)) n = (int)ARRAY_LEN(g_hid);
-    for (i = 0; i < n; i++) {
-        if (WantLaunch() &&
-            ListHas(g_hid[i], g_launch, (int)ARRAY_LEN(g_launch))) c++;
-        else if (WantLegal() &&
-                 ListHas(g_hid[i], g_legal, (int)ARRAY_LEN(g_legal))) c++;
-    }
+    for (i = 0; i < (int)ARRAY_LEN(g_rules); i++)
+        if (InterlockedCompareExchange(&g_rules[i].hit, 0, 0)) c++;
     return c;
 }
+
+/* The four detours that used to live here - GetFileAttributesA/W and
+ * CreateFileA/W, each answering not-found for the names above - are the
+ * layer's now, and this plugin has no hook, no function pointer and no
+ * opinion about which module in the process is asking. */
+
+/* ---- the rules this plugin registered ----------------------------------- */
+
+/* Everything past this point is bookkeeping: the switches, the release and
+ * the menu. The interception itself is the layer's. */
+/* ---- the release -------------------------------------------------------
+ * What has been intercepted, and giving the rules back.
+ */
 
 /* The line under the menu. One sentence, and it is true in every state the
  * plugin can be in: the switches are honoured while the hooks are in, but
@@ -498,46 +318,19 @@ static void UpdateStatus(void) {
     g_statusF(g_menu, "Changing a switch takes effect after a restart");
 }
 
-/* Take the patches back out. This runs on the watcher thread, never inside
- * a hook - a memory write and a log line have no business in a file API a
- * thread of the engine is sitting in. Two rules hold here:
- *
- *   - the flag goes up first, so a call already inside a detour stops
- *     hiding anything and the game sees the truth from then on;
- *   - a slot is only written when it still holds OUR detour. Another
- *     component may have patched over it, and the only honest move then is
- *     to leave it exactly as it is and say so in the log.
- */
-static void UnpatchAll(const char *why) {
-    LONG i, n;
-
+/* Give the rules back. This runs on the watcher thread, and the flag goes
+ * up first: a call already inside the layer's dispatch stops hiding
+ * anything from that moment on. The layer takes its hooks out when the
+ * last rule is gone, so this is also what puts the process back the way it
+ * was found - there is no slot of ours to check any more. */
+static void ReleaseAll(const char *why) {
     if (InterlockedExchange(&g_released, 1)) return;   /* once, ever */
-    n = InterlockedCompareExchange(&g_npatch, 0, 0);
-
-    for (i = 0; i < n; i++) {
-        SkipPatch *p = &g_patch[i];
-        DWORD old;
-
-        if (!p->slot) continue;
-        if (*(p->slot) != p->detour) {
-            SkipLog("left %s alone - the slot is not ours any more (%p)",
-                    p->name, *(p->slot));
-            continue;
-        }
-        if (!VirtualProtect(p->slot, sizeof(void *), PAGE_READWRITE,
-                            &old)) {
-            SkipLog("restore %s: VirtualProtect failed (%lu)",
-                    p->name, GetLastError());
-            continue;
-        }
-        *(p->slot) = p->orig;
-        VirtualProtect(p->slot, sizeof(void *), old, &old);
-        SkipLog("restored %-38s (was ours, now %p)", p->name, p->orig);
-    }
-    SkipLog("released (%s) after %lu ms; %ld file call(s) had gone through "
-            "the four detours by then",
+    GroupRules(0, 0);
+    GroupRules(1, 0);
+    SkipLog("released (%s) after %lu ms; %lu file call(s) had been through "
+            "the layer by then",
             why, (unsigned long)(GetTickCount() - g_started),
-            (long)InterlockedCompareExchange(&g_calls, 0, 0));
+            (unsigned long)ShFileCallCount());
 }
 
 /* The watcher. 250 ms, the same order of magnitude as the framework's own
@@ -567,15 +360,15 @@ static DWORD WINAPI ReleaseThread(LPVOID p) {
         if (need > 0 && have >= need) {
             snprintf(why, sizeof(why), "already intercepted %d/%d",
                      have, need);
-            UnpatchAll(why);
+            ReleaseAll(why);
             return 0;
         }
         if (need == 0) {
-            UnpatchAll("both groups were switched off");
+            ReleaseAll("both groups were switched off");
             return 0;
         }
         if (g_getGameState && g_getGameState() == SH_STATE_MENU_LOCAL) {
-            UnpatchAll("the main menu was up");
+            ReleaseAll("the main menu was up");
             return 0;
         }
     }
@@ -686,16 +479,18 @@ static void SaveIni(void) {
 
 static void OnLaunch(int v) {
     InterlockedExchange(&g_skipLaunch, v ? 1 : 0);
+    if (!Released()) GroupRules(0, WantLaunch());
     SkipLog("menu: skip_launch_videos=%d%s", WantLaunch(),
-            Released() ? " (the hooks are already out - this applies to the "
+            Released() ? " (the rules are already out - this applies to the "
                          "next launch)" : "");
     SaveIni();
 }
 
 static void OnLegal(int v) {
     InterlockedExchange(&g_skipLegal, v ? 1 : 0);
+    if (!Released()) GroupRules(1, WantLegal());
     SkipLog("menu: skip_legal_videos=%d%s", WantLegal(),
-            Released() ? " (the hooks are already out - this applies to the "
+            Released() ? " (the rules are already out - this applies to the "
                          "next launch)" : "");
     SaveIni();
 }
@@ -730,17 +525,6 @@ static void BuildMenu(HMODULE m) {
 
 /* ---- startup ------------------------------------------------------------- */
 
-static void BuildWideLists(void) {
-    size_t i;
-
-    for (i = 0; i < ARRAY_LEN(g_launch); i++)
-        MultiByteToWideChar(CP_ACP, 0, g_launch[i], -1,
-                            g_launchW[i], NAME_MAX);
-    for (i = 0; i < ARRAY_LEN(g_legal); i++)
-        MultiByteToWideChar(CP_ACP, 0, g_legal[i], -1,
-                            g_legalW[i], NAME_MAX);
-}
-
 static void OpenLog(void) {
     char path[MAX_PATH];
     char *slash;
@@ -768,8 +552,7 @@ static DWORD WINAPI InitThread(LPVOID p) {
 
     (void)p;
     OpenLog();
-    SkipLog("--- skipintro plugin, file-level hide ---");
-    BuildWideLists();
+    SkipLog("--- skipintro plugin, hiding through the framework's layer ---");
     ResolveIniPath();
     LoadConfig();
     LogList("launch targets", g_launch, (int)ARRAY_LEN(g_launch));
@@ -781,25 +564,21 @@ static DWORD WINAPI InitThread(LPVOID p) {
         BuildMenu(di);
     }
 
-    /* Nothing enabled means nothing to take back out: an install with both
-     * groups off costs the game not one detour, all session long. */
+    /* Nothing enabled means nothing to give back: an install with both
+     * groups off costs the game not one intercepted call, all session
+     * long - the layer is not even installed. */
     if (!WantLaunch() && !WantLegal()) {
         SkipLog("both groups are off - not one file call is intercepted");
         return 0;
     }
 
     g_started = GetTickCount();
-    PatchImport("kernel32.dll", "GetFileAttributesA",
-                HookGetFileAttributesA, (void **)&g_realGFA);
-    PatchImport("kernel32.dll", "GetFileAttributesW",
-                HookGetFileAttributesW, (void **)&g_realGFW);
-    PatchImport("kernel32.dll", "CreateFileA",
-                HookCreateFileA, (void **)&g_realCFA);
-    PatchImport("kernel32.dll", "CreateFileW",
-                HookCreateFileW, (void **)&g_realCFW);
+    GroupRules(0, WantLaunch());
+    GroupRules(1, WantLegal());
+    SkipLog("ready - %ld rule(s) in the layer, and they come back out as "
+            "soon as the enabled names have been intercepted",
+            (long)InterlockedCompareExchange(&g_nrules, 0, 0));
     UpdateStatus();
-    SkipLog("ready - the hooks come back out as soon as the enabled names "
-            "have been intercepted");
     CreateThread(NULL, 0, ReleaseThread, NULL, 0, NULL);
     return 0;
 }
