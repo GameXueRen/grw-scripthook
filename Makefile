@@ -15,14 +15,22 @@ GAMEDIR = ../..
 # <gamedir>/logs at runtime.
 
 .PHONY: all roulette fling spawner npcspawner enemyreinforce modeprobe \
-        modecallprobe crazycars freecam fov fps chaos sample skipintro \
-        docs clean
+        modecallprobe blacklistsample crazycars freecam fov fps chaos \
+        sample skipintro docs clean
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 
 $(GAMEDIR)/plugins/ui_sample/ui_sample.asi: ui_sample.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ ui_sample.c -L. -lscripthook -luser32
+
+blacklistsample: $(GAMEDIR)/plugins/blacklist_sample/blacklist_sample.asi
+
+# Late binds every framework call by name, so no import library here; see
+# the file header for what it demonstrates.
+$(GAMEDIR)/plugins/blacklist_sample/blacklist_sample.asi: blacklist_sample.c scripthook.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ blacklist_sample.c
 
 docs:
 	doxygen Doxyfile
@@ -140,7 +148,7 @@ libscripthook.a: $(GAMEDIR)/dinput8.dll
 $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
                         scripthook_physics.c \
                         scripthook_health.c scripthook_state.c \
-                        scripthook_playmode.c \
+                        scripthook_playmode.c scripthook_blacklist.c \
                         scripthook_entity.c scripthook_spawn.c \
                         scripthook_npc.c scripthook_domino.c \
                         scripthook_hit.c scripthook_camera.c \
@@ -165,7 +173,8 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_config.c \
 		scripthook_physics.c scripthook_health.c \
-		scripthook_state.c scripthook_playmode.c scripthook_entity.c \
+		scripthook_state.c scripthook_playmode.c scripthook_blacklist.c \
+		scripthook_entity.c \
 		scripthook_spawn.c scripthook_npc.c scripthook_domino.c scripthook_hit.c \
 		scripthook_camera.c scripthook_head.c \
 		scripthook_fov.c scripthook_blur.c scripthook_fpx.c \

@@ -147,6 +147,164 @@ SH_API int ShPlayModeEvidence(char *buf, int len);
  *  treating `NONE` as "no mode in particular". */
 SH_API int ShPlayModeHookArmed(void);
 
+/** The bit a mode occupies in a blacklist mask (see the plugin blacklist
+ *  group below), or 0 for a value that is not a mode. */
+SH_API uint32_t ShPlayModeBit(int mode);
+
+/** A mode's name, spelled the way the framework logs it elsewhere:
+ *  "Ghost War", "MERCENARIES", "campaign", "Ghost Mode", "Guerrilla", and
+ *  "" for a value that is not a mode. It is a translation key: pass it
+ *  through ShLang before showing it. */
+SH_API const char *ShPlayModeName(int mode);
+
+/** @} */
+/** @defgroup blacklist Plugin mode blacklist
+ *  Which play modes a plugin must not run in, and what the framework does
+ *  about it.
+ *
+ *  A plugin declares its modes once, from its own source:
+ *
+ *  ```c
+ *  ShPluginBlacklist(SH_MODE_BLACKLIST_GHOST_WAR |
+ *                    SH_MODE_BLACKLIST_MERCENARIES);
+ *  ```
+ *
+ *  and the framework takes its row out of the F4 root menu, everything
+ *  under it with it, for as long as the session is in one of those modes.
+ *  The declaration is the only input: nothing in any ini can widen or
+ *  narrow it.
+ *
+ *  A mask names play modes, and play modes are the only conditions. The
+ *  front end was one of them until 2026-09-13 and is not any more: the
+ *  reading it rested on (the GameFlow machine's mode-screen object) latches
+ *  once a mode screen has been opened, so it was right at startup and wrong
+ *  after a round trip through a campaign - and `ShGetGameState` puts the
+ *  main menu and every lobby in one bucket, so there was no second reading
+ *  to fall back on. Better no condition than one that is right half the
+ *  time.
+ *
+ *  Three cases, and the third is the one that matters:
+ *
+ *   - declared bits       blocked in exactly those;
+ *   - declared NONE (0)   blocked nowhere - declaring "none" is the only
+ *                         way to be unrestricted;
+ *   - not declared at all blocked in Ghost War and Mercenaries. Every
+ *                         third party plugin is in this group by
+ *                         construction, and so is any plugin of ours that
+ *                         has not been taught otherwise. Built-in pages are
+ *                         not plugins (their menu owner is "") and are never
+ *                         blocked.
+ *
+ *  What is in force comes from one place: `ShSelectedPlayMode`, the mode
+ *  the game's own manager was handed. When it cannot be read - the manager
+ *  has not set a mode yet, or the hook is not armed on this build - nothing
+ *  is in force and nobody is blocked: a menu that vanishes with no reason to
+ *  give would be worse than one that stays.
+ *
+ *  What this cannot do: stop a plugin's code. Plugins run their own
+ *  threads and carry their own MinHook copy, and the framework has no
+ *  registry that could suspend them. Blocked means hidden and told; a
+ *  plugin that wants its work to stop has to stop it. The usual shape is a
+ *  tick thread that returns early plus a callback that tears down what it
+ *  installed:
+ *
+ *  ```c
+ *  static void OnBlocked(int allowed, int mode, void *user) {
+ *      (void)mode; (void)user;
+ *      if (!allowed) StopMyWork();      // drop hooks, park the thread
+ *      else          StartMyWork();
+ *  }
+ *  ShPluginOnBlocked(OnBlocked, NULL);
+ *  ```
+ *
+ *  The callback arrives on a framework thread (250 ms poll), once per
+ *  change, and only when the answer actually flips. Keep it short; it is
+ *  not holding any lock of ours, so calling back into the framework from
+ *  it is allowed. See docs/plugin-blacklist.md.
+ *  @{ */
+
+/** Blocked in Ghost War, the 4v4 PvP mode. */
+#define SH_MODE_BLACKLIST_GHOST_WAR   (1u << (SH_PLAYMODE_GHOST_WAR - 1))
+/** Blocked in Mercenaries, the eight player PvPvE mode. */
+#define SH_MODE_BLACKLIST_MERCENARIES (1u << (SH_PLAYMODE_MERCENARIES - 1))
+/** Blocked in the campaign: the story mode, and the campaign content that
+ *  runs in it (Narco Road, Fallen Ghosts, The Last Rites). */
+#define SH_MODE_BLACKLIST_CAMPAIGN    (1u << (SH_PLAYMODE_CAMPAIGN - 1))
+/** Blocked in Ghost Mode (幽灵/魅影模式), the permadeath campaign. */
+#define SH_MODE_BLACKLIST_GHOST_MODE  (1u << (SH_PLAYMODE_GHOST_MODE - 1))
+/** Blocked in Guerrilla (游击战), the camp defence mode. */
+#define SH_MODE_BLACKLIST_GUERRILLA   (1u << (SH_PLAYMODE_GUERRILLA - 1))
+/** Everything: every mode the game can be in. */
+#define SH_MODE_BLACKLIST_ANY         (SH_MODE_BLACKLIST_GHOST_WAR | \
+                                       SH_MODE_BLACKLIST_MERCENARIES | \
+                                       SH_MODE_BLACKLIST_CAMPAIGN | \
+                                       SH_MODE_BLACKLIST_GHOST_MODE | \
+                                       SH_MODE_BLACKLIST_GUERRILLA)
+/** Declared on purpose: no mode is blacklisted. A plugin that never calls
+ *  ShPluginBlacklist is not this - it gets the default. */
+#define SH_MODE_BLACKLIST_NONE        0u
+
+/** Declare which conditions this plugin must not run in - a mask of the
+ *  bits above. Call it once, from your own code: the caller's module is
+ *  what identifies the plugin. 1 when accepted; 0 with ShLastError saying
+ *  why - `SH_ERR_BAD_ARG` when the caller is not a plugin,
+ *  `SH_ERR_REGISTRY_FULL` when 64 plugins are already registered. */
+SH_API int      ShPluginBlacklist(uint32_t modes);
+
+/** What is switching this plugin off right now, as the bits above
+ *  (`SH_MODE_BLACKLIST_*`), or 0 when nothing is. */
+SH_API int      ShPluginBlockedBy(void);
+
+/** 1 when this plugin may run now. Cheap; safe to call every frame. */
+SH_API int      ShPluginAllowed(void);
+
+/** The conditions in force for this plugin: what it declared, or the
+ *  default (Ghost War and Mercenaries) when it never declared anything.
+ *  0 for a declarer of "none". */
+SH_API uint32_t ShPluginBlacklistModes(void);
+
+/** Be told when the answer changes: `allowed` is 1 when the plugin may run
+ *  again, `blocked` the bits that decided it (0 when allowed). One callback
+ *  per plugin, last call wins, and only called when the answer flips. */
+typedef void (*ShPluginBlockedFn)(int allowed, int blocked, void *user);
+SH_API int      ShPluginOnBlocked(ShPluginBlockedFn fn, void *user);
+
+/** The name of one bit, for a log line or a menu: "Ghost War",
+ *  "MERCENARIES", "campaign", "Ghost Mode", "Guerrilla"; "" for 0 or for
+ *  more than one bit (use ShBlockedText for that). A translation key: pass
+ *  it through ShLang before showing it. */
+SH_API const char *ShBlacklistName(uint32_t bit);
+
+/** The bits as one line, for a log: "Ghost War+MERCENARIES". 1 when
+ *  something was written. */
+SH_API int      ShBlockedText(uint32_t bits, char *buf, int cap);
+
+/** The registry, for a settings page: how many plugins were seen, and one
+ *  entry per index - its folder name, the conditions in force, and the bits
+ *  blocking it now (0 for none). */
+SH_API int      ShPluginBlacklistCount(void);
+SH_API int      ShPluginBlacklistAt(int i, char *name, int cap,
+                                    uint32_t *modes, int *blockedBy);
+
+/** One translated line naming the plugins the current conditions have
+ *  switched off: "Off now (Ghost War): firstperson, freecam
+ *  (+3)". Short on purpose - the Plugins page shows it on the hint line it
+ *  shares with the "needs a restart" note - and empty with a 0 return when
+ *  there is nothing to say. */
+SH_API int      ShPluginBlacklistNotice(char *buf, int cap);
+
+/** Internal, not a plugin API: the folder name of the .asi a call came
+ *  from; "" for the framework itself, the exe, or an unmapped address. */
+void ShPluginOwnerFromAddress(void *address, char *out, int cap);
+
+/** Internal, for the menu layer: 1 when that plugin's row must not be
+ *  drawn, selected or entered right now. "" is never hidden. */
+int  ShPluginHidden(const char *owner);
+
+/** Internal: start the registry. The loader runs it before the plugins
+ *  load, so a declaration has somewhere to go. */
+void ShBlacklistStartup(void);
+
 /** @} */
 /** @defgroup state Game state
  *  The engine's GameFlow machine, tracked by the hook.
@@ -222,7 +380,8 @@ enum ShError {
     SH_ERR_CONTROLLER,
     SH_ERR_UI_NOT_READY,   /**< in game, scene not up yet */
     SH_ERR_UI_PROP,        /**< no such property on the class */
-    SH_ERR_UI_ASSET        /**< font or texture not loaded */
+    SH_ERR_UI_ASSET,       /**< font or texture not loaded */
+    SH_ERR_REGISTRY_FULL   /**< a fixed table is full (blacklist: 64) */
 };
 
 /** @} */

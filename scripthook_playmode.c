@@ -380,6 +380,27 @@ SH_API int ShIsGuerrillaMode(void) {
     return ShSelectedPlayMode() == SH_PLAYMODE_GUERRILLA;
 }
 
+/* The mask bit a mode occupies, for the plugin blacklist: one bit per
+ * mode, laid out in the order of the enum, so a mask reads the same way
+ * the modes are listed above. Anything that is not a mode is 0 bits. */
+SH_API uint32_t ShPlayModeBit(int mode) {
+    if (mode < SH_PLAYMODE_GHOST_WAR || mode > SH_PLAYMODE_GUERRILLA)
+        return 0;
+    return 1u << (mode - SH_PLAYMODE_GHOST_WAR);
+}
+
+/* The name from the mode table, so the log lines, the settings page and
+ * anything else cannot drift apart: "Ghost War", "MERCENARIES",
+ * "campaign", "Ghost Mode", "Guerrilla". "" for NONE and for anything
+ * that is not a mode. */
+SH_API const char *ShPlayModeName(int mode) {
+    int i;
+
+    for (i = 0; i < GM_FP_N; i++)
+        if (g_fp[i].mode == mode) return g_fp[i].name;
+    return "";
+}
+
 SH_API int ShPlayModeFingerprint(void) {
     return (int)g_gmFp;
 }

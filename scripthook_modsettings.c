@@ -326,6 +326,44 @@ static void BuildLanguageRow(uint32_t parent) {
                    (void *)g_langOpts);
 }
 
+/* ---- the mode blacklist line ------------------------------------------
+ * The Plugins page lists every plugin with a switch that only takes effect
+ * on the next launch. The mode blacklist is the other reason a plugin can
+ * be off - a temporary one that follows the play mode rather than the ini -
+ * so it is shown on the same page, as a second line under the hint it
+ * already carries. A slow thread refreshes it: the answer follows the
+ * mode, and nothing tells a menu when that changes.
+ */
+static char g_blLast[96];
+
+static void SetPluginHint(void) {
+    char notice[96], text[256];
+    int n;
+
+    ShPluginBlacklistNotice(notice, sizeof(notice));
+    n = snprintf(text, sizeof(text), "%s",
+                 ShLang("These changes take effect after a game restart."));
+    if (notice[0] && n > 0 && (size_t)n + 2 < sizeof(text))
+        snprintf(text + n, sizeof(text) - (size_t)n, "\n%s", notice);
+    ShMenuHint(g_pluginMenu, text);
+}
+
+static DWORD WINAPI BlHintThread(LPVOID p) {
+    char notice[96];
+
+    (void)p;
+    for (;;) {
+        Sleep(1000);
+        if (!g_pluginMenu) continue;
+        notice[0] = 0;
+        ShPluginBlacklistNotice(notice, sizeof(notice));
+        if (!strcmp(notice, g_blLast)) continue;
+        snprintf(g_blLast, sizeof(g_blLast), "%s", notice);
+        SetPluginHint();
+    }
+    return 0;
+}
+
 /* Register the whole tree. Called from the loader thread after the
  * config has been parsed, so the values and the scan see the real
  * ini. Safe to call once; the guard keeps rebuilds from stacking. */
@@ -374,7 +412,9 @@ void ShModSettingsStartup(void) {
         snprintf(hint, sizeof(hint), "%s",
                  ShLang("These changes take effect after a game restart."));
         ShMenuHint(g_modMenu, hint);
-        ShMenuHint(g_pluginMenu, hint);
+        /* The Plugins page shows the same note plus the mode blacklist
+         * line, which the thread started below keeps up to date. */
+        SetPluginHint();
 
         used = strlen(hint);
         if (ShCoreFixGetStatus(&cf)) {
@@ -418,4 +458,10 @@ void ShModSettingsStartup(void) {
         }
         ShMenuHint(g_loaderMenu, hint);
     }
+
+    /* The blacklist line follows the play mode, and nothing calls back
+     * when that changes, so it is polled. A second is plenty: the line
+     * only matters while a player has the menu open. */
+    if (!CreateThread(NULL, 0, BlHintThread, NULL, 0, NULL))
+        ShMenuStatus(g_pluginMenu, "blacklist line thread failed");
 }

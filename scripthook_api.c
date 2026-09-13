@@ -97,6 +97,9 @@ SH_API const char *ShErrorString(int err) {
                "driven by a character controller, so its "
                "Havok body ignores velocity and writing it "
                "detaches the collision body from the player";
+    case SH_ERR_REGISTRY_FULL:
+        return "the registry is full: 64 plugins are already "
+               "registered with the mode blacklist";
     default:               return "unknown";
     }
 }

@@ -187,6 +187,83 @@ static Item *NewItem(Menu *m, int kind, const char *label,
     return it;
 }
 
+/* ---- the rows the mode blacklist takes away ---------------------------
+ * A plugin the current play mode has switched off is not drawn and cannot
+ * be reached: not its row on the root, not the page behind it. One
+ * predicate answers that for every place which walks rows, so the
+ * capture, the navigation, the footer count and the Enter key cannot
+ * disagree - a row that is invisible but still selectable is exactly the
+ * bug this is asking for.
+ *
+ * Hidden means: an IT_SUB row whose child page belongs to a plugin
+ * (owner[0]) that ShPluginHidden says is off. Built-in pages have an
+ * empty owner and are never hidden.
+ */
+static int RowVisible(const Menu *m, int idx) {
+    const Item *it;
+    const Menu *cm;
+
+    if (!m || idx < 0 || idx >= m->count) return 0;
+    it = &m->items[idx];
+    if (it->kind != IT_SUB || !it->sub) return 1;
+    cm = MenuOf(it->sub);
+    if (!cm || !cm->owner[0]) return 1;         /* a built-in page */
+    return !ShPluginHidden(cm->owner);
+}
+
+static int VisibleCount(const Menu *m) {
+    int i, n = 0;
+
+    for (i = 0; i < m->count; i++)
+        if (RowVisible(m, i)) n++;
+    return n;
+}
+
+/* How many visible rows sit at or before idx: one based, for the footer. */
+static int VisibleOrdinal(const Menu *m, int idx) {
+    int i, n = 0;
+
+    for (i = 0; i <= idx && i < m->count; i++)
+        if (RowVisible(m, i)) n++;
+    return n;
+}
+
+/* The row a step of dir lands on, skipping the hidden ones and wrapping
+ * around; idx itself when it is the only visible row there is. */
+static int NextVisible(const Menu *m, int idx, int dir) {
+    int step, i;
+
+    if (m->count < 1) return 0;
+    for (step = 1; step <= m->count; step++) {
+        i = ((idx + dir * step) % m->count + m->count) % m->count;
+        if (RowVisible(m, i)) return i;
+    }
+    return idx;
+}
+
+/* Park the selection on a visible row: back up if it sits on a hidden one
+ * (a menu that lost a row keeps its place), forward if there was nothing
+ * behind it. */
+static void FixSel(Menu *m) {
+    int i;
+
+    if (m->count < 1) { m->sel = 0; return; }
+    if (RowVisible(m, m->sel)) return;
+    for (i = m->sel - 1; i >= 0; i--)
+        if (RowVisible(m, i)) { m->sel = i; return; }
+    for (i = m->sel + 1; i < m->count; i++)
+        if (RowVisible(m, i)) { m->sel = i; return; }
+    m->sel = 0;
+}
+
+/* A page whose own plugin is switched off cannot be shown, so the menu
+ * steps back out of it - the same place ESC would go. */
+static void BackOutOfHiddenPage(const Menu *m) {
+    if (!m || m->parent == 0) return;
+    if (!m->owner[0] || !ShPluginHidden(m->owner)) return;
+    g_current = m->parent;
+}
+
 /* ---- key-bind rows ------------------------------------------------
  * A row that stores a virtual key (Item.value = VK code).  Pressing
  * Enter on it arms a capture: the menu thread then ignores normal
@@ -476,6 +553,9 @@ static int CapTickLocked(void) {
     if (!g_capActive || g_capRow < 0) { CapClear(); return 1; }
     m = MenuOf(g_capMenu);
     if (!m || g_capRow >= m->count) { CapClear(); return 1; }
+    /* The row can be one the mode has just taken away: drop the capture
+     * rather than bind a key to something nobody can see. */
+    if (!RowVisible(m, g_capRow)) { CapClear(); return 1; }
     it = &m->items[g_capRow];
     if (it->kind != IT_KEYBIND) { CapClear(); return 1; }
 
@@ -515,11 +595,20 @@ static int WindowFocused(void) {
 }
 
 /* Selection scrolls with the cursor, so a long menu shows a
- * window of rows rather than running off the screen.
+ * window of rows rather than running off the screen. The window is
+ * counted in VISIBLE rows and not in raw ones, so hidden rows take no
+ * room on screen and its first row is always one the player can see.
  */
 static void Scroll(Menu *m) {
-    if (m->sel < m->top) m->top = m->sel;
-    if (m->sel >= m->top + VISIBLE) m->top = m->sel - VISIBLE + 1;
+    int i, back = 0;
+
+    FixSel(m);
+    m->top = m->sel;
+    for (i = m->sel - 1; i >= 0 && back < VISIBLE - 1; i--) {
+        if (!RowVisible(m, i)) continue;
+        m->top = i;
+        back++;
+    }
     if (m->top < 0) m->top = 0;
 }
 
@@ -531,6 +620,11 @@ static void Navigate(void) {
     int navDown, navDir, valDown, valDir, r;
 
     if (!m || m->count == 0) return;
+    /* The page itself can be one the mode has taken away: step out of it
+     * before a key lands anywhere. */
+    BackOutOfHiddenPage(m);
+    m = MenuOf(g_current);
+    if (!m || VisibleCount(m) == 0) return;
     /* Arrows and WASD both navigate, and every one of them is polled
      * on its own so the two sets coexist instead of stealing presses
      * from each other: a short circuit here would leave one of them
@@ -552,7 +646,7 @@ static void Navigate(void) {
     valDir  = rtHeld ? 1 : -1;
 
     if (HoldTick(&g_holdNav, navDown, navDir) == 1)
-        m->sel = (m->sel + m->count + navDir) % m->count;
+        m->sel = NextVisible(m, m->sel, navDir);
     Scroll(m);
 
     it = &m->items[m->sel];
@@ -580,7 +674,7 @@ static void Navigate(void) {
             Fire(g_current, m->sel, it);
     }
     if (Pressed(VK_RETURN)) {
-        if (it->kind == IT_SUB && it->sub) {
+        if (it->kind == IT_SUB && it->sub && RowVisible(m, m->sel)) {
             g_current = it->sub;
             HoldReset();
         } else if (it->kind == IT_TOGGLE) {
@@ -791,6 +885,12 @@ void ShMenuCaptureView(ShMenuView *v) {
     memset(v, 0, sizeof(*v));
     Lock();
     m = MenuOf(g_current);
+    /* A page the mode has taken away is not drawn: step back out first,
+     * so the overlay never shows a plugin that is supposed to be gone. */
+    if (m) {
+        BackOutOfHiddenPage(m);
+        m = MenuOf(g_current);
+    }
     if (m) {
         char path[64], parentPath[64];
         const char *owner = m->owner;
@@ -801,6 +901,9 @@ void ShMenuCaptureView(ShMenuView *v) {
         /* Keep the root's plugin rows ordered by [MenuOrder] in
          * the model, so navigation matches what is on screen. */
         if (m->parent == 0) ReorderRoot(m);
+        /* The sort, or a row going away, can leave the selection parked on
+         * a row that is no longer drawn. */
+        Scroll(m);
 
         /* The root's rows and the submenus' titles read from the
          * global table ([lang]), because MenuPath is empty for the
@@ -837,7 +940,7 @@ void ShMenuCaptureView(ShMenuView *v) {
                  ShLangForOwned(owner, parentPath, m->title));
         SafeCopy(v->status, sizeof(v->status),
                  ShLangForOwned(owner, path, m->status));
-        for (i = m->top; i < m->count && i < m->top + VISIBLE; i++) {
+        for (i = m->top; i < m->count && v->rows < VISIBLE; i++) {
             ShMenuRow *r = &v->row[v->rows];
             const Item *it = &m->items[i];
             /* A submenu row shows the child menu's title, so it is
@@ -845,6 +948,10 @@ void ShMenuCaptureView(ShMenuView *v) {
              * in, but its plugin rows must still read the plugin's
              * own ini first (scope stays the global table). */
             const char *rowOwner = owner;
+            /* A row the mode has switched off takes no room: the window
+             * is filled with rows the player can actually see, and it is
+             * asked here so nothing below it has to know. */
+            if (!RowVisible(m, i)) continue;
             if (it->kind == IT_SUB) {
                 Menu *cm = MenuOf(it->sub);
                 if (cm && cm->owner[0]) rowOwner = cm->owner;
@@ -856,9 +963,12 @@ void ShMenuCaptureView(ShMenuView *v) {
             if (r->selected) v->sel = v->rows;
             v->rows++;
         }
-        if (m->count > VISIBLE)
-            snprintf(v->footer, sizeof(v->footer), "%d / %d",
-                     m->sel + 1, m->count);
+        {
+            int vis = VisibleCount(m);
+            if (vis > VISIBLE)
+                snprintf(v->footer, sizeof(v->footer), "%d / %d",
+                         VisibleOrdinal(m, m->sel), vis);
+        }
     }
     Unlock();
 }

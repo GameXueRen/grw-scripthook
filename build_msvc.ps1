@@ -138,7 +138,8 @@ if ($LASTEXITCODE -ne 0) { throw 'ml64 failed for guard.asm' }
 $fwSources = @(
     'loader.c', 'scripthook_api.c', 'scripthook_config.c',
     'scripthook_physics.c', 'scripthook_health.c',
-    'scripthook_state.c', 'scripthook_playmode.c', 'scripthook_entity.c',
+    'scripthook_state.c', 'scripthook_playmode.c',
+    'scripthook_blacklist.c', 'scripthook_entity.c',
     'scripthook_spawn.c', 'scripthook_npc.c',
     'scripthook_domino.c', 'scripthook_hit.c',
     'scripthook_camera.c', 'scripthook_head.c',
@@ -200,6 +201,12 @@ Write-Host "built $out"
 $libPath = "/LIBPATH:$root"
 
 Build-Plugin 'ui_sample'    'ui_sample.c'    @($libPath, 'libscripthook.lib', 'user32.lib')
+# The mode blacklist worked example: one declaration, one callback that
+# stops its own work, one query in its tick, one HUD line. It ships on
+# because it is what docs/plugin-blacklist.md points at, and it declares
+# itself blocked in Ghost Mode - the single player one - so it can be tried
+# without a second player. Late binds, so it needs no import library.
+Build-Plugin 'blacklist_sample' 'blacklist_sample.c' @()
 Build-Plugin 'hitfling'     'hitfling.c'     @('gdi32.lib', 'user32.lib')
 Build-Plugin 'freecam'      'freecam.c'      @('gdi32.lib', 'user32.lib')
 Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')

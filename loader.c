@@ -4,8 +4,8 @@
 #include "log.h"
 #include "scripthook.h"
 
-/* The Ghost War latch (scripthook_playmode.c): not a plugin facing
- * export beyond ShIsGhostWarMode and friends, so it is declared here. */
+/* The play mode module (scripthook_playmode.c): not a plugin facing
+ * export beyond ShSelectedPlayMode and friends, so it is declared here. */
 extern void ShPlayModeStart(void);
 
 typedef HRESULT (WINAPI *DirectInput8Create_t)(
@@ -181,10 +181,13 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     /* Forge Mod Loader: scan mods\ and build the per-archive overrides
      * before the plugins load, so the menu is up with the rest. */
     ShForgeStartup();
-    /* The Ghost War latch: watches the main menu for the click that
-     * enters the mode. Cheap (one 30 ms poll) and inert until a point
-     * has been calibrated, so it runs for every install. */
+    /* Which play mode the session is in: hooks the game's own mode
+     * manager, so it has to be up before anything asks, and it is what
+     * the plugin blacklist decides from. */
     ShPlayModeStart();
+    /* The plugin blacklist: scans plugins\ and comes up before the
+     * plugins load, so a plugin's declaration has somewhere to go. */
+    ShBlacklistStartup();
     LoadASIPlugins();
     return 0;
 }
