@@ -68,6 +68,11 @@
 #include <stdio.h>
 #include <string.h>
 
+/* SH_BUILD before scripthook.h, like every other framework source:
+ * without it SH_API expands to nothing and the read ledger's exports
+ * are not in the DLL at all. */
+#define SH_BUILD 1
+#include "scripthook.h"
 #include "forge.h"
 #include "log.h"
 #include "third_party/minhook/include/MinHook.h"
@@ -113,8 +118,128 @@ static GetFinalPathNameByHandleW_t   p_FinalPath;
 static HANDLE          g_cacheH[IO_CACHE];
 static ShForgeOverlay *g_cacheO[IO_CACHE];
 static IO_TLS int      t_busy;
+/* Set while the loader is doing its OWN archive I/O (the FileDataID
+ * index pass, the mod resolve). Thread local, because the engine reads
+ * on its own threads and those are the reads the ledger wants. */
+static IO_TLS int      t_own;
 static volatile LONG   g_fixups;
 static volatile LONG   g_gorCalls;
+
+/* ---- the read ledger ------------------------------------------------
+ *
+ * Every .forge the engine reads has to be resolved here - that is how a
+ * handle is matched to an archive - so this is the one place that can
+ * answer "which archives did this session actually load" without
+ * scanning gigabytes of memory or trusting a name to be in it.
+ *
+ * It is worth having because it is mode evidence: a mode that mounts an
+ * archive of its own reads a file the other modes never touch, and a
+ * session that read it cannot have been in the other mode. Read, not
+ * opened: an archive the engine opens but never reads is not loaded, and
+ * the handle cache means this is written once per handle, not per read.
+ *
+ * Measured on a retail install, the engine reads rather than maps its
+ * archives (47 .forge opens, 646 reads, not one CreateFileMapping or
+ * MapViewOfFile on a .forge - docs/forge-mod-loader.md), so a mapped
+ * file name would have missed all of them.
+ */
+#define LEDGER_MAX  64
+#define LEDGER_NAME 96
+
+static char               g_ledger[LEDGER_MAX][LEDGER_NAME];
+static volatile LONG      g_ledgerCount;
+static CRITICAL_SECTION   g_ledgerLock;
+
+static int LedgerEqI(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        int ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return 0;
+    }
+    return *a == 0 && *b == 0;
+}
+
+/* Case insensitive substring, for "does any read archive name hold
+ * this": callers pass a fragment like "GhostRoom", not a full name. */
+static int LedgerHasI(const char *hay, const char *needle) {
+    size_t n = strlen(needle);
+    const char *p;
+
+    if (!n) return 0;
+    for (p = hay; *p; p++) {
+        size_t i;
+        for (i = 0; i < n; i++) {
+            char c = p[i];
+            char d = needle[i];
+            if (!c) return 0;
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            if (d >= 'A' && d <= 'Z') d += 'a' - 'A';
+            if (c != d) break;
+        }
+        if (i == n) return 1;
+    }
+    return 0;
+}
+
+static void LedgerAdd(const char *path) {
+    const char *b = path, *s;
+    char name[LEDGER_NAME];
+    LONG count, i;
+    size_t n;
+
+    for (s = path; *s; s++) {
+        if (*s == '\\' || *s == '/') b = s + 1;
+    }
+    n = strlen(b);
+    if (!n || n >= LEDGER_NAME) return;
+    memcpy(name, b, n);
+    name[n] = 0;
+
+    EnterCriticalSection(&g_ledgerLock);
+    count = g_ledgerCount;
+    for (i = 0; i < count; i++) {
+        if (LedgerEqI(g_ledger[i], name)) {
+            LeaveCriticalSection(&g_ledgerLock);
+            return;
+        }
+    }
+    if (count < LEDGER_MAX) {
+        memcpy(g_ledger[count], name, n + 1);
+        InterlockedIncrement(&g_ledgerCount);
+    }
+    LeaveCriticalSection(&g_ledgerLock);
+}
+
+SH_API int ShForgeReadCount(void) {
+    return (int)g_ledgerCount;
+}
+
+SH_API const char *ShForgeReadName(int index) {
+    if (index < 0 || index >= (int)g_ledgerCount) return "";
+    return g_ledger[index];
+}
+
+SH_API int ShForgeReadSeen(const char *name) {
+    LONG count, i;
+    int found = 0;
+
+    if (!name || !name[0]) return 0;
+    EnterCriticalSection(&g_ledgerLock);
+    count = g_ledgerCount;
+    for (i = 0; i < count; i++) {
+        if (LedgerHasI(g_ledger[i], name)) { found = 1; break; }
+    }
+    LeaveCriticalSection(&g_ledgerLock);
+    return found;
+}
+
+/* Marks the calling thread as doing the loader's own archive I/O, so
+ * those reads stay out of the ledger. Thread local by design: the
+ * engine's reads happen on its own threads and are the ones wanted. */
+void ShForgeIoOwn(int on) {
+    t_own = on ? 1 : 0;
+}
 
 /* An asynchronous read that covers a patch: remembered at ReadFile time
  * so the buffer can be patched once the transfer is known to be done. */
@@ -288,7 +413,11 @@ static ShForgeOverlay *LookupOrResolve(HANDLE h) {
         char *p = path;
         if (p[0] == '\\' && p[1] == '\\' && p[2] == '?' && p[3] == '\\') p += 4;
         if (!EndsWithForge(p)) return NULL;
-        o = ShForgeOverlayFor(p);
+        /* Resolved here and nowhere else, so this is also where the read
+         * ledger is written. A dry run still wants the ledger, so the
+         * overlay is what gets dropped, not the resolve. */
+        LedgerAdd(p);
+        o = ShForgeDryRun() ? NULL : ShForgeOverlayFor(p);
     }
 
     if (o) g_cacheO[slot] = o;
@@ -310,8 +439,12 @@ static BOOL WINAPI H_ReadFile(HANDLE h, LPVOID buf, DWORD len, LPDWORD got,
     DWORD err;
 
     /* Our own table and payload reads run through here too; they must
-     * pass straight through or the overlay build would recurse. */
-    if (was) return r_ReadFile(h, buf, len, got, ov);
+     * pass straight through or the overlay build would recurse. t_own is
+     * the loader's own archive I/O, and it is kept out of the ledger for
+     * a different reason: the index pass reads EVERY archive on disk, so
+     * letting it through would put all of them in the ledger and destroy
+     * the one thing the ledger is for - which archives the ENGINE read. */
+    if (was || t_own) return r_ReadFile(h, buf, len, got, ov);
 
     /* Also covers a caller that polls instead of waiting. */
     PendingSweep();
@@ -517,6 +650,7 @@ void ShForgeIoStartup(void) {
 
     InitializeCriticalSection(&g_lock);
     g_lockReady = 1;
+    InitializeCriticalSection(&g_ledgerLock);
 
     /* Resolved, not hooked: used to ask a handle where the read is and
      * what it is, without intercepting either call. */

@@ -125,4 +125,11 @@ void ShForgeIoStartup(void);
 /** How many reads have been answered with patched bytes so far. */
 int ShForgeIoFixups(void);
 
+/** Marks the calling thread as doing the LOADER's own archive I/O, so
+ *  its reads stay out of the read ledger (ShForgeReadCount and friends).
+ *  The FileDataID index pass opens every archive on disk; those reads
+ *  are ours, and counting them would make the ledger useless for the
+ *  one question it answers - which archives the engine read. */
+void ShForgeIoOwn(int on);
+
 #endif /* SH_FORGE_H */

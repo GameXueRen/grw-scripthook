@@ -72,6 +72,11 @@ typedef struct {
 
 static int g_enabled, g_dryRun, g_strict, g_reportCopies, g_applyAll;
 static int g_logReads;
+/* 1 = keep the read ledger: which .forge archives this session has
+ * actually read. It rides scripthook_forge_io.c, so the I/O layer is
+ * installed for it even with nothing to serve - that is the whole cost
+ * of being able to answer "which mode loaded this". */
+static int g_ledger;
 static int g_started;
 
 static ArchiveRef  g_arch[ARCHIVES_MAX];
@@ -572,8 +577,14 @@ static void CopyReport(void) {
 
 static DWORD WINAPI CopyIndexThread(LPVOID p) {
     (void)p;
+    /* This opens every archive on disk to index FileDataIDs. Those reads
+     * are the loader's, not the engine's: letting them reach the read
+     * ledger fills it with all 23 archives in every mode, which is
+     * exactly what makes it useless as mode evidence. */
+    ShForgeIoOwn(1);
     CopyIndexBuild();
     if (g_reportCopies) CopyReport();
+    ShForgeIoOwn(0);
     return 0;
 }
 
@@ -872,11 +883,22 @@ void ShForgeStartup(void) {
     g_applyAll     = ShConfigGetBool("forgemod", "apply_all_copies", 0);
     g_logReads     = ShConfigGetBool("forgemod", "log_reads", 0);
 
+    /* The read ledger defaults on: it is what makes "which mode is this"
+     * answerable from the archives a session loaded. The evidence probe
+     * hooks ReadFile itself, and MinHook keeps one hook per target, so
+     * with probe=1 its own log is the list and this stands down. */
+    g_ledger = ShConfigGetBool("forgemod", "ledger", 1);
+    if (g_ledger && ShConfigGetBool("forgemod", "probe", 0)) {
+        Log("ledger: [forgemod] probe=1 owns ReadFile; "
+            "forge_probe.log carries the archive list instead");
+        g_ledger = 0;
+    }
+
     g_ovl = (ShForgeOverlay **)calloc(OVL_MAX, sizeof(void *));
 
     Log("forge mod loader: enabled=%d dry_run=%d strict=%d report_copies=%d "
-        "apply_all_copies=%d", g_enabled, g_dryRun, g_strict, g_reportCopies,
-        g_applyAll);
+        "apply_all_copies=%d ledger=%d", g_enabled, g_dryRun, g_strict,
+        g_reportCopies, g_applyAll, g_ledger);
 
     ScanArchives();
     Log("find: %d archive(s)", g_narch);
@@ -884,6 +906,9 @@ void ShForgeStartup(void) {
     if (!g_enabled) {
         snprintf(g_status, sizeof(g_status),
                  "Forge Mod Loader: off ([forgemod] enabled=0)");
+        /* The ledger is not a mod, so it is installed with the feature
+         * off as well - that is the case a stock install runs in. */
+        if (g_ledger) ShForgeIoStartup();
         /* The page is registered even when the feature is off: it is the
          * only place the switch lives, so hiding it would make the
          * feature unreachable. */
@@ -894,7 +919,10 @@ void ShForgeStartup(void) {
     ScanMods();
     if (g_nmods > 0) {
         int applied = 0, bad = 0, i;
+        /* Same as the index thread: these are the loader's own reads. */
+        ShForgeIoOwn(1);
         ResolveMods();
+        ShForgeIoOwn(0);
         for (i = 0; i < g_nmods; i++) {
             if (g_mods[i].ok == 1) applied++;
             else if (g_mods[i].ok < 0) bad++;
@@ -903,9 +931,10 @@ void ShForgeStartup(void) {
                  "Forge Mod Loader: %d mod(s), %d applied, %d rejected",
                  g_nmods, applied, bad);
         Log("mods: %s", g_status);
-        /* Nothing to serve means no hooks at all: an install with no
-         * mods costs the game zero. */
-        if (applied > 0 && !g_dryRun) ShForgeIoStartup();
+        /* The ledger needs the I/O layer even when nothing is served; a
+         * dry run is handled inside it, by dropping the overlay rather
+         * than the resolve. */
+        if (applied > 0 || g_ledger) ShForgeIoStartup();
         if (g_reportCopies || g_applyAll)
             CreateThread(NULL, 0, CopyIndexThread, NULL, 0, NULL);
     } else {
