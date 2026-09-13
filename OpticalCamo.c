@@ -28,9 +28,10 @@
  * screen, map - it stops before touching anything; the cost in game is
  * eight guarded reads against the player's own node list.
  *
- * The status line is pushed only while the menu is up: nothing is
- * written to a menu nobody is looking at, and the line is refreshed as
- * soon as the menu opens (see the PushStatus part of Pump).
+ * The status line is pushed only while this page is the one on screen
+ * (ShMenuIsShowing): nothing is written to a menu nobody is looking at,
+ * and the line is refreshed the moment the page comes up - see the
+ * status part of Pump.
  *
  * The effect is the framework's: ShSetVisibility scales the detection /
  * awareness term the engine computes, the same term the trainer's
@@ -60,7 +61,8 @@
  *     the original's four steps and always-on write: the original had no
  *     way to leave the engine alone, and no way to be truly off;
  *   - while off, the thread parks and the game is not read;
- *   - the status line is only written while the menu is open;
+ *   - the status line is only written while this page is the one on
+ *     screen (ShMenuIsShowing);
  *   - no shared-memory bus (W_VisibilityBus_v2 / "VIS2") and no Linked
  *     channel: there is no consumer inside this framework, and with no
  *     consumer the original applied the factor itself anyway - that is
@@ -268,7 +270,7 @@ static int ReadCamoState(CamoVote *vote) {
 
 /* ---- apply + status -------------------------------------------------
  * One writer (the poll thread) and one value: the multiplier is written
- * only when the wanted value moves, the status line only while the menu
+ * only when the wanted value moves, the status line only while this page
  * is up and only when what it shows has moved.  The original had the
  * first guard, for the same reason - this runs twenty times a second
  * while the game is drawing.
@@ -324,10 +326,11 @@ static void Pump(int state) {
         needPush  = 1;
     }
 
-    /* Only while the menu is up: that is the only time the line can be
-     * read.  A change made with the menu closed keeps needPush set, so
-     * opening it shows today's value straight away. */
-    if (needPush && g_menu && ShMenuIsOpen()) {
+    /* Only while this page is the one on screen: that is the only time
+     * the line can be read.  A change made while it is not keeps
+     * needPush set, so the moment the page comes up it shows today's
+     * value - no refresh is spent on a menu nobody is looking at. */
+    if (needPush && g_menu && ShMenuIsShowing(g_menu)) {
         if (!on)
             ShMenuStatusF(g_menu, "Off | %.3fx", shown);
         else if (state == CAMO_UNKNOWN)

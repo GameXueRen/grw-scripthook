@@ -1042,6 +1042,31 @@ SH_API int  ShMenuStatusF(uint32_t menu, const char *fmt, ...);
 SH_API int  ShMenuHint(uint32_t menu, const char *text);
 SH_API void ShMenuSetKey(int vk);
 SH_API int  ShMenuIsOpen(void);
+/** Is that menu the page on screen right now?  1 when the menu is up and
+ *  `menu` is exactly the page being shown; 0 when another page is
+ *  showing, when the menu is closed (nothing is on screen then, whatever
+ *  page was left open last), or when the id names no menu.
+ *
+ *  Exactly that page, not "somewhere on the way to it": the framework
+ *  draws the status line of the current page and of no other, so while
+ *  the player is inside a submenu the parent's page is not showing even
+ *  though the player came through it.  Asking about the parent there
+ *  answers 0; asking about the submenu answers 1.  A plugin whose status
+ *  line lives in a submenu passes that submenu's id, and a plugin that
+ *  wants to know whether any of several pages of its own is up asks
+ *  about each of them.
+ *
+ *  This is the guard for a status line.  ShMenuStatus/ShMenuStatusF write
+ *  into the menu model, and a plugin that keeps a line current while
+ *  nobody can read it is spending work on nothing; gate the refresh on
+ *  this and the line is only written while it can be seen.  The framework
+ *  shows whatever was written last the moment the page comes up, so a
+ *  plugin that wants the first frame to be right keeps a dirty flag of
+ *  its own (OpticalCamo.c does exactly that).
+ *
+ *  0 for a menu that exists and is simply not showing is an answer, not a
+ *  failure: ShLastError is set only when the id names no menu. */
+SH_API int  ShMenuIsShowing(uint32_t menu);
 SH_API void ShMenuOpen(int open);
 
 /** One row of the menu, copied for the overlay renderer. */

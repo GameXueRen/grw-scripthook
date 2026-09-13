@@ -1343,6 +1343,33 @@ SH_API int ShMenuHint(uint32_t menu, const char *text) {
 SH_API void ShMenuSetKey(int vk) { g_key = vk; }
 SH_API int  ShMenuIsOpen(void) { return g_open; }
 
+/* Is that menu the page the player is looking at?  Exactly that page:
+ * the capture path draws the current page's status line and nobody
+ * else's (ShMenuCaptureView), so while the player is inside a submenu
+ * the parent page is NOT showing even though the player came through
+ * it.  Asking about the parent there is 0; asking about the submenu is
+ * what a line inside that submenu passes.
+ *
+ * The menu also has to be up: with it closed nothing is on screen,
+ * whatever page g_current still holds from last time.  A 0 for a menu
+ * that exists and is simply not showing is an answer rather than a
+ * failure; the error is set only when the id names no menu. */
+SH_API int ShMenuIsShowing(uint32_t menu) {
+    int hit;
+
+    if (!menu) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    Lock();
+    if (!MenuOf(menu)) {
+        Unlock();
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    hit = (g_open && g_current == menu) ? 1 : 0;
+    Unlock();
+    ShSetError(SH_OK);   /* "not showing" is an answer, not an error */
+    return hit;
+}
+
 SH_API void ShMenuOpen(int open) {
     EnsureMenu();
     g_open = open ? 1 : 0;
