@@ -103,6 +103,12 @@ static void TextAppend(const char *utf8) {
 static void BoxOn(void) {
     InterlockedExchange(&g_box, 1);
     g_text[0] = 0;
+    /* One session at a time: opening one takes the keyboard from whoever
+     * held it, and the previous owner notices (its box reads back as not
+     * focused and ends itself).  Say so, because taking it from the chat
+     * box mid-sentence is a thing worth seeing in the log. */
+    if (ShDrawInputIsOpen())
+        Log("taking the input session from another box");
     /* Open the session and hand the framework the box's name: that name
      * is what ShDrawInputBox below passes in, and what makes the box the
      * focused one (only a focused box anchors the IME). */
@@ -146,6 +152,14 @@ static void DrawWindow(void *user) {
 
     if (InterlockedCompareExchange(&g_box, 0, 0)) {
         ShDrawInput in;
+        /* The session is the framework's to end: it closes one whose box
+         * was not drawn for a while - which is exactly what happens to a
+         * box switched on from the ini before the overlay is up.  The
+         * switch is still on and we are drawing now, so take it back. */
+        if (!ShDrawInputIsOpen()) {
+            ShDrawInputOpen(BOX_ID);
+            Log("took the input session back (the framework had closed it)");
+        }
         /* The box: the framework draws it, owns the IME and hands the
          * characters over; the buffer above is ours. */
         ShDrawInputBox(BOX_ID, g_text,

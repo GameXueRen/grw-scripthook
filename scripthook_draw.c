@@ -313,6 +313,55 @@ int   ShDrawList(const char *label, int *idx, const char *const *items, int n)
 void  ShDrawPushFont(int which)      { VT_CALL(push_font, which); }
 void  ShDrawPopFont(void)            { VT_CALL(pop_font); }
 
+/* ---- the "is the box still there?" rule ------------------------------
+ * The owner draws its box every frame while it is up, so a session that
+ * has not been drawn for a while is one whose owner stopped drawing it -
+ * it wedged, or it hid its window and forgot to end the session.  Such a
+ * session must never keep the player's keyboard hostage, because that is
+ * the state where nothing can be closed and the game has to be killed:
+ * the swallowing stops first, and once the box is clearly abandoned the
+ * session is ended outright (which also restores the IME stack).  A box
+ * that is merely idle is still drawn every frame, so idling - opening
+ * the chat and staring at it - never triggers this.
+ *
+ * This is the safety net for any owner, not just the framework's own
+ * chat: it is the layer refusing to hand a plugin the power to make the
+ * game unplayable. */
+#define IN_FRESH_MS    2000
+#define IN_ABANDON_MS  5000
+
+static volatile LONG g_inDrawnAt = 0;
+static volatile LONG g_inStaleLogged = 0;
+
+/* Called by the owner, from the render thread, once per drawn box. */
+static void NoteBoxDrawn(void)
+{
+    InterlockedExchange(&g_inDrawnAt, (LONG)GetTickCount());
+}
+
+/* 1 = fresh enough to swallow keys for. */
+static int BoxFresh(DWORD now)
+{
+    DWORD drawn = (DWORD)InterlockedCompareExchange(&g_inDrawnAt, 0, 0);
+
+    if (drawn && (int)(now - drawn) < IN_FRESH_MS) {
+        InterlockedExchange(&g_inStaleLogged, 0);
+        return 1;
+    }
+    if (drawn && (int)(now - drawn) >= IN_ABANDON_MS) {
+        DrawLog("the box has not been drawn for %dms: closing the input "
+                "session (the owner stopped drawing it, or hid its window "
+                "without ending the session)", (int)(now - drawn));
+        ShDrawInputClose();
+        return 0;
+    }
+    if (!InterlockedExchange(&g_inStaleLogged, 1)) {
+        DrawLog("the input session is not being drawn: letting the keyboard "
+                "through until it is (or until the session is closed)");
+    }
+    return 0;
+}
+
 /* ---- the input session ---------------------------------------------
  * One named box owns the keyboard at a time.  The framework does not
  * edit anything: it collects what the system delivers and hands it to
@@ -338,6 +387,10 @@ int ShDrawInputOpen(const char *id)
     g_pendFullLogged = 0;
     LeaveCriticalSection(&g_lock);
     InterlockedExchange(&g_inOpen, 1);
+    /* Fresh from the start: the first frame that draws the box is what
+     * keeps it fresh, and a session whose box is never drawn is closed
+     * by the rule in ShDrawInputWndMsg. */
+    NoteBoxDrawn();
     DrawLog("input session opened for box '%s'", id);
     return 1;
 }
@@ -427,6 +480,11 @@ int ShDrawInputWndMsg(uint64_t hwnd, uint32_t msg, uint64_t wp, uint64_t lp)
     open = ShDrawInputIsOpen();
     if (!open && !ShDrawInputSending()) return 0;
 
+    /* The owner is not drawing its box any more: stop swallowing, and end
+     * the session once it is clearly abandoned.  The injection path is
+     * deliberately exempt - while sending there is no box to draw. */
+    if (open && !ShDrawInputSending() && !BoxFresh(GetTickCount())) return 0;
+
     if (msg == WM_CHAR || msg == WM_IME_CHAR) {
         /* While typing the character feeds the owner's buffer; while
          * sending it MUST fall through to the game window procedure -
@@ -471,6 +529,10 @@ int ShDrawInputBox(const char *id, const char *text, const char *hint,
 
     Ready();
     if (out) memset(out, 0, sizeof(*out));
+
+    /* Drawing the box is what tells the layer the session is alive - see
+     * the freshness rule in ShDrawInputWndMsg. */
+    NoteBoxDrawn();
 
     EnterCriticalSection(&g_lock);
     focused = (g_inOpen && id && _stricmp(id, g_inId) == 0) ? 1 : 0;

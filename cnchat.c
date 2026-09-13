@@ -36,7 +36,11 @@
  *   - Enter: release the capture, then PostMessage WM_CHAR for every
  *     character to the game window (the channel GRW-CNChat proved
  *     works on GRW), followed by an Enter key press to submit.
- *   - Esc: release and post Esc so the game closes its chat box.
+ *   - Esc: release.  Nothing is posted: the keyboard capture deliberately
+ *     never hides the escapes, so the player's own Esc has already reached
+ *     the game and closed its chat box.  Posting a second one (as this
+ *     used to) landed on a chat field that was already gone, which is the
+ *     game's own Esc action - the pause menu opening over the player.
  */
 #include <windows.h>
 #include <string.h>
@@ -48,6 +52,22 @@
 
 #define VK_CHAT     0x54            /* 'T' */
 #define POLL_MS     15
+
+/* Two ways the box must never become unclosable, both of them states the
+ * field has actually produced:
+ *   FOCUS_LOST_MS     the game lost focus while the box was up.  The keys
+ *                     were still captured, every key handler is gated on
+ *                     focus (the menu's own F4 included), so nothing could
+ *                     close anything until focus came back - and the game
+ *                     was left deaf to the keyboard on top of it.
+ *   ESC_HOLD_MS       Esc is held this long while a composition is live.
+ *                     Esc closes the box on the press (see the poll
+ *                     thread); this is the fallback for the press whose
+ *                     edge the detector could not see, because the key was
+ *                     already down when the composition started.
+ */
+#define FOCUS_LOST_MS     5000
+#define ESC_HOLD_MS       1500
 
 /* ---- shared state -------------------------------------------------
  * Text is edited on the poll thread only (paste, backspace) except
@@ -65,6 +85,7 @@ typedef struct {
 
 static ChatState g_chat;
 static volatile int g_ownsKeys = 0;
+static volatile LONG g_notMine = 0;  /* another owner took the session */
 static volatile int g_sending = 0;   /* injecting into the native box */
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
@@ -173,6 +194,21 @@ static int WindowFocused(void) {
     return pid == GetCurrentProcessId();
 }
 
+/* The window the finished text is posted into: the game's own, which is
+ * what has focus while playing (the box only opens with focus, see the
+ * poll thread).  The class is logged with it, because the injection is a
+ * PostMessage to that exact window - if an IME's own tool window ever
+ * ended up in front, the text would land there instead, and the class in
+ * the log is how that would show. */
+static HWND GameWindow(void) {
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    if (!fg) return NULL;
+    GetWindowThreadProcessId(fg, &pid);
+    if (pid != GetCurrentProcessId()) return NULL;
+    return fg;
+}
+
 static int KeyDown(int vk) {
     return (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
@@ -264,6 +300,13 @@ static void DrawChat(void *user) {
     (void)user;
     ChatSnapshot(text, (int)sizeof(text), hint, (int)sizeof(hint));
     ShDrawInputBox("chat", text, hint, &in);
+    /* Only one box can own the input session at a time.  If a session is
+     * open and it is not this one, another owner took the keyboard (its
+     * own box is drawn and typed into instead): flag it, and the poll
+     * thread closes this box rather than leaving one on screen that can
+     * no longer be typed into. */
+    if (ShDrawInputIsOpen() && !in.focused)
+        InterlockedExchange(&g_notMine, 1);
 }
 
 static void ChatDrawerShow(int on) {
@@ -324,7 +367,7 @@ static void OpenChat(void) {
     g_chat.len = 0;
     g_chat.text[0] = 0;
     g_chat.cmd = 0;
-    hwnd = GetForegroundWindow();
+    hwnd = GameWindow();
     g_chat.hwnd = (uint64_t)(uintptr_t)hwnd;
     g_chat.open = 1;
     Unlock();
@@ -335,8 +378,12 @@ static void OpenChat(void) {
      * are ours to poll while no composition is live. */
     ShDrawInputOpen("chat");
     ChatDrawerShow(1);   /* the drawer draws the box */
-    Log("box opened, session %s, keys captured",
-        ShDrawInputIsOpen() ? "live" : "refused");
+    {
+        char cls[80] = "";
+        if (hwnd) GetClassNameA(hwnd, cls, sizeof(cls));
+        Log("box opened, session %s, keys captured, target %p '%s'",
+            ShDrawInputIsOpen() ? "live" : "refused", (void *)hwnd, cls);
+    }
     /* Nudge the window thread so the overlay's IME probe (the one
      * that re-associates the input context) runs right now.  Left to
      * itself it waits for the window's next message, which is the
@@ -388,9 +435,13 @@ static DWORD WINAPI SendThread(LPVOID arg) {
         Sleep(800);
         InjectKeyUp(VK_RETURN);
     } else {
-        /* Cancelled: close the game's chat box too. */
+        /* Cancelled.  Nothing is injected here on purpose: the capture
+         * never hides the escapes (see Escapes() in scripthook_input.c),
+         * so the player's own Esc already reached the game and closed its
+         * chat box.  Injecting a second one put an extra Esc into the game
+         * with the chat field already gone - which is the game's own Esc
+         * action (the pause menu), and players noticed exactly that. */
         ReleaseKeys();
-        if (g_sendJob.hwnd) InjectKey(VK_ESCAPE);
     }
     g_sending = 0;
     ShDrawInputSetSending(0);   /* the hook may let the keys through again */
@@ -428,8 +479,11 @@ static void HandleDone(void) {
     ShDrawInputClose();
     ShDrawInputSetSending(1);
     ChatDrawerShow(0);   /* the box is gone; sending has no box */
-    Log("%s: %d character(s) to the game window",
-        send ? "sending" : "cancelled", send ? len : 0);
+    if (send)
+        Log("sending %d character(s) to the game window", len);
+    else
+        Log("cancelled, nothing sent (the player's own Esc closed the "
+            "game's chat box)");
 
     g_sendJob.send = send;
     g_sendJob.hwnd = hwnd;
@@ -511,8 +565,10 @@ static void ChatClose(void);
 static DWORD WINAPI ChatThread(LPVOID arg) {
     (void)arg;
     int tDown = 0;
-    int compLatch = 0;   /* just left a composition; see below   */
-    DWORD backNext = 0;  /* when a held Backspace repeats next  */
+    int compLatch = 0;      /* just left a composition; see below   */
+    DWORD backNext = 0;     /* when a held Backspace repeats next  */
+    DWORD focusLostAt = 0;  /* 0 = the game window is in front     */
+    DWORD escDownAt = 0;    /* Esc held during a composition       */
     for (;;) {
         Sleep(POLL_MS);
 
@@ -554,6 +610,8 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
                 tDown = 0;
                 memset(g_keyWas, 0, sizeof(g_keyWas));
                 OpenChat();
+                focusLostAt = 0;   /* the box starts in front of the game */
+                escDownAt = 0;
             }
             continue;
         }
@@ -561,22 +619,88 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
         /* Box open: poll the editing keys (the game window does not
          * deliver keyboard messages to us, so nothing else works). */
         TakePendingChars();
+
+        /* The framework ends a session whose box stopped being drawn
+         * (its watchdog against an owner that wedged).  Whatever the
+         * reason, a session that is no longer open is not ours to keep:
+         * the box would go on painting itself while taking no text at
+         * all.  Close it here and be done. */
+        if (!ShDrawInputIsOpen()) {
+            Log("the input session is gone: closing the box");
+            ChatClose();
+            continue;
+        }
+        if (InterlockedExchange(&g_notMine, 0)) {
+            Log("another box took the input session: closing the box");
+            ChatClose();
+            continue;
+        }
+
         if (!WindowFocused()) {
             /* Focus went elsewhere: the keys typed out there belong
              * to that window, so ignore them and keep the text for
-             * when the game comes back to the front. */
+             * when the game comes back to the front.  Two things still
+             * have to happen, or this is the "cannot close it, cannot
+             * play it" state: the game gets its keyboard back - a
+             * window without focus receives no keyboard input anyway,
+             * so hiding the keys from it buys nothing, while a capture
+             * that outlives the box leaves the game deaf - and a box
+             * nobody can reach must not stay open for ever. */
+            if (g_ownsKeys) {
+                ReleaseKeys();
+                Log("focus left the game: keys released, box held");
+            }
+            if (focusLostAt == 0) {
+                focusLostAt = GetTickCount();
+            } else if ((int)(GetTickCount() - focusLostAt) > FOCUS_LOST_MS) {
+                Log("focus has been away for %dms: closing the box",
+                    (int)FOCUS_LOST_MS);
+                focusLostAt = 0;
+                ChatClose();
+            }
             memset(g_keyWas, 0, sizeof(g_keyWas));
             continue;
         }
+        if (focusLostAt) {
+            /* Back in front of the game: take the keyboard again. */
+            Log("focus returned to the game: keys captured again");
+            focusLostAt = 0;
+            if (g_chat.open) TakeKeys();
+        }
+
         /* While a pinyin composition is live the command keys belong
          * to the IME: Backspace shortens the pinyin, Enter commits
          * its letters, Esc cancels it.  Acting on them here as well
          * is what wiped committed Chinese when Backspace was only
-         * trimming pinyin letters. */
+         * trimming pinyin letters.
+         *
+         * Esc is the exception, and it is the whole way out: the input
+         * method cancels the composition with that same key press, so one
+         * press has to mean "the composition is gone AND the box is
+         * gone".  It used to mean only the first half - the box stayed up
+         * with the game's own chat already closed behind it, and the
+         * second press then went on into the game.  Holding the key
+         * covers the press whose edge we missed (it was already down when
+         * the composition started). */
         if (ShDrawInputComposing()) {
             compLatch = 1;
+            if (KeyDown(VK_ESCAPE)) {
+                if (escDownAt == 0) escDownAt = GetTickCount();
+                if (Pressed(VK_ESCAPE) ||
+                    (int)(GetTickCount() - escDownAt) >= ESC_HOLD_MS) {
+                    Log("Esc with a live composition: closing the box (the "
+                        "input method cancels the composition with the same "
+                        "key press)");
+                    escDownAt = 0;
+                    Lock(); g_chat.cmd = 2; Unlock();
+                    HandleDone();
+                }
+            } else {
+                escDownAt = 0;
+            }
             continue;
         }
+        escDownAt = 0;
         if (compLatch) {
             /* Just left a composition.  The very press that ended it
              * (typically the Backspace that ate the last letter) is

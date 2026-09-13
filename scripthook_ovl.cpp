@@ -451,13 +451,41 @@ static void W2U8(const wchar_t *w, char *dst, int dstSize)
     WideCharToMultiByte(CP_UTF8, 0, w, -1, dst, dstSize, NULL, NULL);
 }
 
-/* Read the IME composition string and current candidate page. */
-static void ImeReadState(HWND hWnd)
+/* Read the IME composition string and current candidate page, and report
+ * what is there in BOTH directions: a composition or a candidate list the
+ * IME no longer has has to clear the cached state.
+ *
+ * It used to only ever SET the two flags, and clear them from
+ * WM_IME_ENDCOMPOSITION / IMN_CLOSECANDIDATE.  An IME that stops sending
+ * those - Sogou does, once we have parked its own candidate window off
+ * screen - then left "a composition is live" true forever.  The box's
+ * owner asks exactly that before it dares to act on Enter / Esc / Backspace
+ * (during a composition those keys belong to the IME), so a stuck flag
+ * locks the box open: T, Enter and Esc all stop working, the keyboard
+ * stays captured and the player has to kill the game.  That is the bug
+ * the clearing half below exists to prevent.
+ *
+ * `gen` is bumped only when something actually changed: it is the "the
+ * IME is still moving" signal ImeComposingNow reads.
+ *
+ * Returns 1 when the IME could be asked, 0 when it could not (no window,
+ * no context): the teardown path treats "could not ask" as "still
+ * composing", because that is the state where touching the context is
+ * dangerous (see ImeProbeDisable). */
+static int ImeReadState(HWND hWnd)
 {
     HIMC hImc;
-    if (!hWnd || !IsWindow(hWnd)) return;
+    char comp[192];
+    char cand[IME_CAND_MAX][IME_CAND_TXT];
+    int  active = 0, changed;
+    int  count = 0, sel = 0, page = 0, pageSize = 0;
+
+    comp[0] = 0;
+    memset(cand, 0, sizeof(cand));
+
+    if (!hWnd || !IsWindow(hWnd)) return 0;
     hImc = ImmGetContext(hWnd);
-    if (!hImc) return;
+    if (!hImc) return 0;
 
     /* --- composition string --- */
     {
@@ -465,15 +493,12 @@ static void ImeReadState(HWND hWnd)
         if (n > 0) {
             int wn = (int)(n / sizeof(wchar_t)) + 1;
             wchar_t *buf = (wchar_t *)malloc((size_t)wn * sizeof(wchar_t));
+            active = 1;              /* the IME has one, empty string or not */
             if (buf) {
                 ImmGetCompositionStringW(hImc, GCS_COMPSTR, buf,
                                          (DWORD)(wn * sizeof(wchar_t)));
                 buf[wn - 1] = 0;
-                ImeLock();
-                W2U8(buf, g_ime.comp, sizeof(g_ime.comp));
-                g_ime.active = 1;
-                g_ime.gen++;
-                ImeUnlock();
+                W2U8(buf, comp, sizeof(comp));
                 free(buf);
             }
         }
@@ -488,31 +513,101 @@ static void ImeReadState(HWND hWnd)
                                      (DWORD)raw.size()) != 0)
             {
                 const CANDIDATELIST *cl = (const CANDIDATELIST *)raw.data();
-                int count = (int)cl->dwCount;
-                int page  = (int)cl->dwPageStart;
-                int sel   = (int)cl->dwSelection;
-                int pageSize = (int)cl->dwPageSize;
+                count = (int)cl->dwCount;
+                page  = (int)cl->dwPageStart;
+                sel   = (int)cl->dwSelection;
+                pageSize = (int)cl->dwPageSize;
                 if (pageSize <= 0 || pageSize > count - page)
                     pageSize = count - page;
                 if (pageSize > IME_CAND_MAX) pageSize = IME_CAND_MAX;
-
-                ImeLock();
-                g_ime.candOpen = 1;
-                g_ime.candCount = count;
-                g_ime.candSel = sel;
-                g_ime.candPage = page;
-                g_ime.candShow = pageSize;
                 for (int i = 0; i < pageSize; i++) {
                     DWORD ofs = cl->dwOffset[page + i];
                     const wchar_t *w = (const wchar_t *)(raw.data() + ofs);
-                    W2U8(w, g_ime.cand[i], sizeof(g_ime.cand[i]));
+                    W2U8(w, cand[i], sizeof(cand[i]));
                 }
-                g_ime.gen++;
-                ImeUnlock();
             }
         }
     }
     ImmReleaseContext(hWnd, hImc);
+
+    /* Commit it - and count it as movement only when it differs. */
+    ImeLock();
+    changed = (g_ime.active    != active) ||
+              (g_ime.candOpen  != (pageSize > 0 ? 1 : 0)) ||
+              (g_ime.candCount != count) || (g_ime.candSel != sel) ||
+              (g_ime.candPage  != page)  || (g_ime.candShow != pageSize) ||
+              (strcmp(g_ime.comp, comp) != 0);
+    for (int i = 0; !changed && i < pageSize; i++)
+        if (strcmp(g_ime.cand[i], cand[i]) != 0) changed = 1;
+    if (changed) {
+        g_ime.active    = active;
+        g_ime.candOpen  = (pageSize > 0) ? 1 : 0;
+        g_ime.candCount = count;
+        g_ime.candSel   = sel;
+        g_ime.candPage  = page;
+        g_ime.candShow  = pageSize;
+        snprintf(g_ime.comp, sizeof(g_ime.comp), "%s", comp);
+        for (int i = 0; i < IME_CAND_MAX; i++)
+            snprintf(g_ime.cand[i], sizeof(g_ime.cand[i]), "%s", cand[i]);
+        g_ime.gen++;
+    }
+    ImeUnlock();
+    return 1;
+}
+
+/* How long a composition may sit completely still before it is treated as
+ * over rather than as live.  A live one moves - every keystroke and every
+ * candidate change bumps g_ime.gen - so silence for this long means the
+ * cached state is not following an IME any more. */
+#define IME_STALE_MS 10000
+
+/* ImeComposingNow's bookkeeping, touched only under the IME lock. */
+static int   g_imeMovedGen    = -1;
+static DWORD g_imeMovedAt     = 0;
+static int   g_imeStaleNagged = 0;
+
+/* Is a composition (or its candidate list) actually alive right now?
+ *
+ * Everything else asks THIS, never the raw flags, because the answer is
+ * the difference between "the IME owns Enter / Esc / Backspace" and "the
+ * box can never be closed again".  The raw flags are still cleared by the
+ * messages that say so, and by ImeReadState's clearing half; this adds
+ * the last resort: a state that has not moved for IME_STALE_MS is dropped
+ * outright, so even an IME that goes completely silent cannot keep the
+ * box - and the keyboard - hostage.  Callable from any thread. */
+static int ImeComposingNow(void)
+{
+    DWORD now = GetTickCount();
+    int on, gen;
+
+    ImeLock();
+    on  = (g_ime.active || g_ime.candOpen) ? 1 : 0;
+    gen = g_ime.gen;
+
+    if (!on) {
+        g_imeMovedGen    = -1;
+        g_imeMovedAt     = now;
+        g_imeStaleNagged = 0;
+    } else if (gen != g_imeMovedGen) {
+        g_imeMovedGen = gen;
+        g_imeMovedAt  = now;
+    } else if ((int)(now - g_imeMovedAt) >= IME_STALE_MS) {
+        if (!g_imeStaleNagged) {
+            g_imeStaleNagged = 1;
+            ImeUnlock();
+            OvlLog("ime: the composition state has not moved for %dms - "
+                   "dropping it so Enter/Esc reach the box again (this is "
+                   "the stuck-IME state that used to lock the box open)",
+                   (int)(now - g_imeMovedAt));
+            ImeLock();
+        }
+        ImeStateReset();             /* the lock is recursive: same thread */
+        g_imeMovedGen = g_ime.gen;
+        g_imeMovedAt  = now;
+        on = 0;
+    }
+    ImeUnlock();
+    return on;
 }
 
 /* Mirror one IME message into g_ime while the chat box is open.  All
@@ -662,22 +757,46 @@ static void ImeHideForeignWindows(void)
 }
 
 /* Undo everything ImeProbeEnable and the foreign-window subclass
- * did, once the chat session is over: cancel any composition the
+ * did, once the input session is over: cancel any composition the
  * IME still holds, put the open status back, detach the context
  * and un-subclass the IME windows.  When the game later exits
- * nothing of ours is left touching the IME stack. */
+ * nothing of ours is left touching the IME stack.
+ *
+ * With one exception, learned the hard way: the detach (and the
+ * destruction of a context we manufactured) is SKIPPED when the IME
+ * still owns a composition.  Detaching the window's input context at
+ * that moment leaves the text service with a document it can no longer
+ * reach, and the next input event makes textinputframework.dll
+ * dereference null.  Field crash 2026-09-13 23:38:44: a box was closed
+ * while Esc was held down during a live composition, and the fault
+ * landed 2ms after this function's last log line.  So: cancel and
+ * restore first, then read the IME and only do the risky half when it
+ * says the composition is really gone - and treat "cannot be asked" as
+ * "still composing" rather than guessing.  Leaving the association in
+ * place costs a window that keeps an input context; crashing costs the
+ * session. */
 static void ImeProbeDisable(HWND hWnd)
 {
     HIMC hImc;
-    int i;
+    int i, read, composing;
 
     if (hWnd && (hImc = ImmGetContext(hWnd)) != NULL) {
         ImmNotifyIME(hImc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
         ImmSetOpenStatus(hImc, g_imeOpenWas);
         ImmReleaseContext(hWnd, hImc);
     }
-    if (hWnd) ImmAssociateContextEx(hWnd, NULL, 0);
-    if (g_imeCtxMade && g_imeMadeCtx) {
+
+    /* Ask the IME where it stands instead of trusting the cache: the
+     * cache may have been dropped on purpose (ImeComposingNow's stale
+     * rule) while the IME still owns a composition. */
+    ImeStateReset();
+    read = hWnd ? ImeReadState(hWnd) : 0;
+    ImeLock();
+    composing = (!read || g_ime.active || g_ime.candOpen) ? 1 : 0;
+    ImeUnlock();
+
+    if (hWnd && !composing) ImmAssociateContextEx(hWnd, NULL, 0);
+    if (!composing && g_imeCtxMade && g_imeMadeCtx) {
         ImmDestroyContext(g_imeMadeCtx);
         g_imeCtxMade = 0;
         g_imeMadeCtx = NULL;
@@ -694,7 +813,12 @@ static void ImeProbeDisable(HWND hWnd)
      * session: a leftover caret keeps anchoring IME windows to a
      * dead spot and grows the show-caret count per message. */
     DestroyCaret();
-    OvlLog("ime probe disabled (session over)");
+    if (composing)
+        OvlLog("ime probe disabled (session over; the IME still had a "
+               "composition, so the window keeps its input context - "
+               "detaching it here is what crashes the TSF stack)");
+    else
+        OvlLog("ime probe disabled (session over)");
 }
 
 static void ImeMirrorMsg(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -735,6 +859,21 @@ static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
             ImeProbeEnable(hWnd);
             if (selfDrawn) ImePlaceCaret(hWnd);
             else ImeApplyAnchor(hWnd);
+        }
+
+        /* Keep the IME state fresh even when the IME has gone quiet:
+         * ImeReadState's clearing half is what stops a composition from
+         * being "live" forever, and some IMEs stop sending the messages
+         * that would drive it.  The window thread is the only thread
+         * allowed to ask IMM about this window, so it is asked here - on
+         * a throttle, not once per message. */
+        {
+            static DWORD lastRead = 0;
+            DWORD now = GetTickCount();
+            if ((int)(now - lastRead) >= 200) {
+                lastRead = now;
+                ImeReadState(hWnd);
+            }
         }
 
         /* Every IME message must keep advancing the IMM state machine,
@@ -798,10 +937,22 @@ static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
          * opened, feature switched off): put the IME stack back the
          * way the game had it, exactly once.  The box rectangle goes
          * with it, so the next session starts from the fixed anchor
-         * until its own first frame publishes one. */
+         * until its own first frame publishes one.
+         *
+         * The flag is cleared BEFORE the teardown, not after:
+         * ImmNotifyIME / ImmAssociateContextEx / ImmDestroyContext all
+         * pump messages, and a message that re-enters this window
+         * procedure sees the session already gone and starts the
+         * teardown a second time.  That second pass would re-read the
+         * IME right after the first pass cancelled the composition -
+         * and, if the read came back clean, would detach the context
+         * that the first pass is still unwinding (field log
+         * 2026-09-13 23:55:11: two "ime probe disabled" lines 0.1ms
+         * apart, the second one on the plain path).  One flag write
+         * buys exactly-once. */
         if (g_imeProbed) {
-            ImeProbeDisable(hWnd);
             g_imeProbed = 0;
+            ImeProbeDisable(hWnd);
         }
         if (g_ime.active || g_ime.candOpen) ImeStateReset();
         InterlockedExchange(&g_boxW, 0);
@@ -1111,8 +1262,11 @@ int DrawInputBoxAt(const char *id, const char *text, const char *hint,
     ImeState ime;
     ImeSnapshot(&ime);
     bool selfDrawn = (ShDrawInputGetMode() == 0);
-    const char* comp = (selfDrawn && ime.active) ? ime.comp : "";
-    const bool composing = (ime.active || ime.candOpen) ? true : false;
+    /* ImeComposingNow, not the raw flags: a stale composition must not
+     * keep the owner's hands off Enter/Esc (see the comment on it), and
+     * the composition string is only drawn while it is really live. */
+    const bool composing = ImeComposingNow() != 0;
+    const char* comp = (selfDrawn && composing && ime.active) ? ime.comp : "";
     if (out) out->composing = composing ? 1 : 0;
 
     // Width hugs text + composition, capped.
@@ -1507,14 +1661,14 @@ static int DrawInputBoxImpl(const char *id, const char *text, const char *hint,
  * during composition those keys belong to the IME (shorten pinyin,
  * commit its letters, cancel it), and acting on them as well is what
  * deleted committed Chinese from the buffer while Backspace was only
- * trimming pinyin letters.  Callable from any thread. */
+ * trimming pinyin letters.  Callable from any thread.
+ *
+ * It answers through ImeComposingNow, so a stale composition - an IME
+ * that stopped reporting one - reads as "over" instead of keeping the
+ * box's only way out disabled. */
 static int DrawComposingImpl(void)
 {
-    int on;
-    ImeLock();
-    on = g_ime.active || g_ime.candOpen;
-    ImeUnlock();
-    return on;
+    return ImeComposingNow();
 }
 
 static const ShDrawVtbl g_drawVtbl = {
