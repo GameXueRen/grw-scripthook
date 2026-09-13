@@ -454,20 +454,14 @@ static int ShouldTouchSlot(int slot) {
 
 /* ---- the clean copy ---------------------------------------------------- */
 
-typedef BOOL   (WINAPI *MoveFileExW_t)(LPCWSTR from, LPCWSTR to, DWORD flags);
-typedef BOOL   (WINAPI *MoveFileW_t)(LPCWSTR from, LPCWSTR to);
-typedef BOOL   (WINAPI *CopyFileW_t)(LPCWSTR from, LPCWSTR to,
-                                     BOOL failIfExists);
-typedef HANDLE (WINAPI *CreateFileW_t)(LPCWSTR name, DWORD access,
-                                       DWORD share,
-                                       LPSECURITY_ATTRIBUTES sa,
-                                       DWORD disposition, DWORD flags,
-                                       HANDLE tmpl);
+/* The guard used to hold function pointers for the three calls it hooked.
+ * It holds none of them any more - the layer owns those targets, and the
+ * rule it registers is what gets this module asked about them - so the
+ * only pointer left is the one it makes its clean copies with. */
+typedef BOOL (WINAPI *CopyFileW_t)(LPCWSTR from, LPCWSTR to,
+                                   BOOL failIfExists);
 
-static MoveFileExW_t g_realMoveFileExW;
-static MoveFileW_t   g_realMoveFileW;
-static CopyFileW_t   g_realCopyFileW;
-static CreateFileW_t g_realCreateFileW;
+static CopyFileW_t g_realCopyFileW;
 
 static int BackupPath(const wchar_t *save, wchar_t *out, size_t cap) {
     const wchar_t *base;
@@ -1107,10 +1101,12 @@ static void InstallHooks(void) {
                  "as usual");
         return;
     }
-    GuardLog("install: MoveFileExW=%p MoveFileW=%p CreateFileW=%p "
-             "CopyFileW=%p",
-             (void *)g_realMoveFileExW, (void *)g_realMoveFileW,
-             (void *)g_realCreateFileW, (void *)g_realCopyFileW);
+    /* The two calls the guard watches are the layer's hooks now, not this
+     * module's: the rule above is what makes the layer ask this guard about
+     * every move and every open. The only function pointer this plugin
+     * still holds is the CopyFileW it makes its copies with. */
+    GuardLog("install: watching through the layer's rule; CopyFileW=%p",
+             (void *)g_realCopyFileW);
 }
 
 static DWORD WINAPI InitThread(LPVOID p) {
