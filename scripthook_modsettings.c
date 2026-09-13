@@ -2,8 +2,8 @@
  * scripthook.ini at runtime.
  *
  * The engine reads every key it exposes here only at startup:
- *   - [loader] load_plugins / cpu_boot / cpu_window / cpu_play
- *     / cpu_cores
+ *   - [loader] load_plugins / cpu_boot / cpu_window / cpu_play / cpu_cores
+ *     / cpu_prio_play / cpu_eco_boot
  *   - [plugins]  one toggle per plugins\<name>\<name>.asi
  *   - [Settings] Language (menu language)
  * Each page carries a single hint line noting that changes need a
@@ -11,7 +11,7 @@
  *
  * The [loader] rows sit on two pages, because they answer two unrelated
  * questions: "Startup & core" holds the one about loading plugins at all,
- * and the CPU scheduling page - right under Plugins - holds the seven that
+ * and the CPU scheduling page - right under Plugins - holds the six that
  * decide which set of processors the game runs on in each stage of its
  * start up, and at what priority. The corefix status line travels with the
  * CPU page, since it is a statement about those dials on this machine and
@@ -44,7 +44,6 @@ typedef struct {
     int  def;             /* fallback when the key is missing */
     const char **opts;    /* a fixed-choice row when non-NULL */
     int  nopts;           /* how many of them this row offers */
-    const int  *vals;     /* the ini value per option, NULL = the index */
 } Setting;
 
 /* The stage dials, in the ini's own order: what, if anything, is done to
@@ -67,20 +66,24 @@ static const char *g_stageOpts[] = {
  * engine needs processor 0 while it is starting up. */
 #define STAGE_NOPTS 5
 
-/* The priority classes, in the ini's own order. The start-up stages
- * offer the two lower ones as well - a loading screen may as well yield
- * the machine to whatever else wants it - while the play stage does not,
- * because a game being played at low priority is just a stutter.
- * Realtime is offered nowhere: a game at realtime priority can starve
- * the desktop and the audio threads. */
+/* The names a priority can be shown by, in corefix's own order - which is
+ * the number the play row stores, so its first four entries are exactly the
+ * choices that row offers. The last two are the states the loading stages'
+ * one switch resolves to - the efficiency mode where the machine has it,
+ * the low class where it does not - and they are never offered as a choice:
+ * they only ever appear on the status line, which reports what is in force
+ * rather than what was asked for. Realtime is offered nowhere: it can
+ * starve the desktop and the audio threads. */
 static const char *g_prioOpts[] = {
-    "Low", "Below normal", "Leave alone", "Normal", "Above normal", "High"
+    "Leave alone",      /* 0 */
+    "Normal",           /* 1 */
+    "Above normal",     /* 2 */
+    "High",             /* 3 */
+    "Efficiency mode",  /* 4: what the loading switch resolves to */
+    "Low"               /* 5: ... on a machine that cannot do that */
 };
-static const char *g_prioPlayOpts[] = {
-    "Leave alone", "Normal", "Above normal", "High"
-};
-/* The play row maps onto the same scale, minus the low end. */
-static const int g_prioPlayVals[] = { 2, 3, 4, 5 };
+#define PRIO_NOPTS      6                   /* names: the status line's range */
+#define PRIO_PLAY_NOPTS 4                   /* what the play row offers */
 
 /* The one row that is about loading at all: whether the loader's next scan
  * brings any plugin up. It stays on "Startup & core"; the processor dials
@@ -92,21 +95,24 @@ static const Setting g_loaderSettings[] = {
 };
 
 /* One pair of rows per stage of the game's start up: which set of
- * processors it runs on, and which priority class it holds. Same rows,
- * same ini keys and same order as before - only the page is new. */
+ * processors it runs on, and which priority (or the efficiency mode) it
+ * holds. Same rows, same ini keys and same order as before - only the page
+ * is new. Each scale is written in its own order, so an option's index IS
+ * the value the ini stores and no row needs a mapping. */
 static const Setting g_cpuSettings[] = {
     { "loader", "cpu_boot",
       "Boot cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
-    { "loader", "cpu_prio_boot",
-      "Boot priority", 1, 0, 5, 1, 0, g_prioOpts, 6, NULL },
     { "loader", "cpu_window",
       "Loading cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
-    { "loader", "cpu_prio_window",
-      "Loading priority", 1, 0, 5, 1, 0, g_prioOpts, 6, NULL },
+    /* One switch for the two loading stages between them: on = efficiency
+     * mode while they last, off (the default) = the class is left alone. */
+    { "loader", "cpu_eco_boot",
+      "Efficiency mode while loading", 0, 0, 0, 0, 0, NULL, 0 },
     { "loader", "cpu_play",
       "Play cores", 1, 0, 8, 1, 0, g_stageOpts, 9 },
     { "loader", "cpu_prio_play",
-      "Play priority", 1, 0, 5, 1, 0, g_prioPlayOpts, 4, g_prioPlayVals },
+      "Play priority", 1, 0, PRIO_PLAY_NOPTS - 1, 1, 0, g_prioOpts,
+      PRIO_PLAY_NOPTS },
     /* A ceiling on the play stage alone (0 = none): trimming the set
      * while the game is still starting is a good way to make it not
      * start, and the stutter it is for is a play-time thing. */
@@ -151,11 +157,9 @@ static void OnNumber(uint32_t menu, uint32_t item, int value,
     const Setting *s = (const Setting *)user;
     (void)item;
     if (!s) return;
-    /* A list row hands back the option's index; the ini wants that
-     * option's value, which is the index itself unless the row maps it
-     * (the play priority row shares the scale but not its low end). */
-    if (s->opts && s->vals && value >= 0 && value < s->nopts)
-        value = s->vals[value];
+    /* A list row hands back the option's index, and for every row here
+     * that index IS the value the ini stores - each scale is written in
+     * its own order for exactly that reason. */
     if (ShConfigSetInt(s->section, s->key, value))
         ReportSaved(menu);
 }
@@ -244,14 +248,16 @@ static void BuildSettings(uint32_t menu, const Setting *rows, int n) {
     for (i = 0; i < n; i++) {
         const Setting *s = &rows[i];
         if (s->opts) {
-            /* A fixed-choice row: the ini holds the option's value, the
-             * list wants its index, and the callback is handed the index
-             * again. */
+            /* A fixed-choice row: the ini holds the option's value, which
+             * is its index in the list, and the callback is handed that
+             * index again. A value the row does not offer - a hand-edited
+             * ini, or one written by a build with more dials - reads as
+             * the first entry rather than pointing past the list. */
             int cur = ShConfigGetInt(s->section, s->key, s->def);
             int idx = 0, k;
 
             for (k = 0; k < s->nopts; k++) {
-                if ((s->vals ? s->vals[k] : k) == cur) { idx = k; break; }
+                if (k == cur) { idx = k; break; }
             }
             ShMenuList(menu, s->label, s->opts, s->nopts, idx,
                        OnNumber, (void *)s);
@@ -402,7 +408,7 @@ static const char *StageKey(int stage) {
 }
 
 static void SetCpuLine(void) {
-    ShCoreFixStatus cf;
+    ShCpuStatus cf;
     const char *dial, *prio;
     char text[160];
     int st, d, p;
@@ -413,10 +419,10 @@ static void SetCpuLine(void) {
      * called, so the status is filled by now and the fields are settled.
      * Clamped all the same: an index from a build with more values than
      * this one knows must not read past the tables above. */
-    ShCoreFixGetStatus(&cf);
+    ShCpuGetStatus(&cf);
     st = cf.stage >= 0 && cf.stage <= 2 ? cf.stage : 0;
     d  = cf.dial[st] >= 0 && cf.dial[st] <= 8 ? cf.dial[st] : 0;
-    p  = cf.prio[st] >= 0 && cf.prio[st] <= 5 ? cf.prio[st] : 2;
+    p  = cf.prio[st] >= 0 && cf.prio[st] < PRIO_NOPTS ? cf.prio[st] : 0;
 
     /* Every entry of those two scales is already a translation key - the
      * same words the rows above use. */
@@ -424,7 +430,7 @@ static void SetCpuLine(void) {
     prio = g_prioOpts[p];
 
     snprintf(text, sizeof(text),
-             ShLang("Now: %s stage - cores %s - priority %s"),
+             ShLang("Now: %s - cores %s - priority %s"),
              ShLang(StageKey(st)), ShLang(dial), ShLang(prio));
     if (!strcmp(text, g_cpuLast)) return;
     snprintf(g_cpuLast, sizeof(g_cpuLast), "%s", text);
@@ -493,7 +499,7 @@ void ShModSettingsStartup(void) {
         char   hint[384];
         char   line[160];
         size_t used;
-        ShCoreFixStatus cf;
+        ShCpuStatus cf;
 
         /* The root page and the loader page carry the restart note and
          * nothing else. */
@@ -514,7 +520,12 @@ void ShModSettingsStartup(void) {
                                 ShLang("Processor set and priority for each "
                                        "start up stage - changes need a "
                                        "restart."));
-        if (ShCoreFixGetStatus(&cf)) {
+        if (ShCpuGetStatus(&cf)) {
+            /* Two dials can be picked and then do nothing at all, and each
+             * of them needs a line of its own - the row alone would read as
+             * "set and quietly ignored": "E-cores off" on a CPU with no
+             * E-cores, and the efficiency mode on anything but Windows 11,
+             * where the call exists but the level it names does not. */
             line[0] = 0;
             if (cf.ecoreState == SH_CF_NA_NOT_INTEL)
                 snprintf(line, sizeof(line), "%s",
@@ -525,6 +536,23 @@ void ShModSettingsStartup(void) {
             else if (cf.ecoreState == SH_CF_FAILED)
                 snprintf(line, sizeof(line), "%s",
                          ShLang("E-cores off: detection failed."));
+            if (line[0] && used + 2 < sizeof(hint)) {
+                snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
+                used = strlen(hint);
+                line[0] = 0;
+            }
+            if (cf.ecoBoot) {
+                if (cf.eco == SH_ECO_NA)
+                    snprintf(line, sizeof(line), "%s",
+                             ShLang("Efficiency mode: not available on this "
+                                    "system - the loading stages hold the low "
+                                    "priority instead."));
+                else if (cf.eco == SH_ECO_FAILED)
+                    snprintf(line, sizeof(line), "%s",
+                             ShLang("Efficiency mode: the call failed - the "
+                                    "loading stages hold the low priority "
+                                    "instead."));
+            }
             if (line[0] && used + 2 < sizeof(hint))
                 snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
         }

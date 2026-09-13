@@ -163,10 +163,12 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
      * per target. Nothing is blocked, nothing is changed. */
     if (ShConfigGetBool("forgemod", "probe", 0))
         ShForgeProbeStartup();
-    /* The play-time half of the CPU trims: the deferred processor-0
-     * drop. Started here rather than in DllMain, where creating a
-     * thread can deadlock against the loader lock. A no-op unless
-     * cpu_no0=1.
+    /* The CPU trims' stage thread: it puts the play dial in force once the
+     * world is up (the processor-0 combinations among them) and keeps
+     * track of the stage for the public CPU API. Started here rather than
+     * in DllMain, where creating a thread can deadlock against the loader
+     * lock, and it is not conditional: with every dial left alone it still
+     * reports the stage.
      */
     ShCoreFixLateStartup();
     /* Mod settings must be up before the plugin scan: it owns the
@@ -214,8 +216,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         /* CPU core-count/affinity fix. Must run before the
          * engine reads the processor count, so it goes here,
          * on the attach path, not in the loader thread.
-         * No-op unless scripthook.ini [loader] cpu_ecore_off=1
-         * or cpu_ht_off=1.
+         * Everything it does comes from the [loader] cpu_boot /
+         * cpu_window / cpu_play / cpu_cores and cpu_prio_* dials;
+         * with all of them left alone it installs no hook and
+         * touches not one scheduling API.
          */
         ShCoreFixStartup();
         LoadRealDinput8();

@@ -1578,6 +1578,23 @@ SH_API uint32_t ShFp2Age(void);
 int ShFp2PlaceEye(uint64_t cm, float *m, float *p);
 void ShFp2HeadFrame(void);
 
+/** @defgroup cpu Processor scheduling
+ *  The processor set and the process priority the framework holds for each
+ *  stage of the game's start up, the efficiency mode, and the read-only
+ *  queries a plugin can use to see them.
+ *
+ *  Why a plugin would want to: while a dial is in force the framework
+ *  answers the whole process for the processor count, the topology, the
+ *  affinity and the priority. That is what keeps the engine from spreading
+ *  itself back over every core, and it means `GetSystemInfo` and friends
+ *  report the trimmed set to every caller, a plugin's included - a thread
+ *  pool sized from them is sized for the set that is really allowed, which
+ *  is usually what a caller wants, but it is no longer the machine's own
+ *  answer. These calls say what the framework is doing instead. With every
+ *  dial left alone nothing is hooked and every answer is the machine's
+ *  own; the queries below still work and report that truthfully.
+ *  @{ */
+
 /** Outcome of one scheduling trim, for the log and the menu.
  *  The values double as the state of the whole switch: 0 it was
  *  never asked for, 1 it is in force, 2 it does not apply to
@@ -1592,38 +1609,128 @@ void ShFp2HeadFrame(void);
 #define SH_CF_FAILED        4
 #define SH_CF_SKIPPED_EMPTY 5
 
-/** The stage a dial belongs to. */
-#define SH_STAGE_BOOT   0   /* the game's logo screen               */
-#define SH_STAGE_WINDOW 1   /* the window: loading, menu, lobby     */
-#define SH_STAGE_PLAY   2   /* in play                              */
+/** The stage a dial belongs to, and the value ShCpuStage reports.
+ *
+ *  The three are steps, not modes: within one session they only ever move
+ *  forwards, once each, and none of them comes back.
+ *
+ *   - BOOT    the logo screen, until the game's own window appears;
+ *             the framework knows it by the window itself, on two features:
+ *             the class the game gives it (ScimitarSplashScreenWindow,
+ *             against ScimitarEngineWindowClass for the window that ends
+ *             the step) and the title, where the registered mark comes
+ *             through mis-encoded ("Ghost Recon?Wildlands", against
+ *             "Ghost Recon(R) Wildlands"). The class is read first and the
+ *             title is the fallback, so a renamed build behaves as it did
+ *             before the class was used at all;
+ *   - WINDOW  the game's own window, until the main menu is reached: the
+ *             first load, where the engine does its own start-up work;
+ *   - PLAY    everything from the first main menu on - the menu, a lobby,
+ *             a later load screen, the pause menu and the world - for the
+ *             rest of the session. Past the front end the two questions a
+ *             stage answers (is the engine still starting, is any of the
+ *             world up) have both been asked and answered.
+ */
+#define SH_STAGE_BOOT   0   /* the logo screen                      */
+#define SH_STAGE_WINDOW 1   /* the window, before the front end     */
+#define SH_STAGE_PLAY   2   /* from the first main menu on          */
 
-/** What the CPU scheduling dials did this launch. Read by the mod
- *  settings page, which lives in the same dinput8.dll and is started
- *  after the dials have run, so the fields are settled by then.
+/** The efficiency mode (Windows 11 EcoQoS - the switch Task Manager shows
+ *  as "Efficiency mode"), as ShCpuStatus.eco reports it. Not a priority
+ *  class: the framework sets it through the process' power-throttling
+ *  class, and offers it for the two start-up stages only, where the work is
+ *  the kind the hint is documented for.
+ *
+ *  Windows 11 only. The calls exist earlier, but the level this names does
+ *  not - Microsoft's page for SetProcessInformation says such a process was
+ *  marked LowQoS before Windows 11 - so on anything older the dial reads as
+ *  SH_ECO_NA and nothing is set: a dial that cannot be honoured must not
+ *  read as one that was. The settings page says so on its hint line.
+ */
+#define SH_ECO_OFF     0    /**< not on                                 */
+#define SH_ECO_ON      1    /**< on right now                           */
+#define SH_ECO_NA      2    /**< not on this system (needs Windows 11)  */
+#define SH_ECO_FAILED  3    /**< the call failed; see the corefix log   */
+
+/** One plugin's stage callback, handed the new SH_STAGE_*. */
+typedef void (*ShCpuStageFn)(int stage, void *user);
+
+/** The values ShCpuStatus.prio[] carries: the four the play dial offers,
+ *  and the two states the loading stages' one switch can resolve to. The
+ *  last two are never a choice - they are only ever the state that is in
+ *  force, and SH_PRIO_LOW is what SH_PRIO_ECO falls back to on a machine
+ *  which cannot do efficiency mode.
+ */
+#define SH_PRIO_LEAVE  0
+#define SH_PRIO_NORMAL 1
+#define SH_PRIO_ABOVE  2
+#define SH_PRIO_HIGH   3
+#define SH_PRIO_ECO    4
+#define SH_PRIO_LOW    5
+
+/** What the CPU scheduling dials are doing right now. The fields are
+ *  written by the framework's stage thread and read from anywhere, so a
+ *  copy may mix two ticks a quarter of a second apart - each field is true
+ *  of some moment, which is what a status query is for.
  */
 typedef struct {
-    int      active;        /* any stage does something             */
-    int      stage;         /* the dial in force (SH_STAGE_*)       */
-    int      dial[3];       /* the three core dials from the ini    */
-    int      prio[3];       /* the three priority dials             */
-    int      ecoreState;    /* SH_CF_* for this CPU's applicability */
-    unsigned origCount;     /* processors this process started with */
-    unsigned sysCount;      /* processors the machine has           */
-    unsigned reportCount;   /* what the engine is told (0 = as-is)  */
-    unsigned keepCount;     /* schedulable now (0 = as it came)     */
-    unsigned long long mask;/* the set in force (0 = as it came)    */
-} ShCoreFixStatus;
+    int      active;        /* any stage does something (0 = disabled) */
+    int      stage;         /* the stage in force (SH_STAGE_*)        */
+    int      dial[3];       /* the three core dials from the ini      */
+    int      prio[3];       /* the priority each stage holds (SH_PRIO_*):
+                             * [0] and [1] are what the loading switch
+                             * resolved to, [2] is the play dial        */
+    int      ecoreState;    /* SH_CF_* for this CPU's applicability   */
+    int      eco;           /* SH_ECO_* : the efficiency mode now     */
+    int      ecoOurs;       /* 1 when that switch is one we turned on */
+    int      ecoBoot;       /* the loading switch as it was set (0/1) */
+    unsigned origCount;     /* processors this process started with   */
+    unsigned sysCount;      /* processors the machine has             */
+    unsigned reportCount;   /* what the engine is told (0 = as-is)    */
+    unsigned keepCount;     /* schedulable now (0 = as it came)       */
+    unsigned long long mask;/* the set in force (0 = as it came)      */
+} ShCpuStatus;
 
-/** Fill *out with the launch's scheduling result and return 1, or
- *  0 when there is nothing to say yet.
- */
-int ShCoreFixGetStatus(ShCoreFixStatus *out);
+/** Fill *out with the launch's scheduling result. 0 only for a NULL
+ *  argument: the dials are read on the attach path, so there is always
+ *  something to say. */
+SH_API int      ShCpuGetStatus(ShCpuStatus *out);
 
-/** Start the part of the CPU trims that runs during play: the deferred
- *  processor-0 drop, which is applied once the world is up and taken
- *  back for a load screen or a menu. Called from the loader thread
- *  (never from DllMain, where creating a thread deadlocks), and does
- *  nothing unless cpu_no0=1 asked for it.
+/** The stage the framework is in now (SH_STAGE_*), cheap and safe to poll.
+ *  True whether or not any dial is set, and it only ever moves forwards, so
+ *  a caller can latch on the first SH_STAGE_PLAY and stay latched. This is
+ *  the framework's own reading of the start up and not a second game state:
+ *  the engine's states put the main menu and every lobby in one bucket and
+ *  do not tell the logo window from the game's own, and those two are
+ *  exactly the boundaries drawn here. */
+SH_API int      ShCpuStage(void);
+
+/** The processors the process may run on while a dial is in force, or 0
+ *  when nothing trims the set. This is the mask the affinity hooks answer
+ *  with, so a caller can place its own work inside it on purpose. */
+SH_API uint64_t ShCpuAllowedMask(void);
+
+/** How many processors the engine is told the machine has (0 = as-is).
+ *  The number the count hooks report: lower than the machine's own while a
+ *  dial trims the set. */
+SH_API unsigned ShCpuReportedCount(void);
+
+/** Be told when the stage changes: called once per change with the new
+ *  SH_STAGE_*, never with the stage already in force - at most twice in a
+ *  session, since the stages only move forwards. One slot per plugin (the
+ *  caller's module is the identity, as with ShPluginOnBlocked) and eight
+ *  plugins can subscribe; calling in with NULL clears this plugin's slot.
+ *  1 when accepted, 0 with ShLastError saying why. The callback runs on the
+ *  framework's stage thread and may call back into the framework. */
+SH_API int      ShCpuOnStageChange(ShCpuStageFn fn, void *user);
+
+/** @} */
+
+/** Internal, not a plugin API: the play-time half of the trims, started by
+ *  the loader on its own thread (never from DllMain, where creating a
+ *  thread deadlocks). It is what puts the stage thread up, and that thread
+ *  runs whether or not a dial asks for anything - the stage above is part
+ *  of the API, so it is read and reported either way.
  */
 void ShCoreFixLateStartup(void);
 
