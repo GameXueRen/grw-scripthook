@@ -477,12 +477,6 @@ void ShModSettingsStartup(void) {
     BuildPluginMenu();
     BuildLanguageRow(g_modMenu);
 
-    /* Chinese chat input (built-in): its own page under Mod settings.
-     * Registered after the rows above so it sorts right under them;
-     * ShChatStartup may not have run yet (it runs after this module),
-     * but the page reads the ini directly, so that does not matter. */
-    ShChatMenuRegister(g_modMenu);
-
     /* One hint per page is enough: these rows only act on the next
      * launch, as does the language switch. On the CPU page the note is
      * followed by the two facts about this machine that decide whether a

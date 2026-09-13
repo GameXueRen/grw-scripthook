@@ -15,8 +15,8 @@ GAMEDIR = ../..
 # <gamedir>/logs at runtime.
 
 .PHONY: all roulette fling spawner npcspawner enemyreinforce modeprobe \
-        modecallprobe blacklistsample filewatchsample crazycars freecam fov \
-        fps chaos sample skipintro docs clean
+        modecallprobe blacklistsample filewatchsample drawsample cnchat \
+        crazycars freecam fov fps chaos sample skipintro docs clean
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 
@@ -40,6 +40,24 @@ filewatchsample: $(GAMEDIR)/plugins/file_watch_sample/file_watch_sample.asi
 $(GAMEDIR)/plugins/file_watch_sample/file_watch_sample.asi: file_watch_sample.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ file_watch_sample.c -L. -lscripthook
+
+drawsample: $(GAMEDIR)/plugins/draw_sample/draw_sample.asi
+
+# The worked example docs/ui-drawing.md points at. It links the framework,
+# because the primitives and their types only the header carries. Note the
+# primitives are no-ops in this build: the overlay (ImGui over D3D11) is
+# MSVC-only, so under MinGW the plugin loads, registers and draws nothing.
+$(GAMEDIR)/plugins/draw_sample/draw_sample.asi: draw_sample.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ draw_sample.c -L. -lscripthook
+
+cnchat: $(GAMEDIR)/plugins/cnchat/cnchat.asi
+
+# In-game Chinese text input. It links the framework: the box, the input
+# session and the character collection are ShDraw* calls.
+$(GAMEDIR)/plugins/cnchat/cnchat.asi: cnchat.c scripthook.h log.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ cnchat.c -L. -lscripthook -luser32
 
 docs:
 	doxygen Doxyfile
@@ -170,7 +188,8 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
                         scripthook_reflect.c scripthook_ui.c \
                         scripthook_scene.c scripthook_uiprop.c \
                         scripthook_uiinput.c scripthook_dinput.c \
-                        scripthook_hud.c scripthook_menu.c scripthook_cnchat.c \
+                        scripthook_hud.c scripthook_menu.c \
+                        scripthook_draw.c \
                         guard.c scripthook.h log.h \
                         scripthook_corefix.c scripthook_modsettings.c \
                         forge.c scripthook_forge.c scripthook_forge_io.c \
@@ -194,7 +213,8 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
 		scripthook_reflect.c scripthook_ui.c \
 		scripthook_scene.c scripthook_uiprop.c \
 		scripthook_uiinput.c scripthook_dinput.c \
-		scripthook_hud.c scripthook_menu.c scripthook_cnchat.c guard.c \
+		scripthook_hud.c scripthook_menu.c \
+		scripthook_draw.c guard.c \
 		scripthook_corefix.c scripthook_modsettings.c \
 		forge.c scripthook_forge.c scripthook_forge_io.c \
 		scripthook_forgeprobe.c scripthook_files.c \

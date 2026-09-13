@@ -32,6 +32,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_draw.h"
 #include "log.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
@@ -70,6 +71,13 @@ static ID3D11DeviceContext* g_pd3dContext = nullptr;
 static HWND   g_hwnd = nullptr;
 static WNDPROC g_origWndProc = nullptr;
 static volatile LONG g_ready = 0;
+
+/* Set once per frame by HookPresent: is any plugin drawer registered?
+ * The window subclass reads it to decide whether the mouse should be fed
+ * to ImGui (a plugin's window has real widgets; the framework's own
+ * drawing has none).  Cached per frame so a burst of mouse messages does
+ * not take the draw registry's lock once each. */
+static volatile LONG g_drawers = 0;
 
 /* [loader] leak_probe: the 5s leak-hunting heartbeat is opt-in.
  * Resolved once on the render thread when ImGui becomes ready
@@ -342,6 +350,40 @@ static void MaybeRescale(unsigned w, unsigned h)
 
 } // namespace
 
+/* The rectangle of the last input box that was drawn (the overlay's own
+ * coordinate space, which is the window's client area - the win32
+ * backend feeds ImGui exactly that).  Published by the input box
+ * primitive while the frame draws, read on the window thread when an
+ * IME message arrives, so it is exchanged atomically rather than
+ * locked: the worst a race can do is anchor one message at the previous
+ * frame's position.  A zero width means "no box drawn yet", and the
+ * fixed spot under the 72% line is used instead - which is exactly
+ * where the framework's own box lives, so the very first composition
+ * (it can arrive before the box's first frame) still lands right. */
+static volatile LONG g_boxX = 0, g_boxY = 0, g_boxW = 0, g_boxH = 0;
+
+/* Client-space point the IME should hang off: the middle of the drawn
+ * box's bottom edge, or the old fixed spot when there is no box. */
+static void ImeAnchorClient(HWND hWnd, LONG *px, LONG *py)
+{
+    RECT rc;
+    LONG w;
+    *px = 0;
+    *py = 0;
+    if (!hWnd || !IsWindow(hWnd)) return;
+    if (!GetClientRect(hWnd, &rc)) return;
+    w = (LONG)InterlockedCompareExchange(&g_boxW, 0, 0);
+    if (w > 0) {
+        *px = (LONG)InterlockedCompareExchange(&g_boxX, 0, 0) + w / 2;
+        *py = (LONG)InterlockedCompareExchange(&g_boxY, 0, 0) +
+              (LONG)InterlockedCompareExchange(&g_boxH, 0, 0);
+        return;
+    }
+    *px = (rc.right - rc.left) / 2;
+    *py = (LONG)((rc.bottom - rc.top) * CHAT_ANCHOR_Y_RATIO)
+        + (LONG)CHAT_ANCHOR_H + (LONG)CHAT_ANCHOR_GAP;
+}
+
 static void ImeApplyAnchor(HWND hWnd)
 {
     HIMC hImc;
@@ -352,9 +394,7 @@ static void ImeApplyAnchor(HWND hWnd)
     if (!hWnd || !IsWindow(hWnd)) return;
     if (!GetClientRect(hWnd, &rc)) return;
 
-    cx = (rc.right - rc.left) / 2;
-    cy = (LONG)((rc.bottom - rc.top) * CHAT_ANCHOR_Y_RATIO)
-         + (LONG)CHAT_ANCHOR_H + (LONG)CHAT_ANCHOR_GAP;
+    ImeAnchorClient(hWnd, &cx, &cy);
 
     /* NULL bitmap = solid caret; tiny and hidden below.  Only the
      * position matters to the IME. */
@@ -396,13 +436,9 @@ static LONG g_imeAnchorY = -32000;
 
 static void ImeUpdateAnchor(void)
 {
-    RECT rc;
     POINT pt;
     if (!g_hwnd || !IsWindow(g_hwnd)) return;
-    if (!GetClientRect(g_hwnd, &rc)) return;
-    pt.x = (rc.right - rc.left) / 2;
-    pt.y = (LONG)((rc.bottom - rc.top) * CHAT_ANCHOR_Y_RATIO)
-           + (LONG)CHAT_ANCHOR_H + (LONG)CHAT_ANCHOR_GAP;
+    ImeAnchorClient(g_hwnd, &pt.x, &pt.y);
     ClientToScreen(g_hwnd, &pt);
     g_imeAnchorX = pt.x;
     g_imeAnchorY = pt.y;
@@ -522,7 +558,7 @@ static LRESULT CALLBACK ImeForeignProc(HWND h, UINT m, WPARAM w, LPARAM l)
     if (m == WM_WINDOWPOSCHANGING) {
         WINDOWPOS *wp = (WINDOWPOS *)l;
         if (wp) {
-            if (ShChatGetCandMode() == 0) {
+            if (ShDrawInputGetMode() == 0) {
                 /* Force to a point that can never be seen, and strip
                  * the show flag so it cannot appear where it asked. */
                 wp->x = -32000;
@@ -593,7 +629,7 @@ static BOOL CALLBACK ImeForeignEnum(HWND h, LPARAM lp)
      * change to the window's own thread, so this is safe from any
      * thread; the move passes through our own WM_WINDOWPOSCHANGING
      * handler, which parks it anyway in self-drawn mode. */
-    if (ShChatGetCandMode() == 0) {
+    if (ShDrawInputGetMode() == 0) {
         SetWindowPos(h, NULL, -32000, -32000, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
                      SWP_ASYNCWINDOWPOS);
@@ -688,26 +724,11 @@ static void ImeMirrorMsg(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 }
 
-/* Live while a pinyin composition or its candidate list is on
- * screen.  The chat poll thread reads this to keep its hands off
- * Enter / Esc / Backspace: during composition those keys belong to
- * the IME (shorten pinyin, commit letters, cancel), and acting on
- * them here as well is what deleted committed Chinese from the
- * buffer while Backspace was only trimming pinyin letters. */
-int ShChatComposing(void)
-{
-    int on;
-    ImeLock();
-    on = g_ime.active || g_ime.candOpen;
-    ImeUnlock();
-    return on;
-}
-
 static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    /* Chat box just opened: one IME-enable attempt per session. */
-    if (g_ready && ShChatIsOpen()) {
-        int selfDrawn = (ShChatGetCandMode() == 0); /* 0=overlay-drawn */
+    /* An input box is up: one IME-enable attempt per session. */
+    if (g_ready && ShDrawInputIsOpen()) {
+        int selfDrawn = (ShDrawInputGetMode() == 0); /* 0=overlay-drawn */
 
         if (!g_imeProbed) {
             g_imeProbed = 1;
@@ -773,27 +794,39 @@ static LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
             break;
         }
     } else {
-        /* Chat session just ended (any path: sent, cancelled, menu
+        /* Input session just ended (any path: sent, cancelled, menu
          * opened, feature switched off): put the IME stack back the
-         * way the game had it, exactly once. */
+         * way the game had it, exactly once.  The box rectangle goes
+         * with it, so the next session starts from the fixed anchor
+         * until its own first frame publishes one. */
         if (g_imeProbed) {
             ImeProbeDisable(hWnd);
             g_imeProbed = 0;
         }
         if (g_ime.active || g_ime.candOpen) ImeStateReset();
+        InterlockedExchange(&g_boxW, 0);
     }
 
-    /* The Chinese chat box consumes the keyboard while it is up:
-     * WM_CHAR/WM_IME_CHAR feed its text buffer, navigation keys are
+    /* An input box consumes the keyboard while it is up:
+     * WM_CHAR/WM_IME_CHAR feed the box's owner, navigation keys are
      * swallowed so the game's own chat field never sees them.  While
-     * the box is injecting (sending) the hook must stay active too, so
-     * the user's physical Enter keyup cannot leak through and submit
-     * early - but the injected WM_CHAR characters must fall through to
-     * the game window procedure (ShChatWndMsg returns 0 for those). */
-    if (g_ready && (ShChatIsOpen() || ShChatIsSending()) &&
-        ShChatWndMsg((uint64_t)(uintptr_t)hWnd, (uint32_t)msg,
-                     (uint64_t)wParam, (uint64_t)lParam))
+     * the owner is injecting (sending) the hook must stay active too,
+     * so the user's physical Enter keyup cannot leak through and
+     * submit early - but the injected WM_CHAR characters must fall
+     * through to the game window procedure (ShDrawInputWndMsg returns
+     * 0 for those). */
+    if (g_ready && (ShDrawInputIsOpen() || ShDrawInputSending()) &&
+        ShDrawInputWndMsg((uint64_t)(uintptr_t)hWnd, (uint32_t)msg,
+                          (uint64_t)wParam, (uint64_t)lParam))
         return 1;
+    /* A registered drawer draws a real window with real widgets, and
+     * widgets need the mouse.  These messages are only FED to ImGui,
+     * never swallowed: the game reads its look input through DirectInput
+     * and does not want the window's mouse messages either way, and
+     * swallowing them here could only break something. */
+    if (g_ready && g_drawers &&
+        msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST)
+        ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
     if (g_ready && ShMenuIsOpen() &&
         ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
         return 1;
@@ -813,6 +846,13 @@ namespace {
 ImU32 Col(uint32_t rgb, int a = 255)
 {
     return IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, a);
+}
+
+// The same colour as ImVec4, for ImGuiStyle (which keeps colours as
+// floats; only PushStyleColor takes the packed form).
+ImVec4 Col4(uint32_t rgb, int a = 255)
+{
+    return ImGui::ColorConvertU32ToFloat4(Col(rgb, a));
 }
 
 // Text layout helpers.
@@ -1021,12 +1061,25 @@ void RenderMenu(const ShMenuView* v)
     }
 }
 
-// Chinese chat input box: a single-line field, lower middle.
-// The text comes from scripthook_cnchat.c (already UTF-8); this
-// only draws the snapshot plus a blinking caret at the end.
-// Larger bold font for readability: the chat UI uses g_chatFont
-// (msyh bold) and a 24px body size.  All metrics are the scaled
-// globals from the top-of-file block (CHAT_*, CAND_*).
+// The input box primitive: a single-line field with the IME's
+// composition string, a blinking caret and (in self-drawn mode) the
+// candidate list.  Larger bold font for readability: the chat UI uses
+// g_chatFont (msyh bold) and a 24px body size.  All metrics are the
+// scaled globals from the top-of-file block (CHAT_*, CAND_*).
+//
+// This is BOTH the framework's chat box and the widget a plugin gets
+// through ShDrawInputBox().  That is deliberate: the framework's own
+// chat is the only box with a year of field mileage behind it, so
+// keeping one implementation is what makes the primitive provable -
+// while the chat box looks and behaves exactly as it did, a plugin's
+// box does too.  Everything that is the box: panel, text, composition,
+// caret, candidates, hint, and the IME anchor that follows the drawn
+// rectangle rather than a fixed ratio.
+//
+// It draws at the CURRENT CURSOR position, so the caller decides where
+// the box lives (the chat pins a frameless window at 72% of the screen;
+// a plugin draws it wherever its window's cursor happens to be), and it
+// advances the cursor past the box.
 
 /* Snapshot the IME state for one frame of drawing. */
 static void ImeSnapshot(ImeState* out)
@@ -1037,17 +1090,19 @@ static void ImeSnapshot(ImeState* out)
     ImeUnlock();
 }
 
-void RenderChat(const ShChatView* v)
+int DrawInputBoxAt(const char *id, const char *text, const char *hint,
+                   int focused, ShDrawInput *out)
 {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     // Chat text uses the bold CJK font (falls back to the default).
     ImFont* font = g_chatFont ? g_chatFont : ImGui::GetFont();
     const float fs = CHAT_FS;
-    const float wpx = ImGui::GetIO().DisplaySize.x;
     const float hpx = ImGui::GetIO().DisplaySize.y;
     const float s = g_uiScale;   // for the few inline pixel values
+    const ImVec2 cur = ImGui::GetCursorScreenPos();
+    const char* txt = text ? text : "";
 
-    if (!v || !v->open) return;
+    if (out) out->composing = 0;
 
     /* IME composition string (the pinyin/characters not committed yet)
      * renders right after the confirmed text so the user sees both.
@@ -1055,29 +1110,31 @@ void RenderChat(const ShChatView* v)
      * the system IME draws its composition and candidate UI itself. */
     ImeState ime;
     ImeSnapshot(&ime);
-    bool selfDrawn = (ShChatGetCandMode() == 0);
+    bool selfDrawn = (ShDrawInputGetMode() == 0);
     const char* comp = (selfDrawn && ime.active) ? ime.comp : "";
+    const bool composing = (ime.active || ime.candOpen) ? true : false;
+    if (out) out->composing = composing ? 1 : 0;
 
     // Width hugs text + composition, capped.
-    ImVec2 tsz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, v->text);
+    ImVec2 tsz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, txt);
     ImVec2 csz = comp[0] ? font->CalcTextSizeA(fs, FLT_MAX, 0.0f, comp)
                          : ImVec2(0, 0);
     float tw = tsz.x + csz.x + CHAT_PAD * 2.0f;
     if (tw < 240.0f * s) tw = 240.0f * s;
     if (tw > CHAT_W_MAX) tw = CHAT_W_MAX;
 
-    float y = hpx * 0.72f;
-    float x = (wpx - tw) * 0.5f;
+    float y = cur.y;
+    float x = cur.x;
 
     // Panel: translucent rounded quad centred horizontally.
     dl->AddRectFilled(ImVec2(x, y), ImVec2(x + tw, y + CHAT_H),
                       IM_COL32(0, 0, 0, 210), 6.0f * s);
 
     // Hint line above the field text (same bold font, smaller size).
-    if (v->hint[0]) {
+    if (hint && hint[0]) {
         dl->AddText(font, HINT_FS,
                     ImVec2(x + CHAT_PAD, y - HINT_FS - 10.0f * s),
-                    Col(0x8CF0FFu), v->hint);
+                    Col(0x8CF0FFu), hint);
     }
 
     // Text sits vertically centred in the box by its TOP (AddText's
@@ -1086,7 +1143,7 @@ void RenderChat(const ShChatView* v)
     float ttop = TextTopForRow(font, fs, y, CHAT_H);
     float tlh  = TextLineHeight(font, fs);
     dl->AddText(font, fs, ImVec2(x + CHAT_PAD, ttop),
-                Col(0xF0F0F0u), v->text);
+                Col(0xF0F0F0u), txt);
 
     // Composition string in a brighter tone right after the text.
     float compX = x + CHAT_PAD + tsz.x;
@@ -1124,7 +1181,7 @@ void RenderChat(const ShChatView* v)
         if (cw > CHAT_W_MAX) cw = CHAT_W_MAX;
 
         float cy = y + CHAT_H + 8.0f * s;
-        float cx0 = (wpx - cw) * 0.5f;
+        float cx0 = x + (tw - cw) * 0.5f;   // centred on the box
         float chh = CAND_ROW * (float)n + 10.0f * s;
         if (cy + chh > hpx - 8.0f * s)
             cy = y - chh - 8.0f * s; /* flip above */
@@ -1158,9 +1215,331 @@ void RenderChat(const ShChatView* v)
                         ime.cand[i]);
         }
     }
+
+    /* Anchor the input method under the box that is actually on screen:
+     * the IME's own candidate/composition windows and the system caret
+     * both hang off this point.  Only a focused box publishes it - an
+     * unfocused one is just a drawing - and the window thread reads it
+     * while composing, hence plain atomically exchanged coordinates
+     * rather than a lock (they are cleared when the session ends). */
+    if (focused) {
+        InterlockedExchange(&g_boxX, (LONG)x);
+        InterlockedExchange(&g_boxY, (LONG)y);
+        InterlockedExchange(&g_boxW, (LONG)tw);
+        InterlockedExchange(&g_boxH, (LONG)CHAT_H);
+    }
+
+    /* The box is drawn on the foreground list, so it still has to claim
+     * its layout slot: the frameless window that holds it hugs this, and
+     * a plugin that draws more after the box continues underneath it. */
+    ImGui::Dummy(ImVec2(tw, CHAT_H));
+    return 1;
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// The plugin drawing layer's renderer half: the primitives a drawer's
+// callback calls, and the window each drawer is wrapped in.  The registry
+// is C (scripthook_draw.c) and forwards to the vtable below, which this
+// file publishes once ImGui is up - see scripthook_draw.h for why the
+// layer is split that way, and @defgroup draw in scripthook.h for the
+// contract a plugin sees.
+// ---------------------------------------------------------------------------
+
+/* Set while a drawer's callback runs.  The primitives draw at the cursor
+ * of the drawer's own window, so they only mean anything inside one; a
+ * call from anywhere else is a plugin's mistake worth one log line
+ * rather than an ImGui assert. */
+static int g_inDraw = 0;
+static int g_outsideDrawLogged = 0;
+static int g_drawFrameless = 0;
+static int g_fontPushes = 0;
+
+static int InDraw(void)
+{
+    if (g_inDraw) return 1;
+    if (!g_outsideDrawLogged) {
+        g_outsideDrawLogged = 1;
+        OvlLog("draw: a primitive was called outside a drawer callback - "
+               "ignored (draw from the callback ShDrawAdd registered)");
+    }
+    return 0;
+}
+
+static int DrawBegin(const char *name, const ShDrawOpts *opts)
+{
+    ImGuiWindowFlags f = ImGuiWindowFlags_NoSavedSettings;
+    ShDrawOpts o;
+    memset(&o, 0, sizeof(o));
+    if (opts) o = *opts;
+
+    if (o.flags & SH_DRAW_FRAMELESS) {
+        /* The shape the framework's own text box uses: no decoration,
+         * no background, and the window hugs whatever is drawn in it. */
+        f |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+             ImGuiWindowFlags_NoScrollWithMouse |
+             ImGuiWindowFlags_NoBackground |
+             ImGuiWindowFlags_AlwaysAutoResize |
+             ImGuiWindowFlags_NoNav |
+             ImGuiWindowFlags_NoFocusOnAppearing |
+             ImGuiWindowFlags_NoBringToFrontOnFocus;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        g_drawFrameless = 1;
+    } else {
+        f |= ImGuiWindowFlags_AlwaysAutoResize;
+        if (o.flags & SH_DRAW_NO_MOVE)   f |= ImGuiWindowFlags_NoMove;
+        if (o.flags & SH_DRAW_NO_RESIZE) f |= ImGuiWindowFlags_NoResize;
+        ImGui::SetNextWindowSize(ImVec2(360.0f * g_uiScale, 0.0f),
+                                 ImGuiCond_FirstUseEver);
+        g_drawFrameless = 0;
+    }
+
+    /* Where it first appears.  A plugin that wants a screen anchor rather
+     * than a pixel offset asks for it with the two POS_* flags - that is
+     * how the framework's own box sits at the centre of the 72% line
+     * without knowing the resolution, and the pivot keeps it centred
+     * even though the width depends on the drawer's content. */
+    if (o.flags & (SH_DRAW_POS_CENTER_X | SH_DRAW_POS_Y_RATIO)) {
+        ImGuiIO& io = ImGui::GetIO();
+        float px = (o.flags & SH_DRAW_POS_CENTER_X) ? io.DisplaySize.x * 0.5f
+                                                   : o.x;
+        float py = (o.flags & SH_DRAW_POS_Y_RATIO) ? io.DisplaySize.y * o.y
+                                                   : o.y;
+        ImGui::SetNextWindowPos(ImVec2(px, py), ImGuiCond_Always,
+                                ImVec2((o.flags & SH_DRAW_POS_CENTER_X)
+                                           ? 0.5f : 0.0f,
+                                       0.0f));
+    } else if (o.x > 0.0f || o.y > 0.0f) {
+        ImGui::SetNextWindowPos(ImVec2(o.x, o.y), ImGuiCond_FirstUseEver);
+    }
+
+    /* The close box writes back through p_open: the drawer keeps its
+     * slot but stops being called until ShDrawShow() turns it on again.
+     * A first-use position that the user then drags away is remembered
+     * by ImGui for the session; the framework deliberately keeps no
+     * imgui.ini on disk. */
+    {
+        bool open = ShDrawShown(name) ? true : false;
+        bool visible = ImGui::Begin(name, &open, f);
+        if (!open) {
+            ShDrawSetShown(name, 0);
+            OvlLog("draw: '%s' closed by the user (ShDrawShow puts it back)",
+                   name);
+        }
+        g_inDraw = 1;
+        g_fontPushes = 0;
+        if (g_drawFrameless) return 1;   /* no chrome: nothing can collapse */
+        return visible ? 1 : 0;
+    }
+}
+
+static void DrawEnd(void)
+{
+    /* A callback that pushed a font without popping it must not shift the
+     * stack of whatever draws next, so the layer balances it here. */
+    while (g_fontPushes > 0) {
+        ImGui::PopFont();
+        g_fontPushes--;
+    }
+    g_inDraw = 0;
+    ImGui::End();
+    if (g_drawFrameless) {
+        ImGui::PopStyleVar();
+        g_drawFrameless = 0;
+    }
+}
+
+static float DrawScaleImpl(void)
+{
+    return g_uiScale;
+}
+
+static void DrawTextImpl(const char *utf8)
+{
+    if (!InDraw() || !utf8) return;
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          ImGui::ColorConvertU32ToFloat4(Col(SH_DRAW_COL_TEXT)));
+    ImGui::TextUnformatted(utf8);
+    ImGui::PopStyleColor();
+}
+
+static void DrawTextColoredImpl(const char *utf8, unsigned rgb, int a)
+{
+    if (!InDraw() || !utf8) return;
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          ImGui::ColorConvertU32ToFloat4(Col(rgb, a)));
+    ImGui::TextUnformatted(utf8);
+    ImGui::PopStyleColor();
+}
+
+static void DrawTextWrappedImpl(const char *utf8)
+{
+    if (!InDraw() || !utf8) return;
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          ImGui::ColorConvertU32ToFloat4(Col(SH_DRAW_COL_TEXT)));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(utf8);
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+}
+
+static void DrawHintImpl(const char *utf8)
+{
+    if (!InDraw() || !utf8) return;
+    // Same face and tone as the menu's own control hints.
+    ImGui::PushFont(g_chatFont ? g_chatFont : ImGui::GetFont(), MENU_HINT_FS);
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          ImGui::ColorConvertU32ToFloat4(Col(SH_DRAW_COL_DIM)));
+    ImGui::TextUnformatted(utf8);
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+}
+
+static void DrawSpacingImpl(void)   { if (InDraw()) ImGui::Spacing(); }
+static void DrawSameLineImpl(void)  { if (InDraw()) ImGui::SameLine(); }
+static void DrawSeparatorImpl(void) { if (InDraw()) ImGui::Separator(); }
+
+/* A filled rectangle of an explicit size: the shape is reserved with a
+ * Dummy and then drawn over it, so the cursor ends up past it and the
+ * content-hugging window measures it like any other item. */
+static void DrawFill(float w, float h, unsigned rgb, int a, float rounding)
+{
+    if (!InDraw()) return;
+    if (w <= 0.0f) w = 1.0f;
+    if (h <= 0.0f) h = 1.0f;
+    ImGui::Dummy(ImVec2(w, h));
+    ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetItemRectMin(),
+                                              ImGui::GetItemRectMax(),
+                                              Col(rgb, a), rounding);
+}
+
+static void DrawPanelImpl(float w, float h, unsigned rgb, int a)
+{
+    DrawFill(w, h, rgb, a, 6.0f * g_uiScale);
+}
+
+static void DrawRectImpl(float w, float h, unsigned rgb, int a)
+{
+    DrawFill(w, h, rgb, a, 0.0f);
+}
+
+static int DrawButtonImpl(const char *label)
+{
+    if (!InDraw() || !label) return 0;
+    return ImGui::Button(label) ? 1 : 0;
+}
+
+static int DrawToggleImpl(const char *label, int *v)
+{
+    bool b;
+    if (!InDraw() || !label || !v) return 0;
+    b = (*v != 0);
+    if (ImGui::Checkbox(label, &b)) {
+        *v = b ? 1 : 0;
+        return 1;
+    }
+    return 0;
+}
+
+static int DrawNumberImpl(const char *label, int *v, int step, int mn, int mx)
+{
+    int before;
+    if (!InDraw() || !label || !v) return 0;
+    if (mn > mx) { int t = mn; mn = mx; mx = t; }
+    if (step < 1) step = 1;
+    before = *v;
+    ImGui::SetNextItemWidth(120.0f * g_uiScale);
+    /* ImGui's field commits on Enter or when it loses focus, which is
+     * what makes typing a number possible at all; the clamp is applied
+     * to whatever came out. */
+    ImGui::InputInt(label, v, step, step * 10);
+    if (*v < mn) *v = mn;
+    if (*v > mx) *v = mx;
+    return (*v != before) ? 1 : 0;
+}
+
+static int DrawSliderImpl(const char *label, float *v, float mn, float mx)
+{
+    if (!InDraw() || !label || !v) return 0;
+    ImGui::SetNextItemWidth(160.0f * g_uiScale);
+    return ImGui::SliderFloat(label, v, mn, mx) ? 1 : 0;
+}
+
+static int DrawListImpl(const char *label, int *idx, const char *const *items,
+                        int n)
+{
+    if (!InDraw() || !label || !idx || !items || n <= 0) return 0;
+    if (*idx < 0) *idx = 0;
+    if (*idx >= n) *idx = n - 1;
+    return ImGui::Combo(label, idx, items, n) ? 1 : 0;
+}
+
+static void DrawPushFontImpl(int which)
+{
+    if (!InDraw()) return;
+    if (which == SH_DRAW_FONT_BOLD)
+        ImGui::PushFont(g_chatFont ? g_chatFont : ImGui::GetFont(), MENU_FS);
+    else
+        ImGui::PushFont(NULL, MENU_FS);   /* keep the face, frame body size */
+    g_fontPushes++;
+}
+
+static void DrawPopFontImpl(void)
+{
+    if (!InDraw()) return;
+    if (g_fontPushes > 0) {
+        ImGui::PopFont();
+        g_fontPushes--;
+    }
+}
+
+static int DrawInputBoxImpl(const char *id, const char *text, const char *hint,
+                            int focused, ShDrawInput *out)
+{
+    if (!InDraw()) return 0;
+    return DrawInputBoxAt(id, text, hint, focused, out);
+}
+
+/* Live while a pinyin composition or its candidate list is on screen.
+ * A box's owner reads it to keep its hands off Enter / Esc / Backspace:
+ * during composition those keys belong to the IME (shorten pinyin,
+ * commit its letters, cancel it), and acting on them as well is what
+ * deleted committed Chinese from the buffer while Backspace was only
+ * trimming pinyin letters.  Callable from any thread. */
+static int DrawComposingImpl(void)
+{
+    int on;
+    ImeLock();
+    on = g_ime.active || g_ime.candOpen;
+    ImeUnlock();
+    return on;
+}
+
+static const ShDrawVtbl g_drawVtbl = {
+    DrawBegin,
+    DrawEnd,
+    DrawScaleImpl,
+    DrawTextImpl,
+    DrawTextColoredImpl,
+    DrawTextWrappedImpl,
+    DrawHintImpl,
+    DrawSpacingImpl,
+    DrawSameLineImpl,
+    DrawSeparatorImpl,
+    DrawPanelImpl,
+    DrawRectImpl,
+    DrawButtonImpl,
+    DrawToggleImpl,
+    DrawNumberImpl,
+    DrawSliderImpl,
+    DrawListImpl,
+    DrawPushFontImpl,
+    DrawPopFontImpl,
+    DrawInputBoxImpl,
+    DrawComposingImpl
+};
 
 // ---------------------------------------------------------------------------
 // font loading: a CJK-capable system font so Chinese menu labels
@@ -1242,12 +1621,46 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
             ImGuiStyle& st = ImGui::GetStyle();
             st.WindowRounding = 6.0f;
             st.WindowBorderSize = 0.0f;
+            /* A plugin's window is made of ImGui widgets (the draw layer),
+             * so give those the menu's palette instead of ImGui's default
+             * grey - a plugin then matches the framework without having to
+             * guess at colours.  The framework's own drawing never reads
+             * these: the menu, the chat box and the toasts all draw with
+             * the foreground list and explicit colours. */
+            st.FrameRounding = 4.0f;
+            st.GrabRounding  = 4.0f;
+            st.WindowTitleAlign = ImVec2(0.0f, 0.5f);
+            st.Colors[ImGuiCol_WindowBg]         = Col4(0x000000u, 204);
+            st.Colors[ImGuiCol_TitleBg]          = Col4(0x28465Au, 230);
+            st.Colors[ImGuiCol_TitleBgActive]    = Col4(0x28465Au, 255);
+            st.Colors[ImGuiCol_TitleBgCollapsed] = Col4(0x1A2A36u, 230);
+            st.Colors[ImGuiCol_Text]             = Col4(SH_DRAW_COL_TEXT);
+            st.Colors[ImGuiCol_FrameBg]          = Col4(0xFFFFFFu, 18);
+            st.Colors[ImGuiCol_FrameBgHovered]   = Col4(0xFFFFFFu, 30);
+            st.Colors[ImGuiCol_FrameBgActive]    = Col4(0xFFFFFFu, 42);
+            st.Colors[ImGuiCol_Button]           = Col4(0x28465Au, 200);
+            st.Colors[ImGuiCol_ButtonHovered]    = Col4(0x35607Au, 230);
+            st.Colors[ImGuiCol_ButtonActive]     = Col4(0x8CF0FFu, 180);
+            st.Colors[ImGuiCol_Header]           = Col4(0x28465Au, 200);
+            st.Colors[ImGuiCol_HeaderHovered]    = Col4(0x35607Au, 230);
+            st.Colors[ImGuiCol_HeaderActive]     = Col4(0x8CF0FFu, 160);
+            st.Colors[ImGuiCol_CheckMark]        = Col4(SH_DRAW_COL_HI);
+            st.Colors[ImGuiCol_SliderGrab]       = Col4(SH_DRAW_COL_HI);
+            st.Colors[ImGuiCol_SliderGrabActive] = Col4(0xFFFFFFu);
+            st.Colors[ImGuiCol_Separator]        = Col4(0x8C9BA8u, 90);
+            st.Colors[ImGuiCol_ScrollbarBg]      = Col4(0x000000u, 120);
 
             if (ImGui_ImplWin32_Init(g_hwnd) &&
                 ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dContext))
             {
                 LoadCjkFont();
                 ShMenuSetOverlayReady(1);
+                /* Hand the primitives to the C registry: from here a
+                 * plugin's drawer callback can draw.  Before this call
+                 * (and on a build without the overlay) every primitive
+                 * is a no-op, which is what lets the same plugin source
+                 * run under both toolchains. */
+                ShDrawSetVtbl(&g_drawVtbl);
                 g_leakProbe = ShConfigGetBool("loader", "leak_probe", 0)
                             ? 1 : 0;
                 InterlockedExchange(&g_ready, 1);
@@ -1280,8 +1693,14 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
 
     {
         bool drawMenu = ShMenuIsOpen() ? true : false;
-        bool drawChat = drawMenu ? false
-                                 : (ShChatIsOpen() ? true : false);
+        /* A registered drawer draws every frame, with or without the
+         * menu: its window is the drawer's own and it decides what to put
+         * in it.  The framework's own chat box is one of them now, so
+         * there is no chat special case left in this file.  The answer
+         * also feeds the window subclass, which only feeds the mouse to
+         * ImGui when such a window exists. */
+        bool drawPlugins = ShDrawWantFrame() ? true : false;
+        InterlockedExchange(&g_drawers, drawPlugins ? 1 : 0);
         /* Status toasts. Taking the snapshot is also what retires a
          * line whose time is up, so it is taken every frame, before
          * the "is ImGui up" test - otherwise a toast said while the
@@ -1292,11 +1711,13 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
          * status window an IME creates in our process.  This runs on
          * the render thread: EnumWindows + SetWindowLongPtrW here never
          * blocks the game's message pump (unlike on the WndProc thread). */
-        if (drawChat) {
+        if (ShDrawInputIsOpen()) {
             /* Periodically grab any candidate / status window an IME
              * creates in this process and steer it according to the
-             * candidate mode (park off screen, or follow the chat
-             * anchor - see ImeForeignProc). */
+             * candidate mode (park off screen, or follow the anchor -
+             * see ImeForeignProc).  Keyed off the input session, not off
+             * the drawing: the IME is up while a box owns the keyboard,
+             * whether or not the box is on screen this frame. */
             static DWORD lastImeScan = 0;
             DWORD now = GetTickCount();
             if ((int)(now - lastImeScan) > 120) {
@@ -1304,7 +1725,7 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                 ImeHideForeignWindows();
             }
         }
-        if (g_ready && (drawMenu || drawChat || toastN > 0))
+        if (g_ready && (drawMenu || toastN > 0 || drawPlugins))
         {
             // Bind the swapchain back buffer as the render target so
             // the overlay is drawn on the surface that gets
@@ -1352,14 +1773,15 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                                     (float)desc.BufferDesc.Height);
             ImGui::NewFrame();
 
+            /* The plugin layer first: a drawer's window is an ordinary
+             * ImGui window, while the menu, the chat box and the toasts
+             * draw on the foreground list and so stay on top of it. */
+            ShDrawFrame();
+
             if (drawMenu) {
                 ShMenuView v;
                 ShMenuCaptureView(&v);
                 RenderMenu(&v);
-            } else if (drawChat) {
-                ShChatView v;
-                ShChatCapture(&v);
-                RenderChat(&v);
             }
             if (toastN > 0) RenderToasts(toasts, toastN);
 

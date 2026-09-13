@@ -1070,64 +1070,265 @@ void ShMenuCaptureView(ShMenuView *v);
 void ShMenuSetOverlayReady(int ready);
 
 /** @} */
-/** @defgroup cnchat Chinese chat input
- *  In-game Chinese text input: the game's own chat box cannot take
- *  IME composition, so this built-in module shows an ImGui input
- *  box and sends the finished text into the game's chat field by
- *  PostMessage WM_CHAR (the method verified to work on GRW by the
- *  external GRW-CNChat AutoHotkey tool).  The game window opens its
- *  chat box when the module injects the chat hotkey ("T"); while the
- *  ImGui box is up the game's keyboard is captured so the two never
- *  fight.
+/** @defgroup draw Plugin drawing
+ *  A plugin's own window inside the game's overlay, drawn by the
+ *  plugin's own code.
+ *
+ *  A plugin registers one callback by name (ShDrawAdd) and is called
+ *  once per frame, on the render thread, inside an ImGui window titled
+ *  with that name.  Inside the callback it draws with the primitives
+ *  below - text, panels, buttons, toggles, numbers, sliders, a text
+ *  box - using the same fonts, colours and resolution-scaled metrics as
+ *  the framework's own menu, so a plugin's UI looks like it belongs.
+ *  Nothing registered means nothing drawn and nothing paid: the layer is
+ *  a single loop over an empty table.
+ *
+ *  The primitives are implemented by the overlay (ImGui lives there),
+ *  but they are reached through a plain C ABI and a table of function
+ *  pointers - ImGui is NOT part of the plugin API, so a plugin is
+ *  ordinary C, links the import library (or GetProcAddress) and needs no
+ *  C++ at all.  When the framework is built without the overlay - the
+ *  MinGW chain has no D3D11 or ImGui - every primitive is a safe no-op
+ *  and ShDrawReady() returns 0, so the same plugin source works in both
+ *  builds.
+ *
+ *  The input box deserves its own paragraph, because the split of work
+ *  is deliberate.  The framework owns the CHARACTERS and the IME
+ *  session: the game's window is the only place a system IME can deliver
+ *  composed text (it arrives as WM_CHAR / WM_IME_CHAR while the box is
+ *  open), so the framework collects those, gives them to the owner
+ *  through ShDrawInputTake(), and owns the composition string, the
+ *  candidate list, the candidate-window anchoring and the "text is being
+ *  composed, keep your hands off Enter / Esc / Backspace" test
+ *  (ShDrawInputComposing).  The OWNER owns the buffer: it appends what
+ *  ShDrawInputTake() hands it, deletes, pastes and decides what Enter
+ *  means.  The framework never edits text and never interprets a command
+ *  key, so there is exactly one writer per byte, and hotkeys and pulsing
+ *  keys stay where the game's input model needs them - polled by the
+ *  owner, not read out of the window's message queue.
+ *
+ *  The contract, in full:
+ *   - One callback per frame, on the render thread, only while the
+ *     overlay is up.  It runs on the game's Present path, so it must not
+ *     block: no sleeps, no waiting on another thread, no I/O.  Drawing
+ *     only.
+ *   - Registration and ShDrawInput* may be called from any thread; the
+ *     callback is the only part that is render-thread bound.
+ *   - A drawer at the end of the frame is not drawn; a drawer registered
+ *     during one starts on the next.
+ *   - Sixteen drawers maximum, names up to 47 characters.  A seventeenth
+ *     is refused with a log line rather than falling back silently.
+ *   - Window positions and sizes are remembered for the session (the
+ *     framework deliberately keeps no imgui.ini on disk).  Removing the
+ *     drawer with ShDrawDel() removes the window with it; closing it with
+ *     its own close box only hides it, and ShDrawShow() brings it back.
+ *   - The layer will not protect the game from a plugin that crashes in
+ *     its callback - it runs on the render thread.  Keep it trivial.
  *  @{ */
 
-#define SH_CHAT_TEXT_MAX 512
+/** Current UI scale, 1.0 = the 1080p baseline.  The primitives already
+ *  scale themselves; this is for a plugin that wants to lay out custom
+ *  pixel values (a canvas, an image, manual spacing) against the same
+ *  factor the menu uses.  Falls back to 1.0 while no renderer is up. */
+SH_API float ShDrawScale(void);
+/** Is the overlay attached and drawing?  0 on a build without the
+ *  overlay, and for the first frames before ImGui comes up.  A plugin
+ *  that only draws needs no test - the primitives are no-ops - but one
+ *  that wants to skip work can ask. */
+SH_API int   ShDrawReady(void);
 
-/** One frame of the chat input box, captured for the overlay. */
-typedef struct ShChatView {
-    int   open;                     /**< input box visible           */
-    int   phase;                    /**< 0 idle 1 typing 2 sending   */
-    char  text[SH_CHAT_TEXT_MAX];   /**< current text (UTF-8)        */
-    char  hint[96];                 /**< status / hint line          */
-} ShChatView;
+/** A drawer's callback.  `user` is whatever was passed to ShDrawAdd. */
+typedef void (*ShDrawFn)(void *user);
 
-/** Internal: start the chat thread (loader calls once). */
-void ShChatStartup(void);
-/** Internal: is the chat input box on screen right now? */
-int  ShChatIsOpen(void);
-/** Internal: true while the box is injecting text into the native chat
- *  field.  The window hook must keep swallowing the user's physical
- *  keys during this window - a leaked Enter keyup would make the game
- *  submit before the injection finished (tail truncation). */
-int  ShChatIsSending(void);
-/** Internal: capture a frame for the overlay renderer. */
-void ShChatCapture(ShChatView *out);
-/** Internal: drop the input box (menu opened over it, etc). */
-void ShChatClose(void);
-/** Internal: feed one window message from the subclassed game window
- *  while the box is open.  Called by the overlay's SubWndProc for
- *  keyboard messages; return 1 when consumed (game must not see it).
- *  Text arrives as WM_CHAR / WM_IME_CHAR so the system IME feeds the
- *  box exactly like it would a native Edit. */
-int  ShChatWndMsg(uint64_t hwnd, uint32_t msg,
-                  uint64_t wp, uint64_t lp);
-/** Internal: true while an IME composition (pinyin) or its candidate
- *  list is live on the game window.  The chat poll thread must leave
- *  Enter / Esc / Backspace to the IME in that state - they edit the
- *  composition, not the committed text buffer. */
-int  ShChatComposing(void);
+/** SH_DRAW_FRAMELESS - no title bar, no background, no move or resize,
+ *  and the window hugs its content: this is the shape the framework's own
+ *  text box uses, and what a HUD-style panel wants.
+ *  SH_DRAW_NO_MOVE / SH_DRAW_NO_RESIZE - keep the title bar but pin the
+ *  position or the size.
+ *  SH_DRAW_POS_CENTER_X - centre the window horizontally on the screen.
+ *  SH_DRAW_POS_Y_RATIO - read `y` as a fraction of the screen height
+ *  (0.72 is the line the framework's own text box sits on) instead of
+ *  scaled pixels.
+ *  The last two together are "the classic box spot": a plugin cannot work
+ *  that out for itself without knowing the resolution, and both a
+ *  chat-style box and a readout pinned to a screen edge want it.
+ *  The rest of the window behaves like any other: draggable by its title
+ *  bar, collapsible, and closable (which only hides it - see
+ *  ShDrawShow). */
+enum {
+    SH_DRAW_FRAMELESS    = 0x01,
+    SH_DRAW_NO_MOVE      = 0x02,
+    SH_DRAW_NO_RESIZE    = 0x04,
+    SH_DRAW_POS_CENTER_X = 0x08,
+    SH_DRAW_POS_Y_RATIO  = 0x10
+};
 
-/** Internal: chat feature runtime configuration (mod settings page).
- *  Enabled defaults off; the start key must match the game's own text
- *  chat key; candMode 0 = overlay-drawn candidate window (default),
- *  1 = the input method's own candidate window. */
-void ShChatMenuRegister(uint32_t parent);
-int  ShChatGetEnabled(void);
-void ShChatSetEnabled(int on);
-int  ShChatGetStartKey(void);
-void ShChatSetStartKey(int vk);
-int  ShChatGetCandMode(void);
-void ShChatSetCandMode(int mode);
+/** How a drawer's window should behave.  `x`/`y` are where it first
+ *  appears - scaled pixels, or a screen-centre line and a height fraction
+ *  with SH_DRAW_POS_CENTER_X / SH_DRAW_POS_Y_RATIO (0 = let the overlay
+ *  pick); after that the user's own placement wins for the rest of the
+ *  session. */
+typedef struct ShDrawOpts {
+    int   flags;   /**< SH_DRAW_* above                          */
+    float x, y;    /**< first position, 0 = overlay default      */
+} ShDrawOpts;
+
+/** Named colours from the framework's own palette, so a plugin's window
+ *  matches the menu instead of guessing. */
+enum {
+    SH_DRAW_COL_TEXT  = 0xD2D2D2,  /**< body text                  */
+    SH_DRAW_COL_DIM   = 0x8C9BA8,  /**< hints and secondary lines  */
+    SH_DRAW_COL_HI    = 0x8CF0FF,  /**< highlight / selection      */
+    SH_DRAW_COL_WARN  = 0xFFD25A,  /**< titles and warnings        */
+    SH_DRAW_COL_GOOD  = 0xA0E6A0,  /**< confirmations              */
+    SH_DRAW_COL_PANEL = 0x000000   /**< window / panel background  */
+};
+
+/** Register a drawer: `name` is the window title and the key for
+ *  ShDrawDel; `fn` is called once per frame on the render thread.  A
+ *  second call with a name already registered replaces its callback
+ *  rather than adding a slot.  Returns 0 if the name is empty, longer
+ *  than 47 characters, the callback is NULL, or all sixteen slots are
+ *  taken - each of those is logged. */
+SH_API int ShDrawAdd(const char *name, ShDrawFn fn, void *user);
+/** Same, with window options (see ShDrawOpts). */
+SH_API int ShDrawAddEx(const char *name, ShDrawFn fn, void *user,
+                       const ShDrawOpts *opts);
+/** Drop a drawer and its window.  Returns 0 if there was no such name.
+ *  Safe to call from inside a drawer's own callback, and safe to call
+ *  for a name that was never registered. */
+SH_API int ShDrawDel(const char *name);
+/** How many drawers are registered (visible or hidden). */
+SH_API int ShDrawCount(void);
+/** Hide or show a drawer's window without unregistering it.  A hidden
+ *  drawer is not called at all.  Returns 0 if there was no such name. */
+SH_API int ShDrawShow(const char *name, int on);
+/** Is that drawer's window visible?  0 for a name that is not
+ *  registered.  A drawer whose own close box the user clicked reads 0
+ *  here until ShDrawShow() brings it back. */
+SH_API int ShDrawShown(const char *name);
+
+/** Fonts for ShDrawPushFont.  DEFAULT is the CJK-capable system font
+ *  the whole overlay uses; BOLD is the heavier face the menu titles and
+ *  the text box are drawn with (and falls back to DEFAULT when the
+ *  system has no bold face).  The size is the frame's own scaled body
+ *  size - the primitives scale, so plugins do not. */
+enum {
+    SH_DRAW_FONT_DEFAULT = 0,
+    SH_DRAW_FONT_BOLD    = 1
+};
+/** Push / pop the font.  Everything drawn between the two calls uses
+ *  it; pops must be balanced (the renderer restores the stack at the end
+ *  of every callback regardless). */
+SH_API void ShDrawPushFont(int which);
+SH_API void ShDrawPopFont(void);
+
+/** One line of text at the cursor. */
+SH_API void ShDrawText(const char *utf8);
+/** One line of text in a chosen colour (0xRRGGBB, alpha 0-255). */
+SH_API void ShDrawTextColored(const char *utf8, unsigned rgb, int a);
+/** Text wrapped to the window's width. */
+SH_API void ShDrawTextWrapped(const char *utf8);
+/** A small dim line, the way the menu shows its control hints. */
+SH_API void ShDrawHint(const char *utf8);
+
+/** Vertical gap, next widget on the same line, horizontal rule. */
+SH_API void ShDrawSpacing(void);
+SH_API void ShDrawSameLine(void);
+SH_API void ShDrawSeparator(void);
+
+/** A filled rounded panel / a plain filled rectangle of that size,
+ *  advancing the cursor past it.  The colour is an 0xRRGGBB + alpha
+ *  pair like ShDrawTextColored; the panel uses the overlay's own corner
+ *  rounding. */
+SH_API void ShDrawPanel(float w, float h, unsigned rgb, int a);
+SH_API void ShDrawRect(float w, float h, unsigned rgb, int a);
+
+/** A button.  Returns 1 on the frame it is clicked. */
+SH_API int ShDrawButton(const char *label);
+/** A checkbox bound to *v (any non-zero is on).  Returns 1 when the user
+ *  flips it; *v is updated. */
+SH_API int ShDrawToggle(const char *label, int *v);
+/** An integer field with +/- steps, clamped to [mn, mx].  Returns 1 when
+ *  it changed. */
+SH_API int ShDrawNumber(const char *label, int *v, int step, int mn, int mx);
+/** A float slider clamped to [mn, mx].  Returns 1 when it changed. */
+SH_API int ShDrawSlider(const char *label, float *v, float mn, float mx);
+/** A drop-down of `n` NUL-terminated labels; *idx is the selection.
+ *  Returns 1 when it changed. */
+SH_API int ShDrawList(const char *label, int *idx, const char *const *items,
+                      int n);
+
+/** Start an input session for the box called `id`: from here the
+ *  framework collects the characters the game window receives and the
+ *  IME session belongs to this box.  Only one session exists at a time -
+ *  opening one while another is open moves it.  Returns 0 on a bad id. */
+SH_API int  ShDrawInputOpen(const char *id);
+/** End the input session (the box is gone, or the game is about to
+ *  inject the text into its own field).  Any undrained characters are
+ *  dropped.  Safe to call with no session open. */
+SH_API void ShDrawInputClose(void);
+/** Is a session live?  This is what the window hook and the IME probe
+ *  key off, so an owner that polls its own hotkeys uses it to notice
+ *  that something else (the menu, the console) took the keyboard away. */
+SH_API int  ShDrawInputIsOpen(void);
+/** Collect the characters that arrived since the last call, as UTF-8,
+ *  NUL-terminated, at most `cap` bytes (leave room for the terminator -
+ *  64 is plenty per frame at 60 fps).  Returns the byte count.  A
+ *  character that does not fit stays queued: nothing is ever lost, the
+ *  drain simply takes another frame.  Call it from wherever the owner
+ *  edits its buffer; `out` may be a stack buffer. */
+SH_API int  ShDrawInputTake(char *out, int cap);
+/** Candidate window mode: 0 = the overlay draws the candidate list
+ *  itself (default), 1 = the input method's own window is used and
+ *  steered under the box.  Mirrors the menu's "Candidate window" row. */
+SH_API void ShDrawInputSetMode(int mode);
+SH_API int  ShDrawInputGetMode(void);
+/** True while an IME composition (pinyin) or its candidate list is
+ *  live.  The owner must leave Enter / Esc / Backspace to the IME in
+ *  that state - they edit the composition, not the buffer.  Callable
+ *  from any thread. */
+SH_API int  ShDrawInputComposing(void);
+/** True while the owner is injecting the text into the game's own chat
+ *  field.  The window hook keeps swallowing the user's physical keys
+ *  during that window: a leaked Enter keyup would make the game submit
+ *  before the injection finished. */
+SH_API int  ShDrawInputSending(void);
+/** Tell the framework the owner started / finished injecting.  While it
+ *  is set the hook swallows physical keys but lets the injected
+ *  WM_CHAR characters through - that is the channel into the game. */
+SH_API void ShDrawInputSetSending(int on);
+
+/** Internal, used by the overlay's window hook: feed one window message
+ *  from the subclassed game window.  Returns 1 when the message was
+ *  consumed and the game must not see it.  Text arrives as WM_CHAR /
+ *  WM_IME_CHAR and is queued for ShDrawInputTake(); every other keyboard
+ *  message is swallowed while a box is open, except Tab. */
+SH_API int  ShDrawInputWndMsg(uint64_t hwnd, uint32_t msg,
+                              uint64_t wp, uint64_t lp);
+
+/** What the owner learns about its box as it draws it. */
+typedef struct ShDrawInput {
+    int focused;     /**< this box owns the session                */
+    int composing;   /**< IME composition live: hands off the
+                          command keys (same as
+                          ShDrawInputComposing)                  */
+    int mode;        /**< candidate window mode in force           */
+} ShDrawInput;
+
+/** Draw the input box: panel, text, IME composition, caret, candidate
+ *  list and the hint line above it, at the current cursor position,
+ *  sized to its content.  This is the same widget the framework's own
+ *  Chinese chat box is made of, so a plugin's box is identical to it.
+ *
+ *  `id` must be the name the session was opened with - that is what
+ *  decides `out->focused`, and only a focused box takes the IME anchor.
+ *  `text` is whatever the owner wants shown (UTF-8, NUL-terminated);
+ *  `hint` is a small line drawn above the box and may be NULL or empty.
+ *  Returns 1 if the box was drawn. */
+SH_API int  ShDrawInputBox(const char *id, const char *text,
+                           const char *hint, ShDrawInput *out);
+
 /** @} */
 /** @defgroup hud HUD
  *  Drawn by the engine's own UI; slots pack per corner.

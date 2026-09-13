@@ -1025,10 +1025,11 @@ static DWORD WINAPI MenuThread(LPVOID p) {
             g_open = !g_open;
             HoldReset();   /* opened or closed: nothing is held now */
             if (g_open) {
-                /* The Chinese chat box must yield the keyboard
-                 * (it captured it to type); the menu owns the
-                 * capture while it is up. */
-                ShChatClose();
+                /* A plugin's text box (the Chinese chat box is one)
+                 * yields the keyboard by itself: it polls
+                 * ShMenuIsOpen() and closes, which releases the
+                 * capture - the menu only has to take the keys from
+                 * here, not hand them over. */
                 OpenRoot();
             }
         }

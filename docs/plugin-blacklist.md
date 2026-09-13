@@ -29,7 +29,7 @@ ShPluginBlacklist(SH_MODE_BLACKLIST_GHOST_WAR | SH_MODE_BLACKLIST_MERCENARIES);
 | `SH_MODE_BLACKLIST_GUERRILLA` | 游击战 | 守营地波次 |
 | `SH_MODE_BLACKLIST_ANY` | 全部 | 上面五个的并集 |
 
-**框架内置模块与内置页不受影响**（它们的菜单 owner 为空）："模组功能设置"、"中文聊天输入"、Forge 等在任何模式下都照常可用。默认禁用只针对 `plugins\` 下的 `.asi` 插件。
+**框架内置模块与内置页不受影响**（它们的菜单 owner 为空）："模组功能设置"、Forge 等在任何模式下都照常可用。默认禁用只针对 `plugins\` 下的 `.asi` 插件 —— 中文聊天输入自 2026-09 起也是插件（`plugins\cnchat\`），因此它现在同样受这套规则约束（未声明即默认禁 Ghost War 与雇佣兵）。
 
 ### 为什么没有"主菜单"这一档（实测，已放弃）
 

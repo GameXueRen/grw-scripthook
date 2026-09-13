@@ -153,7 +153,7 @@ $fwSources = @(
     'scripthook_scene.c', 'scripthook_uiprop.c',
     'scripthook_uiinput.c', 'scripthook_dinput.c',
     'scripthook_hud.c', 'scripthook_menu.c',
-    'scripthook_cnchat.c', 'guard.c',
+    'scripthook_draw.c', 'guard.c',
     'scripthook_corefix.c', 'scripthook_modsettings.c',
     'forge.c', 'scripthook_forge.c', 'scripthook_forge_io.c',
     'scripthook_forgeprobe.c', 'scripthook_files.c',
@@ -210,6 +210,15 @@ Build-Plugin 'blacklist_sample' 'blacklist_sample.c' @()
 # The file interception worked example: one watcher, one hide rule and the
 # query calls, so docs/file-interception.md points at something runnable.
 Build-Plugin 'file_watch_sample' 'file_watch_sample.c' @($libPath, 'libscripthook.lib')
+# The drawing-API worked example: a drawer window, a frameless corner
+# readout and the input box, so docs/ui-drawing.md points at something
+# runnable.
+Build-Plugin 'draw_sample'  'draw_sample.c'  @($libPath, 'libscripthook.lib', 'user32.lib')
+# In-game Chinese text input: the input-box primitive's real user, and
+# the worked example of "a plugin owns the buffer, the framework owns the
+# IME". It ships off by default (its own ini: enabled=0); see
+# docs/ui-drawing.md section 5 for the split of work.
+Build-Plugin 'cnchat'       'cnchat.c'       @($libPath, 'libscripthook.lib', 'user32.lib')
 Build-Plugin 'hitfling'     'hitfling.c'     @('gdi32.lib', 'user32.lib')
 Build-Plugin 'freecam'      'freecam.c'      @('gdi32.lib', 'user32.lib')
 Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')

@@ -1,4 +1,4 @@
-/* Chinese chat input (in-process, mirroring GRW-CNChat):
+/* Chinese chat input, as a plugin (in-process, mirroring GRW-CNChat).
  *
  * The game's own text chat field cannot take IME composition - its
  * input is DirectInput based, so composed Chinese never reaches it.
@@ -6,18 +6,32 @@
  * owns a real Edit control (full IME), then posts the finished text
  * into the game window as WM_CHAR (verified to work on GRW).
  *
- * This module does the same thing inside the game process, but it
- * does NOT depend on window keyboard messages: the game reads its
- * keyboard through DirectInput and never translates keyboard messages
- * to this window, so WM_CHAR / WM_IME_CHAR from the system IME never
- * arrive here either.  Instead all editing is polled with
- * GetAsyncKeyState exactly like the menu and the gadget wheel:
+ * This plugin does the same thing inside the game process, and it is
+ * also the second worked example of the drawing API (the first is
+ * draw_sample): its box is a frameless drawer whose callback calls
+ * ShDrawInputBox, exactly the way a third-party plugin would.  The
+ * split of work is the framework's documented one:
+ *
+ *   the framework   the box's looks, its focus, the IME session
+ *                   (composition string, candidate list, candidate
+ *                   window anchoring), and the CHARACTERS - it collects
+ *                   what the game window receives as WM_CHAR / WM_IME_CHAR
+ *                   and hands them over through ShDrawInputTake.
+ *   this plugin     the buffer (append, backspace, paste), the hotkey,
+ *                   what Enter and Esc do, and this page of the menu.
+ *
+ * Editing is polled with GetAsyncKeyState exactly like the menu and the
+ * gadget wheel, because the game reads its keyboard through DirectInput
+ * and the command keys in the window's message queue are not a channel
+ * to rely on:
  *   - The player presses the chat hotkey (default T).  The key is
  *     let through to the game (it opens its own chat box); when T
- *     comes back up we open the ImGui input box and capture the
- *     keyboard (ShCaptureKeys), so the game chat box stays open but
- *     never sees the keys we type.
- *   - Chinese text is brought in through the clipboard (Ctrl+V),
+ *     comes back up we open the input box and capture the keyboard
+ *     (ShCaptureKeys), so the game chat box stays open but never sees
+ *     the keys we type.
+ *   - Characters arrive through the framework's input session - that is
+ *     the IME's own channel, so composed Chinese lands in the buffer.
+ *   - Chinese text can also be brought in through the clipboard (Ctrl+V),
  *     which works regardless of the game's input handling.
  *   - Enter: release the capture, then PostMessage WM_CHAR for every
  *     character to the game window (the channel GRW-CNChat proved
@@ -27,9 +41,10 @@
 #include <windows.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
 
-#define SH_BUILD 1
 #include "scripthook.h"
+#include "log.h"
 
 #define VK_CHAT     0x54            /* 'T' */
 #define POLL_MS     15
@@ -49,7 +64,6 @@ typedef struct {
 } ChatState;
 
 static ChatState g_chat;
-static volatile int g_started = 0;
 static volatile int g_ownsKeys = 0;
 static volatile int g_sending = 0;   /* injecting into the native box */
 static CRITICAL_SECTION g_lock;
@@ -74,6 +88,24 @@ static void TextBackLocked(void) {
     if (g_chat.len <= 0) return;
     g_chat.len--;
     g_chat.text[g_chat.len] = 0;
+}
+
+/* Drain what the framework's input session collected since the last
+ * poll.  The characters the game window receives - WM_CHAR, and
+ * WM_IME_CHAR, which is how a system IME hands over composed text - now
+ * arrive through that session (see ShDrawInputTake), and this is the
+ * only place they are appended, on the thread that owns the buffer. */
+static void TakePendingChars(void) {
+    char got[256];
+    while (ShDrawInputTake(got, (int)sizeof(got)) > 0) {
+        wchar_t wide[128];
+        int n = MultiByteToWideChar(CP_UTF8, 0, got, -1, wide, 128);
+        int i;
+        if (n <= 1) continue;   /* -1 bytes, or a conversion failure */
+        Lock();
+        for (i = 0; i < n - 1; i++) TextAppendLocked((unsigned)wide[i]);
+        Unlock();
+    }
 }
 
 /* ---- clipboard paste (works no matter how the game reads keys) ----- */
@@ -171,42 +203,87 @@ static void ReleaseKeys(void) {
     g_ownsKeys = 0;
 }
 
-/* ---- optional window-message channel -------------------------------
- * Some window modes (windowed/borderless) do deliver WM_CHAR for the
- * keys the game did not swallow; when they arrive we append them.
- * Command keys are deliberately NOT handled here - the poll thread
- * owns Enter/Esc/Backspace so nothing fires twice. */
-int ShChatWndMsg(uint64_t hwnd, uint32_t msg,
-                 uint64_t wp, uint64_t lp) {
-    (void)lp;
-    if (!g_chat.open && !g_sending) return 0;
-    if (msg == WM_CHAR || msg == WM_IME_CHAR) {
-        g_chat.hwnd = hwnd;
-        /* While typing (open) the char feeds our own buffer; while
-         * sending it MUST fall through to the game window procedure -
-         * that is the injection channel. */
-        if (g_chat.open && wp >= 0x20 && wp != 0x7F && wp < 0x10000) {
-            Lock();
-            TextAppendLocked((unsigned)wp);
-            Unlock();
-            return 1;
+/* ---- the box, drawn as a drawer --------------------------------------
+ *
+ * The chat box is drawn the way a plugin draws one: a frameless drawer
+ * whose callback calls the input-box primitive.  That is what makes the
+ * primitive provable - the framework's own box and a plugin's box are
+ * literally the same code path - and it is why the overlay knows nothing
+ * about the chat any more: its part ends at the shared widget.
+ *
+ * The drawer is registered once and shown only while the box is open, so
+ * a closed box costs nothing at all (a hidden drawer is never called).
+ */
+#define DRAW_NAME       "cnchat"
+#define VIEW_UTF8_MAX   512
+#define ANCHOR_Y_RATIO  0.72f   /* where the box sits, screen fraction */
+
+/* UTF-8 text + hint for one frame, taken under the lock.  Converting
+ * the used length only matters: converting the whole buffer with -1
+ * fails outright once the UTF-8 form outgrows the view (about 170 CJK
+ * chars), which would blank the box mid-sentence. */
+static void ChatSnapshot(char *text, int tcap, char *hint, int hcap) {
+    int n = 0, cmd, open;
+
+    text[0] = 0;
+    hint[0] = 0;
+    Lock();
+    cmd  = g_chat.cmd;
+    open = g_chat.open;
+    if (open || cmd) {
+        n = WideCharToMultiByte(CP_UTF8, 0, g_chat.text, g_chat.len,
+                                text, tcap - 1, NULL, NULL);
+        if (n <= 0 && g_chat.len > 0) {
+            /* Still too long: keep the longest prefix that fits. */
+            int keep = g_chat.len;
+            while (keep > 1) {
+                keep--;
+                n = WideCharToMultiByte(CP_UTF8, 0, g_chat.text, keep,
+                                        text, tcap - 1, NULL, NULL);
+                if (n > 0) break;
+            }
         }
-        return 0;
     }
-    /* Swallow the rest of the keyboard while the box is up (typing) OR
-     * while we are injecting (sending).  A physical Enter keyup that
-     * leaks through during the injection makes the game submit before
-     * the injected characters have all landed - the tail-truncation
-     * bug.  Tab still reaches the game while typing (channel switch). */
-    if (msg == WM_KEYDOWN || msg == WM_KEYUP ||
-        msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
-        if ((uint32_t)wp == VK_TAB && g_chat.open) return 0;
-        return 1;
-    }
-    return 0;
+    Unlock();
+    if (n > 0) text[n] = 0;   /* success already NULs; be exact */
+    else text[0] = 0;
+
+    if (cmd == 1)
+        snprintf(hint, (size_t)hcap, "%s", "sending...");
+    else if (open)
+        snprintf(hint, (size_t)hcap, "%s",
+                 "回车发送 · Esc 取消 · Tab 切换频道");
 }
 
-int ShChatIsSending(void) { return g_sending; }
+/* Called on the render thread, once per frame, while the box is shown. */
+static void DrawChat(void *user) {
+    char text[VIEW_UTF8_MAX];
+    char hint[96];
+    ShDrawInput in;
+
+    (void)user;
+    ChatSnapshot(text, (int)sizeof(text), hint, (int)sizeof(hint));
+    ShDrawInputBox("chat", text, hint, &in);
+}
+
+static void ChatDrawerShow(int on) {
+    ShDrawShow(DRAW_NAME, on ? 1 : 0);
+}
+
+static void ChatDrawerRegister(void) {
+    ShDrawOpts o;
+
+    memset(&o, 0, sizeof(o));
+    /* Frameless (the box is a panel, not a window), pinned by screen
+     * position rather than pixels: centred horizontally, top edge on the
+     * 72% line - the same spot this box has always been drawn at. */
+    o.flags = SH_DRAW_FRAMELESS | SH_DRAW_NO_MOVE |
+              SH_DRAW_POS_CENTER_X | SH_DRAW_POS_Y_RATIO;
+    o.y = ANCHOR_Y_RATIO;
+    if (!ShDrawAddEx(DRAW_NAME, DrawChat, NULL, &o))
+        Log("the chat drawer was refused - see logs\\scripthook_draw.log");
+    ChatDrawerShow(0);
+}
 
 /* ---- open / close --------------------------------------------------- */
 
@@ -252,6 +329,14 @@ static void OpenChat(void) {
     g_chat.open = 1;
     Unlock();
     TakeKeys();
+    /* Open the framework's input session for this box.  From here the
+     * window hook routes the characters the game window receives into
+     * it, the IME probe knows a box is up, and Enter / Esc / Backspace
+     * are ours to poll while no composition is live. */
+    ShDrawInputOpen("chat");
+    ChatDrawerShow(1);   /* the drawer draws the box */
+    Log("box opened, session %s, keys captured",
+        ShDrawInputIsOpen() ? "live" : "refused");
     /* Nudge the window thread so the overlay's IME probe (the one
      * that re-associates the input context) runs right now.  Left to
      * itself it waits for the window's next message, which is the
@@ -308,6 +393,7 @@ static DWORD WINAPI SendThread(LPVOID arg) {
         if (g_sendJob.hwnd) InjectKey(VK_ESCAPE);
     }
     g_sending = 0;
+    ShDrawInputSetSending(0);   /* the hook may let the keys through again */
     ReleaseKeys();
     return 0;
 }
@@ -335,6 +421,15 @@ static void HandleDone(void) {
      * characters had all landed (tail truncation).  It is released by
      * the send thread once the submit has landed. */
     g_sending = 1;
+    /* The box is gone (open is already 0), so the session ends here:
+     * the injected characters now fall through to the game window -
+     * that is the injection channel - while the physical keys keep
+     * being swallowed until the send thread clears the flag. */
+    ShDrawInputClose();
+    ShDrawInputSetSending(1);
+    ChatDrawerShow(0);   /* the box is gone; sending has no box */
+    Log("%s: %d character(s) to the game window",
+        send ? "sending" : "cancelled", send ? len : 0);
 
     g_sendJob.send = send;
     g_sendJob.hwnd = hwnd;
@@ -347,30 +442,71 @@ static void HandleDone(void) {
             /* Nobody else releases the keyboard: with g_sending
              * stuck at 1 every key would stay swallowed. */
             g_sending = 0;
+            ShDrawInputSetSending(0);
             ReleaseKeys();
         }
     }
 }
 
 /* ---- runtime configuration ------------------------------------------
- * Persisted in scripthook.ini under [chat]:
- *   Enabled   = 0/1   (default 0: the self-drawn box is off)
- *   StartKey  = VK    (default 0x54 'T'; must match the in-game chat key)
- *   CandMode  = 0/1   (0 overlay-drawn candidate list [default],
+ * Persisted in the plugin's own ini, plugins\cnchat\cnchat.ini:
+ *   [Settings]
+ *   enabled  = 0/1   (default 0: the self-drawn box is off)
+ *   startkey = VK    (default 0x54 'T'; must match the in-game chat key)
+ *   candmode = 0/1   (0 overlay-drawn candidate list [default],
  *                     1 the input method's own candidate window)
  * Loaded once at startup; menu toggles update the globals AND write the
- * ini so the change sticks.  ChatThread / ovl read these globals live.
+ * ini so the change sticks.  The poll thread reads these globals live,
+ * and the candidate mode is also pushed into the framework's input
+ * session, which is what draws (or steers) the candidates.
  * Defined before ChatThread, which reads them every poll. */
-#define CFG_SECTION "chat"
-#define CFG_KEY_CFG  "Enabled"
-#define CFG_KEY_KEY  "StartKey"
-#define CFG_KEY_CAND "CandMode"
+#define INI_SECTION "Settings"
+#define CFG_KEY_CFG  "enabled"
+#define CFG_KEY_KEY  "startkey"
+#define CFG_KEY_CAND "candmode"
 
 static volatile int g_cfgEnabled = 0;   /* default off */
 static volatile int g_cfgKey     = VK_CHAT; /* 'T' */
 static volatile int g_cfgCand    = 0;   /* default overlay-drawn */
 
+static HINSTANCE g_inst;
+static char      g_iniPath[MAX_PATH];
+
+/* plugins\cnchat\cnchat.ini, derived from this module's own file name -
+ * the same convention every plugin uses (see draw_sample.c). */
+static void ResolveIniPath(void) {
+    char mod[MAX_PATH];
+    const char *dot;
+    size_t n;
+
+    g_iniPath[0] = 0;
+    if (!g_inst || !GetModuleFileNameA(g_inst, mod, sizeof(mod))) return;
+    dot = strrchr(mod, '.');
+    n = dot ? (size_t)(dot - mod) : strlen(mod);
+    if (n >= sizeof(g_iniPath)) n = sizeof(g_iniPath) - 1;
+    memcpy(g_iniPath, mod, n);
+    g_iniPath[n] = 0;
+    strncat(g_iniPath, ".ini", sizeof(g_iniPath) - n - 1);
+}
+
+static int IniInt(const char *key, int def) {
+    return g_iniPath[0] ? GetPrivateProfileIntA(INI_SECTION, key, def,
+                                                g_iniPath)
+                        : def;
+}
+
+static void IniSet(const char *key, int v) {
+    char buf[16];
+    if (!g_iniPath[0]) return;
+    snprintf(buf, sizeof(buf), "%d", v);
+    WritePrivateProfileStringA(INI_SECTION, key, buf, g_iniPath);
+}
+
 /* ---- poll thread ---------------------------------------------------- */
+
+/* Defined with the box's open/close path below; the poll thread is what
+ * calls it most (menu opened, feature switched off). */
+static void ChatClose(void);
 
 static DWORD WINAPI ChatThread(LPVOID arg) {
     (void)arg;
@@ -388,7 +524,7 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
         }
 
         if (ShMenuIsOpen()) {
-            if (g_chat.open) ShChatClose();
+            if (g_chat.open) ChatClose();
             memset(g_keyWas, 0, sizeof(g_keyWas));
             tDown = 0;
             continue;
@@ -396,7 +532,7 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
 
         /* Feature switched off (default): never touch the chat key. */
         if (!g_cfgEnabled) {
-            if (g_chat.open) ShChatClose();
+            if (g_chat.open) ChatClose();
             memset(g_keyWas, 0, sizeof(g_keyWas));
             tDown = 0;
             continue;
@@ -424,6 +560,7 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
 
         /* Box open: poll the editing keys (the game window does not
          * deliver keyboard messages to us, so nothing else works). */
+        TakePendingChars();
         if (!WindowFocused()) {
             /* Focus went elsewhere: the keys typed out there belong
              * to that window, so ignore them and keep the text for
@@ -436,7 +573,7 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
          * its letters, Esc cancels it.  Acting on them here as well
          * is what wiped committed Chinese when Backspace was only
          * trimming pinyin letters. */
-        if (ShChatComposing()) {
+        if (ShDrawInputComposing()) {
             compLatch = 1;
             continue;
         }
@@ -482,54 +619,42 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
  * The ini keys and the three globals live above (before ChatThread).
  * ChatCfgLoad runs once at startup and copies the ini into them. */
 static void ChatCfgLoad(void) {
-    g_cfgEnabled = ShConfigGetBool(CFG_SECTION, CFG_KEY_CFG, 0) ? 1 : 0;
-    g_cfgKey = ShConfigGetInt(CFG_SECTION, CFG_KEY_KEY, VK_CHAT);
+    g_cfgEnabled = IniInt(CFG_KEY_CFG, 0) ? 1 : 0;
+    g_cfgKey = IniInt(CFG_KEY_KEY, VK_CHAT);
     if (g_cfgKey < 1 || g_cfgKey > 0xFE) g_cfgKey = VK_CHAT;
-    g_cfgCand = ShConfigGetInt(CFG_SECTION, CFG_KEY_CAND, 0) ? 1 : 0;
+    g_cfgCand = IniInt(CFG_KEY_CAND, 0) ? 1 : 0;
 }
 
-int ShChatGetEnabled(void)   { return g_cfgEnabled; }
-int ShChatGetStartKey(void)  { return g_cfgKey; }
-int ShChatGetCandMode(void)  { return g_cfgCand; }
-
-void ShChatSetEnabled(int on) {
-    g_cfgEnabled = on ? 1 : 0;
-    ShConfigSetBool(CFG_SECTION, CFG_KEY_CFG, g_cfgEnabled);
-    if (!g_cfgEnabled && g_chat.open) ShChatClose();
-}
-
-void ShChatSetStartKey(int vk) {
-    if (vk < 1 || vk > 0xFE) return;
-    g_cfgKey = vk;
-    ShConfigSetInt(CFG_SECTION, CFG_KEY_KEY, vk);
-}
-
-void ShChatSetCandMode(int mode) {
+/* The candidate mode is the one setting that is both live and shared:
+ * the framework draws (or steers) the candidate window by it, so it goes
+ * into the input session as well as staying in this plugin's ini. */
+static void ChatSetCandMode(int mode) {
     g_cfgCand = mode ? 1 : 0;
-    ShConfigSetInt(CFG_SECTION, CFG_KEY_CAND, g_cfgCand);
+    IniSet(CFG_KEY_CAND, g_cfgCand);
+    ShDrawInputSetMode(g_cfgCand);
 }
 
-/* ---- mod-settings page ----------------------------------------------
- * A page under "Mod settings" gating the whole feature.  The rows read
- * and write the ini directly; "Enabled" only takes effect on the next
- * launch (the module loads its config once at startup), so it is not
- * mirrored into g_cfg* live.  StartKey / CandMode are applied live
- * through the ShChatSet* setters, which keep the ini in sync. */
+/* ---- the plugin's own menu page -------------------------------------
+ * A root page of its own, like every other plugin.  The rows read and
+ * write this plugin's ini directly; "Enabled" only takes effect on the
+ * next launch (the config is read once at startup), so it is not
+ * mirrored into g_cfg* live.  CandMode is applied live through
+ * ChatSetCandMode, which keeps the ini in sync. */
 
 static void ChatOnEnabled(uint32_t menu, uint32_t item, int value,
                           void *user) {
     (void)menu; (void)item; (void)user;
     /* Restart to apply: do not touch the running g_cfgEnabled. */
-    ShConfigSetBool(CFG_SECTION, CFG_KEY_CFG, value ? 1 : 0);
+    IniSet(CFG_KEY_CFG, value ? 1 : 0);
 }
 
 static void ChatOnCandMode(uint32_t menu, uint32_t item, int value,
                            void *user) {
     (void)menu; (void)item; (void)user;
-    ShChatSetCandMode(value);
+    ChatSetCandMode(value);
 }
 
-void ShChatMenuRegister(uint32_t parent) {
+static void BuildMenu(void) {
     static const char *kCandOpts[] = { "Self-drawn", "IME native" };
     /* The start key is not user-configurable yet: it is fixed to the
      * game's own text-chat key ("T").  A single-option list shows the
@@ -537,38 +662,71 @@ void ShChatMenuRegister(uint32_t parent) {
     static const char *kKeyOpts[] = { "T" };
     uint32_t m;
 
-    if (!parent) return;
-    m = ShMenuSub(parent, "Chinese chat box");
+    m = ShMenuCreate("Chinese chat box");
     if (!m) return;
 
-    ShMenuToggle(m, "Enabled",
-                 ShConfigGetBool(CFG_SECTION, CFG_KEY_CFG, 0),
+    ShMenuToggle(m, "Enabled", IniInt(CFG_KEY_CFG, 0),
                  ChatOnEnabled, NULL);
     ShMenuList(m, "Start chat key", kKeyOpts, 1, 0, NULL, NULL);
     ShMenuList(m, "Candidate window", kCandOpts, 2,
-               ShConfigGetInt(CFG_SECTION, CFG_KEY_CAND, 0),
-               ChatOnCandMode, NULL);
+               IniInt(CFG_KEY_CAND, 0), ChatOnCandMode, NULL);
     ShMenuHint(m, "Restart to apply.");
+    Log("menu page created");
 }
 
-/* ---- framework hooks ------------------------------------------------ */
+/* ---- plugin entry ---------------------------------------------------- */
 
-void ShChatStartup(void) {
-    if (g_started) return;
-    g_started = 1;
+static DWORD WINAPI InitThread(LPVOID p) {
+    (void)p;
+
+    /* log.h: this translation unit gets its own file and its own Log. */
+    LogInit("cnchat.log");
+    Log("--- chinese chat box ---");
+
+    ResolveIniPath();
     InitializeCriticalSection(&g_lock);
     g_lockReady = 1;
     ChatCfgLoad();
-    if (!Bind()) return;
+    ShDrawInputSetMode(g_cfgCand);   /* the framework reads it live */
+    ChatDrawerRegister();
+    Log("drawer '%s' registered, enabled=%d startkey=0x%02X candmode=%d",
+        DRAW_NAME, g_cfgEnabled, g_cfgKey, g_cfgCand);
+
+    /* A text-input utility with nothing game-specific in it: it was a
+     * framework module until it became a plugin, and it worked in every
+     * mode then.  Say so explicitly - a plugin that stays silent gets the
+     * default (no Ghost War, no mercenaries). */
+    if (!ShPluginBlacklist(SH_MODE_BLACKLIST_NONE))
+        Log("the blacklist declaration was refused");
+
+    if (!Bind()) {
+        Log("the game state reader is missing: the box stays off");
+        return 0;
+    }
+    BuildMenu();
     CreateThread(NULL, 0, ChatThread, NULL, 0, NULL);
+    Log("poll thread up");
+    return 0;
 }
 
-int ShChatIsOpen(void) {
-    return g_chat.open ? 1 : 0;
+BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
+    (void)reserved;
+    if (reason == DLL_PROCESS_ATTACH) {
+        g_inst = inst;
+        DisableThreadLibraryCalls(inst);
+        CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+    }
+    return TRUE;
 }
 
-/* The F4 menu opens over the input box: drop it and release keys. */
-void ShChatClose(void) {
+/* The F4 menu opens over the input box, or the feature is switched off:
+ * drop the box and release the keys.  The framework's session is closed
+ * first, so the IME stack is restored and the characters stop being
+ * collected even if this runs while the poll thread is between checks;
+ * the drawer is hidden so the box stops being drawn the same frame. */
+static void ChatClose(void) {
+    ShDrawInputClose();
+    ChatDrawerShow(0);
     if (!g_chat.open) return;
     Lock();
     g_chat.open = 0;
@@ -579,38 +737,4 @@ void ShChatClose(void) {
     ReleaseKeys();
 }
 
-/* Snapshot for the overlay renderer (called on the render thread). */
-void ShChatCapture(ShChatView *out) {
-    int n;
-    if (!out) return;
-    memset(out, 0, sizeof(*out));
-    Lock();
-    out->open  = g_chat.open ? 1 : 0;
-    out->phase = g_chat.cmd ? 2 : (g_chat.open ? 1 : 0);
-    /* Convert the used length only: converting the whole buffer
-     * with -1 fails outright once the UTF-8 form outgrows the
-     * view (about 170 CJK chars), blanking the box. */
-    n = WideCharToMultiByte(CP_UTF8, 0, g_chat.text, g_chat.len,
-                            out->text, sizeof(out->text) - 1,
-                            NULL, NULL);
-    if (n <= 0 && g_chat.len > 0) {
-        /* Still too long: keep the longest prefix that fits. */
-        int keep = g_chat.len;
-        while (keep > 1) {
-            keep--;
-            n = WideCharToMultiByte(CP_UTF8, 0, g_chat.text, keep,
-                                    out->text, sizeof(out->text) - 1,
-                                    NULL, NULL);
-            if (n > 0) break;
-        }
-    }
-    Unlock();
-    if (n > 0) out->text[n] = 0;   /* success already NULs; be exact */
-    else out->text[0] = 0;
-    if (g_chat.cmd == 1)
-        strncpy(out->hint, "sending...", sizeof(out->hint) - 1);
-    else if (g_chat.open)
-        strncpy(out->hint,
-                "回车发送 · Esc 取消 · Tab 切换频道",
-                sizeof(out->hint) - 1);
-}
+/* ---- the box, drawn as a drawer -------------------------------------- */

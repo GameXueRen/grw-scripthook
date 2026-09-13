@@ -271,7 +271,7 @@ static const char *DEFAULT_CONFIG =
     "; Languages the menu language switch offers (comma separated;\n"
     "; the order here is the order shown).\n"
     "Languages=zh_cn,en\n"
-    "; Mod menu / chat box UI scale, driven by the game resolution:\n"
+    "; Mod menu / plugin window UI scale, driven by the game resolution:\n"
     ";   MenuScale = 0 auto (height/1080, so 4K -> 2.0); >0 fixed rate\n"
     ";   (still clamped by Min/Max).  MenuScaleMin/Max bound the final\n"
     ";   scale in both modes.  Restart to apply.  1080p baseline = 1.0.\n"

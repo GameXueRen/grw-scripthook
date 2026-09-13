@@ -69,7 +69,6 @@ extern void ShCrashStartup(void);
 extern void ShCoreFixStartup(void);
 extern void ShCoreFixLateStartup(void);
 extern void ShModSettingsStartup(void);
-extern void ShChatStartup(void);
 /* Temporary, until the mod loader replaces it: the evidence round that
  * records how the engine reads .forge. See scripthook_forgeprobe.c. */
 extern void ShForgeProbeStartup(void);
@@ -177,9 +176,6 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
      * from inside the game). Its root row carries weight 0, so it
      * sorts to the top no matter when the plugins register theirs. */
     ShModSettingsStartup();
-    /* Chinese chat input: in-process version of the GRW-CNChat
-     * AutoHotkey tool (the game's own chat field cannot take IME). */
-    ShChatStartup();
     /* Forge Mod Loader: scan mods\ and build the per-archive overrides
      * before the plugins load, so the menu is up with the rest. */
     ShForgeStartup();
