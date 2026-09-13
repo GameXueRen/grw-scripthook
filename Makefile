@@ -16,7 +16,8 @@ GAMEDIR = ../..
 
 .PHONY: all roulette fling spawner npcspawner enemyreinforce modeprobe \
         modecallprobe blacklistsample filewatchsample drawsample cnchat \
-        crazycars freecam fov fps chaos sample skipintro docs clean
+        crazycars freecam fov fps chaos sample skipintro opticalcamo \
+        docs clean
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 
@@ -99,6 +100,15 @@ skipintro: $(GAMEDIR)/plugins/skipintro/skipintro.asi
 $(GAMEDIR)/plugins/skipintro/skipintro.asi: skipintro.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ skipintro.c -L. -lscripthook
+
+# OpticalCamo, the third-party plugin rewritten against this framework
+# (docs/opticacamo-reverse.md), plus the ini seeded next to the .asi by
+# build_msvc.ps1. It links the import library.
+opticalcamo: $(GAMEDIR)/plugins/OpticalCamo/OpticalCamo.asi
+
+$(GAMEDIR)/plugins/OpticalCamo/OpticalCamo.asi: OpticalCamo.c scripthook.h log.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ OpticalCamo.c -L. -lscripthook
 
 fov: $(GAMEDIR)/plugins/fov_changer/fov_changer.asi
 

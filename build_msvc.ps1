@@ -280,6 +280,13 @@ Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')
 # NPCSpawner.asi (see docs/npcspawner-reverse.md). It late-binds the
 # same exports the original did, so it needs no import library.
 Build-Plugin 'NPCSpawner'   'NPCSpawner.c'   @()
+# OpticalCamo is a behaviour-equivalent C rewrite of the third-party
+# OpticalCamo.asi (see docs/opticacamo-reverse.md). It keeps the
+# original's way of telling whether the optical camo is live (a vote on
+# the player's part flags) and drives the framework's visibility factor
+# with it. Unlike the original, it links the import library directly,
+# and it keeps its step in OpticalCamo.ini beside the source.
+Build-Plugin 'OpticalCamo'  'OpticalCamo.c'  @($libPath, 'libscripthook.lib')
 # EnemyReinforce sends reinforcements while a fight is on and hardens
 # the enemies it can prove are fighting. It late-binds as well, and
 # keeps its defaults and translations in EnemyReinforce.ini beside
@@ -311,7 +318,8 @@ Build-Plugin 'test_plugin'  'test_plugin.c'  @('ws2_32.lib', 'gdi32.lib', 'user3
 # only: a later build must never overwrite settings changed in game,
 # and the plugin itself never writes this file (that would re-encode
 # its UTF-8 translations through the ANSI code page).
-foreach ($name in @('EnemyReinforce', 'ModeProbe', 'ModeCallProbe')) {
+foreach ($name in @('EnemyReinforce', 'ModeProbe', 'ModeCallProbe',
+                    'OpticalCamo')) {
     $iniSrc = Join-Path $root "$name.ini"
     $iniDst = Join-Path $plugins "$name\$name.ini"
     if ((Test-Path $iniSrc) -and -not (Test-Path $iniDst)) {
