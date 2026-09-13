@@ -9,6 +9,14 @@
  * Each page carries a single hint line noting that changes need a
  * game restart to take effect, instead of marking every row.
  *
+ * The [loader] rows sit on two pages, because they answer two unrelated
+ * questions: "Startup & core" holds the one about loading plugins at all,
+ * and the CPU scheduling page - right under Plugins - holds the seven that
+ * decide which set of processors the game runs on in each stage of its
+ * start up, and at what priority. The corefix status line travels with the
+ * CPU page, since it is a statement about those dials on this machine and
+ * says nothing about plugins.
+ *
  * Values are written back with ShConfigSet*, which rewrites the
  * on-disk ini in place (comments and translation tables survive)
  * and refreshes the in-memory table. The loader already consumed
@@ -74,11 +82,19 @@ static const char *g_prioPlayOpts[] = {
 /* The play row maps onto the same scale, minus the low end. */
 static const int g_prioPlayVals[] = { 2, 3, 4, 5 };
 
+/* The one row that is about loading at all: whether the loader's next scan
+ * brings any plugin up. It stays on "Startup & core"; the processor dials
+ * moved to the CPU scheduling page, because a CPU dial and a plugin switch
+ * have nothing to say to each other. */
 static const Setting g_loaderSettings[] = {
     { "loader", "load_plugins",
       "Load all plugins", 0, 0, 0, 0, 1, NULL, 0 },
-    /* One pair of rows per stage of the game's start up: which set of
-     * processors it runs on, and which priority class it holds. */
+};
+
+/* One pair of rows per stage of the game's start up: which set of
+ * processors it runs on, and which priority class it holds. Same rows,
+ * same ini keys and same order as before - only the page is new. */
+static const Setting g_cpuSettings[] = {
     { "loader", "cpu_boot",
       "Boot cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
     { "loader", "cpu_prio_boot",
@@ -101,8 +117,9 @@ static const Setting g_loaderSettings[] = {
 /* ---- menu handles ---------------------------------------------- */
 
 static uint32_t g_modMenu = 0;     /* the Mod settings page        */
-static uint32_t g_loaderMenu = 0;  /* [loader] rows                */
+static uint32_t g_loaderMenu = 0;  /* [loader] load_plugins        */
 static uint32_t g_pluginMenu = 0;  /* [plugins] rows               */
+static uint32_t g_cpuMenu = 0;     /* [loader] CPU scheduling rows */
 static volatile int g_built = 0;
 
 /* ---- plugin scan buffer ---------------------------------------- */
@@ -218,32 +235,33 @@ static void ScanPlugins(void) {
 
 /* ---- menu construction ------------------------------------------ */
 
-static void BuildLoaderMenu(void) {
-    size_t i;
+/* One row per Setting, on whichever page the table belongs to. The three
+ * row shapes are the same for both tables, which is why this is a
+ * function rather than the same loop written out twice. */
+static void BuildSettings(uint32_t menu, const Setting *rows, int n) {
+    int i;
 
-    for (i = 0; i < sizeof(g_loaderSettings) / sizeof(g_loaderSettings[0]);
-         i++) {
-        const Setting *s = &g_loaderSettings[i];
+    for (i = 0; i < n; i++) {
+        const Setting *s = &rows[i];
         if (s->opts) {
             /* A fixed-choice row: the ini holds the option's value, the
              * list wants its index, and the callback is handed the index
              * again. */
             int cur = ShConfigGetInt(s->section, s->key, s->def);
-            int idx = 0, i;
+            int idx = 0, k;
 
-            for (i = 0; i < s->nopts; i++) {
-                if ((s->vals ? s->vals[i] : i) == cur) { idx = i; break; }
+            for (k = 0; k < s->nopts; k++) {
+                if ((s->vals ? s->vals[k] : k) == cur) { idx = k; break; }
             }
-            ShMenuList(g_loaderMenu, s->label, s->opts, s->nopts, idx,
+            ShMenuList(menu, s->label, s->opts, s->nopts, idx,
                        OnNumber, (void *)s);
         } else if (s->isNumber) {
             int cur = ShConfigGetInt(s->section, s->key, s->def);
-            ShMenuNumber(g_loaderMenu, s->label, (float)cur,
+            ShMenuNumber(menu, s->label, (float)cur,
                          s->lo, s->hi, s->step, OnNumber, (void *)s);
         } else {
             int cur = ShConfigGetBool(s->section, s->key, s->def);
-            ShMenuToggle(g_loaderMenu, s->label, cur, OnLoaderBool,
-                         (void *)s);
+            ShMenuToggle(menu, s->label, cur, OnLoaderBool, (void *)s);
         }
     }
 }
@@ -364,6 +382,64 @@ static DWORD WINAPI BlHintThread(LPVOID p) {
     return 0;
 }
 
+/* ---- the CPU page's live line ------------------------------------------
+ * The rows on that page say what will be done from the next launch on; the
+ * line under them says what the game is running with RIGHT NOW - which
+ * stage it is in, which processor dial is in force for that stage, and at
+ * what priority. Those come from the corefix module, which read the dials
+ * when the game started, so the line describes the process as it is rather
+ * than the ini as it is being edited. It follows the stage, and nothing
+ * tells a menu when that changes, so it is polled.
+ */
+static char g_cpuLast[128];
+
+/* The stage as the translation table spells it: "boot" / "window" / "play"
+ * are keys there, and read as Logo / 窗口加载 / 游玩. */
+static const char *StageKey(int stage) {
+    return stage == SH_STAGE_BOOT ? "boot"
+         : stage == SH_STAGE_WINDOW ? "window"
+         : "play";
+}
+
+static void SetCpuLine(void) {
+    ShCoreFixStatus cf;
+    const char *dial, *prio;
+    char text[160];
+    int st, d, p;
+
+    if (!g_cpuMenu) return;
+
+    /* The dials ran on the attach path, long before this module was
+     * called, so the status is filled by now and the fields are settled.
+     * Clamped all the same: an index from a build with more values than
+     * this one knows must not read past the tables above. */
+    ShCoreFixGetStatus(&cf);
+    st = cf.stage >= 0 && cf.stage <= 2 ? cf.stage : 0;
+    d  = cf.dial[st] >= 0 && cf.dial[st] <= 8 ? cf.dial[st] : 0;
+    p  = cf.prio[st] >= 0 && cf.prio[st] <= 5 ? cf.prio[st] : 2;
+
+    /* Every entry of those two scales is already a translation key - the
+     * same words the rows above use. */
+    dial = g_stageOpts[d];
+    prio = g_prioOpts[p];
+
+    snprintf(text, sizeof(text),
+             ShLang("Now: %s stage - cores %s - priority %s"),
+             ShLang(StageKey(st)), ShLang(dial), ShLang(prio));
+    if (!strcmp(text, g_cpuLast)) return;
+    snprintf(g_cpuLast, sizeof(g_cpuLast), "%s", text);
+    ShMenuStatus(g_cpuMenu, text);
+}
+
+static DWORD WINAPI CpuLineThread(LPVOID p) {
+    (void)p;
+    for (;;) {
+        Sleep(1000);
+        SetCpuLine();
+    }
+    return 0;
+}
+
 /* Register the whole tree. Called from the loader thread after the
  * config has been parsed, so the values and the scan see the real
  * ini. Safe to call once; the guard keeps rebuilds from stacking. */
@@ -380,11 +456,18 @@ void ShModSettingsStartup(void) {
     g_modMenu = ShMenuCreate("Mod settings");
     if (!g_modMenu) return;
 
+    /* Sub pages sort by the order they are made in: the plugin master
+     * switch, then the plugin list, then the CPU dials on a page of their
+     * own, then the language row. */
     g_loaderMenu = ShMenuSub(g_modMenu, "Startup & core");
     g_pluginMenu = ShMenuSub(g_modMenu, "Plugins");
+    g_cpuMenu    = ShMenuSub(g_modMenu, "CPU scheduling");
 
     ScanPlugins();
-    BuildLoaderMenu();
+    BuildSettings(g_loaderMenu, g_loaderSettings,
+                  (int)(sizeof(g_loaderSettings) / sizeof(g_loaderSettings[0])));
+    BuildSettings(g_cpuMenu, g_cpuSettings,
+                  (int)(sizeof(g_cpuSettings) / sizeof(g_cpuSettings[0])));
     BuildPluginMenu();
     BuildLanguageRow(g_modMenu);
 
@@ -395,28 +478,42 @@ void ShModSettingsStartup(void) {
     ShChatMenuRegister(g_modMenu);
 
     /* One hint per page is enough: these rows only act on the next
-     * launch, as does the language switch. The loader page adds what
-     * the CPU dials are actually doing on this machine, because a dial
-     * that cannot apply here (E-cores off on a CPU without E-cores)
-     * otherwise reads as one that was ignored, and because "the system
-     * already trimmed this process" is the one thing that decides
-     * whether an "All cores" dial is worth setting. The strings are
-     * pre-translated here (capture translates the stored hint again, a
-     * no-op for already-localised text). */
+     * launch, as does the language switch. On the CPU page the note is
+     * followed by the two facts about this machine that decide whether a
+     * dial can apply at all: a dial that cannot (E-cores off on a CPU
+     * without E-cores) otherwise reads as one that was ignored, and "the
+     * system already trimmed this process" is the one thing that decides
+     * whether an "All cores" dial is worth setting. What the dials are
+     * doing right now is the line at the bottom of that page, not this
+     * one. The strings are pre-translated here (capture translates the
+     * stored hint again, a no-op for already-localised text). */
     {
+        const char *restart =
+            ShLang("These changes take effect after a game restart.");
         char   hint[384];
         char   line[160];
         size_t used;
         ShCoreFixStatus cf;
 
-        snprintf(hint, sizeof(hint), "%s",
-                 ShLang("These changes take effect after a game restart."));
+        /* The root page and the loader page carry the restart note and
+         * nothing else. */
+        snprintf(hint, sizeof(hint), "%s", restart);
         ShMenuHint(g_modMenu, hint);
+        ShMenuHint(g_loaderMenu, hint);
         /* The Plugins page shows the same note plus the mode blacklist
          * line, which the thread started below keeps up to date. */
         SetPluginHint();
 
-        used = strlen(hint);
+        /* The CPU page: one sentence - what the page does, and that it
+         * acts from the next launch on. The one thing worth a second line
+         * is the E-core caveat, and only on a machine where that dial
+         * cannot apply at all; anywhere else it would explain nothing.
+         * What the dials are doing right now is the line at the bottom of
+         * the page, not this one. */
+        used = (size_t)snprintf(hint, sizeof(hint), "%s",
+                                ShLang("Processor set and priority for each "
+                                       "start up stage - changes need a "
+                                       "restart."));
         if (ShCoreFixGetStatus(&cf)) {
             line[0] = 0;
             if (cf.ecoreState == SH_CF_NA_NOT_INTEL)
@@ -429,39 +526,18 @@ void ShModSettingsStartup(void) {
                 snprintf(line, sizeof(line), "%s",
                          ShLang("E-cores off: detection failed."));
             if (line[0] && used + 2 < sizeof(hint))
-                used += (size_t)snprintf(hint + used,
-                                         sizeof(hint) - used, "\n%s", line);
-
-            if (cf.active && used + 2 < sizeof(hint)) {
-                snprintf(line, sizeof(line),
-                         ShLang("Machine: %u processors, the game started "
-                                "on %u."),
-                         cf.sysCount, cf.origCount);
-                used += (size_t)snprintf(hint + used,
-                                         sizeof(hint) - used, "\n%s", line);
-            }
-            if (cf.active && used + 2 < sizeof(hint)) {
-                const char *stage = cf.stage == SH_STAGE_BOOT ? "boot"
-                                  : cf.stage == SH_STAGE_WINDOW ? "window"
-                                  : "play";
-
-                if (cf.keepCount == 0)
-                    snprintf(line, sizeof(line),
-                             ShLang("Now: %s stage, left alone."),
-                             ShLang(stage));
-                else
-                    snprintf(line, sizeof(line),
-                             ShLang("Now: %s stage, %u processors."),
-                             ShLang(stage), cf.keepCount);
                 snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
-            }
         }
-        ShMenuHint(g_loaderMenu, hint);
+        ShMenuHint(g_cpuMenu, hint);
     }
 
-    /* The blacklist line follows the play mode, and nothing calls back
-     * when that changes, so it is polled. A second is plenty: the line
-     * only matters while a player has the menu open. */
+    /* Two lines follow something the menu cannot hear about: the blacklist
+     * line follows the play mode, and the CPU page's line follows the
+     * stage. A second is plenty for both - they only matter while a player
+     * has the menu open. */
+    SetCpuLine();
     if (!CreateThread(NULL, 0, BlHintThread, NULL, 0, NULL))
         ShMenuStatus(g_pluginMenu, "blacklist line thread failed");
+    if (!CreateThread(NULL, 0, CpuLineThread, NULL, 0, NULL))
+        ShMenuStatus(g_cpuMenu, "CPU line thread failed");
 }
