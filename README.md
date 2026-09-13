@@ -60,6 +60,7 @@ C ABI，并按 ASI 插件约定加载 `plugins\` 下的 `.asi` 插件。
 | CPU 核心调度（Logo / 窗口加载 / 游玩三阶段分档 + 最大核心数上限） | 已实现，待大规模验证 |
 | 「最后的仪式」闪退修复（LastRites_dlcfix：单开关，条目 3718 写死） | 已完成，已验证 |
 | 魅影模式不删档（GhostNoWipe：单开关，写入守卫 + 拦改名 + 状态提示条） | 已完成，已验证 |
+| 会话模式识别（`ShSelectedPlayMode`：战役 / 幽灵模式 / 雇佣兵 / 游击战 / Ghost War；判据是 `CreateGameMode` 拿到的**模式对象**（`38DC7F0` 战役[含 Narco Road、Fallen Ghosts] / `38DCD80` 幽灵模式 / `38DD178` 雇佣兵 / `38DCF80` 游击战 / `3908D98` Ghost War），`SetCurrentGameMode` 的参数只作为证据一并记日志 —— 实测同一模式内容可能带 0 或 2，不能当判据；未知对象写日志并返回 NONE，不猜；另有 `ShIsGhostWarMode` / `ShIsGhostMode` / `ShIsMercenariesMode` / `ShIsGuerrillaMode` 与 `ShPlayModeFingerprint`） | 已完成，五种模式 + 两个 DLC 战役均已实测确认 |
 | Forge Mod Loader | 游戏资源侧载热替换（mods\ 目录，免解包免重打包、不改原版、不写盘） | 已完成，机制已验证 |
 
 

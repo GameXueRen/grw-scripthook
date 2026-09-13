@@ -138,7 +138,7 @@ if ($LASTEXITCODE -ne 0) { throw 'ml64 failed for guard.asm' }
 $fwSources = @(
     'loader.c', 'scripthook_api.c', 'scripthook_config.c',
     'scripthook_physics.c', 'scripthook_health.c',
-    'scripthook_state.c', 'scripthook_entity.c',
+    'scripthook_state.c', 'scripthook_playmode.c', 'scripthook_entity.c',
     'scripthook_spawn.c', 'scripthook_npc.c',
     'scripthook_domino.c', 'scripthook_hit.c',
     'scripthook_camera.c', 'scripthook_head.c',
@@ -276,6 +276,22 @@ Build-Plugin 'NPCSpawner'   'NPCSpawner.c'   @()
 # keeps its defaults and translations in EnemyReinforce.ini beside
 # the source, which is seeded next to the .asi further down.
 Build-Plugin 'EnemyReinforce' 'EnemyReinforce.c' @()
+# ModeProbe is a read only evidence tool: it samples every candidate
+# the framework can reach (GameFlow objects, the shell, the scene set,
+# the PVP entity names) into logs\ModeProbe.log so the play mode can
+# be pinned to a field. It late-binds and hooks nothing.
+Build-Plugin 'ModeProbe'    'ModeProbe.c'    @('user32.lib')
+# ModeCallProbe dumps the method tables of the front end objects (the
+# GameFlow machine, its sub objects, the HybridMenu) and names as many
+# entries as a crc32 dictionary resolves, so the function behind the
+# mode selection can be found by name and hooked. Read only.
+Build-Plugin -Name 'ModeCallProbe' -Source 'ModeCallProbe.c' `
+    -LinkArgs @('user32.lib') -ExtraSources @(
+    (Join-Path $root 'third_party/minhook/src/buffer.c'),
+    (Join-Path $root 'third_party/minhook/src/hook.c'),
+    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
+    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
+)
 Build-Plugin 'CrazyCars'    'crazycars.c'    @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tp_roulette'  'tp_roulette.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
@@ -286,7 +302,7 @@ Build-Plugin 'test_plugin'  'test_plugin.c'  @('ws2_32.lib', 'gdi32.lib', 'user3
 # only: a later build must never overwrite settings changed in game,
 # and the plugin itself never writes this file (that would re-encode
 # its UTF-8 translations through the ANSI code page).
-foreach ($name in @('EnemyReinforce')) {
+foreach ($name in @('EnemyReinforce', 'ModeProbe', 'ModeCallProbe')) {
     $iniSrc = Join-Path $root "$name.ini"
     $iniDst = Join-Path $plugins "$name\$name.ini"
     if ((Test-Path $iniSrc) -and -not (Test-Path $iniDst)) {

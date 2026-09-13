@@ -39,6 +39,115 @@ typedef struct { float x, y, z; } ShVec3;
 
 /** @} */
 
+/** @defgroup playmode Play mode selection
+ *  Which PvP mode this session is in, read from the game's own mode
+ *  manager.
+ *
+ *  The mode is the mode object, and the object is read from
+ *  CreateGameMode - the description it is handed to build the mode from
+ *  has a pointer into the game's own mode table as its first field, one
+ *  entry per mode, stable across sessions (Mercenaries was 38DD178 in
+ *  all three, the campaign 38DC7F0 every time). That call is hooked
+ *  (`scripthook_playmode.c`), its identity is checked against the build
+ *  before the hook is armed, its argument is read off the watcher thread
+ *  - never inside the hook - and an object that is not in the
+ *  framework's table is logged and left undecided rather than guessed at
+ *  (`ShPlayModeFingerprint` hands the number out for exactly that case;
+ *  that is how Guerrilla was found).
+ *
+ *  GameModeManager::SetCurrentGameMode is hooked too, and its argument is
+ *  logged with every mode, but it is not what names the mode: measured,
+ *  it is 3 for Ghost War and 2 for the three modes that share it, but it
+ *  is also 0 for the campaign, Narco Road *and* 2 for Fallen Ghosts with
+ *  the same campaign object. The same mode content can come with either
+ *  number, so the argument is recorded and the object decides.
+ *
+ *  It has to be that call, because nothing else in the engine says it.
+ *  Measured, in the main menu and in the Ghost War lobby: the GameFlow
+ *  state name, the GameFlow sub object class hashes, the drawn scene set
+ *  (empty in the front end), the UI state bits, the input context, the
+ *  entity counts and the archives read are all identical - PvE is four
+ *  player co-op, so other humans prove nothing, and every mode reads the
+ *  same 23 archives because the engine indexes all of them at startup.
+ *  The mode name in memory is already there in the main menu because it
+ *  is the button's own label. The objects are reflected (32 byte entries
+ *  of crc32(name), index and function, and that hash is plain CRC-32),
+ *  but 312 front end methods resolved against a 24000 name dictionary
+ *  came back with nothing but the scene interface, and the mode
+ *  manager's own method names match no method table entry at all. The
+ *  named lifecycle methods were hooked as a last resort: they fire, with
+ *  a real dispatcher chain in the stack, but with the same signature for
+ *  all three modes - page navigation, not a mode choice - and no mode id
+ *  or name appears in their arguments either.
+ *
+ *  What this costs and what it does not promise:
+ *
+ *   - `NONE` until the game has set a mode, so asking early is safe and
+ *     says "not yet" rather than guessing. `ShPlayModeHookArmed` says
+ *     whether it ever will on this build.
+ *   - The mode is measured, not documented: an object that is not in the
+ *     framework's table is left `NONE` with a log line carrying it (and
+ *     the argument the game used), rather than guessed at.
+ *   - A different build whose layout differs will not arm the hook, and
+ *     the answer stays `NONE`.
+ *   - The mode is known from the moment the game sets it, in the lobby
+ *     and in a match alike; nothing here needs a mouse, a resolution or
+ *     a UI scale to be right.
+ *  @{ */
+
+enum ShPlayMode {
+    SH_PLAYMODE_NONE = 0,      /**< the game has not set a mode yet */
+    SH_PLAYMODE_GHOST_WAR = 1,
+    SH_PLAYMODE_MERCENARIES = 2,
+    /** The campaign - the story mode (mode object 38DC7F0). Campaign
+     *  *content* is not a mode of its own: the base story, Narco Road,
+     *  Fallen Ghosts and The Last Rites all report this same object,
+     *  because they are the campaign game mode with different content
+     *  loaded. Telling those apart needs something other than this call -
+     *  the region, the mission, the save. */
+    SH_PLAYMODE_CAMPAIGN = 3,
+    /** Ghost Mode - 幽灵/魅影模式, the permadeath campaign (a death ends
+     *  the run and the save goes with it), which is a different mode
+     *  from Mercenaries: the eight player PvPvE one where a death only
+     *  costs the gear the run had collected. */
+    SH_PLAYMODE_GHOST_MODE = 4,
+    /** Guerrilla Mode - 游击战模式: defending a camp against waves of
+     *  attackers, alone or in co-op. */
+    SH_PLAYMODE_GUERRILLA = 5
+};
+
+/** The mode this session is in, one of `ShPlayMode`.
+ *
+ *  `NONE` means not decided yet, which is also the honest answer while
+ *  the mode object is still being read - the wait is a watcher tick, 200
+ *  ms at most - or when the object is one the framework does not know. */
+SH_API int ShSelectedPlayMode(void);
+
+/** ShSelectedPlayMode() == the mode named. */
+SH_API int ShIsGhostWarMode(void);
+SH_API int ShIsMercenariesMode(void);
+SH_API int ShIsGhostMode(void);
+SH_API int ShIsGuerrillaMode(void);
+
+/** The mode object's identity, as an RVA into the game's own mode table,
+ *  or 0 while it is not known. This is the second half of the answer for
+ *  the modes that share an argument: the table in
+ *  `scripthook_playmode.c` maps each one to a mode, and an object that is
+ *  not in it is logged by the framework - send that line in and it gets
+ *  a row. */
+SH_API int ShPlayModeFingerprint(void);
+
+/** What the answer rests on, for a log line or a menu: "GameModeType 2
+ *  with mode object 38DD178 (MERCENARIES)", or why there is none yet. 1
+ *  when the mode is known. */
+SH_API int ShPlayModeEvidence(char *buf, int len);
+
+/** 1 when the game's mode manager is being read, so a caller can tell
+ *  "not yet" from "not on this build" - and say so, rather than
+ *  treating `NONE` as "no mode in particular". */
+SH_API int ShPlayModeHookArmed(void);
+
+/** @} */
 /** @defgroup state Game state
  *  The engine's GameFlow machine, tracked by the hook.
  *  @{ */
@@ -1093,10 +1202,44 @@ SH_API uint32_t ShBlockedInput(void);
 SH_API int  ShSetCrashIntercept(int on);
 SH_API int  ShCrashInterceptOn(void);
 
+/** @defgroup archives Loaded archives
+ *  What this session read, not what is on disk.
+ *  @{ */
+
+/** How many distinct `.forge` archives the engine has READ so far.
+ *  Read, not opened: an archive opened and never read is not loaded.
+ *  The list is kept by the forge I/O layer (scripthook_forge_io.c),
+ *  which has to resolve every read handle to a path anyway, and it is
+ *  installed for this alone - `[forgemod] ledger=1` by default - even
+ *  when nothing is being modded. 0 until the first archive is read.
+ *
+ *  It is worth asking because a mode that mounts an archive of its own
+ *  reads a file the other modes never touch: a session that read it
+ *  cannot have been in the other mode. The engine reads its archives
+ *  rather than mapping them (measured: 47 opens, 646 reads, not one
+ *  CreateFileMapping or MapViewOfFile on a .forge), so a mapped file
+ *  name would have missed every one of them.
+ */
+SH_API int ShForgeReadCount(void);
+
+/** File name of the index-th read archive, without its folder:
+ *  "DataPC.forge", "DataPC_GRN_WorldMap.forge". "" for an index out of
+ *  range. The order is the order the archives were first read in.
+ */
+SH_API const char *ShForgeReadName(int index);
+
+/** 1 when any read archive's file name contains `name`, case
+ *  insensitive - so "WorldMap" and "DataPC_GRN_WorldMap.forge" both
+ *  work. This is the cheap question: it does not name a mode by itself
+ *  (every mode reads archives every mode reads), but an archive only
+ *  one mode reads settles which mode this is.
+ */
+SH_API int ShForgeReadSeen(const char *name);
+
+/** @} */
 /** @defgroup crash Crash reports
  *  Faults land in logs/scripthook_crash.log, annotated.
  *  @{ */
-
 /** How many crashes have been caught this session. */
 SH_API int  ShCrashCount(void);
 

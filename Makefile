@@ -14,8 +14,9 @@ GAMEDIR = ../..
 # plugin, which is what the loader scans for. Logs go into
 # <gamedir>/logs at runtime.
 
-.PHONY: all roulette fling spawner npcspawner enemyreinforce crazycars \
-        freecam fov fps chaos sample skipintro docs clean
+.PHONY: all roulette fling spawner npcspawner enemyreinforce modeprobe \
+        modecallprobe crazycars freecam fov fps chaos sample skipintro \
+        docs clean
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 
@@ -91,6 +92,32 @@ $(GAMEDIR)/plugins/EnemyReinforce/EnemyReinforce.asi: EnemyReinforce.c scripthoo
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ EnemyReinforce.c
 
+modeprobe: $(GAMEDIR)/plugins/ModeProbe/ModeProbe.asi
+
+# ModeProbe.ini sits beside the source and is seeded into the plugin
+# folder by build_msvc.ps1; this target only builds the .asi.
+$(GAMEDIR)/plugins/ModeProbe/ModeProbe.asi: ModeProbe.c scripthook.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ ModeProbe.c -luser32
+
+modecallprobe: $(GAMEDIR)/plugins/ModeCallProbe/ModeCallProbe.asi
+
+# ModeCallProbe.ini sits beside the source and is seeded into the plugin
+# folder by build_msvc.ps1; this target only builds the .asi. MinHook is
+# compiled in: it keeps its state per DLL, so each plugin that hooks
+# carries its own copy. Contrast: GhostWipeProbe / ModeExitProbe.
+$(GAMEDIR)/plugins/ModeCallProbe/ModeCallProbe.asi: ModeCallProbe.c scripthook.h \
+        third_party/minhook/src/buffer.c third_party/minhook/src/hook.c \
+        third_party/minhook/src/trampoline.c \
+        third_party/minhook/src/hde/hde64.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ ModeCallProbe.c \
+		third_party/minhook/src/buffer.c \
+		third_party/minhook/src/hook.c \
+		third_party/minhook/src/trampoline.c \
+		third_party/minhook/src/hde/hde64.c \
+		-Ithird_party/minhook/include -luser32
+
 crazycars: $(GAMEDIR)/plugins/CrazyCars/CrazyCars.asi
 
 $(GAMEDIR)/plugins/CrazyCars/CrazyCars.asi: crazycars.c scripthook.h
@@ -113,6 +140,7 @@ libscripthook.a: $(GAMEDIR)/dinput8.dll
 $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
                         scripthook_physics.c \
                         scripthook_health.c scripthook_state.c \
+                        scripthook_playmode.c \
                         scripthook_entity.c scripthook_spawn.c \
                         scripthook_npc.c scripthook_domino.c \
                         scripthook_hit.c scripthook_camera.c \
@@ -137,7 +165,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_config.c \
 		scripthook_physics.c scripthook_health.c \
-		scripthook_state.c scripthook_entity.c \
+		scripthook_state.c scripthook_playmode.c scripthook_entity.c \
 		scripthook_spawn.c scripthook_npc.c scripthook_domino.c scripthook_hit.c \
 		scripthook_camera.c scripthook_head.c \
 		scripthook_fov.c scripthook_blur.c scripthook_fpx.c \
