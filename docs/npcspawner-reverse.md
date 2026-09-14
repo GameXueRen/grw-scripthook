@@ -170,12 +170,13 @@ Spawn Count 真值     @0x180007BF0  int[3]   = {1, 3, 5}
 `Spawn Distance` 行的值显示为 `< 30 m >`，正是距离的默认索引 2（30 m），
 而 `Spawn Count` 行显示的是数量值——两行的**值**都落在正确的行上。
 
-`plugins\NPCSpawner\NPCSpawner.ini` 已修正，并补了状态行翻译
-（放在 `[zh_cn.Native NPC Spawner]`，作用域 = `MenuPath(插件菜单)` = 菜单标题；
-普通 `[zh_cn]` 对任意 scope 都兜底，所以行标签仍放 `[zh_cn]`）。
+`plugins\NPCSpawner\NPCSpawner.ini` 已修正；文案另存
+`plugins\NPCSpawner\lang.ini` 的 `[zh-CN]` 段（行标签与状态行都在这里，
+键仍是英文原文的**字面量** —— 本插件尚未改用稳定 ID）。
 
-> 插件的 ini 是**按 owner 懒加载且只加载一次**（`PluginLangsLoad` 的 `done` 标记），
-> 改完 ini 必须**重启游戏**才生效。
+> 译文已与插件自身的 `NPCSpawner.ini` 分离：那份只有插件配置，文案在 `lang.ini`
+> （框架**只读、永不回写**）。加载是"每个 owner 每份文件一次"，但**切换语言会
+> 清表重扫**，所以改完 `lang.ini` 切一次语言即可看到改动，不必重启。
 
 ---
 

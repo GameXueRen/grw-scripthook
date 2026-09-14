@@ -21,7 +21,7 @@ C ABI，并按 ASI 插件约定加载 `plugins\` 下的 `.asi` 插件。
 游戏本身没有脚本层、没有控制台、没有可直接使用的API，因此框架的每一项能力都源于游戏引擎中一段被定位并验证过的函数或字段。
 
 魔改版在保留全部底层能力（载具、实体、相机、事件、原生UI 等）的前提下，重点改进了**F4 模组菜单**。  
-改为独立的 D3D11/ImGui 覆盖层渲染（原生支持中文字体），并对接入`scripthook.ini` 的翻译表，实现可高度自定义汉化的模组菜单界面。
+改为独立的 D3D11/ImGui 覆盖层渲染（原生支持中文字体），并把菜单文案接入独立的 `lang.ini`：**中英内置、切换即时生效**，也可高度自定义汉化。
 
 ---
 
@@ -178,34 +178,70 @@ base 家族）；外观类 3D 模型多位于 `DataPC_GRN_WorldMap*`。
 → 修改 → 放回 `mods\<归档名>\`。完整说明、归档角色对照表与实测结论见
 [`docs/forge-mod-loader.md`](docs/forge-mod-loader.md)。
 
-### 插件菜单的汉化（翻译表用法示例）
+### 插件菜单的多语言（`lang.ini` 用法示例）
 
-框架菜单中的**每一个标签文本都是“翻译 key”**：显示前会先在当前语言（由 `[Settings] Language` 决定）的翻译表里查找，查不到就回退显示英文原文。  
-因此**插件无需任何改动**，只要在 `scripthook.ini` 里补上对应的翻译条目，就能把它的菜单汉化。
+菜单里的**每一段文本都是一个键**，显示前按四层顺序查找：
 
-**插件也可以把翻译放进自己的配置文件** `plugins\<插件名>\<插件名>.ini`（同样的 `[zh_cn]` / `[zh_cn.<菜单标题>]` 节格式）：查找时**插件自己的 ini 优先**，找不到再回退 `scripthook.ini`。这样单独分享插件时，翻译跟着插件走，不需要动总配置文件。
-
-以 firstperson 插件（菜单标题 `First person`）为例：
-
-**① 根菜单行标题** —— 加在全局表 `[zh_cn]` 下：
-
-```ini
-[zh_cn]
-First person = 第一人称
+```
+① plugins\<插件名>\lang.ini   当前语言      ← 该插件的文案
+② <gamedir>\lang.ini          当前语言      ← 框架自己的文案（也是共享覆盖层）
+③ 编译期基线                  当前语言      ← 编译进 dinput8.dll / 各插件的表
+④ 编译期基线                  en-US
+⑤ ID 可读化 + logs\scripthook_text.log 记一条缺失
 ```
 
-**② 该插件菜单内部的选项** —— 新建子节 `[zh_cn.First person]`
-（配置段名为菜单标题原文），键为菜单项原名，值为翻译后的名字：
+键有两种写法，按 `@` 前缀机械区分：
+
+| 键 | 含义 |
+|---|---|
+| `@fp.hidehead` | **稳定 ID**。改页面标题、改行文案都不会打穿译文 |
+| `Hide head` | **字面量**（英文原文）。给**没有源码、无法改代码的第三方插件**用 |
+
+**中英两种语言都编译在程序里**：删掉任何 `lang.ini`，菜单照样能切中英。`lang.ini` 只用来**改**文案或**加**语言，不是"能显示中文"的前提。
+
+`lang.ini` 与配置彻底分离：`*.ini` 是设置（程序会写），`lang.ini` 是文案（**程序只读、永不回写**）。所以删 `scripthook.ini` 只重置设置，文案一条不动。
+
+以 firstperson 为例 —— `plugins\firstperson\lang.ini`：
 
 ```ini
-[zh_cn.First person]
-Enabled = 第一人称
-Hide head = 隐藏头部
-Forward cm = 前后调整(cm)
-Height cm = 高低调整(cm)
-ADS settle ms = 开镜速度(ms)
-First-person view: hide head, adjust eye height and distance. = 第一人称视角，可隐藏头部，可调整视角前后高低
+[zh-CN]
+"@fp.page"           = 第一人称
+"@fp.page.hint"      = W/S 选择，回车确认，Esc 返回
+"@fp.hidehead"       = 隐藏头部
 ```
+
+而 ID 与英文同处，写在插件自己的 `.c` 里（每语言一张表，加语言 = 加一张表 + 一行注册）：
+
+```c
+static const ShText kEn[] = {
+    { "@fp.page",      "First person" },
+    { "@fp.page.hint", "W/S select, Enter confirm, Esc back" },
+    { "@fp.hidehead",  "Hide head" },
+};
+ShLangDeclare("firstperson", "en-US", kEn, 3);      /* 中文再来一张表 */
+
+ShMenuCreate("@fp.page");                           /* 根菜单那一行 = 页面标题键 */
+ShMenuToggle(page, "@fp.hidehead", 1, NULL, NULL);
+```
+
+**第三方插件（没有源码）同样能汉化**——它代码里的字面量本身就是键，只要在它的目录里放一份 `lang.ini`，它的 `.asi` 一个字节都不用改：
+
+```ini
+; plugins\Time&Weather\lang.ini
+[zh-CN]
+"Time & Weather"      = 时间与天气
+"Time & Weather.hint" = W/S 选择，回车确认，Esc 返回
+```
+
+几条固定约定：
+
+| 键 | 用途 |
+|---|---|
+| `<页面键>` | 页面标题，同时就是根菜单上那一行 |
+| `<页面键>.hint` | 该页面的顶部提示（插件自己没调 `ShMenuHint` 时用它） |
+| 其它 ID / 字面量 | 行标签、状态行模板、toast、自绘文本 |
+
+页面**排序**（`[MenuOrder]`）也用同一个页面键，例如 `[MenuOrder]` 里写 `"@fp.page" = 10`；改页面名不再需要搬任何译文。语言**切换后立即生效**，不必重启。
 
 ---
 

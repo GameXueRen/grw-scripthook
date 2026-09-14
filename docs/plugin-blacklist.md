@@ -89,7 +89,9 @@ static DWORD WINAPI Tick(LPVOID p) {
   Off now (Ghost War): firstperson, freecam (+3)
   ```
 
-  中文环境下第二行会显示为「当前不可用（幽灵战争）：…」（`[zh_cn]` 里 `"Off now"` 的译文）。
+  中文环境下第二行显示为「当前不可用（幽灵战争）：…」——`"Off now"` 是框架自己的文本键，
+  译文在编译期基线里（也可由 `<gamedir>\lang.ini` 覆盖）。行尾的插件名目前仍是**目录名**，
+  改用菜单显示名是待办项（见 `docs/i18n-refactor.md` 的 P1）。
 
 ---
 

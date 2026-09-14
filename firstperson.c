@@ -57,7 +57,7 @@ enum {
 };
 
 /* Menu titles and ini suffixes, per category. The English
- * titles are the lookup keys for [zh_cn.First person]. */
+ * titles are the lookup keys in plugins\firstperson\lang.ini. */
 static const char *g_catName[CAT_COUNT] = {
     "On foot", "Ground vehicle", "Motorbike", "Boat",
     "Airplane", "Helicopter", "Passenger"
@@ -570,7 +570,7 @@ static int EngineView(void) {
 
 /* The row is printed from a template, and the template is
  * translated before it is filled in - so the English below is a
- * key in [zh_cn.First person] rather than something the player
+ * key in plugins\firstperson\lang.ini rather than something the player
  * ever reads.
  */
 static void SayStatus(const char *tmpl, const char *set,
@@ -1189,7 +1189,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
     menuToggle(g_menu, "Enabled", 0, OnToggle, NULL);
     /* One row picks the flip key: None (=off), =, F2 or F3.
      * The row's label is the English lookup key, translated by
-     * the [zh_cn.First person] table. */
+     * the plugins\firstperson\lang.ini table. */
     if (menuList)
         menuList(g_menu, "View toggle hotkey", g_hotName,
                  HOTKEYS, g_hotKey, OnHotKey, NULL);

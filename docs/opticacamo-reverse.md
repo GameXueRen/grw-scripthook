@@ -229,9 +229,10 @@ SaveSetting(value);                       /* 0x180001080 */
 → `strtof` → **取最近档位**（`|v-0|`、`|v-0.25|`、`|v-0.5|`、`|v-0.75|` 里最小者；
 NaN / ±∞ / 解析失败回落 `0.50`）→ 写回索引并立刻 `SaveSetting()` 规范化。
 
-**本地化**：随包 ini 自带 `[zh_cn]`/`[zh_cn.Optical Camo]`（"光学迷彩加强"、
-"敌人视觉感知"、"状态不可用"）。本框架的菜单文本按**所属插件自己的 ini** 翻译
-（`ShLangForOwned` 的查找顺序），所以插件只要保持英文标题/标签不变即可。
+**本地化**：文案在 `plugins\OpticalCamo\lang.ini` 的 `[zh-CN]`（"光学迷彩加强"、
+"敌人视觉感知"、"状态不可用" 等）。查找链是**插件 `lang.ini` → 框架 `lang.ini`
+→ 编译期基线（中英）→ ID 可读化**；键可以是稳定 ID，也可以是英文原文的字面量
+（本插件目前用字面量，显示效果与改写前一致）。
 
 ---
 
@@ -351,7 +352,7 @@ PAGE_READWRITE, 0, 44, L"…W_VisibilityBus_v2")`（UTF-16 名字在 `0x1800041F
 - ini `plugins\OpticalCamo\OpticalCamo.ini` 的 `[OpticalCamo] Visibility=`（值语义不变，
   旧设置照读）；"取最近档位 + 立刻规范化回写"的加载行为；
 - 三态状态行、50 ms 轮询、退出时 `ShSetVisibility(1.0f)` 复位；
-- `[zh_cn]` 本地化（随包的 ini 一并更新为新状态行模板）。
+- 本地化（`lang.ini` 的 `[zh-CN]`，随包发布；新状态行模板同步更新）。
 
 不保留（本框架里无意义的兼容层）：
 
@@ -364,7 +365,7 @@ PAGE_READWRITE, 0, 44, L"…W_VisibilityBus_v2")`（UTF-16 名字在 `0x1800041F
 - **菜单重做**：原版只有一项四档 `0.0/0.25/0.50/0.75`，而且**总是**写因子（没有关闭的办法）；
   重写版按用户要求改为两项、默认 `关 + 0.5x`：
   - 项一"`Optical Camo (crouch effect)`"：`关/开` 总开关（`ShMenuToggle`，框架渲染成
-    `[关]/[开]`，中文由 `[zh_cn.Optical Camo]` 提供）；
+    `[关]/[开]`，中文由 `plugins\OpticalCamo\lang.ini` 提供）；
   - 项二"`Camo Visibility`"：九档 `0.1x … 0.9x`（`ShMenuList`；没有 `0.0x`，
     那是训练器的隐身开关而不是迷彩强度）；
   - **关的时候**：不下发因子、**不读游戏**（不取玩家、不遍历部件）、线程阻塞在事件上
@@ -381,7 +382,7 @@ PAGE_READWRITE, 0, 44, L"…W_VisibilityBus_v2")`（UTF-16 名字在 `0x1800041F
     想同时关心自己好几页的插件就逐页问。菜单关着时一律为 0；
 - 状态行去掉 `Linked |` / `Direct |` 前缀，直接三态 + 系数；档位为 1.0x 时显示
   `原版 | %.3fx`（此时状态无关紧要，因为什么都没施加）；
-- 状态文字用 `ShMenuStatusF` 模板（框架会按 `[zh_cn.Optical Camo]` 翻译模板）；
+- 状态文字用 `ShMenuStatusF` 模板（框架按该页面所属 owner 的文本键翻译模板，译文在 `plugins\OpticalCamo\lang.ini`）；
 - 读到的部件数、三种计数进 `logs\OpticalCamo.log`，便于复核第九节第 1 条。
 
 **不在本轮**：通用的"当前装备 / 背包 / 武器"查询 API。本次逆向已证明

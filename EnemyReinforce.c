@@ -727,8 +727,8 @@ static int IniInt(const char *key, int def) {
 
 /* Saving is the Win32 profile call, the same one firstperson.c uses
  * in its SaveIni.  It updates the value in place and leaves every
- * other byte alone, UTF-8 translations included - firstperson.ini,
- * Chinese comments and a full [zh_cn] table in one file, has been
+ * other byte alone, UTF-8 content included - firstperson.ini, with
+ * Chinese comments sitting beside its settings in one file, has been
  * the standing proof of that in the deployed tree. */
 static void IniSaveInt(const char *key, int v) {
     char buf[24];

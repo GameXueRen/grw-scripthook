@@ -31,9 +31,15 @@ the line a folder is missing (`=0`), so the list ends up naming
 every plugin it found. Deleting `scripthook.ini` is the reset: a
 fresh default is written with every plugin off, which is how a
 player rules plugins out after something breaks - but the file
-also holds the `[loader]` CPU dials, the language and the
-translation tables, so those come back as defaults too. Future
-framework features will take their switches from the same file.
+also holds the `[loader]` CPU dials and the language, so those
+come back as defaults too. Future framework features will take
+their switches from the same file.
+
+What deleting it does **not** touch is the text: translations live
+in `lang.ini` files (`plugins\<name>\lang.ini`, and the framework's
+own `<gamedir>\lang.ini`), which the framework only ever reads, and
+everything compiled in is still there - so the menu keeps reading,
+in Chinese and English, whichever of those files exist.
 Plugins can read it too through `ShConfigGetInt` /
 `ShConfigGetBool` / `ShConfigGetStr`.
 
