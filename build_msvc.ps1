@@ -340,13 +340,15 @@ foreach ($dir in (Get-ChildItem $srcPlugins -Directory)) {
     }
 }
 
-# The framework's own text is <gamedir>\lang.ini, under the same rule.
-$fwLang    = Join-Path $root 'lang.ini'
-$fwLangDst = Join-Path $Gamedir 'lang.ini'
-if ((Test-Path $fwLang) -and -not (Test-Path $fwLangDst)) {
-    Copy-Item $fwLang $fwLangDst -Force
-    Write-Host "seeded $fwLangDst"
-}
+# <gamedir>\lang.ini is NOT seeded, and an existing one is never touched.
+#
+# It is the player's own file: the place to change a line of the built-in
+# text, to add a language, or to translate a plugin that ships no source.
+# Everything a fresh install shows is compiled in - the framework's tables
+# in scripthook_text.c and each plugin's own - so the menu reads in English
+# and Chinese with no file there at all, and one created by the build would
+# only be a file to explain away. lang.example.ini in the repository root is
+# the reference to copy out by hand if a player wants one.
 
 # cl generates a .lib/.exp beside any plugin that exports
 # symbols (chaos exports ChaosCount & friends). They are not

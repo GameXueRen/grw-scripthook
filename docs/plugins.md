@@ -7,7 +7,8 @@ under `plugins\` next to `GRW.exe`:
 <gamedir>/
 ├── dinput8.dll
 ├── scripthook.ini       main config, created on first launch
-├── lang.ini             the framework's own text
+├── lang.ini             optional, and yours to write: text overrides
+│                        (the build never creates this; see below)
 ├── logs/                every log file, timestamps on each line
 └── plugins/
     └── firstperson/
@@ -32,6 +33,18 @@ config can be deleted independently. This repo keeps that same
 layout under its own `plugins\<name>\`, so a plugin's source, its
 config and its text travel together. See docs/i18n-refactor.md.
 
+A plugin's own text is **compiled in** (English and Chinese) once its
+source is in this repo, so its `lang.ini` is an override: delete it and
+the menu still reads both languages. An `.asi` that ships without source
+is the exception - its text exists only in that file, which is how the
+framework translates it at all. It is seeded once by the build and never
+overwritten. The same goes for `<gamedir>\lang.ini`: it is the way to
+change a line of the framework's own text, to add a language, or to
+translate such a plugin from one place, and **the build does not create
+it** - nothing is there on a fresh install, and the compiled-in text
+carries both languages. `lang.example.ini` in this repository is that
+file's reference, to be copied out by hand.
+
 `scripthook.ini` is the main config, parsed before any plugin
 loads. The loader reads `[loader] load_plugins` and one
 `[plugins] <name>` line per plugin, and **a plugin with no line
@@ -47,11 +60,12 @@ also holds the `[loader]` CPU dials and the language, so those
 come back as defaults too. Future framework features will take
 their switches from the same file.
 
-What deleting it does **not** touch is the text: translations live
-in `lang.ini` files (`plugins\<name>\lang.ini`, and the framework's
-own `<gamedir>\lang.ini`), which the framework only ever reads, and
-everything compiled in is still there - so the menu keeps reading,
-in Chinese and English, whichever of those files exist.
+What deleting it does **not** touch is the text: the compiled-in tables
+(the framework's in `scripthook_text.c`, each plugin's own) carry English
+and Chinese on their own, and any `lang.ini` - `plugins\<name>\lang.ini`
+or a `<gamedir>\lang.ini` you wrote yourself - only overrides that. The
+framework never writes one, so the menu keeps reading, in both languages,
+whichever of those files exist.
 Plugins can read it too through `ShConfigGetInt` /
 `ShConfigGetBool` / `ShConfigGetStr`.
 

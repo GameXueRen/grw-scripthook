@@ -562,7 +562,7 @@ ShToastEx("@fp.toast.scanning", 0xFFD700, 0);  /* 同上 */
 |---|---|---|
 | `scripthook.ini` | 框架（`ShConfigSet*` → `IniWriteValue:1267`）、用户 | 菜单改设置即整份重写 |
 | `plugins\<owner>\<owner>.ini` | 插件自己、用户 | 插件不应写 `lang.ini` |
-| **`lang.ini`** | **只由用户/随包发布** | **框架永不回写** |
+| **`lang.ini`** | **只由玩家自建**（构建不生成、不覆盖、也不删除；仓库里是 `lang.example.ini` 示例） | **框架永不回写** |
 
 理由（项目里已有同源的认识）：
 
@@ -982,7 +982,7 @@ ShLangDeclare("firstperson", "zh-CN", kZh, N);
 | S1 | `[MenuHints]` 段**取消** → 9 条改为 `<页面键>.hint`；其中 4 条的插件内中文译文按新键保留 | `<gamedir>\lang.ini`、各插件 `lang.ini` |
 | S1 | 仓库参考 `scripthook.ini` 瘦身 600 → **231 行**（只剩 `[loader] [plugins] [Settings] [MenuOrder] [playmode] [forgemod]`），旧译文注释块换成指针注释 | `scripthook.ini` |
 | S1 | 生成器瘦身：`DEFAULT_CONFIG` **删 163 行**（译文段 + 说明块），首启生成 `Language=zh-CN` / `Languages=zh-CN,en-US` | `scripthook_config.c` |
-| S1 | 构建脚本：`<name>.lang.ini` → `plugins\<name>\lang.ini`、`lang.ini` → `<gamedir>\lang.ini`，**首次种入、绝不覆盖** | `build_msvc.ps1` |
+| S1 | 构建脚本：`<name>.lang.ini` → `plugins\<name>\lang.ini`、`lang.ini` → `<gamedir>\lang.ini`，**首次种入、绝不覆盖** —— **同日后改为只种插件那份**：`<gamedir>\lang.ini` 不再生成（见 §9.14） | `build_msvc.ps1` |
 | 提前落地（原 S3 的一部分） | **热切换**：`ShLangSet` 清空磁盘层并重扫；`ShMenuStatusResetAll` + `ShToastClear` 清掉"成品文本"；设置页语言行即时生效，其提示与 CPU 行立即重建；轮询线程兜底别处调用 | `scripthook_config.c`、`scripthook_menu.c`、`scripthook_modsettings.c` |
 | 实测收紧 | 语言代码比较按 C4 定为"标准 BCP-47、大小写不敏感、**无短标签回落**"（`en` 不再匹配 `en-US`，也没有 `zh_cn` 容忍）；`ShLangMatch` 同规则 | `LangEq` |
 
@@ -1036,6 +1036,24 @@ ShLangDeclare("firstperson", "zh-CN", kZh, N);
 4. 把译文模板当 `snprintf` 的格式串有 UB 风险 → 统一改为"**字面量格式 + 译文词作参数**"（`ModeCallProbe` 的 `"%d %s, %d %s, %d %s - %s"` 即范例）。
 
 **验证**：全部 27 个插件与 DLL 重新构建通过（0 错误 0 警告），部署后 33 个 `.asi`。实机验证清单见 §9.4。
+
+### 9.14 `<gamedir>\lang.ini` 不再由构建生成（同日）
+
+**动机**：它是**玩家自己**的文件——用来改内置文案的某一行、加一门语言、或给无源码插件做整份翻译；而内置中英（框架 `scripthook_text.c` 的 47 行 + 21 个插件的表 + 无源码插件自己的 `lang.ini`）已经自给自足。构建顺手生成一份，只会多出一个"需要解释它为什么在那里"的文件。
+
+**改动**：
+
+| 项 | 内容 |
+|---|---|
+构建 | `build_msvc.ps1` 删掉 `<gamedir>\lang.ini` 的种入段（插件自己的文件仍按"首次种入、绝不覆盖"处理——5 个无源码插件的中文只在那里，是承重的）。**已存在的一律不动、更不删除** |
+仓库文件 | 根 `lang.ini` → **`lang.example.ini`**：加上"构建不会复制本文件"的说明头，删掉 **43 行确证无人引用**的死行（旧页面的残留：`X/Y/Z cm`、`Hide head`、`Reinforcement` 的几条状态模板、Forge 页的旧字面量行…）与多余的 `[en-US]` 段；`[zh-CN]` 由 276 行降到 **233 行**，且**全部仍会被查阅**（判定见下） |
+文档 | `README.md`、`docs/plugins.md` 的目录树与说明、本文件 §4 的"文件归属"表与 §9.1 的构建行 |
+
+**死行的判定口径**（脚本逐行判定，276 行 → 45 行框架基线已有 / 111 行插件 `lang.ini` 已有 / 77 行源码里仍有该字面量 / **43 行三者皆无** = 死行）。`lang.example.ini` 定稿后**重跑同一判定**：233 行中死行为 **0**。
+
+**为什么不会有回退**：实测游戏目录里的那份是**早期构建种下的旧副本**（11:12 创建，内容早于"黑盒 hint 键改名"那次修复），也就是说这一整轮里它一直**盖住**了基线的新译文——而菜单照样中英正常，因为文案本就来自基线。它现在已被移除（可由快照 `grw-build-260914_161215` 还原），清掉之后那 6 条黑盒 hint 才真正读到修好的中文。
+
+**未做（有意）**：不删除任何玩家已经改过的 `lang.ini`（本次删的那份经比对确系未被编辑的旧种入副本）；`lang.example.ini` 也不进游戏目录。
 
 ### 9.4 尚未经实机验证
 
