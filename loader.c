@@ -85,12 +85,24 @@ extern void ShForgeStartup(void);
  * The folder scan means a plugin's assets, config and log
  * stay together and nothing from the game root is touched.
  * plugins\ is created if this is a fresh install.
+ *
+ * A plugin loads only when the one thing that can say so says so: a
+ * [plugins] line reading 1 - written by hand, or by the mod menu's
+ * Plugins page. No line means off, and that goes for a plugin this
+ * mod ships and for a third-party .asi dropped in here alike: the
+ * scan writes the line it found missing (0), so the ini ends up
+ * listing every folder it saw, and deleting that file is the reset -
+ * a fresh default with every plugin off, which is what a player who
+ * has just broken something wants to be able to do.
  */
+#define PLUGIN_SCAN_MAX 64
+
 static void LoadASIPlugins(void) {
     char pluginsDir[MAX_PATH], pat[MAX_PATH], full[MAX_PATH];
+    static char names[PLUGIN_SCAN_MAX][MAX_PATH];
     WIN32_FIND_DATAA fd;
     HANDLE h;
-    int n = 0, nSkipped = 0;
+    int n = 0, nSkipped = 0, nAdded = 0, count = 0, i, j;
 
     if (!ShPluginsDir(pluginsDir, sizeof(pluginsDir))) {
         Log("cannot find the game directory");
@@ -118,6 +130,10 @@ static void LoadASIPlugins(void) {
         Log("no plugin folders in %s", pluginsDir);
         return;
     }
+
+    /* Phase one: the folders that actually hold a <name>.asi, sorted,
+     * so the log and the lines written back to the ini come out in the
+     * same order on every launch. */
     do {
         const char *name = fd.cFileName;
 
@@ -132,21 +148,69 @@ static void LoadASIPlugins(void) {
             nSkipped++;
             continue;
         }
-        if (!ShConfigGetBool("plugins", name, 1)) {
+        if (count >= PLUGIN_SCAN_MAX) {
+            Log("plugins\\%s: scan table full (%d), not loaded",
+                name, PLUGIN_SCAN_MAX);
+            nSkipped++;
+            continue;
+        }
+        snprintf(names[count], sizeof(names[count]), "%s", name);
+        count++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    for (i = 1; i < count; i++) {
+        char tmp[MAX_PATH];
+        j = i;
+        while (j > 0 && strcmp(names[j - 1], names[j]) > 0) {
+            memcpy(tmp, names[j - 1], sizeof(tmp));
+            memcpy(names[j - 1], names[j], sizeof(tmp));
+            memcpy(names[j], tmp, sizeof(tmp));
+            j--;
+        }
+    }
+
+    /* Phase two: decide, and give a folder with no line of its own the
+     * line it is missing. -1 is "no line at all" (ShConfigGetBool
+     * cannot tell that apart from a 0, which is why this asks for an
+     * int), and the value is always 0: nothing is loaded until a line
+     * - or the menu - says 1. A write that fails is logged and changes
+     * nothing: the decision is made either way. */
+    for (i = 0; i < count; i++) {
+        const char *name = names[i];
+        int on = ShConfigGetInt("plugins", name, -1);
+
+        if (on < 0) {
+            on = 0;
+            if (ShConfigSetInt("plugins", name, 0)) {
+                Log("plugins\\%s: no [plugins] line, wrote %s=0 (off by "
+                    "default; switch it on in the mod menu)", name, name);
+                nAdded++;
+            } else {
+                Log("plugins\\%s: no [plugins] line, off by default "
+                    "(writing it back failed)", name);
+            }
+        }
+        if (!on) {
             Log("plugin disabled in scripthook.ini: %s", name);
             nSkipped++;
             continue;
         }
+
+        snprintf(full, sizeof(full), "%s%s\\%s.asi",
+                 pluginsDir, name, name);
         n++;
         Log("loading plugin: plugins\\%s\\%s.asi", name, name);
-        HMODULE mod = LoadLibraryA(full);
-        if (mod)
-            Log("  loaded at %p", (void *)mod);
-        else
-            Log("  FAILED (error %lu)", GetLastError());
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-    Log("plugin scan done: %d loaded, %d skipped", n, nSkipped);
+        {
+            HMODULE mod = LoadLibraryA(full);
+            if (mod)
+                Log("  loaded at %p", (void *)mod);
+            else
+                Log("  FAILED (error %lu)", GetLastError());
+        }
+    }
+    Log("plugin scan done: %d loaded, %d skipped, %d line(s) written back",
+        n, nSkipped, nAdded);
 }
 
 /* Plugins load here, not in DllMain. LoadLibrary blocks on

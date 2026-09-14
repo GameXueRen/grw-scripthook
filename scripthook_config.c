@@ -210,9 +210,17 @@ static const char *DEFAULT_CONFIG =
     "leak_probe=0\n"
     "\n"
     "[plugins]\n"
-    "; One line per plugin folder, 0 disables it.\n"
-    "; firstperson=1\n"
-    "; GhostNoWipe=1 - the wipe of a Ghost Mode save when a run ends.\n"
+    "; One line per plugin folder, and a plugin with NO line here is not\n"
+    "; loaded. Write <name>=1 to load it, or switch it on in the mod menu's\n"
+    "; Plugins page; either way it takes effect on the next launch. The\n"
+    "; first scan writes a line for every folder it finds, so this list\n"
+    "; always spells out each plugin and its state - a third-party .asi\n"
+    "; dropped into plugins\\ is off until it is asked for, like any other.\n"
+    "; Deleting this file is the reset: a fresh default is written, every\n"
+    "; plugin off, and the [loader] dials and the language go back to their\n"
+    "; defaults as well.\n"
+    "; firstperson - the camera work, with a page of its own in the menu.\n"
+    "; GhostNoWipe - the wipe of a Ghost Mode save when a run ends.\n"
     "; Two records mark the slot as gone: the game renames N.save to\n"
     "; N.save.delete and writes a .delete beside it, and before that it\n"
     "; has already written the run's end into N.save's own content. Both\n"
@@ -226,12 +234,12 @@ static const char *DEFAULT_CONFIG =
     "; listed again on the next launch. Deleting a slot by hand is caught\n"
     "; too - turn the plugin off to remove one. Single player only; delete\n"
     "; the plugin folder once the game itself is patched.\n"
-    "; LastRites_dlcfix=1 - the crash on entering the \"Last Rite\"\n"
+    "; LastRites_dlcfix - the crash on entering the \"Last Rite\"\n"
     "; DLC. One switch, off by default, in the mod menu; the single id\n"
     "; it answers for is built in and cannot be pointed elsewhere.\n"
     "; Single player only, and delete the plugin folder once the game\n"
     "; itself is patched.\n"
-    "; GhostRevive=1 - experimental, answered, switched off in its own ini.\n"
+    "; GhostRevive - experimental, answered, switched off in its own ini.\n"
     "; Whether a Ghost Mode death can be sent down the reviving path: it\n"
     "; cannot. The branch turns on whether the AI squad is aboard - with\n"
     "; one the death goes 7 -> 5 -> 4 and play carries on, without one it\n"
@@ -345,6 +353,7 @@ static const char *DEFAULT_CONFIG =
     "window = 游戏主窗口加载\n"
     "play = 游戏中\n"
     "These changes take effect after a game restart. = 这些改动将在重启游戏后生效。\n"
+    "No [plugins] line means off. Switch it on here; deleting scripthook.ini resets every plugin to off. = 没有 [plugins] 行即为关闭；可在本页打开，删除 scripthook.ini 可把插件全部重置为关闭。\n"
     "E-cores off: not applicable on this CPU. = 禁小核：本机 CPU 不适用（非 Intel 大小核）\n"
     "E-cores off: this CPU has no E-cores. = 禁小核：本机 Intel CPU 无小核\n"
     "E-cores off: detection failed. = 禁小核：检测失败\n"
@@ -1240,6 +1249,16 @@ static const char *SkipWs(const char *p, const char *end) {
     return p;
 }
 
+/* The line ending the file itself uses, so a line appended to a CRLF
+ * ini does not end up the only LF in it. */
+static const char *IniEol(const char *whole, long len) {
+    long i;
+
+    for (i = 0; i + 1 < len; i++)
+        if (whole[i] == '\r' && whole[i + 1] == '\n') return "\r\n";
+    return "\n";
+}
+
 /* Replace the value of key=... inside [section] in the on-disk
  * scripthook.ini. Comments, blank lines and every other section
  * survive byte for byte; a missing key is appended at the end of
@@ -1253,6 +1272,7 @@ static int IniWriteValue(const char *section, const char *key,
     long len;
     char *whole;
     const char *end, *p;
+    const char *eol = "\n";
     char curSec[48];
     int curSecSet = 0;
     int inSec = 0;
@@ -1304,6 +1324,7 @@ static int IniWriteValue(const char *section, const char *key,
 
     end = whole + len;
     p = whole;
+    eol = IniEol(whole, len);
 
     /* Single pass over the source lines:
      *   - matching key inside the target section is replaced;
@@ -1334,8 +1355,8 @@ static int IniWriteValue(const char *section, const char *key,
              * target one and its key was never placed, append it here,
              * at the very end of the target section. */
             if (inSec && !replaced) {
-                OutPrint(&out, &outLen, &outCap, "%s=%s\n",
-                         key, value);
+                OutPrint(&out, &outLen, &outCap, "%s=%s%s",
+                         key, value, eol);
                 replaced = 1;
                 wrote = 1;
             }
@@ -1406,14 +1427,14 @@ static int IniWriteValue(const char *section, const char *key,
         /* The key was never placed: the target section was the last
          * thing in the file, or it never appeared at all. */
         if (outLen > 0 && out[outLen - 1] != '\n')
-            OutPrint(&out, &outLen, &outCap, "\n");
+            OutPrint(&out, &outLen, &outCap, "%s", eol);
         if (!curSecSet || !inSec) {
             /* A new section must be created. */
             if (outLen > 0)
-                OutPrint(&out, &outLen, &outCap, "\n");
-            OutPrint(&out, &outLen, &outCap, "[%s]\n", section);
+                OutPrint(&out, &outLen, &outCap, "%s", eol);
+            OutPrint(&out, &outLen, &outCap, "[%s]%s", section, eol);
         }
-        OutPrint(&out, &outLen, &outCap, "%s=%s\n", key, value);
+        OutPrint(&out, &outLen, &outCap, "%s=%s%s", key, value, eol);
         wrote = 1;
     }
 

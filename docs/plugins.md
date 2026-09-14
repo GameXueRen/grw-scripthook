@@ -22,10 +22,20 @@ to load, `logs/scripthook.log` records the reason.
 
 `scripthook.ini` is the main config, parsed before any plugin
 loads. The loader reads `[loader] load_plugins` and one
-`[plugins] <name>` line per plugin to skip a plugin without
-removing it. Future framework features will take their switches
-from the same file. Plugins can read it too through
-`ShConfigGetInt` / `ShConfigGetBool` / `ShConfigGetStr`.
+`[plugins] <name>` line per plugin, and **a plugin with no line
+there is not loaded** - the same for a plugin this mod ships and
+for a third-party `.asi` dropped into `plugins\`. Write
+`<name>=1` to load it, or switch it on in the mod menu's Plugins
+page; both take effect on the next launch. The first scan writes
+the line a folder is missing (`=0`), so the list ends up naming
+every plugin it found. Deleting `scripthook.ini` is the reset: a
+fresh default is written with every plugin off, which is how a
+player rules plugins out after something breaks - but the file
+also holds the `[loader]` CPU dials, the language and the
+translation tables, so those come back as defaults too. Future
+framework features will take their switches from the same file.
+Plugins can read it too through `ShConfigGetInt` /
+`ShConfigGetBool` / `ShConfigGetStr`.
 
 ## Build and link
 

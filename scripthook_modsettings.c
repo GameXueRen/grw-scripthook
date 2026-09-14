@@ -274,13 +274,17 @@ static void BuildSettings(uint32_t menu, const Setting *rows, int n) {
 
 /* Every plugin switch is a [plugins] toggle the loader's next scan
  * honours. Rows show the plugin folder name only; the "restart
- * needed" note lives once on the menu hint line, not on every row. */
+ * needed" note lives once on the menu hint line, not on every row.
+ * A folder with no line of its own reads as off, which is the same
+ * rule the loader applies: by the time this page is built the loader
+ * has usually written the line itself, so this default only covers a
+ * folder that appeared after that scan. */
 static void BuildPluginMenu(void) {
     int i;
 
     for (i = 0; i < g_nplugins; i++) {
         const char *name = g_plugins[i];
-        int cur = ShConfigGetBool("plugins", name, 1);
+        int cur = ShConfigGetBool("plugins", name, 0);
         ShMenuToggle(g_pluginMenu, name, cur, OnPlugin, (void *)name);
     }
 }
@@ -361,12 +365,14 @@ static void BuildLanguageRow(uint32_t parent) {
 static char g_blLast[96];
 
 static void SetPluginHint(void) {
-    char notice[96], text[256];
+    char notice[96], text[384];
     int n;
 
     ShPluginBlacklistNotice(notice, sizeof(notice));
-    n = snprintf(text, sizeof(text), "%s",
-                 ShLang("These changes take effect after a game restart."));
+    n = snprintf(text, sizeof(text), "%s\n%s",
+                 ShLang("These changes take effect after a game restart."),
+                 ShLang("No [plugins] line means off. Switch it on here; "
+                        "deleting scripthook.ini resets every plugin to off."));
     if (notice[0] && n > 0 && (size_t)n + 2 < sizeof(text))
         snprintf(text + n, sizeof(text) - (size_t)n, "\n%s", notice);
     ShMenuHint(g_pluginMenu, text);
