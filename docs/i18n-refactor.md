@@ -1025,3 +1025,12 @@ ShLangDeclare("firstperson", "zh-CN", kZh, N);
 | 构建（MSVC） | `Build-Plugin` 从 `plugins\<名>\<源文件>` 取源；种入改为按目录扫描（插件自己的 ini 与 `lang.ini` 共用一套"只第一次、不覆盖"）；游戏输出目录的变量改名 `$outPlugins`，与仓库源目录 `$srcPlugins` 分开 |
 | 构建（MinGW） | `Makefile` 每个目标的源路径改为 `plugins/<名>/<源>.c`，`CFLAGS` 增 `-I.`（源文件搬走后 `"scripthook.h"` 不再与被包含者同目录） |
 | 文档 | `README.md`、`docs/plugins.md` 的目录树、构建示例与插件配置说明按新布局更新 |
+
+### 9.6 启动崩溃与修复（同日）
+
+S1 发布 `<gamedir>\lang.ini` 之后，每次启动都在配置加载后约 2 ms 崩溃（对 NULL 写入，游戏直接起不来）。
+
+- **根因**：`ShLangLabel()` 会去读框架 `lang.ini` 的 `[LanguageNames]`（设置页构建语言行时就要），但它调用的 `LoadLang()` **从不分配行表 `g_rows`**，而 `AddRow()` 直接写 `g_rows[g_nrows]` → **写 NULL**。S0 那版还没有 `lang.ini`，`LoadLangFile` 在 `fopen` 处就返回、根本走不到 `AddRow`，所以只有"文件出现"之后才必崩。
+- **为什么报告看起来像别人的错**：崩溃日志的 `Where()` 按地址解析模块，而**我们的 DLL 与系统 `dinput8.dll` 同名**，于是报告显示成"崩在系统 dinput8"。用链接期 `/MAP` 生成的 `framework.map` 把偏移对回去，落在 **`ParseLangText`**（内联的 `CopyN`，`cap` 正是 `LANG_KEY_MAX` 160）——这是判定"错在自己"的关键证据。
+- **复现与验证**：临时 ASan 测试台（编译本文件，喂真实的 `scripthook.ini` + `lang.ini`，按启动顺序先要语言标签再查键）→ `AddressSanitizer: access-violation … WRITE` 且栈顶在 `ShLangLabel`；修复后同一顺序干净通过、译文正确。
+- **修复**：`LoadLang()` 统一经 `EnsureRows()` 分配行表（它是"读文件"的唯一入口，谁调都安全）；`AddRow()` 增加空表守卫；`ShLangText` / `ShLangHas` 同路——`ShLangHas` 原先在表未分配时会**完全跳过文件行**，也一并修掉。
