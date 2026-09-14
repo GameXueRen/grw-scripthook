@@ -1107,10 +1107,11 @@ typedef struct ShMenuOrderRow {
 } ShMenuOrderRow;
 
 /** Internal: copy the reorderable root rows in the order they are drawn.
- *  Plugin pages only - a built-in page has no owner and stays put - and
- *  only rows that are in the root right now, so a page the play mode has
- *  taken away is never listed and never renumbered. Writes at most `cap`
- *  rows and returns how many there are in total. */
+ *  That is every page the root holds - a built-in feature page such as
+ *  the Forge one, and the settings page itself, are ordered like any
+ *  other - but only rows that are in the root right now, so a page the
+ *  play mode has taken away is never listed and never renumbered. Writes
+ *  at most `cap` rows and returns how many there are in total. */
 int  ShMenuRootOrderRows(ShMenuOrderRow *out, int cap);
 /** Internal: put the cursor on the row named `key` and scroll it into
  *  view: a page that rebuilds its own rows needs this afterwards. */

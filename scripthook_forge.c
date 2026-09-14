@@ -835,12 +835,16 @@ static void OnDryRun(uint32_t menu, uint32_t item, int v, void *u) {
     ShMenuStatus(menu, "Saved. Restart to apply.");
 }
 
+/* The page's key: what [MenuOrder] is keyed by, both for the default
+ * weight written at start up and for the mod menu's ordering page. */
+#define SH_FORGE_PAGE "Forge Mod Loader"
+
 void ShForgeMenuRegister(void) {
     uint32_t m;
     int applied = 0, bad = 0, i;
 
     if (!g_started) return;
-    m = ShMenuCreate("Forge Mod Loader");
+    m = ShMenuCreate(SH_FORGE_PAGE);
     if (!m) return;
 
     for (i = 0; i < g_nmods; i++) {
@@ -882,6 +886,12 @@ void ShForgeStartup(void) {
     g_reportCopies = ShConfigGetBool("forgemod", "report_copies", 1);
     g_applyAll     = ShConfigGetBool("forgemod", "apply_all_copies", 0);
     g_logReads     = ShConfigGetBool("forgemod", "log_reads", 0);
+
+    /* Default place in the root menu: right behind the settings page.
+     * Written only when the key is missing, so a move made on the mod
+     * menu's ordering page sticks instead of being undone here. */
+    if (ShConfigGetInt("MenuOrder", SH_FORGE_PAGE, -1) < 0)
+        ShConfigSetInt("MenuOrder", SH_FORGE_PAGE, 10);
 
     /* The read ledger defaults on: it is what makes "which mode is this"
      * answerable from the archives a session loaded. The evidence probe

@@ -24,9 +24,11 @@
  * and refreshes the in-memory table. The loader already consumed
  * these keys at boot, so the change only affects the next launch.
  *
- * This module lives inside dinput8.dll and pins its root row to
- * [MenuOrder] weight 0, so it is always the first row and can never
- * be switched off by the [plugins] list it edits.
+ * This module lives inside dinput8.dll; its root row defaults to
+ * [MenuOrder] weight 0, which puts it first out of the box. It is a row
+ * like any other on the mod menu's ordering page, though, and the
+ * [plugins] list it edits never applies to it: the loader gates plugin
+ * folders only.
  */
 #include <windows.h>
 #include <string.h>
@@ -368,18 +370,19 @@ static void LoadLanguages(void) {
 
 /* ---- the root order page ----------------------------------------------
  * The root menu draws its rows in [MenuOrder] weight order. This page
- * edits those weights: one row per reorderable page, the row's number is
+ * edits those weights: one row per page in the root, the row's number is
  * its place among them, and left/right moves it one place. Every move
- * renumbers the whole visible set 10, 20, 30 ... and writes it at once,
- * and the root re-sorts on its next capture, so the page and the root
- * cannot drift apart.
+ * renumbers the whole set 0, 10, 20 ... and writes it at once, and the
+ * root re-sorts on its next capture, so the page and the root cannot
+ * drift apart.
  *
- * Pages that are not in the root right now are not listed and keep their
- * weight - a plugin switched off, or one the play mode has taken away,
- * comes back to the place it had. The list is taken again every time the
- * page is opened, because the mode can have changed since the last look.
- * The framework's own page has no owner, is never listed, and keeps
- * weight 0 so it stays first.
+ * Nothing is held back: this page and the Forge page are rows here like
+ * any other, and only their default weights (0 and 10) put them first
+ * out of the box. Pages that are not in the root right now are not
+ * listed and keep their weight - a plugin switched off, or one the play
+ * mode has taken away, comes back to the place it had. The list is taken
+ * again every time the page is opened, because the mode can have changed
+ * since the last look.
  */
 static uint32_t g_orderMenu = 0;
 #define ORDER_MAX 64
@@ -454,7 +457,7 @@ static void OrderReload(void) {
     g_nOrder = n;
 }
 
-/* Write the weights back: 10, 20, 30 ... for the pages on this page, in
+/* Write the weights back: 0, 10, 20 ... for the pages on this page, in
  * the order they are in now. A page that is not in the root keeps what
  * it had, so a weight written here can equal a kept one - the sort is
  * stable, so the two hold their relative order until one of them moves. */
@@ -462,10 +465,7 @@ static void OrderWrite(void) {
     int i;
 
     for (i = 0; i < g_nOrder; i++)
-        ShConfigSetInt("MenuOrder", g_order[i].key, (i + 1) * 10);
-    /* The framework's page stays first; only written when it is not. */
-    if (ShConfigGetInt("MenuOrder", "@settings.page", 1000) != 0)
-        ShConfigSetInt("MenuOrder", "@settings.page", 0);
+        ShConfigSetInt("MenuOrder", g_order[i].key, i * 10);
 }
 
 /* Draw the page from g_order. Rebuilt after every move, so what is on
@@ -731,10 +731,11 @@ void ShModSettingsStartup(void) {
     if (g_built) return;
     g_built = 1;
 
-    /* Pin our row first: [MenuOrder] ScriptHook settings = 0. Write it only
-     * when it is not already pinned, so a normal launch does not
-     * touch the ini file for nothing. */
-    if (ShConfigGetInt("MenuOrder", "@settings.page", 1000) != 0)
+    /* Our default place: [MenuOrder] @settings.page = 0. Written only
+     * when the key is missing, so a normal launch does not touch the ini
+     * file for nothing - and so a move made on the ordering page sticks
+     * instead of being undone here at the next launch. */
+    if (ShConfigGetInt("MenuOrder", "@settings.page", -1) < 0)
         ShConfigSetInt("MenuOrder", "@settings.page", 0);
 
     g_modMenu = ShMenuCreate("@settings.page");

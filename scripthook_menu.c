@@ -854,12 +854,12 @@ static void ReorderRoot(Menu *m) {
     if (m->top > m->sel) m->top = m->sel;
 }
 
-/* The root's reorderable rows, as the settings page needs them: a
- * plugin's page only. A built-in page has no owner and is never listed
- * (the framework's own page stays where it is), and a page the mode has
- * taken away is not in the root as the player sees it, so it is not
- * listed either - its weight is left alone for the day it comes back.
- * The rows come back in the order they are drawn. */
+/* The root's reorderable rows, as the settings page needs them: every
+ * page the root holds, in the order it draws them. A built-in page is
+ * ordered like any other - the settings page included, which is only
+ * first because its weight defaults to 0 - and a page the mode has taken
+ * away is not in the root as the player sees it, so it is not listed and
+ * its weight is left alone for the day it comes back. */
 int ShMenuRootOrderRows(ShMenuOrderRow *out, int cap) {
     Menu *r;
     int i, n = 0;
@@ -873,7 +873,7 @@ int ShMenuRootOrderRows(ShMenuOrderRow *out, int cap) {
 
         if (it->kind != IT_SUB || !it->sub) continue;
         cm = MenuOf(it->sub);
-        if (!cm || !cm->owner[0]) continue;         /* a built-in page */
+        if (!cm) continue;
         if (!RowVisible(r, i)) continue;            /* not in the root now */
         if (out && n < cap) {
             SafeCopy(out[n].key, sizeof(out[n].key), it->label);
