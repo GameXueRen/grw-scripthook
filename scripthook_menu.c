@@ -27,7 +27,7 @@
  */
 #define MENUS       64
 #define ITEMS       96
-#define LABEL       48
+#define LABEL       64
 #define VISIBLE     12
 #define TICK_MS     40
 #define OPTS        12
@@ -61,8 +61,8 @@ typedef struct {
     int      used;
     char     title[LABEL];
     char     owner[48];   /* owning plugin folder name; "" = built-in */
-    char     hint[128];
-    char     status[96];
+    char     hint[384];   /* a page's hint can be several long lines */
+    char     status[192];
     uint32_t parent;
     int      sel;
     int      top;
@@ -169,6 +169,11 @@ static void DropMenu(uint32_t h) {
     memset(m, 0, sizeof(*m));
 }
 
+/* Copies display text back to a character boundary, so a cut string
+ * never ends in half a multi-byte character - a renderer draws that as
+ * "?". Defined with the capture helpers below. */
+static void SafeCopy(char *dst, size_t cap, const char *src);
+
 static Item *NewItem(Menu *m, int kind, const char *label,
                      ShMenuFn fn, void *user) {
     Item *it;
@@ -180,10 +185,7 @@ static Item *NewItem(Menu *m, int kind, const char *label,
     it->kind = kind;
     it->fn = fn;
     it->user = user;
-    if (label) {
-        strncpy(it->label, label, LABEL - 1);
-        it->label[LABEL - 1] = 0;
-    }
+    if (label) SafeCopy(it->label, sizeof(it->label), label);
     return it;
 }
 
@@ -758,6 +760,23 @@ void ShMenuSetOverlayReady(int ready) {
     g_ovlReady = ready ? 1 : 0;
 }
 
+/* Drop a trailing half-character: the last bytes of a string that was
+ * cut somewhere else (a formatted status line, a text layer row). When
+ * the lead byte has no room for the bytes that follow it, the string
+ * ends one character earlier. */
+static void Utf8Trim(char *s) {
+    size_t n = strlen(s);
+    size_t keep = n;
+
+    while (keep > 0 && ((unsigned char)s[keep - 1] & 0xC0) == 0x80) keep--;
+    if (keep > 0) {
+        unsigned char b = (unsigned char)s[keep - 1];
+        int need = (b < 0xC2) ? 1 : (b < 0xE0) ? 2 : (b < 0xF0) ? 3 : 4;
+        if (keep - 1 + (size_t)need > n) keep--;
+    }
+    s[keep] = 0;
+}
+
 /* strncpy truncates by bytes, which can split a UTF-8 sequence
  * and leave the renderer with an invalid lead byte (it draws it
  * as '?'). Copy then back up to the start of the last code point
@@ -784,6 +803,9 @@ static void SafeCopy(char *dst, size_t cap, const char *src) {
         dst[n] = 0;
     } else {
         memcpy(dst, src, n + 1);
+        /* The source may already have been cut somewhere else: the room
+         * was there, the character was not. */
+        Utf8Trim(dst);
     }
 }
 
@@ -1315,8 +1337,7 @@ SH_API int ShMenuStatus(uint32_t menu, const char *text) {
     m = MenuOf(menu);
     if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (text) {
-        strncpy(m->status, text, sizeof(m->status) - 1);
-        m->status[sizeof(m->status) - 1] = 0;
+        SafeCopy(m->status, sizeof(m->status), text);
     } else {
         m->status[0] = 0;
     }
@@ -1346,8 +1367,8 @@ void ShMenuStatusResetAll(void) {
  * next pass; today a translation keeps the English order.)
  */
 SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
-    char tmpl[96];
-    char text[96];
+    char tmpl[512];              /* the template, in this menu's text */
+    char text[384];              /* the line that template formats into */
     va_list ap;
     Menu *m;
 
@@ -1362,6 +1383,7 @@ SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(text, sizeof(text), tmpl, ap);
     va_end(ap);
+    Utf8Trim(text);             /* a long value can cut the last character */
     return ShMenuStatus(menu, text);
 }
 
@@ -1374,8 +1396,7 @@ SH_API int ShMenuHint(uint32_t menu, const char *text) {
     m = MenuOf(menu);
     if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (text) {
-        strncpy(m->hint, text, sizeof(m->hint) - 1);
-        m->hint[sizeof(m->hint) - 1] = 0;
+        SafeCopy(m->hint, sizeof(m->hint), text);
     } else {
         m->hint[0] = 0;
     }

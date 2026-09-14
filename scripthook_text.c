@@ -55,6 +55,19 @@ static const ShText kEnUS[] = {
     { "@settings.order.empty", "No plugin menu to order yet." },
     { "@settings.order.saved", "Order saved" },
 
+    /* the Forge page */
+    { "@forge.hint",
+      "Loads loose files from mods\\ over existing .forge entries without "
+      "touching the archives. Lay them out as mods\\<archive>\\<file> or "
+      "mods\\<mod name>\\<archive>\\<file>; '~' disables a mod folder, and "
+      "'<n>_-_<name>.data' names the entry. Changes need a restart." },
+    { "@forge.enabled",       "Enabled" },
+    { "@forge.dryrun",        "Dry run" },
+    { "@forge.status.off",    "Off ([forgemod] enabled=0)." },
+    { "@forge.status.nomods", "On, but mods\\ has no mod files." },
+    { "@forge.status.mods",
+      "%d mod(s): %d applied, %d rejected or overridden." },
+
     /* lines and hints those pages carry */
     { "Saved. Restart to apply.",
       "Saved. Restart to apply." },
@@ -147,6 +160,18 @@ static const ShText kZhCN[] = {
       "被关掉的插件会记住它原来的位置。" },
     { "@settings.order.empty", "还没有可排序的插件菜单。" },
     { "@settings.order.saved", "顺序已保存" },
+
+    { "@forge.hint",
+      "把 mods\\ 下的松散文件叠加到已有 .forge 条目上，不改动原版归档。"
+      "布局：mods\\<归档名>\\<文件> 或 mods\\<mod 名>\\<归档名>\\<文件>；"
+      "文件夹名前加 '~' 表示禁用，'<数字>_-_<条目名>.data' 指定条目。"
+      "改动需重启游戏生效。" },
+    { "@forge.enabled",       "启用" },
+    { "@forge.dryrun",        "仅检查不生效" },
+    { "@forge.status.off",    "已关闭（[forgemod] enabled=0）。" },
+    { "@forge.status.nomods", "已开启，但 mods\\ 下没有 mod 文件。" },
+    { "@forge.status.mods",
+      "%d 个 mod：%d 已生效，%d 被拒绝或覆盖" },
 
     { "Saved. Restart to apply.",
       "已保存。重启后生效。" },

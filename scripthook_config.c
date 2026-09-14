@@ -158,9 +158,9 @@ SH_API const char *ShLangText(const char *owner, const char *key);
 #define ENTRIES_MAX 256
 
 typedef struct {
-    char section[48];
-    char key[64];
-    char value[128];
+    char section[64];
+    char key[96];
+    char value[256];
 } CfgEntry;
 
 static char    g_config[CONFIG_MAX];
@@ -521,9 +521,9 @@ static void ParseConfig(const char *text) {
  */
 #define LANG_CODE_MAX   16
 #define LANG_LIST_MAX   8
-#define LANG_KEY_MAX    160
-#define LANG_VAL_MAX    320
-#define LROW_MAX        1024
+#define LANG_KEY_MAX    512     /* a literal key can be a whole hint */
+#define LANG_VAL_MAX    768     /* and its translation can be longer */
+#define LROW_MAX        2048
 #define BASE_MAX        2048
 #define PLOAD_MAX       128
 
@@ -671,6 +671,23 @@ static int LangSectionIgnored(const char *sec) {
     return 1;
 }
 
+/* End a string one character earlier when its last bytes are only part
+ * of a character. Text cut mid-sequence is what a renderer draws as
+ * "?", and a menu that shows one is worse off than one that shows a
+ * shorter string. */
+static void Utf8Backoff(char *s) {
+    size_t n = strlen(s);
+    size_t keep = n;
+
+    while (keep > 0 && ((unsigned char)s[keep - 1] & 0xC0) == 0x80) keep--;
+    if (keep > 0) {
+        unsigned char b = (unsigned char)s[keep - 1];
+        int need = (b < 0xC2) ? 1 : (b < 0xE0) ? 2 : (b < 0xF0) ? 3 : 4;
+        if (keep - 1 + (size_t)need > n) keep--;
+    }
+    s[keep] = 0;
+}
+
 /* Copy with a cap, reporting the first truncation it causes: a
  * silently shortened translation is exactly what this layer must not
  * do. */
@@ -687,6 +704,7 @@ static void CopyN(char *dst, size_t cap, const char *src) {
     }
     if (n && src) memcpy(dst, src, n);
     dst[n] = 0;
+    Utf8Backoff(dst);
 }
 
 /* Copy a value, expanding "\n" into a line break: one lang.ini row is
@@ -703,6 +721,7 @@ static void CopyValue(char *dst, size_t cap, const char *src) {
         dst[n++] = *src++;
     }
     dst[n] = 0;
+    Utf8Backoff(dst);
 }
 
 /* ---- disk layer ------------------------------------------------- */

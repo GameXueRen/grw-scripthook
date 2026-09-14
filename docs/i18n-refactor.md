@@ -1034,3 +1034,18 @@ S1 发布 `<gamedir>\lang.ini` 之后，每次启动都在配置加载后约 2 m
 - **为什么报告看起来像别人的错**：崩溃日志的 `Where()` 按地址解析模块，而**我们的 DLL 与系统 `dinput8.dll` 同名**，于是报告显示成"崩在系统 dinput8"。用链接期 `/MAP` 生成的 `framework.map` 把偏移对回去，落在 **`ParseLangText`**（内联的 `CopyN`，`cap` 正是 `LANG_KEY_MAX` 160）——这是判定"错在自己"的关键证据。
 - **复现与验证**：临时 ASan 测试台（编译本文件，喂真实的 `scripthook.ini` + `lang.ini`，按启动顺序先要语言标签再查键）→ `AddressSanitizer: access-violation … WRITE` 且栈顶在 `ShLangLabel`；修复后同一顺序干净通过、译文正确。
 - **修复**：`LoadLang()` 统一经 `EnsureRows()` 分配行表（它是"读文件"的唯一入口，谁调都安全）；`AddRow()` 增加空表守卫；`ShLangText` / `ShLangHas` 同路——`ShLangHas` 原先在表未分配时会**完全跳过文件行**，也一并修掉。
+
+### 9.7 截断与字符边界（同日）
+
+实测反馈"菜单名或提示被截断、末尾显示为 `?`"（`?` 是渲染器对**半个 UTF-8 字符**的显示）。四处成因逐条修掉：
+
+| 成因 | 位置 | 处置 |
+|---|---|---|
+| 拷贝按**字节**截断，切断多字节字符 | `scripthook_menu.c` 的 `NewItem` / `ShMenuStatus` / `ShMenuHint` 用 `strncpy`；`ShMenuStatusF` 格式化进 96 字节缓冲 | 显示拷贝统一走 `SafeCopy`；新增 `Utf8Trim` 并在 `SafeCopy` 末尾调用（**源字符串本身已被别处切断**时也收尾）；`ShMenuStatusF` 缓冲提到 `tmpl[512]` / `text[384]` |
+| 文本层拷贝同样按字节截断 | `scripthook_config.c` 的 `CopyN` / `CopyValue` | 新增 `Utf8Backoff`，两处末尾调用；超限日志保留 |
+| 上限偏小 | `LANG_KEY_MAX 160`、`LANG_VAL_MAX 320`、`LROW_MAX 1024`、`CfgEntry{48/64/128}`、`LABEL 48`、`Menu.hint[128]`/`status[96]`、`ShMenuView` 各字段 | 分别提到 `512` / `768` / `2048`、`{64/96/256}`、`64`、`hint[384]`/`status[192]`、`{title64,hint384,status192,footer32,name128,value48}` |
+| 框架内模块仍用**超长英文字面量**当键（Forge 的 hint 最长） | `scripthook_forge.c` | hint、两个开关、三条状态模板改 ID：`@forge.hint`、`@forge.enabled`、`@forge.dryrun`、`@forge.status.off/nomods/mods`，中英进基线 |
+
+顺带修掉一处字面量键撞车：Forge 页的 `"Enabled"` 原先命中共享表里的第一条同名字面量，被译成**「第一人称」**；改成 `@forge.enabled` 后为「启用」。
+
+Forge 的**页面键仍保持字面量** `"Forge Mod Loader"`：它是 `[MenuOrder]` 的键，改成 ID 会让玩家已保存的排序权重失配。

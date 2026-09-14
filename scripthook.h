@@ -1071,18 +1071,20 @@ SH_API void ShMenuOpen(int open);
 
 /** One row of the menu, copied for the overlay renderer. */
 typedef struct ShMenuRow {
-    char name[96];
-    char value[32];
+    char name[128];
+    char value[48];
     int  selected;
 } ShMenuRow;
 
 /** One frame of the current menu, captured under the lock for
- *  the D3D11 overlay (scripthook_ovl.cpp) to draw. */
+ *  the D3D11 overlay (scripthook_ovl.cpp) to draw. Sizes here are
+ *  what the renderer gets: a longer title, hint or status line is
+ *  cut on a character boundary by the capture, never mid-character. */
 typedef struct ShMenuView {
-    char title[48];
-    char hint[128];   /**< control hints under the title, \n lines */
-    char status[96];
-    char footer[16];
+    char title[64];
+    char hint[384];   /**< control hints under the title, \n lines */
+    char status[192];
+    char footer[32];
     int  rows;
     int  sel;
     int  isRoot;      /**< 1 when the root menu is being shown */

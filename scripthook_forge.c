@@ -852,23 +852,20 @@ void ShForgeMenuRegister(void) {
         else if (g_mods[i].ok < 0) bad++;
     }
 
-    ShMenuToggle(m, "Enabled", g_enabled, OnEnabled, NULL);
-    ShMenuToggle(m, "Dry run", g_dryRun, OnDryRun, NULL);
-    ShMenuHint(m,
-        "Loads loose files from mods\\ over existing .forge entries without "
-        "touching the archives. Lay them out as mods\\<archive>\\<file> or "
-        "mods\\<mod name>\\<archive>\\<file>; '~' disables a mod folder, and "
-        "'<n>_-_<name>.data' names the entry. Changes need a restart.");
+    ShMenuToggle(m, "@forge.enabled", g_enabled, OnEnabled, NULL);
+    ShMenuToggle(m, "@forge.dryrun", g_dryRun, OnDryRun, NULL);
+    /* The hint travels as a key: as a literal it is the longest text in
+     * the build, and it was the first thing the text layer cut. */
+    ShMenuHint(m, "@forge.hint");
 
     /* StatusF so the line is translated as this menu's own scope first:
      * the template and its translation keep the same placeholders. */
     if (!g_enabled)
-        ShMenuStatusF(m, "Off ([forgemod] enabled=0).");
+        ShMenuStatusF(m, "@forge.status.off");
     else if (g_nmods == 0)
-        ShMenuStatusF(m, "On, but mods\\ has no mod files.");
+        ShMenuStatusF(m, "@forge.status.nomods");
     else
-        ShMenuStatusF(m, "%d mod(s): %d applied, %d rejected or overridden.",
-                      g_nmods, applied, bad);
+        ShMenuStatusF(m, "@forge.status.mods", g_nmods, applied, bad);
 }
 
 /* ---- startup -------------------------------------------------------- */

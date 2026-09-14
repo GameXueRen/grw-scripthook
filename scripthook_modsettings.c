@@ -390,12 +390,12 @@ static uint32_t g_orderMenu = 0;
 typedef struct {
     char key[48];        /* the page key [MenuOrder] is keyed by */
     char owner[48];      /* the plugin that owns the page       */
-    char name[NAME_MAX]; /* its label, in the current language  */
+    char name[192];      /* its label, in the current language  */
 } OrderRow;
 
 static OrderRow g_order[ORDER_MAX];
 static int  g_nOrder;
-static char g_orderSel[NAME_MAX];      /* label of the row the cursor was on */
+static char g_orderSel[192];           /* label of the row the cursor was on */
 static int  g_orderShown = 0;          /* the page was on screen    */
 static volatile int g_orderStale = 0;  /* list or names need a rebuild */
 static volatile LONG g_orderBusy = 0;
