@@ -62,7 +62,10 @@
 
 #define JOB_WAIT_MS  3000
 #define MAX_UI       256
-#define MAX_TEXT     120
+/* Room for one label's text. The framework's own HUD lines are capped
+ * at HUD_LINE (192) bytes, so this has to be at least that or a long
+ * Chinese line would be cut on the way to the engine. */
+#define MAX_TEXT     256
 
 extern void ShSetError(int err);
 extern int  ShIsInGame(void);
@@ -669,6 +672,22 @@ static int JobImage(Widget *w, uint64_t parentH, uint64_t parentP,
     Dirty(p, parentP);
     *outH = h; *outP = p;
     return 1;
+}
+
+/* Store one label's text into its fixed buffer. The buffer can cut a
+ * long string, so the cut is pulled back to a character boundary (half
+ * a character is what the engine draws as "?"), and an incomplete tail
+ * the caller handed us is dropped the same way. */
+static void SafeText(char *dst, const char *src) {
+    size_t n;
+
+    if (!dst) return;
+    if (!src) { dst[0] = 0; return; }
+    n = strlen(src);
+    if (n > MAX_TEXT - 1) n = MAX_TEXT - 1;
+    memcpy(dst, src, n);
+    dst[n] = 0;
+    ShUtf8Trim(dst);
 }
 
 static void SetText(Widget *w) {
@@ -1293,7 +1312,7 @@ static uint32_t Create(uint32_t scene, int kind, int op, uint32_t parent,
     wd->kind = kind; wd->parent = parent; wd->scene = scene;
     wd->x = x; wd->y = y; wd->w = w; wd->h = h;
     wd->rgb = rgb; wd->alpha = alpha; wd->shown = 1.0f;
-    if (text) { strncpy(wd->text, text, MAX_TEXT - 1); }
+    if (text) { SafeText(wd->text, text); }
     wd->alive = 1;
     if (!RunJob(op, wd)) { wd->alive = 0; id = 0; }
     Log("create kind %d parent %u -> id %u handle %llx priv %llx "
@@ -1367,8 +1386,7 @@ SH_API int ShUiSetText(uint32_t id, const char *text) {
     Lock();
     w = Get(id);
     if (!w || w->kind != K_LABEL) { Unlock(); return 0; }
-    strncpy(w->text, text, MAX_TEXT - 1);
-    w->text[MAX_TEXT - 1] = 0;
+    SafeText(w->text, text);
     Unlock();
     return Apply(id, OP_TEXT);
 }
@@ -1596,6 +1614,7 @@ SH_API int ShUiGetS(uint32_t id, uint32_t prop, char *out, int n) {
     if (!Readable(pc.block + 12, len)) return 0;
     memcpy(out, (void *)(uintptr_t)(pc.block + 12), len);
     out[len] = 0;
+    ShUtf8Trim(out);        /* a small caller buffer cuts, so cut clean */
     return 1;
 }
 

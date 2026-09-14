@@ -455,6 +455,9 @@ static void W2U8(const wchar_t *w, char *dst, int dstSize)
 {
     if (!w || !dst || dstSize <= 0) return;
     WideCharToMultiByte(CP_UTF8, 0, w, -1, dst, dstSize, NULL, NULL);
+    /* A composition or a candidate longer than the buffer is cut by the
+     * converter; half a character is what the overlay would draw. */
+    ShUtf8Trim(dst);
 }
 
 /* Read the IME composition string and current candidate page, and report
