@@ -351,7 +351,11 @@ if ((Test-Path $fwLang) -and -not (Test-Path $fwLangDst)) {
 # cl generates a .lib/.exp beside any plugin that exports
 # symbols (chaos exports ChaosCount & friends). They are not
 # loaded by the game, so keep the plugins tree clean.
-Get-ChildItem $outPlugins -Recurse -Include *.lib, *.exp |
-    Remove-Item -Force
+# Each path is removed explicitly: piping these objects straight into
+# Remove-Item fails to bind under PowerShell 7 ("the input object cannot
+# be bound to any parameters"), which left the files in place and made a
+# successful build report a failure at its last step.
+Get-ChildItem $outPlugins -Recurse -Include *.lib, *.exp -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 
 Write-Host 'build complete'
