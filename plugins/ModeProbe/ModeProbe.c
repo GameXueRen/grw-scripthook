@@ -1200,21 +1200,70 @@ static void RefreshStatus(void) {
     pMenuStatus(g_menu, text);
 }
 
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * The keys are stable IDs, so rewording a row never breaks a
+ * translation. Late-bound, like the rest of this plugin.
+ */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+static LangDeclare_t pLangDeclare;
+
+static const TextRow kEn[] = {
+    { "@mp.page",    "Mode probe" },
+    { "@mp.enabled", "Probe enabled" },
+    { "@mp.dump",    "Dump now" },
+    { "@mp.scan",    "Scan files now" },
+    { "@mp.record",  "Record Ghost War item here" },
+    { "@mp.hint",
+      "Samples the GameFlow objects, the shell, the scene set, the PVP "
+      "entity names and the loaded archives into logs\\ModeProbe.log, one "
+      "line per sample. Play one mode per session, then press the dump "
+      "key (F8) to mark the moment. Nothing is changed." }
+};
+
+static const TextRow kZh[] = {
+    { "@mp.page",    "模式探测" },
+    { "@mp.enabled", "启用探测" },
+    { "@mp.dump",    "立即采样" },
+    { "@mp.scan",    "立即扫描文件" },
+    { "@mp.record",  "在此记录「幽灵战争」条目" },
+    { "@mp.hint",
+      "把 GameFlow 对象、外壳界面、场景集合、PVP 实体名与已加载归档采样到 "
+      "logs\\ModeProbe.log，每次采样一行。每个会话只玩一种模式，按采样键"
+      "（F8）标记该时刻。不修改任何东西。" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE m;
+
+    if (done) return;
+    m = GetModuleHandleA("dinput8.dll");
+    if (!m) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(m, "ShLangDeclare");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("ModeProbe", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("ModeProbe", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void BuildMenu(void) {
     if (!pMenuCreate || !pMenuToggle) return;
-    g_menu = pMenuCreate("Mode probe");
+    TextInit();
+    g_menu = pMenuCreate("@mp.page");
     if (!g_menu) return;
-    pMenuToggle(g_menu, "Probe enabled", g_enabled, OnEnabled, NULL);
-    pMenuAction(g_menu, "Dump now", OnDump, NULL);
-    pMenuAction(g_menu, "Scan files now", OnFiles, NULL);
-    pMenuAction(g_menu, "Record Ghost War item here", OnCalibrate, NULL);
+    pMenuToggle(g_menu, "@mp.enabled", g_enabled, OnEnabled, NULL);
+    pMenuAction(g_menu, "@mp.dump", OnDump, NULL);
+    pMenuAction(g_menu, "@mp.scan", OnFiles, NULL);
+    pMenuAction(g_menu, "@mp.record", OnCalibrate, NULL);
     if (pMenuHint)
-        pMenuHint(g_menu,
-                  "Samples the GameFlow objects, the shell, the scene set, "
-                  "the PVP entity names and the loaded archives into "
-                  "logs\\ModeProbe.log, one line per sample. Play one mode "
-                  "per session, then press the dump key (F8) to mark the "
-                  "moment. Nothing is changed.");
+        pMenuHint(g_menu, "@mp.hint");
     RefreshStatus();
 }
 

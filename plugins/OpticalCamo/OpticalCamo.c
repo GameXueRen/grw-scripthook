@@ -332,13 +332,13 @@ static void Pump(int state) {
      * value - no refresh is spent on a menu nobody is looking at. */
     if (needPush && g_menu && ShMenuIsShowing(g_menu)) {
         if (!on)
-            ShMenuStatusF(g_menu, "Off | %.3fx", shown);
+            ShMenuStatusF(g_menu, "@camo.status.off", shown);
         else if (state == CAMO_UNKNOWN)
-            ShMenuStatusF(g_menu, "State unavailable");
+            ShMenuStatusF(g_menu, "@camo.status.unknown");
         else
             ShMenuStatusF(g_menu, state == CAMO_ACTIVE
-                                   ? "Active | %.3fx"
-                                   : "Inactive | %.3fx", shown);
+                                   ? "@camo.status.active"
+                                   : "@camo.status.inactive", shown);
         needPush = 0;
     }
 }
@@ -373,15 +373,51 @@ static void OnStep(uint32_t menu, uint32_t item, int value, void *user) {
     Log("step %d (%s)", value, kStepName[value]);
 }
 
+/* ---- text ---------------------------------------------------------
+ * The menu's own text, compiled in. The keys are stable IDs, so
+ * rewording a row never breaks a translation in lang.ini.
+ */
+static const ShText kEn[] = {
+    { "@camo.page",             "Optical Camo" },
+    { "@camo.enabled",          "Optical Camo (crouch effect)" },
+    { "@camo.step",             "Camo Visibility" },
+    { "@camo.status.off",       "Off | %.3fx" },
+    { "@camo.status.active",    "Active | %.3fx" },
+    { "@camo.status.inactive",  "Inactive | %.3fx" },
+    { "@camo.status.unknown",   "State unavailable" }
+};
+
+static const ShText kZh[] = {
+    { "@camo.page",             "光学迷彩加强" },
+    { "@camo.enabled",          "光学迷彩加强（蹲下触发特效时生效）" },
+    { "@camo.step",             "敌人视觉感知" },
+    { "@camo.status.off",       "关闭 | %.3fx" },
+    { "@camo.status.active",    "激活 | %.3fx" },
+    { "@camo.status.inactive",  "未激活 | %.3fx" },
+    { "@camo.status.unknown",   "状态不可用" }
+};
+
+static void CamoText(void) {
+    static int done;
+
+    if (done) return;
+    done = 1;
+    ShLangDeclare("OpticalCamo", "en-US", kEn,
+                  (int)(sizeof(kEn) / sizeof(kEn[0])));
+    ShLangDeclare("OpticalCamo", "zh-CN", kZh,
+                  (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void BuildMenu(void) {
-    g_menu = ShMenuCreate("Optical Camo");
+    CamoText();
+    g_menu = ShMenuCreate("@camo.page");
     if (!g_menu) {
         Log("ShMenuCreate failed, error %d", ShLastError());
         return;
     }
-    ShMenuToggle(g_menu, "Optical Camo (crouch effect)", OnNow(),
+    ShMenuToggle(g_menu, "@camo.enabled", OnNow(),
                  OnToggle, NULL);
-    if (!ShMenuList(g_menu, "Camo Visibility", kStepName, STEP_COUNT,
+    if (!ShMenuList(g_menu, "@camo.step", kStepName, STEP_COUNT,
                     StepNow(), OnStep, NULL)) {
         Log("ShMenuList failed, error %d", ShLastError());
         ShMenuDestroy(g_menu);

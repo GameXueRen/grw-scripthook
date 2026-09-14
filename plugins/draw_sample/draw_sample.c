@@ -280,6 +280,52 @@ static void OnBox(uint32_t m, uint32_t it, int v, void *u) {
     SaveIni();
 }
 
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * Keys are stable IDs. Late-bound, like the rest of this plugin.
+ */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+static LangDeclare_t pLangDeclare;
+
+static const TextRow kEn[] = {
+    { "@ds.page", "Drawing sample" },
+    { "@ds.win",  "Drawer window" },
+    { "@ds.hud",  "Corner readout (frameless)" },
+    { "@ds.box",  "Text box" },
+    { "@ds.hint", "A worked example of the framework's drawing API: see "
+                  "docs/ui-drawing.md.  Drawer callbacks run on the render "
+                  "thread, once per frame." }
+};
+
+static const TextRow kZh[] = {
+    { "@ds.page", "绘制示例" },
+    { "@ds.win",  "绘制窗口" },
+    { "@ds.hud",  "角落读数（无边框）" },
+    { "@ds.box",  "文本框" },
+    { "@ds.hint", "框架绘制 API 的完整示例，见 docs/ui-drawing.md。绘制回调"
+                  "运行在渲染线程，每帧一次。" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE mod;
+
+    if (done) return;
+    mod = GetModuleHandleA("dinput8.dll");
+    if (!mod) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(mod, "ShLangDeclare");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("draw_sample", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("draw_sample", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void BuildMenu(HMODULE m) {
     uint32_t (*menuCreate)(const char *) = NULL;
     int (*menuToggle)(uint32_t, const char *, int, MenuFn_t, void *) = NULL;
@@ -290,17 +336,16 @@ static void BuildMenu(HMODULE m) {
     *(FARPROC *)&menuHint   = GetProcAddress(m, "ShMenuHint");
     if (!menuCreate || !menuToggle) return;
 
-    g_menu = menuCreate("Drawing sample");
-    menuToggle(g_menu, "Drawer window", (int)InterlockedCompareExchange(
+    TextInit();
+    g_menu = menuCreate("@ds.page");
+    menuToggle(g_menu, "@ds.win", (int)InterlockedCompareExchange(
                    &g_win, 0, 0), OnWindow, NULL);
-    menuToggle(g_menu, "Corner readout (frameless)", (int)InterlockedCompareExchange(
+    menuToggle(g_menu, "@ds.hud", (int)InterlockedCompareExchange(
                    &g_hud, 0, 0), OnHud, NULL);
-    menuToggle(g_menu, "Text box", (int)InterlockedCompareExchange(
+    menuToggle(g_menu, "@ds.box", (int)InterlockedCompareExchange(
                    &g_box, 0, 0), OnBox, NULL);
     if (menuHint)
-        menuHint(g_menu, "A worked example of the framework's drawing API: "
-                         "see docs/ui-drawing.md.  Drawer callbacks run on "
-                         "the render thread, once per frame.");
+        menuHint(g_menu, "@ds.hint");
     Log("menu created");
 }
 

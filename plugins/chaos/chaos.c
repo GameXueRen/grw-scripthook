@@ -1130,7 +1130,48 @@ static void OnEnable(uint32_t m, uint32_t it, int v, void *u) {
         StopAll();
         ShHudSet(g_hudStack, "");
     }
-    ShMenuStatus(g_menu, v ? "running" : "off");
+    ShMenuStatus(g_menu, v ? "@chaos.status.on" : "@chaos.status.off");
+}
+
+/* ---- text ---------------------------------------------------------
+ * The menu's own text, compiled in. The keys are stable IDs, so
+ * rewording a row never breaks a translation in lang.ini. The plain
+ * "off" and the template "off, %d effects" are two rows on purpose:
+ * one is a status line, the other the head of a formatted one.
+ */
+static const ShText kEn[] = {
+    { "@chaos.page",           "Chaos" },
+    { "@chaos.enabled",        "Enabled" },
+    { "@chaos.every",          "Seconds between" },
+    { "@chaos.hold",           "Effect seconds" },
+    { "@chaos.now",            "Roll one now" },
+    { "@chaos.clear",          "Clear active" },
+    { "@chaos.status.off",     "off" },
+    { "@chaos.status.on",      "running" },
+    { "@chaos.status.effects", "off, %d effects" }
+};
+
+static const ShText kZh[] = {
+    { "@chaos.page",           "混沌模式" },
+    { "@chaos.enabled",        "混沌开关" },
+    { "@chaos.every",          "每次间隔" },
+    { "@chaos.hold",           "特效时长" },
+    { "@chaos.now",            "立即随机一个" },
+    { "@chaos.clear",          "清除当前特效" },
+    { "@chaos.status.off",     "已关闭" },
+    { "@chaos.status.on",      "运行中" },
+    { "@chaos.status.effects", "已关闭，%d 个效果" }
+};
+
+static void ChaosText(void) {
+    static int done;
+
+    if (done) return;
+    done = 1;
+    ShLangDeclare("chaos", "en-US", kEn,
+                  (int)(sizeof(kEn) / sizeof(kEn[0])));
+    ShLangDeclare("chaos", "zh-CN", kZh,
+                  (int)(sizeof(kZh) / sizeof(kZh[0])));
 }
 
 static void OnEvery(uint32_t m, uint32_t it, int v, void *u) {
@@ -1158,16 +1199,17 @@ static DWORD WINAPI InitThread(LPVOID p) {
 
     while (!ShGetVersion()) Sleep(500);
 
-    g_menu = ShMenuCreate("Chaos");
-    ShMenuToggle(g_menu, "Enabled", 0, OnEnable, NULL);
-    ShMenuNumber(g_menu, "Seconds between", 30, 5, 180, 5,
+    ChaosText();
+    g_menu = ShMenuCreate("@chaos.page");
+    ShMenuToggle(g_menu, "@chaos.enabled", 0, OnEnable, NULL);
+    ShMenuNumber(g_menu, "@chaos.every", 30, 5, 180, 5,
                  OnEvery, NULL);
-    ShMenuNumber(g_menu, "Effect seconds", 60, 15, 180, 15,
+    ShMenuNumber(g_menu, "@chaos.hold", 60, 15, 180, 15,
                  OnHold, NULL);
-    ShMenuAction(g_menu, "Roll one now", OnNow, NULL);
-    ShMenuAction(g_menu, "Clear active", OnClearAll, NULL);
+    ShMenuAction(g_menu, "@chaos.now", OnNow, NULL);
+    ShMenuAction(g_menu, "@chaos.clear", OnClearAll, NULL);
 
-    ShMenuStatusF(g_menu, "off, %d effects", FX_COUNT);
+    ShMenuStatusF(g_menu, "@chaos.status.effects", FX_COUNT);
 
     g_hudStack = ShHudCreate("chaos", SH_HUD_TOPRIGHT, 0);
     ShHudColour(g_hudStack, 0xFFCC33);

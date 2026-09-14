@@ -219,6 +219,49 @@ static void OnHide(uint32_t m, uint32_t it, int v, void *u) {
     UpdateStatus();
 }
 
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * Keys are stable IDs. Late-bound, like the rest of this plugin.
+ */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+static LangDeclare_t pLangDeclare;
+
+static const TextRow kEn[] = {
+    { "@fw.page",  "File interception sample" },
+    { "@fw.watch", "Watch file calls" },
+    { "@fw.hide",  "Hide demo_hidden.bin" },
+    { "@fw.hint",  "A worked example of the framework's file layer: one "
+                   "watcher, one hide rule, and the query calls." }
+};
+
+static const TextRow kZh[] = {
+    { "@fw.page",  "文件拦截示例" },
+    { "@fw.watch", "监视文件调用" },
+    { "@fw.hide",  "隐藏 demo_hidden.bin" },
+    { "@fw.hint",  "框架文件层的完整示例：一个监视器、一条隐藏规则，以及查询"
+                   "接口。" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE mod;
+
+    if (done) return;
+    mod = GetModuleHandleA("dinput8.dll");
+    if (!mod) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(mod, "ShLangDeclare");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("file_watch_sample", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("file_watch_sample", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void BuildMenu(HMODULE m) {
     uint32_t (*menuCreate)(const char *) = NULL;
     int (*menuToggle)(uint32_t, const char *, int, MenuFn_t, void *) = NULL;
@@ -230,14 +273,14 @@ static void BuildMenu(HMODULE m) {
     *(FARPROC *)&g_statusF  = GetProcAddress(m, "ShMenuStatusF");
     if (!menuCreate || !menuToggle) return;
 
-    g_menu = menuCreate("File interception sample");
-    menuToggle(g_menu, "Watch file calls", (int)InterlockedCompareExchange(
+    TextInit();
+    g_menu = menuCreate("@fw.page");
+    menuToggle(g_menu, "@fw.watch", (int)InterlockedCompareExchange(
                    &g_watch, 0, 0), OnWatch, NULL);
-    menuToggle(g_menu, "Hide demo_hidden.bin", (int)InterlockedCompareExchange(
+    menuToggle(g_menu, "@fw.hide", (int)InterlockedCompareExchange(
                    &g_hide, 0, 0), OnHide, NULL);
     if (menuHint)
-        menuHint(g_menu, "A worked example of the framework's file layer: "
-                         "one watcher, one hide rule, and the query calls.");
+        menuHint(g_menu, "@fw.hint");
     UpdateStatus();
     Log("menu created");
 }

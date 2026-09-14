@@ -47,20 +47,66 @@ static void OnSpawn(uint32_t menu, uint32_t item, int value,
     (void)item; (void)value;
     if (!v) return;
     if (!g_playerPos(&pos)) {
-        g_status(menu, "no player position");
+        g_status(menu, "@sp.noplayer");
         return;
     }
     pos.x += AHEAD;
     pos.z += LIFT;
 
-    g_status(menu, "spawning...");
+    g_status(menu, "@sp.spawning");
     ent = g_spawn(v->id, &pos);
     if (ent) {
         g_spawned++;
-        g_statusF(menu, "spawned, %d this session", g_spawned);
+        g_statusF(menu, "@sp.spawned", g_spawned);
     } else {
-        g_status(menu, "nothing appeared");
+        g_status(menu, "@sp.nothing");
     }
+}
+
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in. lang.ini beside this source keeps
+ * the catalogue labels - the framework's vehicle names are keys there -
+ * and may override any of these rows. Keys are stable IDs, so rewording
+ * one never breaks a translation.
+ */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+static LangDeclare_t pLangDeclare;
+
+static const TextRow kEn[] = {
+    { "@sp.page",     "Vehicles" },
+    { "@sp.hint",     "Note: the first summon may take a moment." },
+    { "@sp.noplayer", "no player position" },
+    { "@sp.spawning", "spawning..." },
+    { "@sp.spawned",  "spawned, %d this session" },
+    { "@sp.nothing",  "nothing appeared" }
+};
+
+static const TextRow kZh[] = {
+    { "@sp.page",     "载具" },
+    { "@sp.hint",     "提示：第一次召唤可能需要一点时间。" },
+    { "@sp.noplayer", "无法获取玩家位置" },
+    { "@sp.spawning", "正在生成……" },
+    { "@sp.spawned",  "已生成，本次会话共 %d 辆" },
+    { "@sp.nothing",  "没有出现" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE m;
+
+    if (done) return;
+    m = GetModuleHandleA("dinput8.dll");
+    if (!m) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(m, "ShLangDeclare");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("spawner", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("spawner", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
 }
 
 static DWORD WINAPI BindThread(LPVOID p) {
@@ -92,8 +138,9 @@ static DWORD WINAPI BindThread(LPVOID p) {
     /* The catalogue is static, so every vehicle becomes a
      * row once and the API scrolls them.
      */
-    g_menu = menuCreate("Vehicles");
-    g_hint(g_menu, "Note: the first summon may take a moment.");
+    TextInit();
+    g_menu = menuCreate("@sp.page");
+    g_hint(g_menu, "@sp.hint");
     n = g_count();
     for (i = 0; i < n; i++) {
         const Vehicle *v = g_at(i);

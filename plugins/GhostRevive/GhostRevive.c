@@ -279,6 +279,71 @@ static void OnEnable(uint32_t menu, uint32_t item, int value, void *user) {
     SaveIni();
 }
 
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * The keys are stable IDs, so rewording a row never breaks a
+ * translation. Late-bound, like the rest of this plugin.
+ */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+typedef const char *(*LangText_t)(const char *owner, const char *key);
+static LangDeclare_t pLangDeclare;
+static LangText_t    pLangText;
+
+static const TextRow kEn[] = {
+    { "@gr.page",   "Ghost revive" },
+    { "@gr.watch",  "Watch and try to revive" },
+    { "@gr.switch", "Switch the method" },
+    { "@gr.hint",
+      "Experimental. A Ghost Mode death that ends the run goes through a "
+      "different path from one that does not; this tries to send every "
+      "death down the reviving one. The method cycles: off, probe, "
+      "noscene, reload, fixhp, cannotdie, prehp." }
+};
+
+static const TextRow kZh[] = {
+    { "@gr.page",   "幽灵复活" },
+    { "@gr.watch",  "监视并尝试复活" },
+    { "@gr.switch", "切换复活方式" },
+    { "@gr.hint",
+      "实验功能。会让本局结束的幽灵模式死亡与普通死亡走的是不同路径；"
+      "本插件尝试让每次死亡都走可复活的那条。方式循环：off、probe、"
+      "noscene、reload、fixhp、cannotdie、prehp。" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE m;
+
+    if (done) return;
+    m = GetModuleHandleA("dinput8.dll");
+    if (!m) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(m, "ShLangDeclare");
+    if (!pLangText)
+        *(FARPROC *)&pLangText = GetProcAddress(m, "ShLangText");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("GhostRevive", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("GhostRevive", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
+/* One of our IDs as text: a value handed to a toast is used exactly as
+ * written, so it has to be resolved here. */
+static const char *T(const char *id) {
+    const char *t;
+
+    if (!id || id[0] != '@') return id;
+    if (!pLangText) TextInit();
+    if (!pLangText) return id;
+    t = pLangText("GhostRevive", id);
+    return (t && t[0]) ? t : id;
+}
+
 /* The mode cycles, because the point of this build is to compare them
  * against one another without a recompile between each. */
 static void OnCycleMode(uint32_t menu, uint32_t item, int value, void *user) {
@@ -295,7 +360,8 @@ static void OnCycleMode(uint32_t menu, uint32_t item, int value, void *user) {
      * way to tell one from the next. */
     if (g_toastEx) {
         char line[96];
-        snprintf(line, sizeof(line), "Ghost revive: %s", MODE_NAMES[next]);
+        snprintf(line, sizeof(line), "%s: %s", T("@gr.page"),
+                 MODE_NAMES[next]);
         g_toastEx(line, 0xFFCC33u, 2500u);
     }
 }
@@ -313,18 +379,16 @@ static void BuildMenu(HMODULE m) {
     if (!menuCreate || !menuToggle) return;
 
     {
-        uint32_t menu = menuCreate("Ghost revive");
+        uint32_t menu;
 
-        menuToggle(menu, "Watch and try to revive", Enabled(), OnEnable, NULL);
+        TextInit();
+        menu = menuCreate("@gr.page");
+
+        menuToggle(menu, "@gr.watch", Enabled(), OnEnable, NULL);
         if (menuAction)
-            menuAction(menu, "Switch the method", OnCycleMode, NULL);
+            menuAction(menu, "@gr.switch", OnCycleMode, NULL);
         if (menuHint)
-            menuHint(menu,
-                     "Experimental. A Ghost Mode death that ends the run "
-                     "goes through a different path from one that does not; "
-                     "this tries to send every death down the reviving one. "
-                     "The method cycles: off, probe, noscene, reload, "
-                     "fixhp, cannotdie, prehp.");
+            menuHint(menu, "@gr.hint");
     }
     GuardLog("menu created");
 }

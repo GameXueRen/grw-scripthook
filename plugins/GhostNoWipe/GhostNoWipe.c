@@ -871,9 +871,7 @@ static void GnvAfter(ShFileCall *c, void *user) {
  *
  * The text goes through the same table as the menu, so a translation
  * shipped in this plugin's ini applies here too. */
-static const char *NOTICE_TEXT =
-    "The save was kept - the run is over, and play resumes from the last "
-    "checkpoint. Restart the game to carry on.";
+static const char *NOTICE_TEXT = "@gn.notice";
 
 #define NOTICE_RGB 0xFFCC33u
 
@@ -1046,6 +1044,49 @@ static void OnForgetSlots(uint32_t menu, uint32_t item, int value,
     ForgetGhostSlots();
 }
 
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * The keys are stable IDs, so rewording a row never breaks a
+ * translation. This build links the framework, so the two entry points
+ * are called directly.
+ */
+static const ShText kEn[] = {
+    { "@gn.page",   "Ghost save guard" },
+    { "@gn.keep",   "Keep the save when the run ends" },
+    { "@gn.forget", "Forget the ghost slots" },
+    { "@gn.notice",
+      "The save was kept - the run is over, and play resumes from the "
+      "last checkpoint. Restart the game to carry on." },
+    { "@gn.hint",
+      "Stops a Ghost Mode save being wiped when the run ends. Only slots "
+      "this plugin has seen a Ghost Mode death on are protected; every "
+      "other slot is left alone." }
+};
+
+static const ShText kZh[] = {
+    { "@gn.page",   "幽灵存档守卫" },
+    { "@gn.keep",   "本局结束时保留存档" },
+    { "@gn.forget", "清除幽灵槽位记录" },
+    { "@gn.notice",
+      "存档已保留——本局已结束，继续游玩会从上一个检查点开始。"
+      "重启游戏即可继续。" },
+    { "@gn.hint",
+      "在本局结束时阻止幽灵模式存档被清空。只有本插件见过幽灵模式死亡"
+      "的槽位受保护，其余槽位不受影响。" }
+};
+
+static void GnText(void) {
+    static int done;
+
+    if (done) return;
+    done = 1;
+    ShLangDeclare("GhostNoWipe", "en-US", kEn,
+                  (int)(sizeof(kEn) / sizeof(kEn[0])));
+    ShLangDeclare("GhostNoWipe", "zh-CN", kZh,
+                  (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void BuildMenu(HMODULE m) {
     uint32_t (*menuCreate)(const char *) = NULL;
     int (*menuToggle)(uint32_t, const char *, int, MenuFn, void *) = NULL;
@@ -1059,16 +1100,16 @@ static void BuildMenu(HMODULE m) {
     if (!menuCreate || !menuToggle) return;
 
     {
-        uint32_t menu = menuCreate("Ghost save guard");
-        menuToggle(menu, "Keep the save when the run ends", Enabled(),
+        uint32_t menu;
+
+        GnText();
+        menu = menuCreate("@gn.page");
+        menuToggle(menu, "@gn.keep", Enabled(),
                    OnEnable, NULL);
         if (menuAction)
-            menuAction(menu, "Forget the ghost slots", OnForgetSlots, NULL);
+            menuAction(menu, "@gn.forget", OnForgetSlots, NULL);
         if (menuHint)
-            menuHint(menu,
-                     "Stops a Ghost Mode save being wiped when the run ends. "
-                     "Only slots this plugin has seen a Ghost Mode death on "
-                     "are protected; every other slot is left alone.");
+            menuHint(menu, "@gn.hint");
     }
     GuardLog("menu created");
 }

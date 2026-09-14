@@ -360,6 +360,48 @@ static void OnEnable(uint32_t menu, uint32_t item, int value, void *user) {
     SaveIni();
 }
 
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * Keys are stable IDs. Late-bound, like the rest of this plugin.
+ */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+static LangDeclare_t pLangDeclare;
+
+static const TextRow kEn[] = {
+    { "@me.page", "Mode exit probe" },
+    { "@me.log",  "Log exit and relaunch" },
+    { "@me.hint", "Records who asks the game to exit when a non-campaign "
+                  "mode returns to the main menu, and whether the process "
+                  "relaunched itself. Nothing is changed." }
+};
+
+static const TextRow kZh[] = {
+    { "@me.page", "模式退出探测" },
+    { "@me.log",  "记录退出与重启" },
+    { "@me.hint", "记录非战役模式退回主菜单时是谁要求退出游戏，以及进程是否"
+                  "自行重启。不修改任何东西。" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE mod;
+
+    if (done) return;
+    mod = GetModuleHandleA("dinput8.dll");
+    if (!mod) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(mod, "ShLangDeclare");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("ModeExitProbe", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("ModeExitProbe", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void BuildMenu(HMODULE m) {
     uint32_t (*menuCreate)(const char *) = NULL;
     int (*menuToggle)(uint32_t, const char *, int, MenuFn, void *) = NULL;
@@ -371,14 +413,14 @@ static void BuildMenu(HMODULE m) {
     if (!menuCreate || !menuToggle) return;
 
     {
-        uint32_t menu = menuCreate("Mode exit probe");
-        menuToggle(menu, "Log exit and relaunch", Enabled(),
+        uint32_t menu;
+
+        TextInit();
+        menu = menuCreate("@me.page");
+        menuToggle(menu, "@me.log", Enabled(),
                    OnEnable, NULL);
         if (menuHint)
-            menuHint(menu,
-                     "Records who asks the game to exit when a non-campaign "
-                     "mode returns to the main menu, and whether the process "
-                     "relaunched itself. Nothing is changed.");
+            menuHint(menu, "@me.hint");
     }
     ProbeLog("menu created");
 }

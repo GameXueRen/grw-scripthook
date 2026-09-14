@@ -56,11 +56,12 @@ enum {
     CAT_COUNT
 };
 
-/* Menu titles and ini suffixes, per category. The English
- * titles are the lookup keys in plugins\firstperson\lang.ini. */
+/* Menu titles and ini suffixes, per category. The name arrays hold the
+ * IDs the menu looks up (see the tables below); the suffixes stay
+ * English - they name keys in the plugin's own ini. */
 static const char *g_catName[CAT_COUNT] = {
-    "On foot", "Ground vehicle", "Motorbike", "Boat",
-    "Airplane", "Helicopter", "Passenger"
+    "@fp.cat.foot", "@fp.cat.land", "@fp.cat.bike", "@fp.cat.boat",
+    "@fp.cat.plane", "@fp.cat.heli", "@fp.cat.rider"
 };
 static const char *g_catTag[CAT_COUNT] = {
     "foot", "land", "bike", "boat", "plane", "heli", "rider"
@@ -78,7 +79,7 @@ enum {
     PRESET_COUNT       /* number of custom presets */
 };
 static const char *g_presetName[PRESET_COUNT] = {
-    "Custom 1", "Custom 2", "Custom 3", "Custom 4"
+    "@fp.preset.1", "@fp.preset.2", "@fp.preset.3", "@fp.preset.4"
 };
 static const char *g_presetTag[PRESET_COUNT] = {
     "preset1", "preset2", "preset3", "preset4"
@@ -87,9 +88,105 @@ static const char *g_presetTag[PRESET_COUNT] = {
 /* The three axes, per axis suffix: the menu rows read right,
  * forward and up, which is what the eye's own axes are. */
 static const char *g_axisName[3] = {
-    "Right cm", "Forward cm", "Up cm"
+    "@fp.axis.right", "@fp.axis.fwd", "@fp.axis.up"
 };
 static const char *g_axisTag[3] = { "right", "fwd", "up" };
+
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: a lang.ini under this folder only
+ * has to carry what it changes, and the menu reads with or without it.
+ * The keys are stable IDs, so rewording a row never breaks a
+ * translation. The status lines are templates and go through
+ * ShMenuStatusF, which checks a translation's conversions against the
+ * English ones here before it uses them.
+ */
+static const ShText kEn[] = {
+    { "@fp.page",          "First person" },
+    { "@fp.enabled",       "Enabled" },
+    { "@fp.hotkey",        "View toggle hotkey" },
+    { "@fp.preset",        "Preset" },
+    { "@fp.preset.auto",   "Auto" },
+    { "@fp.preset.1",      "Custom 1" },
+    { "@fp.preset.2",      "Custom 2" },
+    { "@fp.preset.3",      "Custom 3" },
+    { "@fp.preset.4",      "Custom 4" },
+    { "@fp.cat.foot",      "On foot" },
+    { "@fp.cat.land",      "Ground vehicle" },
+    { "@fp.cat.bike",      "Motorbike" },
+    { "@fp.cat.boat",      "Boat" },
+    { "@fp.cat.plane",     "Airplane" },
+    { "@fp.cat.heli",      "Helicopter" },
+    { "@fp.cat.rider",     "Passenger" },
+    { "@fp.axis.right",    "Right cm" },
+    { "@fp.axis.fwd",      "Forward cm" },
+    { "@fp.axis.up",       "Up cm" },
+    { "@fp.hot.none",      "None" },
+    { "@fp.hot.equal",     "Equal (=)" },
+    { "@fp.hot.f2",        "F2" },
+    { "@fp.hot.f3",        "F3" },
+    { "@fp.status.off",    "off" },
+    { "@fp.status.nosite", "on, engine sites missing - no first person" },
+    { "@fp.status.on",
+      "on, head hidden [%s %+.0f %+.0f %+.0f]" },
+    { "@fp.status.away",
+      "on, view taken by the engine (%s) [%s %+.0f %+.0f %+.0f]" },
+    { "@fp.hint",
+      "If the head is not hidden by itself, switch first person off "
+      "and on again." }
+};
+
+static const ShText kZh[] = {
+    { "@fp.page",          "第一人称" },
+    { "@fp.enabled",       "启用" },
+    { "@fp.hotkey",        "视角切换快捷键" },
+    { "@fp.preset",        "视角参数" },
+    { "@fp.preset.auto",   "自动" },
+    { "@fp.preset.1",      "自定义 1" },
+    { "@fp.preset.2",      "自定义 2" },
+    { "@fp.preset.3",      "自定义 3" },
+    { "@fp.preset.4",      "自定义 4" },
+    { "@fp.cat.foot",      "步行" },
+    { "@fp.cat.land",      "地面载具" },
+    { "@fp.cat.bike",      "摩托" },
+    { "@fp.cat.boat",      "船" },
+    { "@fp.cat.plane",     "飞机" },
+    { "@fp.cat.heli",      "直升机" },
+    { "@fp.cat.rider",     "乘客" },
+    { "@fp.axis.right",    "左右调整 (厘米)" },
+    { "@fp.axis.fwd",      "前后调整 (厘米)" },
+    { "@fp.axis.up",       "高低调整 (厘米)" },
+    { "@fp.hot.none",      "无" },
+    { "@fp.hot.equal",     "= 键" },
+    { "@fp.hot.f2",        "F2" },
+    { "@fp.hot.f3",        "F3" },
+    { "@fp.status.off",    "已关闭" },
+    { "@fp.status.nosite", "已开启，但引擎点位缺失，第一人称不可用" },
+    { "@fp.status.on",
+      "已开启，头部已隐藏 [%s %+.0f %+.0f %+.0f]" },
+    { "@fp.status.away",
+      "已开启，视角由引擎接管（%s）[%s %+.0f %+.0f %+.0f]" },
+    { "@fp.hint",
+      "头部若未自动隐藏，请重新切换第一人称解决" }
+};
+
+/* Late binding, like everything else in this plugin: the entry points
+ * are resolved by name at bind time, so it loads with any dinput8 that
+ * has the core API. Without this one the menu still works, it just
+ * shows the IDs instead of their text. */
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const ShText *rows, int n);
+static LangDeclare_t g_langDeclare;
+
+static void FpText(void) {
+    static int done;
+
+    if (done || !g_langDeclare) return;
+    done = 1;
+    g_langDeclare("firstperson", "en-US", kEn,
+                  (int)(sizeof(kEn) / sizeof(kEn[0])));
+    g_langDeclare("firstperson", "zh-CN", kZh,
+                  (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
 
 typedef int (*IsInGame_t)(void);
 typedef int (*GameState_t)(void);
@@ -242,7 +339,7 @@ static const int g_hotVk[HOTKEYS] = {
     VK_F3
 };
 static const char *g_hotName[HOTKEYS] = {
-    "None", "Equal (=)", "F2", "F3"
+    "@fp.hot.none", "@fp.hot.equal", "@fp.hot.f2", "@fp.hot.f3"
 };
 static volatile int g_hotKey = 0;   /* index into g_hotVk, 0 = off */
 
@@ -461,7 +558,7 @@ static void SetFp(int on) {
      * changed behind the menu's back; sync it so the next
      * capture renders the truth. */
     if (g_menuSetValue && g_menu)
-        g_menuSetValue(g_menu, "Enabled", g_on);
+        g_menuSetValue(g_menu, "@fp.enabled", g_on);
     Report();
 }
 
@@ -597,19 +694,30 @@ static void SayStatusWhy(const char *tmpl, const char *why,
     g_status(g_menu, line);
 }
 
-#define STATUS_OFF     "off"
-#define STATUS_ON      "on, head hidden [%s %+.0f %+.0f %+.0f]"
-#define STATUS_AWAY    "on, view taken by the engine (%s) [%s %+.0f %+.0f %+.0f]"
-#define STATUS_NOSITE  "on, engine sites missing - no first person"
+#define STATUS_OFF     "@fp.status.off"
+#define STATUS_ON      "@fp.status.on"
+#define STATUS_AWAY    "@fp.status.away"
+#define STATUS_NOSITE  "@fp.status.nosite"
 
-/* The name of the set in force, put through the menu's own
- * translation table so the row does not read half in one
- * language and half in another. */
+/* The name of the set in force, resolved to text. The menu translates a
+ * row it captures itself, but a value handed to a status TEMPLATE comes
+ * through exactly as it is written - so an ID here has to be looked up
+ * by the plugin, or the line would read "@fp.cat.foot". */
+static const char *(*g_langText)(const char *owner, const char *key);
+
+static const char *SetText(const char *id) {
+    const char *t;
+
+    if (!g_langText || !id || id[0] != '@') return id;
+    t = g_langText("firstperson", id);
+    return (t && t[0]) ? t : id;
+}
+
 static const char *ActiveSetName(void) {
     if (g_presetSel >= 0 && g_presetSel < PRESET_COUNT)
-        return g_presetName[g_presetSel];
+        return SetText(g_presetName[g_presetSel]);
     if (g_cat >= 0 && g_cat < CAT_COUNT)
-        return g_catName[g_cat];
+        return SetText(g_catName[g_cat]);
     return "";
 }
 
@@ -1120,6 +1228,11 @@ static DWORD WINAPI BindThread(LPVOID p) {
         GetProcAddress(m, "ShMenuSetValue");
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
     *(FARPROC *)&g_statusF = GetProcAddress(m, "ShMenuStatusF");
+    /* Optional: without it the status line names the set by its ID. */
+    *(FARPROC *)&g_langText = GetProcAddress(m, "ShLangText");
+    /* Optional: declares this plugin's own text. Without it the menu
+     * shows the IDs - both are resolved by name like the rest. */
+    *(FARPROC *)&g_langDeclare = GetProcAddress(m, "ShLangDeclare");
     /* The menu builders. These have to be resolved before the
      * gate below, or the gate reads NULL and the whole plugin
      * bows out of binding - no menu, no threads, no first
@@ -1185,23 +1298,24 @@ static DWORD WINAPI BindThread(LPVOID p) {
     if (g_extras && g_fpxExtras) g_fpxExtras((uint32_t)g_extras);
     Diag("bind: fpx=%d miss=%03x extras=%d", g_fpxUp,
          g_fpxMissing ? (unsigned)g_fpxMissing() : 0u, g_extras);
-    g_menu = menuCreate("First person");
-    menuToggle(g_menu, "Enabled", 0, OnToggle, NULL);
+    FpText();
+    g_menu = menuCreate("@fp.page");
+    menuToggle(g_menu, "@fp.enabled", 0, OnToggle, NULL);
     /* One row picks the flip key: None (=off), =, F2 or F3.
      * The row's label is the English lookup key, translated by
      * the plugins\firstperson\lang.ini table. */
     if (menuList)
-        menuList(g_menu, "View toggle hotkey", g_hotName,
+        menuList(g_menu, "@fp.hotkey", g_hotName,
                  HOTKEYS, g_hotKey, OnHotKey, NULL);
     /* Which set of offsets is in force: Auto follows what the
      * player is doing, a preset holds one set regardless. */
     if (menuList) {
         static const char *opts[PRESET_COUNT + 1];
         int i;
-        opts[0] = "Auto";
+        opts[0] = "@fp.preset.auto";
         for (i = 0; i < PRESET_COUNT; i++)
             opts[i + 1] = g_presetName[i];
-        menuList(g_menu, "Preset", opts, PRESET_COUNT + 1,
+        menuList(g_menu, "@fp.preset", opts, PRESET_COUNT + 1,
                  g_presetSel + 1, OnPresetList, NULL);
     }
     if (menuNumber) {
@@ -1241,9 +1355,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
         }
     }
     if (menuHint)
-        menuHint(g_menu,
-                 "If the head is not hidden by itself, switch "
-                 "first person off and on again.");
+        menuHint(g_menu, "@fp.hint");
     Report();
 
     {

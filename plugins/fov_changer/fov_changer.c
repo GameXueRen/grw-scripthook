@@ -58,12 +58,49 @@ static int Push(void) {
     return ShCameraApply(&o);
 }
 
+/* ---- text ---------------------------------------------------------
+ * The menu's own text, compiled in: with no lang.ini anywhere the menu
+ * still reads in either language, and a lang.ini only has to carry what
+ * it changes. The keys are stable IDs, so rewording a row never breaks
+ * a translation - the reason they are not the English literals.
+ */
+static const ShText kEn[] = {
+    { "@fov.page",       "Field of view" },
+    { "@fov.override",   "Override" },
+    { "@fov.vertical",   "Vertical fov" },
+    { "@fov.reset",      "Back to the game default" },
+    { "@fov.status.on",  "%.0f deg, game default %.0f" },
+    { "@fov.status.off", "off, game is %.0f deg" },
+    { "@fov.notready",   "the camera is not ready" }
+};
+
+static const ShText kZh[] = {
+    { "@fov.page",       "延展视野范围" },
+    { "@fov.override",   "覆盖游戏视野范围设置" },
+    { "@fov.vertical",   "调整垂直视野范围（度）" },
+    { "@fov.reset",      "恢复游戏默认视野范围" },
+    { "@fov.status.on",  "当前视野范围 %.0f 度，游戏默认 %.0f" },
+    { "@fov.status.off", "已关闭，当前视野范围 %.0f 度" },
+    { "@fov.notready",   "游戏视野尚未就绪" }
+};
+
+static void FovText(void) {
+    static int done;
+
+    if (done) return;
+    done = 1;
+    ShLangDeclare("fov_changer", "en-US", kEn,
+                  (int)(sizeof(kEn) / sizeof(kEn[0])));
+    ShLangDeclare("fov_changer", "zh-CN", kZh,
+                  (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void Report(void) {
     if (g_on)
-        ShMenuStatusF(g_menu, "%.0f deg, game default %.0f",
+        ShMenuStatusF(g_menu, "@fov.status.on",
                       g_deg, DefaultRad() * RAD2DEG);
     else
-        ShMenuStatusF(g_menu, "off, game is %.0f deg",
+        ShMenuStatusF(g_menu, "@fov.status.off",
                       DefaultRad() * RAD2DEG);
 }
 
@@ -77,7 +114,7 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
         g_on = 1;
         if (!Push()) {
             g_on = 0;
-            ShMenuStatus(g_menu, "the camera is not ready");
+            ShMenuStatus(g_menu, "@fov.notready");
             return;
         }
     } else {
@@ -127,11 +164,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(inst);
 
         g_deg = FALLBACK * RAD2DEG;
-        g_menu = ShMenuCreate("Field of view");
-        ShMenuToggle(g_menu, "Override", 0, OnToggle, NULL);
-        ShMenuNumber(g_menu, "Vertical fov", g_deg, DEG_MIN, DEG_MAX,
+        FovText();
+        g_menu = ShMenuCreate("@fov.page");
+        ShMenuToggle(g_menu, "@fov.override", 0, OnToggle, NULL);
+        ShMenuNumber(g_menu, "@fov.vertical", g_deg, DEG_MIN, DEG_MAX,
                      DEG_STEP, OnFov, NULL);
-        ShMenuAction(g_menu, "Back to the game default", OnReset,
+        ShMenuAction(g_menu, "@fov.reset", OnReset,
                      NULL);
         Report();
 

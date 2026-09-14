@@ -239,6 +239,9 @@ static void DictAdd(const char *s) {
 /* verbs x nouns, both orders, plus the bare words and whatever the ini
  * adds: a few thousand names is nothing to hash, and the engine's own
  * vocabulary is exactly these words in some order. */
+/* Defined with the text tables below; the status line needs it first. */
+static const char *T(const char *id);
+
 static void DictBuild(void) {
     size_t i, j;
     char buf[40];
@@ -1285,22 +1288,85 @@ static void RefreshStatus(void) {
 
     if (!g_menu || !pMenuStatus) return;
     snprintf(text, sizeof(text),
-             "%d methods, %d named, %d hot - F9 dumps",
-             g_totalMeth, g_totalNamed, g_totalHot);
+             "%d %s, %d %s, %d %s - %s",
+             g_totalMeth, T("@mc.status"), g_totalNamed, T("@mc.status"),
+             g_totalHot, T("@mc.status"), T("@mc.n.dump"));
     pMenuStatus(g_menu, text);
+}
+
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * Keys are stable IDs. Late-bound, like the rest of this plugin.
+ */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+typedef const char *(*LangText_t)(const char *owner, const char *key);
+static LangDeclare_t pLangDeclare;
+static LangText_t    pLangText;
+
+static const TextRow kEn[] = {
+    { "@mc.page", "Mode call probe" },
+    { "@mc.dump", "Dump tables" },
+    { "@mc.status", "methods / named / hot" },
+    { "@mc.n.dump", "F9 dumps" },
+    { "@mc.hint",
+      "Writes the method tables of the GameFlow machine, its sub objects "
+      "and the HybridMenu - with any names the dictionary resolves - to "
+      "logs\\ModeCallProbe.log. Read only: nothing is called, hooked or "
+      "changed." }
+};
+
+static const TextRow kZh[] = {
+    { "@mc.page", "模式调用探测" },
+    { "@mc.dump", "导出方法表" },
+    { "@mc.status", "方法 / 具名 / 热点" },
+    { "@mc.n.dump", "F9 导出" },
+    { "@mc.hint",
+      "把 GameFlow 状态机、其子对象与 HybridMenu 的方法表（含字典能解析出"
+      "的名称）写到 logs\\ModeCallProbe.log。只读：不调用、不挂钩、不修改。" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE mod;
+
+    if (done) return;
+    mod = GetModuleHandleA("dinput8.dll");
+    if (!mod) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(mod, "ShLangDeclare");
+    if (!pLangText)
+        *(FARPROC *)&pLangText = GetProcAddress(mod, "ShLangText");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("ModeCallProbe", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("ModeCallProbe", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
+/* One of our IDs as text: a value inside a status line is used exactly
+ * as written, so it has to be resolved here. */
+static const char *T(const char *id) {
+    const char *t;
+
+    if (!id || id[0] != '@') return id;
+    if (!pLangText) TextInit();
+    if (!pLangText) return id;
+    t = pLangText("ModeCallProbe", id);
+    return (t && t[0]) ? t : id;
 }
 
 static void BuildMenu(void) {
     if (!pMenuCreate || !pMenuAction) return;
-    g_menu = pMenuCreate("Mode call probe");
+    TextInit();
+    g_menu = pMenuCreate("@mc.page");
     if (!g_menu) return;
-    pMenuAction(g_menu, "Dump tables", OnDump, NULL);
+    pMenuAction(g_menu, "@mc.dump", OnDump, NULL);
     if (pMenuHint)
-        pMenuHint(g_menu,
-                  "Writes the method tables of the GameFlow machine, its "
-                  "sub objects and the HybridMenu - with any names the "
-                  "dictionary resolves - to logs\\ModeCallProbe.log. Read "
-                  "only: nothing is called, hooked or changed.");
+        pMenuHint(g_menu, "@mc.hint");
 }
 
 #define DUMP_KEY VK_F9

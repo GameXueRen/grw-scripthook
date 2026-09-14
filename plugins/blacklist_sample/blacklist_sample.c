@@ -102,6 +102,75 @@ static void BitsText(uint32_t bits, char *out, int cap) {
     if (!out[0]) snprintf(out, (size_t)cap, "0x%X", (unsigned)bits);
 }
 
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * Keys are stable IDs. Late-bound, like the rest of this sample.
+ */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+typedef const char *(*LangText_t)(const char *owner, const char *key);
+static LangDeclare_t pLangDeclare;
+static LangText_t    pLangText;
+
+static const TextRow kEn[] = {
+    { "@bs.page",    "Blacklist sample" },
+    { "@bs.active",  "Active" },
+    { "@bs.write",   "Write the state to the log" },
+    { "@bs.on",      "on" },
+    { "@bs.offmenu", "off: switched off in the menu" },
+    { "@bs.blocked", "off: blocked by %s" },
+    { "@bs.written", "state written to the log" },
+    { "@bs.hudname", "blacklist sample" },
+    { "@bs.hint",    "Declared: blocked in Ghost Mode. The row and this "
+                     "page go away in that mode, and the HUD line stops." }
+};
+
+static const TextRow kZh[] = {
+    { "@bs.page",    "黑名单示例" },
+    { "@bs.active",  "启用" },
+    { "@bs.write",   "把状态写入日志" },
+    { "@bs.on",      "已开启" },
+    { "@bs.offmenu", "已关闭（在菜单里关闭）" },
+    { "@bs.blocked", "已关闭：被 %s 屏蔽" },
+    { "@bs.written", "状态已写入日志" },
+    { "@bs.hudname", "黑名单示例" },
+    { "@bs.hint",    "已声明：在幽灵模式下被屏蔽。该模式下这一行与整个页面都会"
+                     "消失，HUD 行也会停止。" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE mod;
+
+    if (done) return;
+    mod = GetModuleHandleA("dinput8.dll");
+    if (!mod) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(mod, "ShLangDeclare");
+    if (!pLangText)
+        *(FARPROC *)&pLangText = GetProcAddress(mod, "ShLangText");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("blacklist_sample", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("blacklist_sample", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
+/* One of our IDs as text: a value inside a HUD line is used exactly as
+ * written, so it has to be resolved here. */
+static const char *T(const char *id) {
+    const char *t;
+
+    if (!id || id[0] != '@') return id;
+    if (!pLangText) TextInit();
+    if (!pLangText) return id;
+    t = pLangText("blacklist_sample", id);
+    return (t && t[0]) ? t : id;
+}
+
 static void SetStatus(void) {
     char text[64];
 
@@ -109,11 +178,11 @@ static void SetStatus(void) {
     if (InterlockedCompareExchange(&g_blocked, 0, 0)) {
         BitsText((uint32_t)(pBlockedBy ? pBlockedBy() : 0), text,
                  (int)sizeof(text));
-        pMenuStatusF(g_menu, "off: blocked by %s", text);
+        pMenuStatusF(g_menu, "@bs.blocked", text);
     } else if (!InterlockedCompareExchange(&g_on, 0, 0)) {
-        pMenuStatus(g_menu, "off: switched off in the menu");
+        pMenuStatus(g_menu, "@bs.offmenu");
     } else {
-        pMenuStatus(g_menu, "on");
+        pMenuStatus(g_menu, "@bs.on");
     }
 }
 
@@ -159,7 +228,7 @@ static DWORD WINAPI TickThread(LPVOID p) {
         InterlockedIncrement(&g_ticks);
         if (g_hud && pHudSet) {
             char line[64];
-            snprintf(line, sizeof(line), "blacklist sample: %ld",
+            snprintf(line, sizeof(line), "%s: %ld", T("@bs.hudname"),
                      (long)InterlockedCompareExchange(&g_ticks, 0, 0));
             pHudSet(g_hud, line);
         }
@@ -174,14 +243,14 @@ static void OnActive(uint32_t menu, uint32_t item, int value, void *user) {
     InterlockedExchange(&g_on, value ? 1 : 0);
     if (g_hud && pHudShow) pHudShow(g_hud, value ? 1 : 0);
     SetStatus();
-    if (pMenuSetValue) pMenuSetValue(menu, "Active", value);
+    if (pMenuSetValue) pMenuSetValue(menu, "@bs.active", value);
 }
 
 static void OnShowState(uint32_t menu, uint32_t item, int value,
                         void *user) {
     (void)item; (void)value; (void)user;
     LogState("asked from the menu");
-    pMenuStatus(menu, "state written to the log");
+    pMenuStatus(menu, "@bs.written");
 }
 
 static DWORD WINAPI InitThread(LPVOID p) {
@@ -230,15 +299,14 @@ static DWORD WINAPI InitThread(LPVOID p) {
             pLastError ? pLastError() : -1);
     pOnBlocked(OnBlocked, NULL);
 
+    TextInit();
     g_hud = pHudCreate("blacklist_sample", SH_HUD_TOPLEFT, 0);
-    g_menu = pMenuCreate("Blacklist sample");
+    g_menu = pMenuCreate("@bs.page");
     if (g_menu) {
-        pMenuToggle(g_menu, "Active", 1, OnActive, NULL);
-        pMenuAction(g_menu, "Write the state to the log", OnShowState,
+        pMenuToggle(g_menu, "@bs.active", 1, OnActive, NULL);
+        pMenuAction(g_menu, "@bs.write", OnShowState,
                     NULL);
-        pMenuHint(g_menu,
-                  "Declared: blocked in Ghost Mode. The row and this page "
-                  "go away in that mode, and the HUD line stops.");
+        pMenuHint(g_menu, "@bs.hint");
     }
     LogState("started");
     SetStatus();

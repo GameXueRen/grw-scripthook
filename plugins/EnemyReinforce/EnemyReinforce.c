@@ -233,10 +233,12 @@ static volatile LONG   g_waveN = 0;     /* waves sent, this fight */
 /* ---- option labels ---------------------------------------------- */
 
 static const char *g_groupOpts[SH_NPC_GROUP_MAX] = {
-    "Santa Blanca", "Unidad", "Rebels", "Civilians", "Special"
+    "@er.group.sb", "@er.group.unidad", "@er.group.rebels",
+    "@er.group.civ", "@er.group.special"
 };
 static const char *g_formationOpts[5] = {
-    "Line", "Spread", "Semicircle", "Circle", "Random"
+    "@er.form.line", "@er.form.spread", "@er.form.semi",
+    "@er.form.circle", "@er.form.random"
 };
 static const char *g_distOpts[6] = {
     "10 m", "20 m", "30 m", "50 m", "75 m", "100 m"
@@ -250,6 +252,137 @@ static char g_numLabel[3][16];
 static const char *g_numOpts[3] = {
     g_numLabel[0], g_numLabel[1], g_numLabel[2]
 };
+
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini under this folder only
+ * carries what it changes, and the menu reads with or without it. The
+ * keys are stable IDs, so rewording a row never breaks a translation.
+ * Late binding, like everything else here; without the framework's
+ * entry points the menu still works and shows the IDs.
+ */
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const ShText *rows, int n);
+typedef const char *(*LangText_t)(const char *owner, const char *key);
+static LangDeclare_t pLangDeclare;
+static LangText_t    pLangText;
+
+static const ShText kEn[] = {
+    { "@er.page",             "Enemy Reinforce" },
+    { "@er.active",           "Active" },
+    { "@er.fire",             "Nearby fire" },
+    { "@er.group",            "NPC Group" },
+    { "@er.number",           "NPC Number" },
+    { "@er.random",           "Random number" },
+    { "@er.spawn",            "Spawn one" },
+    { "@er.remember",         "Remember type" },
+    { "@er.probe",            "Probe nearby enemy" },
+    { "@er.sample",           "Sample alert state" },
+    { "@er.interval",         "Interval s" },
+    { "@er.batch",            "Batch size" },
+    { "@er.cap",              "Cap" },
+    { "@er.waves",            "Wave limit" },
+    { "@er.fight",            "Fight window s" },
+    { "@er.scanr",            "Engage radius m" },
+    { "@er.dist",             "Distance" },
+    { "@er.formation",        "Formation" },
+    { "@er.group.sb",         "Santa Blanca" },
+    { "@er.group.unidad",     "Unidad" },
+    { "@er.group.rebels",     "Rebels" },
+    { "@er.group.civ",        "Civilians" },
+    { "@er.group.special",    "Special" },
+    { "@er.form.line",        "Line" },
+    { "@er.form.spread",      "Spread" },
+    { "@er.form.semi",        "Semicircle" },
+    { "@er.form.circle",      "Circle" },
+    { "@er.form.random",      "Random" },
+    { "@er.st.unavailable",   "unavailable" },
+    { "@er.st.nofind",        "no find export" },
+    { "@er.st.nocomp",        "no component exports" },
+    { "@er.st.sampling",      "a sample is already running" },
+    { "@er.st.nostart",       "could not start the sample" },
+    { "@er.st.probedone",     "probe written to the log" },
+    { "@er.st.probeneed",     "probe needs components and reads" },
+    { "@er.st.nothingprobe",  "nothing near to probe" },
+    { "@er.st.nothingrem",    "nothing to remember" },
+    { "@er.st.remembered",    "type remembered" },
+    { "@er.st.cfgfail",       "could not write the config" },
+    { "@er.st.offrandom",     "off (%s, a random type each wave)" },
+    { "@er.st.offtype",       "off (type %llx, %s)" },
+    { "@er.st.waitrandom",    "on, waiting to be hit (%s, random)" },
+    { "@er.st.waittype",      "on, waiting to be hit (type %llx, %s)" },
+    { "@er.st.fight",
+      "in combat: %s answers, wave %d, spawned %d/%d, next %d s" }
+};
+
+static const ShText kZh[] = {
+    { "@er.page",             "敌人增援强化" },
+    { "@er.active",           "启用" },
+    { "@er.fire",             "近距交火触发" },
+    { "@er.group",            "敌人阵营" },
+    { "@er.number",           "敌人编号" },
+    { "@er.random",           "随机编号" },
+    { "@er.spawn",            "生成一个" },
+    { "@er.remember",         "记住当前类型" },
+    { "@er.probe",            "探测附近敌人" },
+    { "@er.sample",           "采样警戒状态" },
+    { "@er.interval",         "间隔（秒）" },
+    { "@er.batch",            "每波数量" },
+    { "@er.cap",              "在场上限" },
+    { "@er.waves",            "波次上限" },
+    { "@er.fight",            "脱战判定（秒）" },
+    { "@er.scanr",            "交战判定范围（米）" },
+    { "@er.dist",             "生成距离" },
+    { "@er.formation",        "阵型" },
+    { "@er.group.sb",         "圣布兰卡" },
+    { "@er.group.unidad",     "联合军" },
+    { "@er.group.rebels",     "叛军" },
+    { "@er.group.civ",        "平民" },
+    { "@er.group.special",    "特殊" },
+    { "@er.form.line",        "一字" },
+    { "@er.form.spread",      "散开" },
+    { "@er.form.semi",        "半圆" },
+    { "@er.form.circle",      "环形" },
+    { "@er.form.random",      "随机" },
+    { "@er.st.unavailable",   "不可用" },
+    { "@er.st.nofind",        "缺少实体查找接口" },
+    { "@er.st.nocomp",        "缺少组件读取接口" },
+    { "@er.st.sampling",      "已有采样在进行" },
+    { "@er.st.nostart",       "无法启动采样" },
+    { "@er.st.probedone",     "探测结果已写入日志" },
+    { "@er.st.probeneed",     "探测缺少组件或读取接口" },
+    { "@er.st.nothingprobe",  "附近没有可探测的 NPC" },
+    { "@er.st.nothingrem",    "没有可记住的类型" },
+    { "@er.st.remembered",    "已记住当前类型" },
+    { "@er.st.cfgfail",       "无法写入配置" },
+    { "@er.st.offrandom",     "已关闭（%s，每波随机类型）" },
+    { "@er.st.offtype",       "已关闭（类型 %llx，%s）" },
+    { "@er.st.waitrandom",    "已开启，等待被击中（%s，随机类型）" },
+    { "@er.st.waittype",      "已开启，等待被击中（类型 %llx，%s）" },
+    { "@er.st.fight",
+      "交火中：%s 增援，第 %d 波，已生成 %d/%d，下一波 %d 秒" }
+};
+
+static void ErText(void) {
+    static int done;
+
+    if (done || !pLangDeclare) return;
+    done = 1;
+    pLangDeclare("EnemyReinforce", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("EnemyReinforce", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
+/* An option label handed to a status TEMPLATE comes through exactly as
+ * it is written, so a group's ID has to be resolved here - the
+ * framework translates the template, not its values. */
+static const char *SetText(const char *id) {
+    const char *t;
+
+    if (!pLangText || !id || id[0] != '@') return id;
+    t = pLangText("EnemyReinforce", id);
+    return (t && t[0]) ? t : id;
+}
 
 /* ---- recent spawns ---------------------------------------------- */
 
@@ -493,7 +626,7 @@ static void ProbeShooter(uint64_t e, int force) {
     int n, i;
 
     if (!pGetComponents || !pReadU64 || g_idn <= 0) {
-        if (force) SetStatus("probe needs components and reads");
+        if (force) SetStatus("@er.st.probeneed");
         return;
     }
 
@@ -1031,7 +1164,7 @@ static void RefreshStatus(void) {
 
     if (!g_menu) return;
 
-    if (!pGroupSize) { SetStatus("unavailable"); return; }
+    if (!pGroupSize) { SetStatus("@er.st.unavailable"); return; }
 
     now = GetTickCount64();
     lastHit = (unsigned long long)g_lastHit;
@@ -1044,24 +1177,24 @@ static void RefreshStatus(void) {
     if (!InterlockedCompareExchange(&g_active, 0, 0)) {
         if (pMenuStatusF) {
             if (random)
-                pMenuStatusF(g_menu, "off (%s, a random type each wave)",
-                             g_groupOpts[g_group]);
+                pMenuStatusF(g_menu, "@er.st.offrandom",
+                             SetText(g_groupOpts[g_group]));
             else
-                pMenuStatusF(g_menu, "off (type %llx, %s)",
+                pMenuStatusF(g_menu, "@er.st.offtype",
                              (unsigned long long)type,
-                             g_groupOpts[g_group]);
+                             SetText(g_groupOpts[g_group]));
         }
         return;
     }
     if (!lastHit || now - lastHit >= (unsigned long long)g_fightS * 1000u) {
         if (pMenuStatusF) {
             if (random)
-                pMenuStatusF(g_menu, "on, waiting to be hit (%s, random)",
-                             g_groupOpts[g_group]);
+                pMenuStatusF(g_menu, "@er.st.waitrandom",
+                             SetText(g_groupOpts[g_group]));
             else
-                pMenuStatusF(g_menu, "on, waiting to be hit (type %llx, %s)",
+                pMenuStatusF(g_menu, "@er.st.waittype",
                              (unsigned long long)type,
-                             g_groupOpts[g_group]);
+                             SetText(g_groupOpts[g_group]));
         }
         return;
     }
@@ -1069,9 +1202,8 @@ static void RefreshStatus(void) {
     left = g_interval - (int)((now - (unsigned long long)g_lastWave) / 1000);
     if (left < 0) left = 0;
     if (pMenuStatusF)
-        pMenuStatusF(g_menu,
-                     "in combat: %s answers, wave %d, spawned %d/%d, next %d s",
-                     g_groupOpts[g_group],
+        pMenuStatusF(g_menu, "@er.st.fight",
+                     SetText(g_groupOpts[g_group]),
                      (int)InterlockedCompareExchange(&g_waveN, 0, 0),
                      ours, g_cap, left);
 }
@@ -1307,7 +1439,7 @@ static void OnNumber(uint32_t menu, uint32_t item, int value, void *user) {
     RefreshStatus();
     /* Snap the row back to its middle entry, so it keeps reading
      * one back / current / one on. */
-    if (pMenuSetValue) pMenuSetValue(g_menu, "NPC Number", 1);
+    if (pMenuSetValue) pMenuSetValue(g_menu, "@er.number", 1);
 }
 
 /* Off: the spinner above decides.  On: every wave draws a random
@@ -1410,21 +1542,21 @@ static void OnProbe(uint32_t menu, uint32_t item, int value,
     (void)menu; (void)item; (void)value; (void)user;
 
     if (!pFindEntities || !pGetComponents || !pReadU64) {
-        SetStatus("no find export");
+        SetStatus("@er.st.nofind");
         return;
     }
     if (InterlockedCompareExchange(&g_probing, 1, 0)) {
-        SetStatus("a sample is already running");
+        SetStatus("@er.st.sampling");
         return;
     }
     h = CreateThread(NULL, 0, ProbeThread, NULL, 0, NULL);
     if (!h) {
         InterlockedExchange(&g_probing, 0);
-        SetStatus("could not start the sample");
+        SetStatus("@er.st.nostart");
         return;
     }
     CloseHandle(h);
-    SetStatus("probe written to the log");
+    SetStatus("@er.st.probedone");
 }
 
 /* One sample per press, on its own thread (see SampleThread).  Press
@@ -1439,21 +1571,21 @@ static void OnSampleAlert(uint32_t menu, uint32_t item, int value,
     (void)menu; (void)item; (void)value; (void)user;
 
     if (!pFindComponent || !pReadBytes) {
-        SetStatus("no component exports");
+        SetStatus("@er.st.nocomp");
         return;
     }
     if (InterlockedCompareExchange(&g_sampling, 1, 0)) {
-        SetStatus("a sample is already running");
+        SetStatus("@er.st.sampling");
         return;
     }
     h = CreateThread(NULL, 0, SampleThread, NULL, 0, NULL);
     if (!h) {
         InterlockedExchange(&g_sampling, 0);
-        SetStatus("could not start the sample");
+        SetStatus("@er.st.nostart");
         return;
     }
     CloseHandle(h);
-    SetStatus("probe written to the log");
+    SetStatus("@er.st.probedone");
 }
 
 /* Written to scripthook.ini rather than to our own ini, because
@@ -1466,7 +1598,7 @@ static void OnRemember(uint32_t menu, uint32_t item, int value,
     char buf[32], key[24];
     (void)menu; (void)item; (void)value; (void)user;
 
-    if (!id) { SetStatus("nothing to remember"); return; }
+    if (!id) { SetStatus("@er.st.nothingrem"); return; }
 
     /* One key per group, so remembering Santa Blanca's type does
      * not overwrite what Unidad answers with.  Hex text, not a
@@ -1479,9 +1611,9 @@ static void OnRemember(uint32_t menu, uint32_t item, int value,
         g_remembered[g_group] = id;
         Log("reinforce: remembered %s type %llx as %s",
             g_groupOpts[g_group], (unsigned long long)id, key);
-        SetStatus("type remembered");
+        SetStatus("@er.st.remembered");
     } else {
-        SetStatus("could not write the config");
+        SetStatus("@er.st.cfgfail");
     }
 }
 
@@ -1490,39 +1622,41 @@ static void OnRemember(uint32_t menu, uint32_t item, int value,
 static uint32_t BuildMenu(void) {
     uint32_t m;
 
-    m = pMenuCreate("Enemy Reinforce");
+    ErText();
+    m = pMenuCreate("@er.page");
     if (!m) return 0;
 
     UpdateNumberLabels();
 
-    pMenuToggle(m, "Active", (int)InterlockedCompareExchange(&g_active, 0, 0),
+    pMenuToggle(m, "@er.active",
+                (int)InterlockedCompareExchange(&g_active, 0, 0),
                 OnActive, NULL);
-    pMenuToggle(m, "Nearby fire",
+    pMenuToggle(m, "@er.fire",
                 (int)InterlockedCompareExchange(&g_onFire, 0, 0),
                 OnFireToggle, NULL);
-    pMenuList(m, "NPC Group", g_groupOpts, SH_NPC_GROUP_MAX, g_group,
+    pMenuList(m, "@er.group", g_groupOpts, SH_NPC_GROUP_MAX, g_group,
               OnGroup, NULL);
-    pMenuList(m, "NPC Number", g_numOpts, 3, 1, OnNumber, NULL);
-    pMenuToggle(m, "Random number",
+    pMenuList(m, "@er.number", g_numOpts, 3, 1, OnNumber, NULL);
+    pMenuToggle(m, "@er.random",
                 (int)InterlockedCompareExchange(&g_random, 0, 0),
                 OnRandom, NULL);
-    pMenuAction(m, "Spawn one", OnSpawnOne, NULL);
-    pMenuAction(m, "Remember type", OnRemember, NULL);
-    pMenuAction(m, "Probe nearby enemy", OnProbe, NULL);
-    pMenuAction(m, "Sample alert state", OnSampleAlert, NULL);
-    pMenuNumber(m, "Interval s", (float)g_interval, 2.0f, 60.0f, 1.0f,
+    pMenuAction(m, "@er.spawn", OnSpawnOne, NULL);
+    pMenuAction(m, "@er.remember", OnRemember, NULL);
+    pMenuAction(m, "@er.probe", OnProbe, NULL);
+    pMenuAction(m, "@er.sample", OnSampleAlert, NULL);
+    pMenuNumber(m, "@er.interval", (float)g_interval, 2.0f, 60.0f, 1.0f,
                 OnInterval, NULL);
-    pMenuNumber(m, "Batch size", (float)g_batch, 1.0f, 12.0f, 1.0f,
+    pMenuNumber(m, "@er.batch", (float)g_batch, 1.0f, 12.0f, 1.0f,
                 OnBatch, NULL);
-    pMenuNumber(m, "Cap", (float)g_cap, 1.0f, 32.0f, 1.0f, OnCap, NULL);
-    pMenuNumber(m, "Wave limit", (float)g_waves, 0.0f, 50.0f, 1.0f,
+    pMenuNumber(m, "@er.cap", (float)g_cap, 1.0f, 32.0f, 1.0f, OnCap, NULL);
+    pMenuNumber(m, "@er.waves", (float)g_waves, 0.0f, 50.0f, 1.0f,
                 OnWaves, NULL);
-    pMenuNumber(m, "Fight window s", (float)g_fightS, 5.0f, 120.0f, 5.0f,
+    pMenuNumber(m, "@er.fight", (float)g_fightS, 5.0f, 120.0f, 5.0f,
                 OnFight, NULL);
-    pMenuNumber(m, "Engage radius m", (float)g_scanR, 20.0f, 300.0f, 10.0f,
+    pMenuNumber(m, "@er.scanr", (float)g_scanR, 20.0f, 300.0f, 10.0f,
                 OnScanR, NULL);
-    pMenuList(m, "Distance", g_distOpts, 6, g_distIdx, OnDist, NULL);
-    pMenuList(m, "Formation", g_formationOpts, 5, g_formation,
+    pMenuList(m, "@er.dist", g_distOpts, 6, g_distIdx, OnDist, NULL);
+    pMenuList(m, "@er.formation", g_formationOpts, 5, g_formation,
               OnFormation, NULL);
 
     RefreshStatus();
@@ -1603,6 +1737,10 @@ static DWORD WINAPI InitThread(LPVOID p) {
     *(FARPROC *)&pMenuSetValue = GetProcAddress(mod, "ShMenuSetValue");
     *(FARPROC *)&pMenuStatus = GetProcAddress(mod, "ShMenuStatus");
     *(FARPROC *)&pMenuStatusF = GetProcAddress(mod, "ShMenuStatusF");
+    /* Optional: without them the menu shows this plugin's IDs instead
+     * of its text. Resolved by name like everything else here. */
+    *(FARPROC *)&pLangDeclare = GetProcAddress(mod, "ShLangDeclare");
+    *(FARPROC *)&pLangText = GetProcAddress(mod, "ShLangText");
     *(FARPROC *)&pConfigGetStr = GetProcAddress(mod, "ShConfigGetStr");
     *(FARPROC *)&pConfigSetStr = GetProcAddress(mod, "ShConfigSetStr");
 

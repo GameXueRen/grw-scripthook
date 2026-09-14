@@ -313,9 +313,38 @@ static int HaveCount(void) {
  * for the rest of the session - which is most of it - changing one can only
  * shape the next launch. English template; ShMenuStatusF translates it in
  * this menu's own scope. */
+/* ---- text ---------------------------------------------------------
+ * The menu's own text, compiled in. The keys are stable IDs, so
+ * rewording a row never breaks a translation in lang.ini.
+ */
+static const ShText kEn[] = {
+    { "@skip.page",   "Skip intro videos" },
+    { "@skip.legal",  "Skip legal videos" },
+    { "@skip.launch", "Skip launch videos" },
+    { "@skip.status", "Changing a switch takes effect after a restart" }
+};
+
+static const ShText kZh[] = {
+    { "@skip.page",   "跳过启动时的动画视频" },
+    { "@skip.legal",  "跳过启动时的 警告、提示 视频" },
+    { "@skip.launch", "跳过启动时的 Ubisoft、NVidia 视频" },
+    { "@skip.status", "改变开关后重启生效" }
+};
+
+static void SkipText(void) {
+    static int done;
+
+    if (done) return;
+    done = 1;
+    ShLangDeclare("skipintro", "en-US", kEn,
+                  (int)(sizeof(kEn) / sizeof(kEn[0])));
+    ShLangDeclare("skipintro", "zh-CN", kZh,
+                  (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void UpdateStatus(void) {
     if (!g_menu || !g_statusF) return;
-    g_statusF(g_menu, "Changing a switch takes effect after a restart");
+    g_statusF(g_menu, "@skip.status");
 }
 
 /* Give the rules back. This runs on the watcher thread, and the flag goes
@@ -514,10 +543,11 @@ static void BuildMenu(HMODULE m) {
     *(FARPROC *)&g_statusF  = GetProcAddress(m, "ShMenuStatusF");
     if (!menuCreate || !menuToggle) return;
 
-    g_menu = menuCreate("Skip intro videos");
-    menuToggle(g_menu, "Skip legal videos", WantLegal(),
+    SkipText();
+    g_menu = menuCreate("@skip.page");
+    menuToggle(g_menu, "@skip.legal", WantLegal(),
                MenuLegal, NULL);
-    menuToggle(g_menu, "Skip launch videos", WantLaunch(),
+    menuToggle(g_menu, "@skip.launch", WantLaunch(),
                MenuLaunch, NULL);
     UpdateStatus();
     SkipLog("menu created");

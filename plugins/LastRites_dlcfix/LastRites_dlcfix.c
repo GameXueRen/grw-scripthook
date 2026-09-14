@@ -273,6 +273,46 @@ static void OnFix(uint32_t menu, uint32_t item, int value, void *user) {
     SaveIni();
 }
 
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * Keys are stable IDs. Late-bound, like the rest of this plugin.
+ */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+static LangDeclare_t pLangDeclare;
+
+static const TextRow kEn[] = {
+    { "@lr.page", "DLC crash fix" },
+    { "@lr.fix",  "Fix the crash (takes effect after a restart)" },
+    { "@lr.hint", "A temporary fix. Turn it off and remove this plugin "
+                  "once the game itself is patched." }
+};
+
+static const TextRow kZh[] = {
+    { "@lr.page", "DLC 崩溃修复" },
+    { "@lr.fix",  "修复崩溃（重启后生效）" },
+    { "@lr.hint", "临时修复。游戏本体修好后请关掉并删除本插件。" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE mod;
+
+    if (done) return;
+    mod = GetModuleHandleA("dinput8.dll");
+    if (!mod) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(mod, "ShLangDeclare");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("LastRites_dlcfix", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("LastRites_dlcfix", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void BuildMenu(HMODULE m) {
     uint32_t (*menuCreate)(const char *) = NULL;
     int (*menuToggle)(uint32_t, const char *, int, MenuFn, void *) = NULL;
@@ -283,13 +323,12 @@ static void BuildMenu(HMODULE m) {
     *(FARPROC *)&menuHint   = GetProcAddress(m, "ShMenuHint");
     if (!menuCreate || !menuToggle) return;
 
-    g_menu = menuCreate("DLC crash fix");
-    menuToggle(g_menu, "Fix the crash (takes effect after a restart)",
+    TextInit();
+    g_menu = menuCreate("@lr.page");
+    menuToggle(g_menu, "@lr.fix",
                Enabled(), OnFix, NULL);
     if (menuHint)
-        menuHint(g_menu,
-                 "A temporary fix. Turn it off and remove this plugin once "
-                 "the game itself is patched.");
+        menuHint(g_menu, "@lr.hint");
     DlcLog("menu created");
 }
 

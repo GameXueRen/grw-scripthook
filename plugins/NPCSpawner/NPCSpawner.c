@@ -283,14 +283,14 @@ static void RefreshStatus(void) {
     g_groupCount = count;
     UpdateNumberLabels();
 
-    if (count <= 0) { SetStatus("No entries"); return; }
-    if (idx < 0) { SetStatus("Selection unavailable"); return; }
+    if (count <= 0) { SetStatus("@np.st.noentries"); return; }
+    if (idx < 0) { SetStatus("@np.st.nosel"); return; }
     if (pMenuStatusF)
-        pMenuStatusF(g_menu, "%d/%d | Total %d/%d",
+        pMenuStatusF(g_menu, "@np.st.count",
                      g_sel[g_group], count, idx, REPORT_LIMIT);
     /* The row the user just moved snaps back to the middle, so
      * the row keeps showing current - 1 / current / current + 1. */
-    if (pMenuSetValue) pMenuSetValue(g_menu, "NPC Number", 1);
+    if (pMenuSetValue) pMenuSetValue(g_menu, "@np.number", 1);
 }
 
 /* Drop tracked handles whose entity is gone, so the 50 budget
@@ -357,9 +357,9 @@ static DWORD WINAPI SpawnWorker(LPVOID p) {
 
     if (got == 0) {
         if (pLastError && pLastError() == SH_ERR_NO_POSITION)
-            SetStatus("Player unavailable");
+            SetStatus("@np.st.noplayer");
         else
-            SetStatus("Spawn failed");
+            SetStatus("@np.st.spawnfail");
         return 0;
     }
 
@@ -374,7 +374,7 @@ static DWORD WINAPI SpawnWorker(LPVOID p) {
     /* F is what did not turn up; the original counted failed
      * facing transforms here instead. */
     if (pMenuStatusF)
-        pMenuStatusF(g_menu, "Spawn %d/%d | F %d | Total %d/%d",
+        pMenuStatusF(g_menu, "@np.st.spawned",
                      got, count, count - got, alive, REPORT_LIMIT);
     return 0;
 }
@@ -393,7 +393,7 @@ static DWORD WINAPI UndoWorker(LPVOID p) {
     LeaveCriticalSection(&g_trackLock);
 
     if (!e) {
-        SetStatus("Nothing to undo");
+        SetStatus("@np.st.noundo");
         ReleaseBusy();
         return 0;
     }
@@ -402,18 +402,18 @@ static DWORD WINAPI UndoWorker(LPVOID p) {
     kind = pGetEntityKind(e);
     if (!kind) {
         TrackRemove(e);
-        SetStatus("Undo target unavailable");
+        SetStatus("@np.st.undounavail");
         ReleaseBusy();
         return 0;
     }
     if (!pGetHealthEntity(e, &cur, &max)) {
         TrackRemove(e);
-        SetStatus("Undo target unavailable");
+        SetStatus("@np.st.undounavail");
         ReleaseBusy();
         return 0;
     }
     if (cur == 0) {
-        SetStatus("Last spawn is dead");
+        SetStatus("@np.st.dead");
         ReleaseBusy();
         return 0;
     }
@@ -424,7 +424,7 @@ static DWORD WINAPI UndoWorker(LPVOID p) {
     if (WorldBusy()) return 0;
 
     Log("npcspawner: undo ent=%llx ok=%d", (unsigned long long)e, ok);
-    if (!ok) SetStatus("Undo failed");
+    if (!ok) SetStatus("@np.st.undofail");
     else RefreshStatus();
     return 0;
 }
@@ -456,7 +456,7 @@ static void OnSpawnSelected(uint32_t menu, uint32_t item, int value,
     uint64_t id = 0;
     (void)menu; (void)item; (void)value; (void)user;
 
-    if (!TryBusy()) { SetStatus("Busy"); return; }
+    if (!TryBusy()) { SetStatus("@np.st.busy"); return; }
 
     PruneTrack();
 
@@ -466,21 +466,21 @@ static void OnSpawnSelected(uint32_t menu, uint32_t item, int value,
 
     if (alive + g_countN[g_countIdx] > SPAWN_LIMIT) {
         if (pMenuStatusF)
-            pMenuStatusF(g_menu, "Limit | Total %d/%d", alive, REPORT_LIMIT);
+            pMenuStatusF(g_menu, "@np.st.limit", alive, REPORT_LIMIT);
         ReleaseBusy();
         return;
     }
 
     idx = GroupScan(g_group, &count, &id);
     if (count <= 0 || idx < 0 || !id) {
-        SetStatus(count <= 0 ? "No entries" : "Selection unavailable");
+        SetStatus(count <= 0 ? "@np.st.noentries" : "@np.st.nosel");
         ReleaseBusy();
         return;
     }
 
     r = (ShNpcSpawnRequest *)malloc(sizeof(*r));
     if (!r) {
-        SetStatus("Spawn request failed");
+        SetStatus("@np.st.spawnreq");
         ReleaseBusy();
         return;
     }
@@ -493,7 +493,7 @@ static void OnSpawnSelected(uint32_t menu, uint32_t item, int value,
     h = CreateThread(NULL, 0, SpawnWorker, r, 0, NULL);
     if (!h) {
         free(r);
-        SetStatus("Could not start worker");
+        SetStatus("@np.st.worker");
         ReleaseBusy();
         return;
     }
@@ -504,11 +504,11 @@ static void OnUndo(uint32_t menu, uint32_t item, int value, void *user) {
     HANDLE h;
     (void)menu; (void)item; (void)value; (void)user;
 
-    if (!TryBusy()) { SetStatus("Busy"); return; }
+    if (!TryBusy()) { SetStatus("@np.st.busy"); return; }
 
     h = CreateThread(NULL, 0, UndoWorker, NULL, 0, NULL);
     if (!h) {
-        SetStatus("Could not start worker");
+        SetStatus("@np.st.worker");
         ReleaseBusy();
     } else {
         CloseHandle(h);
@@ -565,7 +565,7 @@ static void SelfTestRun(void) {
     idx = GroupScan(g_group, &count, &id);
     if (count <= 0 || idx < 0 || !id) {
         Log("selftest: no selection in group %d, nothing to do", g_group);
-        SetStatus("Selection unavailable");
+        SetStatus("@np.st.nosel");
         return;
     }
     Log("selftest: start, group %d id %llx", g_group,
@@ -652,7 +652,7 @@ static void SelfTestRun(void) {
 
 done:
     Log("selftest: finished; the NPCs it made are NOT in the undo list");
-    SetStatus("Self test done");
+    SetStatus("@np.st.selfdone");
 }
 
 static DWORD WINAPI SelfTestThread(LPVOID p) {
@@ -668,55 +668,141 @@ static void OnSelfTest(uint32_t menu, uint32_t item, int value,
     (void)menu; (void)item; (void)value; (void)user;
 
     if (InterlockedCompareExchange(&g_selfRun, 1, 0)) {
-        SetStatus("Self test already running");
+        SetStatus("@np.st.selfbusy");
         return;
     }
     h = CreateThread(NULL, 0, SelfTestThread, NULL, 0, NULL);
     if (!h) {
         InterlockedExchange(&g_selfRun, 0);
-        SetStatus("Could not start worker");
+        SetStatus("@np.st.worker");
         return;
     }
     CloseHandle(h);
-    SetStatus("Self test running");
+    SetStatus("@np.st.selfrun");
 }
 
 /* ---- menu build ------------------------------------------------- */
 
-/* The row labels below are the translation keys in
- * plugins\NPCSpawner\NPCSpawner.ini, so renaming one here means
- * renaming it there too.  The package the original plugin shipped
- * in had those values shifted up a line (see the report, section 4);
- * the deployed ini is fixed.  The ini is read once per owner, so an
- * edit only shows after a game restart.
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * The keys are stable IDs, so rewording a row never breaks a
+ * translation. This plugin resolves the framework by name; the tables
+ * are declared through the same kind of pointer.
  */
+typedef struct { const char *key; const char *text; } TextRow;
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const TextRow *rows, int n);
+static LangDeclare_t pLangDeclare;
+
+static const TextRow kEn[] = {
+    { "@np.page",        "Native NPC Spawner" },
+    { "@np.number",      "NPC Number" },
+    { "@np.spawn",       "Spawn Selected" },
+    { "@np.undo",        "Undo Last Spawn" },
+    { "@np.distance",    "Spawn Distance" },
+    { "@np.count",       "Spawn Count" },
+    { "@np.formation",   "Formation" },
+    { "@np.facing",      "Facing" },
+    { "@np.group",       "NPC Group" },
+    { "@np.selftest",    "Self test" },
+    { "@np.st.count",    "%d/%d | Total %d/%d" },
+    { "@np.st.limit",    "Limit | Total %d/%d" },
+    { "@np.st.spawned",  "Spawn %d/%d | F %d | Total %d/%d" },
+    { "@np.st.busy",     "Busy" },
+    { "@np.st.worker",   "Could not start worker" },
+    { "@np.st.dead",     "Last spawn is dead" },
+    { "@np.st.noentries", "No entries" },
+    { "@np.st.noundo",   "Nothing to undo" },
+    { "@np.st.noplayer", "Player unavailable" },
+    { "@np.st.nosel",    "Selection unavailable" },
+    { "@np.st.selfbusy", "Self test already running" },
+    { "@np.st.selfdone", "Self test done" },
+    { "@np.st.selfrun",  "Self test running" },
+    { "@np.st.spawnfail", "Spawn failed" },
+    { "@np.st.spawnreq", "Spawn request failed" },
+    { "@np.st.undofail", "Undo failed" },
+    { "@np.st.undounavail", "Undo target unavailable" }
+};
+
+static const TextRow kZh[] = {
+    { "@np.page",        "原生 NPC 生成器" },
+    { "@np.number",      "NPC 编号" },
+    { "@np.spawn",       "生成已选 NPC" },
+    { "@np.undo",        "撤销上次生成" },
+    { "@np.distance",    "生成距离" },
+    { "@np.count",       "生成数量" },
+    { "@np.formation",   "阵型" },
+    { "@np.facing",      "朝向" },
+    { "@np.group",       "NPC 阵营" },
+    { "@np.selftest",    "自检（异步召唤）" },
+    { "@np.st.count",    "%d/%d | 总计 %d/%d" },
+    { "@np.st.limit",    "已达上限 | 总计 %d/%d" },
+    { "@np.st.spawned",  "已生成 %d/%d | 未出现 %d | 总计 %d/%d" },
+    { "@np.st.busy",     "正在处理" },
+    { "@np.st.worker",   "无法启动工作线程" },
+    { "@np.st.dead",     "上次生成的目标已死亡" },
+    { "@np.st.noentries", "无条目" },
+    { "@np.st.noundo",   "没有可撤销的生成" },
+    { "@np.st.noplayer", "无法获取玩家位置" },
+    { "@np.st.nosel",    "无可选条目" },
+    { "@np.st.selfbusy", "自检已在运行" },
+    { "@np.st.selfdone", "自检完成，详见日志" },
+    { "@np.st.selfrun",  "自检进行中，详见日志" },
+    { "@np.st.spawnfail", "生成失败" },
+    { "@np.st.spawnreq", "生成请求失败" },
+    { "@np.st.undofail", "撤销失败" },
+    { "@np.st.undounavail", "撤销目标不可用" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE m;
+
+    if (done) return;
+    m = GetModuleHandleA("dinput8.dll");
+    if (!m) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(m, "ShLangDeclare");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("NPCSpawner", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("NPCSpawner", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
+/* The menu the original offers, with this build's own labels. The
+ * option lists (spinner, distance, count, formation, facing, group)
+ * carry catalogue or numeric labels and are left as they are. */
 static uint32_t BuildMenu(void) {
     uint32_t m;
 
-    m = pMenuCreate("Native NPC Spawner");
+    TextInit();
+    m = pMenuCreate("@np.page");
     if (!m) return 0;
 
     /* Rebuild the spinner labels before the row is added, so the
      * first capture is already correct. */
     UpdateNumberLabels();
 
-    pMenuList(m, "NPC Number", g_numOpts, 3, 1, OnNumber, NULL);
-    pMenuAction(m, "Spawn Selected", OnSpawnSelected, NULL);
-    pMenuAction(m, "Undo Last Spawn", OnUndo, NULL);
-    pMenuList(m, "Spawn Distance", g_distanceOpts, 6, g_distIdx,
+    pMenuList(m, "@np.number", g_numOpts, 3, 1, OnNumber, NULL);
+    pMenuAction(m, "@np.spawn", OnSpawnSelected, NULL);
+    pMenuAction(m, "@np.undo", OnUndo, NULL);
+    pMenuList(m, "@np.distance", g_distanceOpts, 6, g_distIdx,
               OnDistance, NULL);
-    pMenuList(m, "Spawn Count", g_countOpts, 3, g_countIdx, OnCount, NULL);
-    pMenuList(m, "Formation", g_formationOpts, 5, g_formation,
+    pMenuList(m, "@np.count", g_countOpts, 3, g_countIdx, OnCount, NULL);
+    pMenuList(m, "@np.formation", g_formationOpts, 5, g_formation,
               OnFormation, NULL);
-    pMenuList(m, "Facing", g_facingOpts, 2, g_facing, OnFacing, NULL);
-    pMenuList(m, "NPC Group", g_groupOpts, 5, g_group, OnGroup, NULL);
+    pMenuList(m, "@np.facing", g_facingOpts, 2, g_facing, OnFacing, NULL);
+    pMenuList(m, "@np.group", g_groupOpts, 5, g_group, OnGroup, NULL);
 
     /* Last, and only when asked for: [Settings] selftest in this
      * plugin's own ini.  It is a diagnostic, not part of the
      * summon the original offered. */
     if (g_selfOn && pSpawnBegin && pSpawnPoll && pSpawnCancel &&
         pSpawnEnd)
-        pMenuAction(m, "Self test", OnSelfTest, NULL);
+        pMenuAction(m, "@np.selftest", OnSelfTest, NULL);
 
     RefreshStatus();
     return m;

@@ -73,11 +73,11 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
     (void)item; (void)user;
     if (value) {
         if (!Detach()) {
-            g_status(menu, "no camera yet");
+            g_status(menu, "@fc.nocam");
             return;
         }
         g_on = 1;
-        g_status(menu, "flying, WASD QE arrows");
+        g_status(menu, "@fc.flying");
         /* Closed so the arrow keys fly instead of moving
          * the selection.
          */
@@ -85,7 +85,7 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
     } else {
         g_on = 0;
         g_release(SH_CAM_POS | SH_CAM_ROT);
-        g_status(menu, "camera returned to the game");
+        g_status(menu, "@fc.returned");
     }
 }
 
@@ -98,7 +98,7 @@ static void OnSpeed(uint32_t menu, uint32_t item, int value,
 static void OnRecentre(uint32_t menu, uint32_t item, int value,
                        void *user) {
     (void)item; (void)value; (void)user;
-    if (Detach()) g_status(menu, "recentred on the game camera");
+    if (Detach()) g_status(menu, "@fc.recentred");
 }
 
 /* Game basis: x right, y forward, z up. Same convention the
@@ -137,13 +137,16 @@ static void Step(float dt) {
 /* Live telemetry while the menu is closed, which is the one
  * thing a menu cannot show.
  */
+/* Defined with the text tables below; the HUD line needs it first. */
+static const char *T(const char *id);
+
 static void Telemetry(void) {
     char line[128];
 
     if (!g_hud) return;
     if (!g_on) { g_hudSet(g_hud, ""); return; }
-    snprintf(line, sizeof(line),
-             "FREECAM  %.0f %.0f %.0f   %.0f m/s",
+    snprintf(line, sizeof(line), "%s  %.0f %.0f %.0f   %.0f m/s",
+             T("@fc.hudname"),
              g_pos.x, g_pos.y, g_pos.z, g_speed);
     g_hudColour(g_hud, 0x78EBFF);
     g_hudSet(g_hud, line);
@@ -169,6 +172,76 @@ static DWORD WINAPI CamThread(LPVOID p) {
         }
     }
     return 0;
+}
+
+/* ---- text ---------------------------------------------------------
+ * The plugin's own text, compiled in: lang.ini beside this source only
+ * has to carry what it changes, and the menu reads with or without it.
+ * The keys are stable IDs, so rewording a row never breaks a
+ * translation. Everything here is late-bound, like the rest of this
+ * plugin - without the framework's entry points the menu still works,
+ * it shows the IDs.
+ */
+typedef int (*LangDeclare_t)(const char *owner, const char *lang,
+                             const ShText *rows, int n);
+typedef const char *(*LangText_t)(const char *owner, const char *key);
+static LangDeclare_t pLangDeclare;
+static LangText_t    pLangText;
+
+static const ShText kEn[] = {
+    { "@fc.page",     "Free camera" },
+    { "@fc.detached", "Detached" },
+    { "@fc.speed",    "Speed" },
+    { "@fc.recentre", "Recentre on game camera" },
+    { "@fc.nocam",    "no camera yet" },
+    { "@fc.flying",   "flying, WASD QE arrows" },
+    { "@fc.returned", "camera returned to the game" },
+    { "@fc.recentred", "recentred on the game camera" },
+    { "@fc.hudname",  "FREECAM" }
+};
+
+static const ShText kZh[] = {
+    { "@fc.page",     "自由视角" },
+    { "@fc.detached", "脱离引擎视角" },
+    { "@fc.speed",    "移动速度" },
+    { "@fc.recentre", "回到引擎视角" },
+    { "@fc.nocam",    "引擎视角尚未就绪" },
+    { "@fc.flying",   "已接管，WASD / QE 移动、方向键转视角" },
+    { "@fc.returned", "视角已交还游戏" },
+    { "@fc.recentred", "已回到引擎视角" },
+    { "@fc.hudname",  "自由视角" }
+};
+
+static void TextInit(void) {
+    static int done;
+    HMODULE m;
+
+    if (done) return;
+    m = GetModuleHandleA("dinput8.dll");
+    if (!m) return;
+    if (!pLangDeclare)
+        *(FARPROC *)&pLangDeclare = GetProcAddress(m, "ShLangDeclare");
+    if (!pLangText)
+        *(FARPROC *)&pLangText = GetProcAddress(m, "ShLangText");
+    if (!pLangDeclare) return;
+    done = 1;
+    pLangDeclare("freecam", "en-US", kEn,
+                 (int)(sizeof(kEn) / sizeof(kEn[0])));
+    pLangDeclare("freecam", "zh-CN", kZh,
+                 (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
+/* One of our IDs as text. The framework translates the label of a row it
+ * captures itself, but a value handed to a status line or a HUD is used
+ * exactly as written, so those have to be resolved here. */
+static const char *T(const char *id) {
+    const char *t;
+
+    if (!id || id[0] != '@') return id;
+    if (!pLangText) TextInit();
+    if (!pLangText) return id;
+    t = pLangText("freecam", id);
+    return (t && t[0]) ? t : id;
 }
 
 static DWORD WINAPI BindThread(LPVOID p) {
@@ -204,12 +277,13 @@ static DWORD WINAPI BindThread(LPVOID p) {
     if (!menuNumber || !menuAction || !g_status) return 1;
     if (!hudCreate || !g_hudSet || !g_hudColour) return 1;
 
+    TextInit();
     g_hud = hudCreate("freecam", SH_HUD_TOPRIGHT, 20);
-    g_menu = menuCreate("Free camera");
-    menuToggle(g_menu, "Detached", 0, OnToggle, NULL);
-    menuNumber(g_menu, "Speed", 12.0f, 1.0f, 120.0f, 4.0f,
+    g_menu = menuCreate("@fc.page");
+    menuToggle(g_menu, "@fc.detached", 0, OnToggle, NULL);
+    menuNumber(g_menu, "@fc.speed", 12.0f, 1.0f, 120.0f, 4.0f,
                OnSpeed, NULL);
-    menuAction(g_menu, "Recentre on game camera", OnRecentre, NULL);
+    menuAction(g_menu, "@fc.recentre", OnRecentre, NULL);
 
     CreateThread(NULL, 0, CamThread, NULL, 0, NULL);
     return 0;

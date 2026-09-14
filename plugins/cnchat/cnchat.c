@@ -778,23 +778,60 @@ static void ChatOnCandMode(uint32_t menu, uint32_t item, int value,
     ChatSetCandMode(value);
 }
 
+/* ---- text ---------------------------------------------------------
+ * The menu's own text, compiled in: it had no lang.ini at all, so this
+ * is what gives it a Chinese menu. The keys are stable IDs, so rewording
+ * a row never breaks a translation in lang.ini.
+ */
+static const ShText kEn[] = {
+    { "@chat.page",      "Chinese chat box" },
+    { "@chat.enabled",   "Enabled" },
+    { "@chat.startkey",  "Start chat key" },
+    { "@chat.cand",      "Candidate window" },
+    { "@chat.cand.self", "Self-drawn" },
+    { "@chat.cand.ime",  "IME native" },
+    { "@chat.hint",      "Restart to apply." }
+};
+
+static const ShText kZh[] = {
+    { "@chat.page",      "中文聊天框" },
+    { "@chat.enabled",   "启用" },
+    { "@chat.startkey",  "聊天按键" },
+    { "@chat.cand",      "候选词窗口" },
+    { "@chat.cand.self", "自绘窗口" },
+    { "@chat.cand.ime",  "输入法原生窗口" },
+    { "@chat.hint",      "重启后生效。" }
+};
+
+static void ChatText(void) {
+    static int done;
+
+    if (done) return;
+    done = 1;
+    ShLangDeclare("cnchat", "en-US", kEn,
+                  (int)(sizeof(kEn) / sizeof(kEn[0])));
+    ShLangDeclare("cnchat", "zh-CN", kZh,
+                  (int)(sizeof(kZh) / sizeof(kZh[0])));
+}
+
 static void BuildMenu(void) {
-    static const char *kCandOpts[] = { "Self-drawn", "IME native" };
+    static const char *kCandOpts[] = { "@chat.cand.self", "@chat.cand.ime" };
     /* The start key is not user-configurable yet: it is fixed to the
      * game's own text-chat key ("T").  A single-option list shows the
      * current value without arming a key capture. */
     static const char *kKeyOpts[] = { "T" };
     uint32_t m;
 
-    m = ShMenuCreate("Chinese chat box");
+    ChatText();
+    m = ShMenuCreate("@chat.page");
     if (!m) return;
 
-    ShMenuToggle(m, "Enabled", IniInt(CFG_KEY_CFG, 0),
+    ShMenuToggle(m, "@chat.enabled", IniInt(CFG_KEY_CFG, 0),
                  ChatOnEnabled, NULL);
-    ShMenuList(m, "Start chat key", kKeyOpts, 1, 0, NULL, NULL);
-    ShMenuList(m, "Candidate window", kCandOpts, 2,
+    ShMenuList(m, "@chat.startkey", kKeyOpts, 1, 0, NULL, NULL);
+    ShMenuList(m, "@chat.cand", kCandOpts, 2,
                IniInt(CFG_KEY_CAND, 0), ChatOnCandMode, NULL);
-    ShMenuHint(m, "Restart to apply.");
+    ShMenuHint(m, "@chat.hint");
     Log("menu page created");
 }
 
