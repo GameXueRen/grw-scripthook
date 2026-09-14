@@ -609,7 +609,11 @@ static int LangEq(const char *a, const char *b) {
 }
 
 /* A section name that names a language rather than a settings group:
- * two to eight letters, then optionally '-'/'_' plus two to four. */
+ * a bare primary subtag ("en", "zh") or a tag with a region subtag
+ * ("zh-CN", "en_US"). A longer bare word is a settings section -
+ * "loader", "forgemod", "playmode" - and must never be read as a
+ * language: that mistake drops the section's rows from the config, and
+ * it is silent, so the rule stays narrow on purpose. */
 static int IsLangCodeLike(const char *sec) {
     const char *p = sec;
     int n = 0;
@@ -619,8 +623,8 @@ static int IsLangCodeLike(const char *sec) {
         p++;
         n++;
     }
+    if (!*p) return n >= 2 && n <= 3;       /* "en", "zh", not "loader" */
     if (n < 2 || n > 8) return 0;
-    if (!*p) return 1;
     if (*p != '-' && *p != '_') return 0;
     p++;
     n = 0;
@@ -643,12 +647,10 @@ static int LangSectionIgnored(const char *sec) {
     int i;
 
     if (!sec || !sec[0]) return 0;
-    if (!_stricmp(sec, "Settings") || !_stricmp(sec, "loader") ||
-        !_stricmp(sec, "plugins") || !_stricmp(sec, "MenuOrder"))
-        return 0;
 
     /* "[zh_cn.First person]" is a language table too: judge the part
-     * before the first dot. */
+     * before the first dot. The rule in IsLangCodeLike is what tells a
+     * language from a settings section, so nothing is listed here. */
     dot = strchr(sec, '.');
     n = dot ? (size_t)(dot - sec) : strlen(sec);
     if (n >= sizeof(head)) return 0;
