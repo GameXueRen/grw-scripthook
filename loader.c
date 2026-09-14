@@ -234,7 +234,7 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
      * reports the stage.
      */
     ShCoreFixLateStartup();
-    /* Mod settings must be up before the plugin scan: it owns the
+    /* ScriptHook settings must be up before the plugin scan: it owns the
      * very switches that gate the plugins, so it has to exist even
      * when load_plugins=0 (otherwise nothing could turn them back on
      * from inside the game). Its root row carries weight 0, so it

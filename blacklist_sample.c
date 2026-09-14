@@ -27,7 +27,7 @@
  *
  *   - its row is gone from the F4 root menu while the mode is on the
  *     blacklist, and back when it is not;
- *   - Mod settings -> Plugins names it as switched off by that mode;
+ *   - ScriptHook settings -> Plugin switches names it as switched off by that mode;
  *   - logs\scripthook_blacklist_sample.log gets a line on every flip, and
  *     logs\scripthook_blacklist.log gets the framework's own view.
  *

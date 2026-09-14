@@ -29,7 +29,7 @@ ShPluginBlacklist(SH_MODE_BLACKLIST_GHOST_WAR | SH_MODE_BLACKLIST_MERCENARIES);
 | `SH_MODE_BLACKLIST_GUERRILLA` | 游击战 | 守营地波次 |
 | `SH_MODE_BLACKLIST_ANY` | 全部 | 上面五个的并集 |
 
-**框架内置模块与内置页不受影响**（它们的菜单 owner 为空）："模组功能设置"、Forge 等在任何模式下都照常可用。默认禁用只针对 `plugins\` 下的 `.asi` 插件 —— 中文聊天输入自 2026-09 起也是插件（`plugins\cnchat\`），因此它现在同样受这套规则约束（未声明即默认禁 Ghost War 与雇佣兵）。
+**框架内置模块与内置页不受影响**（它们的菜单 owner 为空）："ScriptHook 设置"、Forge 等在任何模式下都照常可用。默认禁用只针对 `plugins\` 下的 `.asi` 插件 —— 中文聊天输入自 2026-09 起也是插件（`plugins\cnchat\`），因此它现在同样受这套规则约束（未声明即默认禁 Ghost War 与雇佣兵）。
 
 ### 为什么没有"主菜单"这一档（实测，已放弃）
 
@@ -82,7 +82,7 @@ static DWORD WINAPI Tick(LPVOID p) {
 - 判定依据是 `ShSelectedPlayMode()`（框架钩住游戏自己的模式管理器读出来的）；
 - **模式未知时谁都不禁**：`SH_PLAYMODE_NONE`（还在前端、游戏尚未设置模式，或这个 build 读不到模式）→ 全部允许 —— 所以**主菜单/前端里插件照常显示**，这是设计（见上一节为什么没有"主菜单"档）；
 - 被禁插件在 **F4 模组菜单根页整行消失**，其子页不可进入；若翻转发生时正停在该插件页面上，会自动退回上级页面；恢复后入口重新出现；
-- **"模组功能设置 → Plugins"** 页多一行提示，写明当前模式禁掉了哪些插件，例如：
+- **"ScriptHook 设置 → 各插件开关"** 页多一行提示，写明当前模式禁掉了哪些插件，例如：
 
   ```
   这些改动需重启游戏生效。

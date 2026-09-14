@@ -1,7 +1,7 @@
 # CPU 调度控制（corefix 模块）
 
 按游戏启动的三个阶段分别设置**处理器集合**与**进程优先级 / 效率模式**，并把当前状态以只读 API 提供给插件。
-配置在 `scripthook.ini` 的 `[loader]` 段，界面在「模组功能设置 → CPU 调度控制」。
+配置在 `scripthook.ini` 的 `[loader]` 段，界面在「ScriptHook 设置 → CPU 调度控制」。
 
 | 键 | 阶段 | 取值 |
 | --- | --- | --- |

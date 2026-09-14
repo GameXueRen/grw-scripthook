@@ -1,4 +1,4 @@
-/* Mod settings: a built-in root-menu page that edits the main
+/* ScriptHook settings: a built-in root-menu page that edits the main
  * scripthook.ini at runtime.
  *
  * The engine reads every key it exposes here only at startup:
@@ -9,13 +9,14 @@
  * Each page carries a single hint line noting that changes need a
  * game restart to take effect, instead of marking every row.
  *
- * The [loader] rows sit on two pages, because they answer two unrelated
- * questions: "Startup & core" holds the one about loading plugins at all,
- * and the CPU scheduling page - right under Plugins - holds the six that
- * decide which set of processors the game runs on in each stage of its
- * start up, and at what priority. The corefix status line travels with the
- * CPU page, since it is a statement about those dials on this machine and
- * says nothing about plugins.
+ * The rows sit on this page and the two under it, in reading order: the
+ * one switch about loading plugins at all comes first, on the page
+ * itself, then "Plugin switches" (one row per plugins\<name>), then the
+ * CPU scheduling page with the six dials that decide which set of
+ * processors the game runs on in each stage of its start up, and at what
+ * priority. The corefix status line travels with the CPU page, since it
+ * is a statement about those dials on this machine and says nothing
+ * about plugins.
  *
  * Values are written back with ShConfigSet*, which rewrites the
  * on-disk ini in place (comments and translation tables survive)
@@ -86,12 +87,13 @@ static const char *g_prioOpts[] = {
 #define PRIO_PLAY_NOPTS 4                   /* what the play row offers */
 
 /* The one row that is about loading at all: whether the loader's next scan
- * brings any plugin up. It stays on "Startup & core"; the processor dials
- * moved to the CPU scheduling page, because a CPU dial and a plugin switch
- * have nothing to say to each other. */
+ * brings any plugin up. It sits on the settings page itself, above "Plugin
+ * switches", so the master switch and the rows it governs are read in that
+ * order; the processor dials keep a page of their own, because a CPU dial
+ * and a plugin switch have nothing to say to each other. */
 static const Setting g_loaderSettings[] = {
     { "loader", "load_plugins",
-      "Load all plugins", 0, 0, 0, 0, 1, NULL, 0 },
+      "Load plugins (master switch)", 0, 0, 0, 0, 1, NULL, 0 },
 };
 
 /* One pair of rows per stage of the game's start up: which set of
@@ -122,8 +124,7 @@ static const Setting g_cpuSettings[] = {
 
 /* ---- menu handles ---------------------------------------------- */
 
-static uint32_t g_modMenu = 0;     /* the Mod settings page        */
-static uint32_t g_loaderMenu = 0;  /* [loader] load_plugins        */
+static uint32_t g_modMenu = 0;     /* the ScriptHook settings page */
 static uint32_t g_pluginMenu = 0;  /* [plugins] rows               */
 static uint32_t g_cpuMenu = 0;     /* [loader] CPU scheduling rows */
 static volatile int g_built = 0;
@@ -459,25 +460,24 @@ void ShModSettingsStartup(void) {
     if (g_built) return;
     g_built = 1;
 
-    /* Pin our row first: [MenuOrder] Mod settings = 0. Write it only
+    /* Pin our row first: [MenuOrder] ScriptHook settings = 0. Write it only
      * when it is not already pinned, so a normal launch does not
      * touch the ini file for nothing. */
-    if (ShConfigGetInt("MenuOrder", "Mod settings", 1000) != 0)
-        ShConfigSetInt("MenuOrder", "Mod settings", 0);
+    if (ShConfigGetInt("MenuOrder", "ScriptHook settings", 1000) != 0)
+        ShConfigSetInt("MenuOrder", "ScriptHook settings", 0);
 
-    g_modMenu = ShMenuCreate("Mod settings");
+    g_modMenu = ShMenuCreate("ScriptHook settings");
     if (!g_modMenu) return;
 
-    /* Sub pages sort by the order they are made in: the plugin master
-     * switch, then the plugin list, then the CPU dials on a page of their
-     * own, then the language row. */
-    g_loaderMenu = ShMenuSub(g_modMenu, "Startup & core");
-    g_pluginMenu = ShMenuSub(g_modMenu, "Plugins");
+    /* Rows sort by the order they are made in: the plugin master switch
+     * first, on this page, then the sub pages - the plugin list, then the
+     * CPU dials on a page of their own - and the language row last. */
+    BuildSettings(g_modMenu, g_loaderSettings,
+                  (int)(sizeof(g_loaderSettings) / sizeof(g_loaderSettings[0])));
+    g_pluginMenu = ShMenuSub(g_modMenu, "Plugin switches");
     g_cpuMenu    = ShMenuSub(g_modMenu, "CPU scheduling");
 
     ScanPlugins();
-    BuildSettings(g_loaderMenu, g_loaderSettings,
-                  (int)(sizeof(g_loaderSettings) / sizeof(g_loaderSettings[0])));
     BuildSettings(g_cpuMenu, g_cpuSettings,
                   (int)(sizeof(g_cpuSettings) / sizeof(g_cpuSettings[0])));
     BuildPluginMenu();
@@ -501,11 +501,9 @@ void ShModSettingsStartup(void) {
         size_t used;
         ShCpuStatus cf;
 
-        /* The root page and the loader page carry the restart note and
-         * nothing else. */
+        /* The settings page carries the restart note and nothing else. */
         snprintf(hint, sizeof(hint), "%s", restart);
         ShMenuHint(g_modMenu, hint);
-        ShMenuHint(g_loaderMenu, hint);
         /* The Plugins page shows the same note plus the mode blacklist
          * line, which the thread started below keeps up to date. */
         SetPluginHint();

@@ -376,7 +376,7 @@ SH_API int ShPluginBlacklistAt(int i, char *name, int cap, uint32_t *modes,
     return 1;
 }
 
-/* A line for the Mod settings page: who is switched off by what is in
+/* A line for the ScriptHook settings page: who is switched off by what is in
  * force, and by which conditions. Localised here, so the page only has to
  * place the text; empty when there is nothing to say. */
 SH_API int ShPluginBlacklistNotice(char *buf, int cap) {
