@@ -1156,17 +1156,17 @@ void RenderMenu(const ShMenuView* v)
         const char* hl = v->hint;
         int li = 0;
         while (*hl && li < hintLines) {
-            char buf[128];
             const char* nl = strchr(hl, '\n');
-            size_t n = nl ? (size_t)(nl - hl) : strlen(hl);
-            if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-            memcpy(buf, hl, n);
-            buf[n] = 0;
+            const char* end = nl ? nl : hl + strlen(hl);
+            // Drawn straight from the string, line by line. This used
+            // to copy each line through a 128 byte buffer, which cut a
+            // long hint mid-character and left a "?" where the rest of
+            // the character should be.
             dl->AddText(font, hintFs, ImVec2(x + PAD, hy),
-                        Col(0x8C9BA8u), buf);
+                        Col(0x8C9BA8u), hl, end);
             hy += hintLh;
             li++;
-            hl = nl ? nl + 1 : hl + n;
+            hl = nl ? nl + 1 : end;
         }
     }
     // Row area starts below the title and the hints.

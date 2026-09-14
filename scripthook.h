@@ -1123,6 +1123,11 @@ int  ShMenuSelectRow(uint32_t menu, const char *key);
  *  that has not changed. */
 void ShMenuOrderDirty(void);
 
+/** Internal: end a string one character earlier when its last bytes are
+ *  only part of a character. Text cut mid-sequence is what a renderer
+ *  draws as "?", so every copy that can cut display text calls this. */
+void ShUtf8Trim(char *s);
+
 /** @} */
 /** @defgroup draw Plugin drawing
  *  A plugin's own window inside the game's overlay, drawn by the

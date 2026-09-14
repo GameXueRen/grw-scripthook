@@ -14,7 +14,7 @@
 #define HUD_TEXT    512
 #define HUD_NAME    32
 #define HUD_LINES   12
-#define HUD_LINE    96
+#define HUD_LINE    192
 #define HUD_TICK_MS 120
 
 /* Geometry in HUD pixels. */
@@ -110,6 +110,8 @@ static int SplitLines(const char *text, char lines[][HUD_LINE],
         if (len > HUD_LINE - 1) len = HUD_LINE - 1;
         memcpy(lines[n], p, len);
         lines[n][len] = 0;
+        ShUtf8Trim(lines[n]);      /* never end a line in half a character */
+        len = (int)strlen(lines[n]);
         if (len > w) w = len;
         n++;
         if (!e) break;
@@ -321,6 +323,7 @@ SH_API int ShHudToastSnapshot(ShToastView *out, int max) {
         if (out && n < max) {
             strncpy(out[n].text, t->text, SH_TOAST_TEXT - 1);
             out[n].text[SH_TOAST_TEXT - 1] = 0;
+            ShUtf8Trim(out[n].text);
             out[n].rgb = t->rgb;
             out[n].alpha = alpha;
         }
@@ -543,6 +546,7 @@ static uint32_t ToastPut(int slot, const char *text, uint32_t rgb,
     if (text) {
         strncpy(t->text, text, SH_TOAST_TEXT - 1);
         t->text[SH_TOAST_TEXT - 1] = 0;
+        ShUtf8Trim(t->text);
     } else {
         t->text[0] = 0;
     }

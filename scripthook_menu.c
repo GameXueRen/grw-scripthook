@@ -88,6 +88,11 @@ extern void ShSetError(int err);
 static void Lock(void) { if (g_lockReady) EnterCriticalSection(&g_lock); }
 static void Unlock(void) { if (g_lockReady) LeaveCriticalSection(&g_lock); }
 
+/* Copies display text back to a character boundary, so a cut string
+ * never ends in half a multi-byte character - a renderer draws that as
+ * "?". Defined with the capture helpers below. */
+static void SafeCopy(char *dst, size_t cap, const char *src);
+
 static Menu *MenuOf(uint32_t h) {
     if (h == 0 || h > MENUS) return NULL;
     if (!g_menus[h - 1].used) return NULL;
@@ -103,10 +108,8 @@ static uint32_t NewMenu(const char *title, uint32_t parent,
         memset(&g_menus[i], 0, sizeof(g_menus[i]));
         g_menus[i].used = 1;
         g_menus[i].parent = parent;
-        if (title) {
-            strncpy(g_menus[i].title, title, LABEL - 1);
-            g_menus[i].title[LABEL - 1] = 0;
-        }
+        if (title) SafeCopy(g_menus[i].title, sizeof(g_menus[i].title),
+                            title);
         if (owner) {
             strncpy(g_menus[i].owner, owner,
                     sizeof(g_menus[i].owner) - 1);
@@ -168,11 +171,6 @@ static void DropMenu(uint32_t h) {
             DropMenu(m->items[i].sub);
     memset(m, 0, sizeof(*m));
 }
-
-/* Copies display text back to a character boundary, so a cut string
- * never ends in half a multi-byte character - a renderer draws that as
- * "?". Defined with the capture helpers below. */
-static void SafeCopy(char *dst, size_t cap, const char *src);
 
 static Item *NewItem(Menu *m, int kind, const char *label,
                      ShMenuFn fn, void *user) {
@@ -760,23 +758,6 @@ void ShMenuSetOverlayReady(int ready) {
     g_ovlReady = ready ? 1 : 0;
 }
 
-/* Drop a trailing half-character: the last bytes of a string that was
- * cut somewhere else (a formatted status line, a text layer row). When
- * the lead byte has no room for the bytes that follow it, the string
- * ends one character earlier. */
-static void Utf8Trim(char *s) {
-    size_t n = strlen(s);
-    size_t keep = n;
-
-    while (keep > 0 && ((unsigned char)s[keep - 1] & 0xC0) == 0x80) keep--;
-    if (keep > 0) {
-        unsigned char b = (unsigned char)s[keep - 1];
-        int need = (b < 0xC2) ? 1 : (b < 0xE0) ? 2 : (b < 0xF0) ? 3 : 4;
-        if (keep - 1 + (size_t)need > n) keep--;
-    }
-    s[keep] = 0;
-}
-
 /* strncpy truncates by bytes, which can split a UTF-8 sequence
  * and leave the renderer with an invalid lead byte (it draws it
  * as '?'). Copy then back up to the start of the last code point
@@ -805,7 +786,7 @@ static void SafeCopy(char *dst, size_t cap, const char *src) {
         memcpy(dst, src, n + 1);
         /* The source may already have been cut somewhere else: the room
          * was there, the character was not. */
-        Utf8Trim(dst);
+        ShUtf8Trim(dst);
     }
 }
 
@@ -1383,7 +1364,7 @@ SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(text, sizeof(text), tmpl, ap);
     va_end(ap);
-    Utf8Trim(text);             /* a long value can cut the last character */
+    ShUtf8Trim(text);           /* a long value can cut the last character */
     return ShMenuStatus(menu, text);
 }
 

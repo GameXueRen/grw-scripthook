@@ -675,7 +675,7 @@ static int LangSectionIgnored(const char *sec) {
  * of a character. Text cut mid-sequence is what a renderer draws as
  * "?", and a menu that shows one is worse off than one that shows a
  * shorter string. */
-static void Utf8Backoff(char *s) {
+void ShUtf8Trim(char *s) {
     size_t n = strlen(s);
     size_t keep = n;
 
@@ -704,7 +704,7 @@ static void CopyN(char *dst, size_t cap, const char *src) {
     }
     if (n && src) memcpy(dst, src, n);
     dst[n] = 0;
-    Utf8Backoff(dst);
+    ShUtf8Trim(dst);
 }
 
 /* Copy a value, expanding "\n" into a line break: one lang.ini row is
@@ -721,7 +721,7 @@ static void CopyValue(char *dst, size_t cap, const char *src) {
         dst[n++] = *src++;
     }
     dst[n] = 0;
-    Utf8Backoff(dst);
+    ShUtf8Trim(dst);
 }
 
 /* ---- disk layer ------------------------------------------------- */
@@ -1401,6 +1401,7 @@ SH_API int ShConfigGetStr(const char *section, const char *key,
     if (n >= (size_t)size) n = (size_t)size - 1;
     memcpy(out, v, n);
     out[n] = 0;
+    ShUtf8Trim(out);
     ShSetError(SH_OK);
     return 1;
 }
