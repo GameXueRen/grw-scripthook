@@ -565,6 +565,7 @@ static volatile LONG    g_textLockReady = 0;
 static int              g_textLogging;
 
 static void LoadLang(const char *owner);
+static int  EnsureRows(void);
 static void AddRow(const char *owner, const char *key,
                    const char *value);
 
@@ -711,6 +712,7 @@ static void AddRow(const char *owner, const char *key,
     LangRow *e;
 
     if (!key || !key[0] || !value || !value[0]) return;
+    if (!g_rows) return;                /* nothing to write into */
     if (g_nrows >= LROW_MAX) {
         if (g_rowsDropped++ == 0)
             TextLog("%d rows kept, the rest dropped (raise LROW_MAX)",
@@ -1031,8 +1033,7 @@ SH_API const char *ShLangText(const char *owner, const char *key) {
     if (!key) return "";
     LoadConfig();
     TextLock();
-    if (!g_rows) g_rows = (LangRow *)calloc(LROW_MAX, sizeof(LangRow));
-    if (g_rows) {
+    if (EnsureRows()) {
         LoadLang(owner);
         v = RowFind(owner, key);
     }
@@ -1054,7 +1055,7 @@ SH_API int ShLangHas(const char *owner, const char *key) {
     if (!key || !key[0]) return 0;
     LoadConfig();
     TextLock();
-    if (g_rows) {
+    if (EnsureRows()) {
         LoadLang(owner);
         v = RowFind(owner, key);
     }
@@ -1209,9 +1210,23 @@ static void LoadLangFile(const char *owner) {
         ParseLangText(owner, text);
 }
 
+/* The rows the files are read into. Allocated on the first read, here
+ * rather than in the caller: ShLangLabel reads the framework file for
+ * [LanguageNames] and allocates nothing itself, so a read can reach
+ * AddRow with no table at all - which is a write to NULL, and it is
+ * what a menu asks for first. */
+static int EnsureRows(void) {
+    if (!g_rows) g_rows = (LangRow *)calloc(LROW_MAX, sizeof(LangRow));
+    return g_rows != NULL;
+}
+
 /* The framework file first: [LanguageNames] and the shared override
  * rows live there, and any plugin may lean on them. */
 static void LoadLang(const char *owner) {
+    if (!EnsureRows()) {
+        TextLog("no table for %d rows: text is not loaded", LROW_MAX);
+        return;
+    }
     LoadLangFile(NULL);
     if (owner && owner[0]) LoadLangFile(owner);
 }
