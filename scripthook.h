@@ -1071,9 +1071,12 @@ SH_API int  ShMenuIsOpen(void);
 SH_API int  ShMenuIsShowing(uint32_t menu);
 SH_API void ShMenuOpen(int open);
 
-/** One row of the menu, copied for the overlay renderer. */
+/** One row of the menu, copied for the overlay renderer. The sizes here
+ *  are the contract with the menu model: a row label is a full row, and
+ *  the longest one the framework builds - a plugin switch, reading
+ *  "<folder>(<page name>)" - has to fit. See LABEL in scripthook_menu.c. */
 typedef struct ShMenuRow {
-    char name[128];
+    char name[160];
     char value[48];
     int  selected;
 } ShMenuRow;
@@ -1083,7 +1086,7 @@ typedef struct ShMenuRow {
  *  what the renderer gets: a longer title, hint or status line is
  *  cut on a character boundary by the capture, never mid-character. */
 typedef struct ShMenuView {
-    char title[96];
+    char title[160];  /**< sized with LABEL: a page title goes in here */
     char hint[384];   /**< control hints under the title, \n lines */
     char status[192];
     char footer[32];

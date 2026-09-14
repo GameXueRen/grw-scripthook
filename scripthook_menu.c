@@ -27,7 +27,13 @@
  */
 #define MENUS       64
 #define ITEMS       96
-#define LABEL       96
+/* Room for a whole row label. The longest one the framework builds itself
+ * is a plugin switch - "<folder>(<page name>)" - where a folder is up to
+ * 63 bytes and the page name is a title; 160 covers that with room to
+ * spare and still keeps the menu model small (64 x 96 labels).
+ * ShMenuRow.name and ShMenuView.title are the same string on the way to
+ * the renderer and are sized to match. */
+#define LABEL       160
 #define VISIBLE     12
 #define TICK_MS     40
 #define OPTS        12
