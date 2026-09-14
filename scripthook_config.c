@@ -804,11 +804,13 @@ static const char *BaseFind(const char *owner, const char *lang,
 
 /* The readable form of a key with no text anywhere: an ID loses its
  * '@' and gains word breaks ("@camo.page.visibility" -> "Camo Page
- * Visibility"); a literal is already readable. Four rotating
- * buffers, because a menu capture holds a title, a hint and a status
- * line at once. */
+ * Visibility"); a literal is already readable. Four rotating buffers,
+ * because a menu capture holds a title, a hint and a status line at
+ * once - and each as long as a key can be, because a literal key IS a
+ * whole hint. At 64 bytes this cut one (the order page's hint, which a
+ * caller had handed over translated rather than as the key it is). */
 static const char *Readable(const char *key) {
-    static char buf[4][64];
+    static char buf[4][LANG_KEY_MAX];
     static int  slot;
     char *out;
     size_t n = 0;
@@ -1145,6 +1147,433 @@ SH_API const char *ShLang(const char *text) {
 SH_API const char *ShLangFor(const char *scope, const char *text) {
     (void)scope;
     return ShLangText(NULL, text);
+}
+
+/* ---- template formatting ----------------------------------------
+ *
+ * A translated template may reorder the values with "%n$" (docs/
+ * i18n-refactor.md 3.3, plan B). The English template is the one the
+ * caller wrote and the one the compiler checked, so its conversions
+ * decide the types on the argument list: a translation says which
+ * argument each of its own conversions uses, and the two have to agree
+ * at every index.
+ *
+ * A template that does not agree - a bare "%", an index that is not
+ * there, "%s" where the English has "%d", an unsupported "*", a mix of
+ * indexed and plain conversions - is logged once and formatted from the
+ * ENGLISH template instead. A wrong "%" in a lang.ini must never reach
+ * vsnprintf: it would read the wrong type off the argument list, which
+ * is garbage output at best and a crash at worst.
+ *
+ * A template with no index at all - every template in the tree today -
+ * still goes straight to vsnprintf, after the same type check, so the
+ * cost on that path is one scan of two short strings.
+ */
+
+typedef enum {
+    CK_INT = 0,     /* %d %i %u %o %x %X %c, with or without h/hh */
+    CK_LONG,        /* the l length */
+    CK_LLONG,       /* ll, I64, and z/j/t (size_t and its neighbours) */
+    CK_DOUBLE,      /* %e %f %g %a, with or without l */
+    CK_LDOUBLE,     /* the same with L */
+    CK_STR,         /* %s */
+    CK_PTR,         /* %p */
+    CK_PCT,         /* %% - takes no argument */
+    CK_BAD          /* unsupported or malformed */
+} ConvKind;
+
+typedef struct {
+    int      len;       /* bytes of the conversion, '%' included */
+    int      index;     /* 1-based argument, 0 when none was written */
+    int      idxAt;     /* offset of the index digits, 0 when none */
+    int      idxLen;    /* bytes of "n$" */
+    ConvKind kind;
+} Conv;
+
+#define CONV_MAX 16
+
+/* Parse the conversion at p, which points at '%'. Returns its length in
+ * bytes, or 0 when it is malformed ("%" at the end, "*" width, "%n",
+ * "%ls" - anything whose value this code cannot fetch safely). */
+static int ScanConv(const char *p, Conv *c)
+{
+    int i = 1;
+    int len = 0;            /* 0 none, 1 h/hh, 2 l, 3 ll/I64/z/j/t, 4 L */
+    ConvKind k;
+
+    c->len = c->idxAt = c->idxLen = 0;
+    c->index = 0;
+    c->kind = CK_BAD;
+    if (p[0] != '%') return 0;
+    if (p[1] == '%') { c->len = 2; c->kind = CK_PCT; return 2; }
+
+    while (p[i] && strchr("-+ #0'", p[i])) i++;
+    if (p[i] >= '0' && p[i] <= '9') {
+        const char *d = p + i;
+        int n = 0;
+
+        while (*d >= '0' && *d <= '9') { n = n * 10 + (*d - '0'); d++; }
+        if (*d == '$') {
+            /* an argument index, then the flags and width that follow
+             * it (POSIX order: %[n$][flags][width][.prec][length]) */
+            c->index = n;
+            c->idxAt = i;
+            c->idxLen = (int)(d - (p + i)) + 1;
+            i += c->idxLen;
+            while (p[i] && strchr("-+ #0'", p[i])) i++;
+            if (p[i] >= '0' && p[i] <= '9')
+                while (p[i] >= '0' && p[i] <= '9') i++;
+        } else {
+            i = (int)(d - p);           /* it was the width */
+        }
+    }
+    if (p[i] == '*') return 0;          /* a width from the argument list */
+    if (p[i] == '.') {
+        i++;
+        if (p[i] == '*') return 0;      /* so is a precision */
+        while (p[i] >= '0' && p[i] <= '9') i++;
+    }
+    switch (p[i]) {
+    case 'h': i++; if (p[i] == 'h') i++; len = 1; break;
+    case 'l': i++; if (p[i] == 'l') { i++; len = 3; } else len = 2; break;
+    case 'L': i++; len = 4; break;
+    case 'z': case 'j': case 't': i++; len = 3; break;
+    case 'I':
+        i++;
+        if (p[i] == '3' && p[i + 1] == '2') i += 2;
+        else if (p[i] == '6' && p[i + 1] == '4') i += 2;
+        len = 3;
+        break;
+    default: break;
+    }
+
+    switch (p[i]) {
+    case 'd': case 'i': case 'u': case 'o': case 'x': case 'X':
+        k = (len == 0 || len == 1) ? CK_INT
+          : (len == 2)            ? CK_LONG : CK_LLONG;
+        break;
+    case 'c':
+        k = (len == 0 || len == 1) ? CK_INT : CK_BAD;
+        break;
+    case 'e': case 'E': case 'f': case 'F': case 'g': case 'G':
+    case 'a': case 'A':
+        k = (len == 4) ? CK_LDOUBLE : CK_DOUBLE;
+        break;
+    case 's':
+        k = (len == 0) ? CK_STR : CK_BAD;   /* %ls is a wide string */
+        break;
+    case 'p':
+        k = (len == 0) ? CK_PTR : CK_BAD;
+        break;
+    default:
+        return 0;                           /* %n, and anything unknown */
+    }
+    c->kind = k;
+    c->len = i + 1;
+    return c->len;
+}
+
+/* Every conversion of a template, in file order, "%%" left out because
+ * it takes no argument. Returns the count, or -1 when malformed. */
+static int CollectConvs(const char *t, Conv *list)
+{
+    int n = 0;
+
+    while (t && *t) {
+        Conv c;
+        int step;
+
+        if (*t != '%') { t++; continue; }
+        step = ScanConv(t, &c);
+        if (step <= 0) return -1;
+        if (c.kind != CK_PCT) {
+            if (n >= CONV_MAX) return -1;
+            list[n++] = c;
+        }
+        t += step;
+    }
+    return n;
+}
+
+/* Append a piece, keeping the buffer terminated. Returns the new
+ * offset, which stops growing once the buffer is full. */
+static int AppendText(char *dst, size_t cap, int at, const char *piece)
+{
+    size_t n = strlen(piece);
+
+    if (cap == 0) return at;
+    if ((size_t)at >= cap - 1) return at;
+    if (n > cap - 1 - (size_t)at) n = cap - 1 - (size_t)at;
+    memcpy(dst + at, piece, n);
+    at += (int)n;
+    dst[at] = 0;
+    return at;
+}
+
+/* Take one argument of the given kind off the list and drop it: a
+ * translation is free to leave values out of order, so the ones it does
+ * not use still have to be stepped over. */
+static void SkipArg(va_list *ap, ConvKind k)
+{
+    switch (k) {
+    case CK_INT:     (void)va_arg(*ap, int); break;
+    case CK_LONG:    (void)va_arg(*ap, long); break;
+    case CK_LLONG:   (void)va_arg(*ap, long long); break;
+    case CK_DOUBLE:  (void)va_arg(*ap, double); break;
+    case CK_LDOUBLE: (void)va_arg(*ap, long double); break;
+    case CK_STR:     (void)va_arg(*ap, const char *); break;
+    case CK_PTR:     (void)va_arg(*ap, void *); break;
+    default: break;                     /* %% and CK_BAD take none */
+    }
+}
+
+/* Render one conversion (its own flags and width, no index) from the
+ * next argument of the given kind, and append the result. */
+static int RenderOne(char *dst, size_t cap, int at, const char *norm,
+                     ConvKind k, va_list *ap)
+{
+    char piece[384];
+    int n;
+
+    /* Every value is taken into a local first: MSVC's va_arg macro does
+     * not splice cleanly into another call's argument list. */
+    switch (k) {
+    case CK_INT: {
+        int v = va_arg(*ap, int);
+        n = snprintf(piece, sizeof(piece), norm, v);
+        break;
+    }
+    case CK_LONG: {
+        long v = va_arg(*ap, long);
+        n = snprintf(piece, sizeof(piece), norm, v);
+        break;
+    }
+    case CK_LLONG: {
+        long long v = va_arg(*ap, long long);
+        n = snprintf(piece, sizeof(piece), norm, v);
+        break;
+    }
+    case CK_DOUBLE: {
+        double v = va_arg(*ap, double);
+        n = snprintf(piece, sizeof(piece), norm, v);
+        break;
+    }
+    case CK_LDOUBLE: {
+        long double v = va_arg(*ap, long double);
+        n = snprintf(piece, sizeof(piece), norm, v);
+        break;
+    }
+    case CK_STR: {
+        const char *v = va_arg(*ap, char *);
+        n = snprintf(piece, sizeof(piece), norm, v ? v : "");
+        break;
+    }
+    case CK_PTR: {
+        void *v = va_arg(*ap, void *);
+        n = snprintf(piece, sizeof(piece), norm, v);
+        break;
+    }
+    default:
+        piece[0] = 0;
+        n = 0;
+        break;
+    }
+    if (n < 0) piece[0] = 0;
+    return AppendText(dst, cap, at, piece);
+}
+
+/* Format a template whose conversions all carry an index, taking every
+ * value from the position the translation names. `en` is the English
+ * conversion list: it says what kind each argument is, which is what
+ * decides how the value is fetched. */
+static int FormatPositional(char *dst, size_t cap, const char *t,
+                            const Conv *en, va_list *base)
+{
+    int at = 0;
+    const char *p = t;
+
+    if (cap) dst[0] = 0;
+    while (*p) {
+        const char *pc;
+        char norm[40];
+        Conv c;
+        va_list a;
+        int step, k, n;
+
+        if (*p != '%') {
+            pc = strchr(p, '%');
+            n = pc ? (int)(pc - p) : (int)strlen(p);
+            if ((size_t)n > sizeof(norm) - 1) n = sizeof(norm) - 1;
+            memcpy(norm, p, (size_t)n);
+            norm[n] = 0;
+            at = AppendText(dst, cap, at, norm);
+            p += n;
+            continue;
+        }
+        step = ScanConv(p, &c);
+        if (step <= 0) break;               /* cannot happen: checked */
+        if (c.kind == CK_PCT) {
+            at = AppendText(dst, cap, at, "%");
+            p += step;
+            continue;
+        }
+
+        /* the same conversion with its "n$" taken out */
+        n = 0;
+        for (k = 0; k < c.idxAt && n < (int)sizeof(norm) - 1; k++)
+            norm[n++] = p[k];
+        for (k = c.idxAt + c.idxLen; k < c.len && n < (int)sizeof(norm) - 1;
+             k++)
+            norm[n++] = p[k];
+        norm[n] = 0;
+
+        va_copy(a, *base);
+        for (k = 1; k < c.index; k++) SkipArg(&a, en[k - 1].kind);
+        at = RenderOne(dst, cap, at, norm, en[c.index - 1].kind, &a);
+        va_end(a);
+        p += step;
+    }
+    return at;
+}
+
+/* One line per bad template, not one per frame: a status line is
+ * formatted ~25 times a second, and a translator needs the line once. */
+static void RejectLog(const char *tr, const char *why)
+{
+    static unsigned seen[16];
+    static int nSeen;
+    unsigned h = 2166136261u;
+    const char *p;
+    int i;
+
+    for (p = tr; p && *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
+    for (i = 0; i < nSeen; i++)
+        if (seen[i] == h) return;
+    if (nSeen >= 16) return;
+    seen[nSeen++] = h;
+    TextLog("template \"%.60s\" rejected (%s): using the English one",
+            tr ? tr : "", why);
+}
+
+int ShTextFormatV(char *dst, size_t cap, const char *en, const char *tr,
+                  va_list ap)
+{
+    Conv ctr[CONV_MAX], cen[CONV_MAX];
+    int ntr, nen, i, indexed = 0, used[CONV_MAX + 1];
+    const char *why = NULL;
+    va_list a;
+    int r;
+
+    if (!dst || cap == 0) return 0;
+    dst[0] = 0;
+    if (!tr || !tr[0]) tr = en;
+    if (!tr || !tr[0]) return 0;
+    if (!en || !en[0]) en = tr;
+
+    ntr = CollectConvs(tr, ctr);
+    nen = CollectConvs(en, cen);
+
+    if (nen < 0) {
+        /* The English side is compiled and the compiler checked it, so
+         * this is not a case to report: format the translation as it
+         * stands, which is what the caller would have done itself. */
+        va_copy(a, ap);
+        r = vsnprintf(dst, cap, tr, a);
+        va_end(a);
+        if (r < 0) r = 0;
+        ShUtf8Trim(dst);
+        return r;
+    }
+
+    if (ntr < 0) {
+        why = "a % that is not a conversion";
+    } else {
+        for (i = 0; i < ntr; i++) {
+            if (ctr[i].kind == CK_BAD) {
+                why = "a conversion this build cannot read a value for";
+                break;
+            }
+            if (ctr[i].index > 0) indexed = 1;
+        }
+    }
+
+    if (!why && indexed) {
+        if (ntr != nen) {
+            why = "a different number of values";
+        } else {
+            for (i = 0; i <= nen; i++) used[i] = 0;
+            for (i = 0; i < ntr; i++) {
+                int n = ctr[i].index;
+
+                if (n < 1 || n > nen) {
+                    why = "an index that is not there";
+                    break;
+                }
+                if (used[n]) {
+                    why = "the same value twice";
+                    break;
+                }
+                if (ctr[i].kind != cen[n - 1].kind) {
+                    why = "a value of the wrong type";
+                    break;
+                }
+                used[n] = 1;
+            }
+            for (i = 1; i <= nen && !why; i++)
+                if (!used[i]) why = "a value left out";
+        }
+    } else if (!why) {
+        if (ntr != nen) {
+            why = "a different number of values";
+        } else {
+            for (i = 0; i < ntr; i++)
+                if (ctr[i].kind != cen[i].kind) {
+                    why = "a value of the wrong type";
+                    break;
+                }
+        }
+    }
+
+    va_copy(a, ap);
+    if (why) {
+        RejectLog(tr, why);
+        r = vsnprintf(dst, cap, en, a);
+    } else if (indexed) {
+        FormatPositional(dst, cap, tr, cen, &a);
+        r = (int)strlen(dst);
+    } else {
+        r = vsnprintf(dst, cap, tr, a);
+    }
+    va_end(a);
+    if (r < 0) r = 0;
+    ShUtf8Trim(dst);
+    return r;
+}
+
+int ShTextFormat(char *dst, size_t cap, const char *en, const char *tr, ...)
+{
+    va_list ap;
+    int r;
+
+    va_start(ap, tr);
+    r = ShTextFormatV(dst, cap, en, tr, ap);
+    va_end(ap);
+    return r;
+}
+
+/** Internal: the en-US text for a key, or NULL when this build has
+ *  none. A template is checked against it, and a rejected translation
+ *  is formatted from it. */
+const char *ShTextEnUS(const char *owner, const char *key)
+{
+    const char *v = NULL;
+
+    if (!key || !key[0]) return NULL;
+    LoadConfig();
+    TextLock();
+    v = BaseFind(owner, "en-US", key);
+    TextUnlock();
+    return v;
 }
 
 /* ---- lang.ini --------------------------------------------------- */

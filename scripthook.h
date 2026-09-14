@@ -5,6 +5,8 @@
 #define GRW_SCRIPTHOOK_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include <stdarg.h>
 
 /* Compiler shims so the same sources build with MSVC, which
  * has no __attribute__ and already uses the MS x64 ABI that
@@ -1127,6 +1129,23 @@ void ShMenuOrderDirty(void);
  *  only part of a character. Text cut mid-sequence is what a renderer
  *  draws as "?", so every copy that can cut display text calls this. */
 void ShUtf8Trim(char *s);
+
+/** Internal: format a translated template, letting the translation
+ *  reorder the values with "%n$". `en` is the same template in en-US:
+ *  the translation's conversions are checked against its types, and a
+ *  translation that fails the check is logged and formatted from `en`
+ *  instead (docs/i18n-refactor.md 3.3). */
+int ShTextFormat(char *dst, size_t cap, const char *en, const char *tr,
+                 ...);
+
+/** Internal: the same, for a caller that already holds a va_list. */
+int ShTextFormatV(char *dst, size_t cap, const char *en, const char *tr,
+                  va_list ap);
+
+/** Internal: the en-US text for a key, or NULL when this build has
+ *  none. What a template is checked against, and what a rejected
+ *  translation falls back to. */
+const char *ShTextEnUS(const char *owner, const char *key);
 
 /** @} */
 /** @defgroup draw Plugin drawing

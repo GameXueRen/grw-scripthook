@@ -996,10 +996,14 @@ void ShMenuCaptureView(ShMenuView *v) {
         }
         {
             int vis = VisibleCount(m);
-            if (vis > VISIBLE)
-                snprintf(v->footer, sizeof(v->footer),
-                         ShLangText(NULL, "@menu.footer.pos"),
-                         VisibleOrdinal(m, m->sel), vis);
+            if (vis > VISIBLE) {
+                const char *fen = ShTextEnUS(NULL, "@menu.footer.pos");
+
+                ShTextFormat(v->footer, sizeof(v->footer),
+                             fen ? fen : "%d / %d",
+                             ShLangText(NULL, "@menu.footer.pos"),
+                             VisibleOrdinal(m, m->sel), vis);
+            }
         }
     }
     Unlock();
@@ -1343,13 +1347,17 @@ void ShMenuStatusResetAll(void) {
 /* The status line from a printf template: take the template's text for
  * this menu's owner, format it once, store the result. The capture
  * path translates m->status again, which is a no-op for the stored
- * result, so this is safe. (Reordering a translation's placeholders -
- * "%2$s" - needs the template parser the design doc reserves for the
- * next pass; today a translation keeps the English order.)
+ * result, so this is safe.
+ *
+ * ShTextFormatV does the formatting, which is what lets a translation
+ * reorder the values ("%2$s" first) and what keeps a mistyped
+ * conversion from reaching vsnprintf at all - the formatter in
+ * scripthook_config.c checks it against `en` and falls back to it.
  */
 SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
     char tmpl[512];              /* the template, in this menu's text */
     char text[384];              /* the line that template formats into */
+    const char *en;              /* the same template in en-US */
     va_list ap;
     Menu *m;
 
@@ -1358,13 +1366,16 @@ SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
     Lock();
     m = MenuOf(menu);
     if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
+    /* A caller that passes an ID has its en-US row; one that passes the
+     * English literal has no row, and the literal is the answer. */
+    en = ShTextEnUS(m->owner, fmt);
+    if (!en) en = fmt;
     SafeCopy(tmpl, sizeof(tmpl), ShLangText(m->owner, fmt));
     Unlock();
 
     va_start(ap, fmt);
-    vsnprintf(text, sizeof(text), tmpl, ap);
+    ShTextFormatV(text, sizeof(text), en, tmpl, ap);
     va_end(ap);
-    ShUtf8Trim(text);           /* a long value can cut the last character */
     return ShMenuStatus(menu, text);
 }
 

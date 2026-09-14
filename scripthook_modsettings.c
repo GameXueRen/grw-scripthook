@@ -434,7 +434,11 @@ static void OnOrderMove(uint32_t menu, uint32_t item, int value,
     ShMenuOrderDirty();          /* the root re-sorts on its next capture */
     BuildOrderMenu();
     ShMenuSelectRow(g_orderMenu, g_orderSel);
-    ShMenuStatus(g_orderMenu, ShLang("@settings.order.saved"));
+    /* These take a KEY, not translated text: the capture looks it up
+     * with the page's owner. Handing over ShLang(...) here translated
+     * twice - the second lookup missed, fell back to the readable form
+     * of the Chinese string and cut it. */
+    ShMenuStatus(g_orderMenu, "@settings.order.saved");
     InterlockedExchange(&g_orderBusy, 0);
 }
 
@@ -480,7 +484,7 @@ static void BuildOrderMenu(void) {
                      (float)(g_nOrder > 1 ? g_nOrder : 1), 1.0f,
                      OnOrderMove, (void *)(INT_PTR)i);
     if (g_nOrder == 0)
-        ShMenuStatus(g_orderMenu, ShLang("@settings.order.empty"));
+        ShMenuStatus(g_orderMenu, "@settings.order.empty");
 }
 
 /* Once a second, on the thread that already watches the CPU line: the
@@ -601,9 +605,10 @@ static void SetCpuLine(void) {
     dial = g_stageOpts[d];
     prio = g_prioOpts[p];
 
-    snprintf(text, sizeof(text),
-             ShLang("Now: %s - cores %s - priority %s"),
-             ShLang(StageKey(st)), ShLang(dial), ShLang(prio));
+    ShTextFormat(text, sizeof(text),
+                 "Now: %s - cores %s - priority %s",
+                 ShLang("Now: %s - cores %s - priority %s"),
+                 ShLang(StageKey(st)), ShLang(dial), ShLang(prio));
     if (!strcmp(text, g_cpuLast)) return;
     snprintf(g_cpuLast, sizeof(g_cpuLast), "%s", text);
     ShMenuStatus(g_cpuMenu, text);
@@ -632,13 +637,13 @@ static void BuildHints(void) {
      * CPU ones, while the language row above applies at once - the note
      * says both rather than sending the player to a restart it does not
      * need. */
-    ShMenuHint(g_modMenu, ShLang("@settings.hint"));
+    ShMenuHint(g_modMenu, "@settings.hint");
     /* The Plugins page shows the same note plus the mode blacklist line,
      * which the thread started below keeps up to date. */
     SetPluginHint();
     /* The order page: one sentence, because the rows carry the rest -
      * the number is the place, left and right move it. */
-    ShMenuHint(g_orderMenu, ShLang("@settings.order.hint"));
+    ShMenuHint(g_orderMenu, "@settings.order.hint");
 
     /* The CPU page: one sentence - what the page does, and that it acts
      * from the next launch on. The one thing worth a second line is the
