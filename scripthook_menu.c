@@ -27,7 +27,7 @@
  */
 #define MENUS       64
 #define ITEMS       96
-#define LABEL       64
+#define LABEL       96
 #define VISIBLE     12
 #define TICK_MS     40
 #define OPTS        12
@@ -959,7 +959,7 @@ void ShMenuCaptureView(ShMenuView *v) {
             SafeCopy(v->hint, sizeof(v->hint),
                      ShLangText(owner, m->hint));
         else {
-            char hintKey[80];
+            char hintKey[LABEL + 16];   /* "<页面键>.hint" */
 
             snprintf(hintKey, sizeof(hintKey), "%s.hint", m->title);
             if (ShLangHas(owner, hintKey))

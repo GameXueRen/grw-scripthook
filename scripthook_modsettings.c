@@ -388,7 +388,7 @@ static uint32_t g_orderMenu = 0;
 #define ORDER_MAX 64
 
 typedef struct {
-    char key[48];        /* the page key [MenuOrder] is keyed by */
+    char key[96];        /* the page key [MenuOrder] is keyed by */
     char owner[48];      /* the plugin that owns the page       */
     char name[192];      /* its label, in the current language  */
 } OrderRow;

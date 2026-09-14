@@ -1081,7 +1081,7 @@ typedef struct ShMenuRow {
  *  what the renderer gets: a longer title, hint or status line is
  *  cut on a character boundary by the capture, never mid-character. */
 typedef struct ShMenuView {
-    char title[64];
+    char title[96];
     char hint[384];   /**< control hints under the title, \n lines */
     char status[192];
     char footer[32];
@@ -1104,7 +1104,7 @@ void ShMenuSetOverlayReady(int ready);
  *  sees it. `key` is the page key [MenuOrder] is keyed by; `owner` is
  *  the plugin folder the page belongs to. */
 typedef struct ShMenuOrderRow {
-    char key[48];
+    char key[96];        /* a page key can be a long literal title */
     char owner[48];
 } ShMenuOrderRow;
 
