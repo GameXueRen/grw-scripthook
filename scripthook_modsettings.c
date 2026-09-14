@@ -9,14 +9,15 @@
  * Each page carries a single hint line noting that changes need a
  * game restart to take effect, instead of marking every row.
  *
- * The rows sit on this page and the two under it, in reading order: the
- * one switch about loading plugins at all comes first, on the page
+ * The rows sit on this page and the three under it, in reading order:
+ * the one switch about loading plugins at all comes first, on the page
  * itself, then "Plugin switches" (one row per plugins\<name>), then the
  * CPU scheduling page with the six dials that decide which set of
  * processors the game runs on in each stage of its start up, and at what
- * priority. The corefix status line travels with the CPU page, since it
- * is a statement about those dials on this machine and says nothing
- * about plugins.
+ * priority, and then "Menu order", which is where the root menu's own
+ * order is decided. The corefix status line travels with the CPU page,
+ * since it is a statement about those dials on this machine and says
+ * nothing about plugins.
  *
  * Values are written back with ShConfigSet*, which rewrites the
  * on-disk ini in place (comments and translation tables survive)
@@ -365,6 +366,145 @@ static void LoadLanguages(void) {
         AddLang("zh-CN");
 }
 
+/* ---- the root order page ----------------------------------------------
+ * The root menu draws its rows in [MenuOrder] weight order. This page
+ * edits those weights: one row per reorderable page, the row's number is
+ * its place among them, and left/right moves it one place. Every move
+ * renumbers the whole visible set 10, 20, 30 ... and writes it at once,
+ * and the root re-sorts on its next capture, so the page and the root
+ * cannot drift apart.
+ *
+ * Pages that are not in the root right now are not listed and keep their
+ * weight - a plugin switched off, or one the play mode has taken away,
+ * comes back to the place it had. The list is taken again every time the
+ * page is opened, because the mode can have changed since the last look.
+ * The framework's own page has no owner, is never listed, and keeps
+ * weight 0 so it stays first.
+ */
+static uint32_t g_orderMenu = 0;
+#define ORDER_MAX 64
+
+typedef struct {
+    char key[48];        /* the page key [MenuOrder] is keyed by */
+    char owner[48];      /* the plugin that owns the page       */
+    char name[NAME_MAX]; /* its label, in the current language  */
+} OrderRow;
+
+static OrderRow g_order[ORDER_MAX];
+static int  g_nOrder;
+static char g_orderSel[NAME_MAX];      /* label of the row the cursor was on */
+static int  g_orderShown = 0;          /* the page was on screen    */
+static volatile int g_orderStale = 0;  /* list or names need a rebuild */
+static volatile LONG g_orderBusy = 0;
+
+static void BuildOrderMenu(void);
+static void OrderWrite(void);
+
+/* A row carries its own index, so the callback knows which page moved.
+ * On a step the value is the place to move to; on release the menu fires
+ * once more with the value unchanged (so what is on screen and what the
+ * plugin holds agree), and that one has nothing to do. */
+static void OnOrderMove(uint32_t menu, uint32_t item, int value,
+                        void *user) {
+    int from = (int)(INT_PTR)user;
+    OrderRow moved;
+    int i, to;
+
+    (void)menu; (void)item;
+    if (from < 0 || from >= g_nOrder) return;
+    if (value < 1 || value > g_nOrder) return;   /* the rows show 1..n */
+    if (value == from + 1) return;               /* the release fire, a no-op */
+    if (InterlockedCompareExchange(&g_orderBusy, 1, 0)) return;
+
+    to = value - 1;
+    moved = g_order[from];
+    if (to > from)
+        for (i = from; i < to; i++) g_order[i] = g_order[i + 1];
+    else
+        for (i = from; i > to; i--) g_order[i] = g_order[i - 1];
+    g_order[to] = moved;
+    /* Remember the moved page by the label it is drawn with: the page is
+     * rebuilt below, and the cursor has to land back on that same page. */
+    snprintf(g_orderSel, sizeof(g_orderSel), "%s", g_order[to].name);
+
+    OrderWrite();
+    ShMenuOrderDirty();          /* the root re-sorts on its next capture */
+    BuildOrderMenu();
+    ShMenuSelectRow(g_orderMenu, g_orderSel);
+    ShMenuStatus(g_orderMenu, ShLang("@settings.order.saved"));
+    InterlockedExchange(&g_orderBusy, 0);
+}
+
+/* Take the order from the menu model: the pages the root holds now, in
+ * the order it draws them. */
+static void OrderReload(void) {
+    ShMenuOrderRow rows[ORDER_MAX];
+    int i, n = ShMenuRootOrderRows(rows, ORDER_MAX);
+
+    if (n > ORDER_MAX) n = ORDER_MAX;
+    for (i = 0; i < n; i++) {
+        snprintf(g_order[i].key, sizeof(g_order[i].key), "%s", rows[i].key);
+        snprintf(g_order[i].owner, sizeof(g_order[i].owner), "%s",
+                 rows[i].owner);
+        /* The page's own label: a plugin's text is keyed by its owner,
+         * which is the lookup that makes the row read in this language. */
+        snprintf(g_order[i].name, sizeof(g_order[i].name), "%s",
+                 ShLangText(rows[i].owner, rows[i].key));
+    }
+    g_nOrder = n;
+}
+
+/* Write the weights back: 10, 20, 30 ... for the pages on this page, in
+ * the order they are in now. A page that is not in the root keeps what
+ * it had, so a weight written here can equal a kept one - the sort is
+ * stable, so the two hold their relative order until one of them moves. */
+static void OrderWrite(void) {
+    int i;
+
+    for (i = 0; i < g_nOrder; i++)
+        ShConfigSetInt("MenuOrder", g_order[i].key, (i + 1) * 10);
+    /* The framework's page stays first; only written when it is not. */
+    if (ShConfigGetInt("MenuOrder", "@settings.page", 1000) != 0)
+        ShConfigSetInt("MenuOrder", "@settings.page", 0);
+}
+
+/* Draw the page from g_order. Rebuilt after every move, so what is on
+ * screen is the order that was just written. */
+static void BuildOrderMenu(void) {
+    int i;
+
+    if (!g_orderMenu) return;
+    ShMenuClear(g_orderMenu);
+    for (i = 0; i < g_nOrder; i++)
+        ShMenuNumber(g_orderMenu, g_order[i].name, (float)(i + 1), 1.0f,
+                     (float)(g_nOrder > 1 ? g_nOrder : 1), 1.0f,
+                     OnOrderMove, (void *)(INT_PTR)i);
+    if (g_nOrder == 0)
+        ShMenuStatus(g_orderMenu, ShLang("@settings.order.empty"));
+}
+
+/* Once a second, on the thread that already watches the CPU line: the
+ * list needs taking again when the page is opened (the play mode can have
+ * changed which pages are in the root) and when the language changed. */
+static void OrderTick(void) {
+    int showing = g_orderMenu ? ShMenuIsShowing(g_orderMenu) : 0;
+
+    if (!showing) {
+        g_orderShown = 0;
+        return;
+    }
+    if (!g_orderShown || g_orderStale) {
+        if (InterlockedCompareExchange(&g_orderBusy, 1, 0)) return;
+        g_orderShown = 1;
+        g_orderStale = 0;
+        OrderReload();
+        BuildOrderMenu();
+        if (g_orderSel[0])
+            ShMenuSelectRow(g_orderMenu, g_orderSel);
+        InterlockedExchange(&g_orderBusy, 0);
+    }
+}
+
 static void BuildLanguageRow(uint32_t parent) {
     const char *cur = ShLangGet();
     int idx = 0, i;
@@ -496,6 +636,9 @@ static void BuildHints(void) {
     /* The Plugins page shows the same note plus the mode blacklist line,
      * which the thread started below keeps up to date. */
     SetPluginHint();
+    /* The order page: one sentence, because the rows carry the rest -
+     * the number is the place, left and right move it. */
+    ShMenuHint(g_orderMenu, ShLang("@settings.order.hint"));
 
     /* The CPU page: one sentence - what the page does, and that it acts
      * from the next launch on. The one thing worth a second line is the
@@ -558,6 +701,10 @@ static void RefreshOwnText(void) {
     if (cur) snprintf(g_langSeen, sizeof(g_langSeen), "%s", cur);
     BuildHints();
     SetCpuLine();
+    /* The order page's row labels are the pages' own titles, resolved
+     * when the list was taken, so they need reading again in the new
+     * language - OrderTick does that on its next pass. */
+    g_orderStale = 1;
 }
 
 static DWORD WINAPI CpuLineThread(LPVOID p) {
@@ -572,6 +719,7 @@ static DWORD WINAPI CpuLineThread(LPVOID p) {
             BuildHints();
         }
         SetCpuLine();
+        OrderTick();
     }
     return 0;
 }
@@ -599,11 +747,14 @@ void ShModSettingsStartup(void) {
                   (int)(sizeof(g_loaderSettings) / sizeof(g_loaderSettings[0])));
     g_pluginMenu = ShMenuSub(g_modMenu, "@settings.plugins");
     g_cpuMenu    = ShMenuSub(g_modMenu, "@settings.cpu");
+    g_orderMenu  = ShMenuSub(g_modMenu, "@settings.order");
 
     ScanPlugins();
     BuildSettings(g_cpuMenu, g_cpuSettings,
                   (int)(sizeof(g_cpuSettings) / sizeof(g_cpuSettings[0])));
     BuildPluginMenu();
+    OrderReload();
+    BuildOrderMenu();
     BuildLanguageRow(g_modMenu);
 
     /* The hints, then the live line. The note the pages carry is text we

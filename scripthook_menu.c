@@ -787,27 +787,40 @@ static void SafeCopy(char *dst, size_t cap, const char *src) {
     }
 }
 
+/* The settings page's order rows write [MenuOrder] while the menu is
+ * up, so the shortcut in ReorderRoot cannot trust an unchanged row
+ * count. Bumped by ShMenuOrderDirty, read by ReorderRoot. */
+static volatile LONG g_orderGen = 0;
+
+void ShMenuOrderDirty(void) {
+    InterlockedIncrement(&g_orderGen);
+}
+
 /* The [MenuOrder] weights reorder the ROOT menu's rows in the
  * model itself, so navigation (which walks m->items) and the
  * visible order always agree. The cursor follows its row across
  * the sort. Unlisted rows use the default weight and keep their
  * relative order (stable sort). A quick ordered check skips the
- * sort once the rows are already in weight order. */
+ * sort once the rows are already in weight order - or once nothing
+ * has changed, which now includes the weights themselves. */
 static void ReorderRoot(Menu *m) {
     int i, j, selPos = -1;
     char selLabel[LABEL];
+    LONG gen = g_orderGen;
     /* ShConfigGetInt is a table scan; without this guard it ran on
      * the menu thread's every capture (~25/s) for an order that only
      * changes when the root's row set changes. */
     static uint32_t lastMenu = 0;
     static int lastCount = -1;
+    static LONG lastGen = 0;
 
     if (m->parent != 0 || m->count < 2) return;
     if (lastMenu == (uint32_t)(m - g_menus) + 1 &&
-        lastCount == m->count)
+        lastCount == m->count && lastGen == gen)
         return;
     lastMenu = (uint32_t)(m - g_menus) + 1;
     lastCount = m->count;
+    lastGen = gen;
 
     for (i = 1; i < m->count; i++) {
         int w0 = ShConfigGetInt("MenuOrder",
@@ -839,6 +852,65 @@ static void ReorderRoot(Menu *m) {
         if (!strcmp(m->items[i].label, selLabel)) { selPos = i; break; }
     if (selPos >= 0) m->sel = selPos;
     if (m->top > m->sel) m->top = m->sel;
+}
+
+/* The root's reorderable rows, as the settings page needs them: a
+ * plugin's page only. A built-in page has no owner and is never listed
+ * (the framework's own page stays where it is), and a page the mode has
+ * taken away is not in the root as the player sees it, so it is not
+ * listed either - its weight is left alone for the day it comes back.
+ * The rows come back in the order they are drawn. */
+int ShMenuRootOrderRows(ShMenuOrderRow *out, int cap) {
+    Menu *r;
+    int i, n = 0;
+
+    Lock();
+    r = MenuOf(g_root);
+    if (!r) { Unlock(); return 0; }
+    for (i = 0; i < r->count; i++) {
+        const Item *it = &r->items[i];
+        Menu *cm;
+
+        if (it->kind != IT_SUB || !it->sub) continue;
+        cm = MenuOf(it->sub);
+        if (!cm || !cm->owner[0]) continue;         /* a built-in page */
+        if (!RowVisible(r, i)) continue;            /* not in the root now */
+        if (out && n < cap) {
+            SafeCopy(out[n].key, sizeof(out[n].key), it->label);
+            SafeCopy(out[n].owner, sizeof(out[n].owner), cm->owner);
+        }
+        n++;
+    }
+    Unlock();
+    return n;
+}
+
+/* Put the cursor on a named row of one menu and scroll it into view.
+ * A page that rebuilds its own rows - the ordering page does, on every
+ * move - needs to put the highlight back where the player left it. */
+int ShMenuSelectRow(uint32_t menu, const char *key) {
+    Menu *m;
+    int i;
+
+    if (!key || !key[0]) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    Lock();
+    m = MenuOf(menu);
+    if (m) {
+        for (i = 0; i < m->count; i++) {
+            if (strcmp(m->items[i].label, key)) continue;
+            m->sel = i;
+            Scroll(m);
+            Unlock();
+            ShSetError(SH_OK);
+            return 1;
+        }
+    }
+    Unlock();
+    ShSetError(SH_ERR_BAD_ARG);
+    return 0;
 }
 
 /* Snapshot the current menu for the overlay renderer. Labels,

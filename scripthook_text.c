@@ -47,6 +47,13 @@ static const ShText kEnUS[] = {
     { "@settings.hint",
       "Plugin switches take effect on the next launch; the language "
       "applies at once." },
+    { "@settings.order",      "Menu order" },
+    { "@settings.order.hint",
+      "Left / right moves the highlighted page one place. Every move is "
+      "saved at once and the root menu follows it; a plugin switched off "
+      "keeps the place it will come back to." },
+    { "@settings.order.empty", "No plugin menu to order yet." },
+    { "@settings.order.saved", "Order saved" },
 
     /* lines and hints those pages carry */
     { "Saved. Restart to apply.",
@@ -134,6 +141,12 @@ static const ShText kZhCN[] = {
     { "@settings.language",   "菜单语言" },
     { "@settings.hint",
       "插件开关下次启动生效；语言立即生效。" },
+    { "@settings.order",      "菜单排序" },
+    { "@settings.order.hint",
+      "← → 把当前行上移 / 下移一位；每次改动立即存盘，根菜单顺序同时生效。"
+      "被关掉的插件会记住它原来的位置。" },
+    { "@settings.order.empty", "还没有可排序的插件菜单。" },
+    { "@settings.order.saved", "顺序已保存" },
 
     { "Saved. Restart to apply.",
       "已保存。重启后生效。" },

@@ -1098,6 +1098,28 @@ void ShMenuStatusResetAll(void);
 /** Internal: tell the menu the overlay can render now. */
 void ShMenuSetOverlayReady(int ready);
 
+/** Internal: one root row the player can reorder, as the settings page
+ *  sees it. `key` is the page key [MenuOrder] is keyed by; `owner` is
+ *  the plugin folder the page belongs to. */
+typedef struct ShMenuOrderRow {
+    char key[48];
+    char owner[48];
+} ShMenuOrderRow;
+
+/** Internal: copy the reorderable root rows in the order they are drawn.
+ *  Plugin pages only - a built-in page has no owner and stays put - and
+ *  only rows that are in the root right now, so a page the play mode has
+ *  taken away is never listed and never renumbered. Writes at most `cap`
+ *  rows and returns how many there are in total. */
+int  ShMenuRootOrderRows(ShMenuOrderRow *out, int cap);
+/** Internal: put the cursor on the row named `key` and scroll it into
+ *  view: a page that rebuilds its own rows needs this afterwards. */
+int  ShMenuSelectRow(uint32_t menu, const char *key);
+/** Internal: the [MenuOrder] weights changed behind the menu's back, so
+ *  the root re-sorts on the next capture instead of trusting a row count
+ *  that has not changed. */
+void ShMenuOrderDirty(void);
+
 /** @} */
 /** @defgroup draw Plugin drawing
  *  A plugin's own window inside the game's overlay, drawn by the
