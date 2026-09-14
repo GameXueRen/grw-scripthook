@@ -674,17 +674,33 @@ static int LangSectionIgnored(const char *sec) {
 /* End a string one character earlier when its last bytes are only part
  * of a character. Text cut mid-sequence is what a renderer draws as
  * "?", and a menu that shows one is worse off than one that shows a
- * shorter string. */
+ * shorter string.
+ *
+ * A COMPLETE last character must come through untouched. Walking back
+ * over its continuation bytes finds its lead byte; where that character
+ * ends decides what survives:
+ *   ends past the string   -> it was cut: drop the lead byte too
+ *   ends inside it         -> complete, but anything after it is an
+ *                             orphaned tail: keep up to that point
+ * An earlier version stopped at the lead byte either way, so every
+ * translated row lost its last character and kept the orphaned lead
+ * byte - which is the "?" that was on screen. */
 void ShUtf8Trim(char *s) {
     size_t n = strlen(s);
     size_t keep = n;
+    size_t end;
+    unsigned char b;
+    int need;
 
     while (keep > 0 && ((unsigned char)s[keep - 1] & 0xC0) == 0x80) keep--;
-    if (keep > 0) {
-        unsigned char b = (unsigned char)s[keep - 1];
-        int need = (b < 0xC2) ? 1 : (b < 0xE0) ? 2 : (b < 0xF0) ? 3 : 4;
-        if (keep - 1 + (size_t)need > n) keep--;
-    }
+    if (keep == 0) { s[0] = 0; return; }    /* nothing but tail bytes */
+    b = (unsigned char)s[keep - 1];
+    need = (b < 0xC2) ? 1 : (b < 0xE0) ? 2 : (b < 0xF0) ? 3 : 4;
+    end = keep - 1 + (size_t)need;
+    if (end > n)
+        keep--;                             /* incomplete: drop the lead */
+    else
+        keep = end;                         /* whole: keep it, drop orphans */
     s[keep] = 0;
 }
 
