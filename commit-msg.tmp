@@ -1,0 +1,36 @@
+refactor(tree): one source folder per plugin under plugins\
+
+Plugin sources, their own config and their text sat at the repo root next to
+the framework, so the only thing telling a plugin from the framework was its
+file name, and the two files a plugin actually owns were three files away
+from it.
+
+Every plugin gets a folder now: plugins\<name>\<name>.c, its own
+plugins\<name>\<name>.ini if it has one, and its text as
+plugins\<name>\lang.ini. The tree lines up with the deployed folder file for
+file, so what a plugin is and where it lands read the same from either side.
+
+26 sources, 4 plugin configs and 18 language files moved; <name>.lang.ini
+became lang.ini on the way, which makes the build's seeding a folder-to-folder
+copy and the repo name the deployed name.
+
+The framework keeps the root: scripthook_*.c, loader.c, forge.c, guard.c, the
+framework's own lang.ini and the reference scripthook.ini. Six plugins that
+have no source in this repo (AmmoCapacity, DayNightVisibility,
+EqualizeEnemyHealth, GunShotDetection, Time&Weather, trainer) are folders with
+nothing but a lang.ini, which is exactly what they are.
+
+Build changes:
+
+  MSVC   Build-Plugin takes plugins\<Name>\<Source>. The seeding loop walks
+         the source folders and copies a plugin's own ini and its lang.ini
+         under the same rule as before - first time only, never overwritten.
+         The game's output folder is $outPlugins now, and the repo's is
+         $srcPlugins, so the two folders named plugins cannot be confused.
+  MinGW  every target names plugins/<name>/<source>.c, and CFLAGS gains -I.
+         because "scripthook.h" no longer sits in the including file's
+         folder once the source moves down a level.
+
+README and docs/plugins.md follow the layout - including the deployed tree,
+which now shows lang.ini beside the config - and docs/i18n-refactor.md
+records the move as section 9.5.

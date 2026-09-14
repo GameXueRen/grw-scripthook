@@ -605,8 +605,8 @@ ja-JP = 日本語
 
 | 产物 | 来源 | 部署方式 |
 |---|---|---|
-| `<gamedir>\lang.ini` | 仓库根的参考文件 | 构建脚本复制（与 `scripthook.ini` 同级，`build_msvc.ps1:69-75` 一带） |
-| `plugins\<owner>\lang.ini` | 仓库根或插件目录的参考文件 | 与现有插件 ini 种入同样的"只第一次、不覆盖"策略（`build_msvc.ps1:316-331`） |
+| `<gamedir>\lang.ini` | 仓库根的 `lang.ini` | 构建脚本复制（与 `scripthook.ini` 同级） |
+| `plugins\<owner>\lang.ini` | 仓库 `plugins\<owner>\lang.ini` | 与插件自己的 ini 走同一套"只第一次、不覆盖"种入（`build_msvc.ps1` 的种入循环） |
 | 缺 `<gamedir>\lang.ini` | — | **不自动生成**（避免两份真理）；需要骨架时用菜单里的"导出缺译清单"（§6-P0） |
 
 ---
@@ -1011,3 +1011,17 @@ ShLangDeclare("firstperson", "zh-CN", kZh, N);
 - 18 份插件 `lang.ini` 的实际显示（含第三方插件的 `<页面键>.hint`）；
 - 语言热切换在**插件自绘页面**上的表现（那些文本不经菜单捕获，只有 `ShToast*` / `ShDraw*` 过一个解析出口）；
 - 非轮询页面的 `status` 在切换后是否会被自己重推（轮询式页面已验证思路成立）。
+
+### 9.5 源码树整理（同日）
+
+插件源码不再散在仓库根目录：**每个插件一个 `plugins\<插件名>\` 目录**，里面是它的 `.c`、它自己的 `<插件名>.ini`（如果有）与文案 `lang.ini`。仓库结构与部署后的游戏目录**逐文件名一致**——仓库里看到的，就是游戏里落下的。
+
+| 项 | 内容 |
+|---|---|
+| 移动 | 26 个插件 `.c` + 4 个插件配置 `.ini` + 18 份语言文件 |
+| 语言文件改名 | `<名>.lang.ini` → `plugins\<名>\lang.ini`：仓库名与部署名统一，种入逻辑变成"目录对目录" |
+| 无源码插件 | `AmmoCapacity`、`DayNightVisibility`、`EqualizeEnemyHealth`、`GunShotDetection`、`Time&Weather`、`trainer` 目录里只有 `lang.ini`（它们本就没有源码） |
+| 框架 | `scripthook_*.c`、`loader.c`、`forge.c`、`guard.c` 以及框架自己的 `lang.ini`、参考 `scripthook.ini` 留在仓库根 |
+| 构建（MSVC） | `Build-Plugin` 从 `plugins\<名>\<源文件>` 取源；种入改为按目录扫描（插件自己的 ini 与 `lang.ini` 共用一套"只第一次、不覆盖"）；游戏输出目录的变量改名 `$outPlugins`，与仓库源目录 `$srcPlugins` 分开 |
+| 构建（MinGW） | `Makefile` 每个目标的源路径改为 `plugins/<名>/<源>.c`，`CFLAGS` 增 `-I.`（源文件搬走后 `"scripthook.h"` 不再与被包含者同目录） |
+| 文档 | `README.md`、`docs/plugins.md` 的目录树、构建示例与插件配置说明按新布局更新 |

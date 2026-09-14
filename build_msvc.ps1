@@ -93,9 +93,12 @@ cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
 }
 
 $out     = Join-Path $Gamedir 'dinput8.dll'
-$plugins = Join-Path $Gamedir 'plugins'
+# Two folders named plugins, kept apart on purpose: the game's is the
+# build output, and the repo's holds one source folder per plugin.
+$outPlugins = Join-Path $Gamedir 'plugins'
+$srcPlugins = Join-Path $root 'plugins'
 $tmp     = Join-Path $env:TEMP 'grw_msvc_build'
-New-Item -ItemType Directory -Force -Path $tmp, $plugins | Out-Null
+New-Item -ItemType Directory -Force -Path $tmp, $outPlugins | Out-Null
 
 # Shared flags for every compile unit.
 $c = @(
@@ -118,10 +121,13 @@ function Invoke-FrameworkBuild {
 function Build-Plugin {
     param([string]$Name, [string]$Source, [string[]]$LinkArgs,
           [string[]]$ExtraSources)
-    $dir = Join-Path $plugins $Name
+    $dir = Join-Path $outPlugins $Name
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $dll = Join-Path $dir "$Name.asi"
-    $src = @((Join-Path $root $Source))
+    # The source of a plugin named $Name is plugins\<Name>\<Source>,
+    # next to its config and its text file, and it deploys as
+    # plugins\<Name>\<Name>.asi. MinHook sources stay where they are.
+    $src = @((Join-Path $srcPlugins "$Name\$Source"))
     if ($ExtraSources) { $src += $ExtraSources }
     & cl @c $src "/Fe:$dll" /link $LinkArgs
     if ($LASTEXITCODE -ne 0) { throw "cl failed for $Name" }
@@ -225,6 +231,7 @@ Build-Plugin 'freecam'      'freecam.c'      @('gdi32.lib', 'user32.lib')
 Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')
 # Reinforcement prototype is parked outside the tree until its
 # combat/lock logic is verified; see reinf_boost/ next to the repo.
+# Enabling it means putting reinf_boost.c in plugins\Reinforcement\.
 #Build-Plugin 'Reinforcement' 'reinf_boost.c' @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'chaos'        'chaos.c'        @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib', 'winmm.lib')
 Build-Plugin 'fov_changer'  'fov_changer.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
@@ -290,8 +297,8 @@ Build-Plugin 'NPCSpawner'   'NPCSpawner.c'   @()
 Build-Plugin 'OpticalCamo'  'OpticalCamo.c'  @($libPath, 'libscripthook.lib')
 # EnemyReinforce sends reinforcements while a fight is on and hardens
 # the enemies it can prove are fighting. It late-binds as well, and
-# keeps its defaults and translations in EnemyReinforce.ini beside
-# the source, which is seeded next to the .asi further down.
+# keeps its defaults in EnemyReinforce.ini and its text in lang.ini,
+# both beside the source and both seeded next to the .asi below.
 Build-Plugin 'EnemyReinforce' 'EnemyReinforce.c' @()
 # ModeProbe is a read only evidence tool: it samples every candidate
 # the framework can reach (GameFlow objects, the shell, the scene set,
@@ -314,38 +321,26 @@ Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tp_roulette'  'tp_roulette.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'test_plugin'  'test_plugin.c'  @('ws2_32.lib', 'gdi32.lib', 'user32.lib')
 
-# A plugin that keeps its defaults and translations in a file beside
-# its source gets that file seeded next to the .asi, the first time
-# only: a later build must never overwrite settings changed in game,
-# and the plugin itself never writes this file (that would re-encode
-# its UTF-8 translations through the ANSI code page).
-foreach ($name in @('EnemyReinforce', 'ModeProbe', 'ModeCallProbe',
-                    'OpticalCamo')) {
-    $iniSrc = Join-Path $root "$name.ini"
-    $iniDst = Join-Path $plugins "$name\$name.ini"
-    if ((Test-Path $iniSrc) -and -not (Test-Path $iniDst)) {
-        New-Item -ItemType Directory -Force -Path (Split-Path $iniDst) |
-            Out-Null
-        Copy-Item $iniSrc $iniDst -Force
-        Write-Host "seeded $iniDst"
+# A plugin's own files are seeded next to its .asi the first time only:
+# a later build must never overwrite settings changed in game, and never
+# a lang.ini that was edited in place. Both sit in the plugin's source
+# folder under the names they carry once deployed, so the tree and the
+# game folder line up file for file.
+foreach ($dir in (Get-ChildItem $srcPlugins -Directory)) {
+    $name = $dir.Name
+    $dst  = Join-Path $outPlugins $name
+    foreach ($file in @("$name.ini", 'lang.ini')) {
+        $from = Join-Path $dir.FullName $file
+        $to   = Join-Path $dst $file
+        if ((Test-Path $from) -and -not (Test-Path $to)) {
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item $from $to -Force
+            Write-Host "seeded $to"
+        }
     }
 }
 
-# The same rule for text: "<name>.lang.ini" beside the source is seeded
-# as plugins\<name>\lang.ini, and the framework's own lang.ini as
-# <gamedir>\lang.ini. First time only again - a lang.ini is the
-# translator's file, and a later build must never overwrite one that
-# was edited in place.
-foreach ($src in (Get-ChildItem (Join-Path $root '*.lang.ini'))) {
-    $name = $src.Name -replace '\.lang\.ini$', ''
-    $dst = Join-Path $plugins "$name\lang.ini"
-    if (-not (Test-Path $dst)) {
-        New-Item -ItemType Directory -Force -Path (Split-Path $dst) |
-            Out-Null
-        Copy-Item $src.FullName $dst -Force
-        Write-Host "seeded $dst"
-    }
-}
+# The framework's own text is <gamedir>\lang.ini, under the same rule.
 $fwLang    = Join-Path $root 'lang.ini'
 $fwLangDst = Join-Path $Gamedir 'lang.ini'
 if ((Test-Path $fwLang) -and -not (Test-Path $fwLangDst)) {
@@ -356,7 +351,7 @@ if ((Test-Path $fwLang) -and -not (Test-Path $fwLangDst)) {
 # cl generates a .lib/.exp beside any plugin that exports
 # symbols (chaos exports ChaosCount & friends). They are not
 # loaded by the game, so keep the plugins tree clean.
-Get-ChildItem $plugins -Recurse -Include *.lib, *.exp |
+Get-ChildItem $outPlugins -Recurse -Include *.lib, *.exp |
     Remove-Item -Force
 
 Write-Host 'build complete'

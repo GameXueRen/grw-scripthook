@@ -5,8 +5,8 @@
 结论：**它是运行在本项目 ScriptHook 之上的第三方 MSVC C++ 插件**，靠
 `GetModuleHandleA("dinput8.dll")` + `GetProcAddress` 晚绑定 11 个框架导出；
 它判断"光学迷彩是否生效"的办法是**逐部件读玩家实体节点 `+0x54` 处的 2 字节，
-按 bit7 投票**。行为已完整还原，并按本框架 API 重写为同目录下的
-`OpticalCamo.c`（见本报告第十节）。
+按 bit7 投票**。行为已完整还原，并按本框架 API 重写为
+`plugins\OpticalCamo\OpticalCamo.c`（见本报告第十节）。
 
 ---
 

@@ -7,11 +7,13 @@ under `plugins\` next to `GRW.exe`:
 <gamedir>/
 ├── dinput8.dll
 ├── scripthook.ini       main config, created on first launch
+├── lang.ini             the framework's own text
 ├── logs/                every log file, timestamps on each line
 └── plugins/
     └── firstperson/
         ├── firstperson.asi
-        └── firstperson.ini    the plugin's own config
+        ├── firstperson.ini    the plugin's own config
+        └── lang.ini           the plugin's text, one section per language
 ```
 
 The loader walks `plugins\` and loads `plugins\<name>\<name>.asi`
@@ -19,6 +21,16 @@ for every folder. A plugin's settings belong beside it as
 `plugins\<name>\<name>.ini`; `ShPluginIniPath()` hands you that
 path so the lookup is not the plugin's problem. If a plugin fails
 to load, `logs/scripthook.log` records the reason.
+
+`lang.ini` beside it holds the plugin's text: page titles, row
+labels, hints, status templates. One section per language
+(`[zh-CN]`, `[en-US]`), each key either a stable ID (`@fp.page`) or
+the English string itself - the second form is what translates a
+plugin whose source you do not have. The framework only ever reads
+it, so a translation can be edited in place, and `lang.ini` and the
+config can be deleted independently. This repo keeps that same
+layout under its own `plugins\<name>\`, so a plugin's source, its
+config and its text travel together. See docs/i18n-refactor.md.
 
 `scripthook.ini` is the main config, parsed before any plugin
 loads. The loader reads `[loader] load_plugins` and one
@@ -74,7 +86,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD why, LPVOID res) {
 ```
 
 ```
-x86_64-w64-mingw32-gcc -O2 -shared -o myplugin.asi myplugin.c -L. -lscripthook
+x86_64-w64-mingw32-gcc -O2 -shared -I. \
+    -o plugins/myplugin/myplugin.asi plugins/myplugin/myplugin.c \
+    -L. -lscripthook
 ```
 
 The worker thread keeps setup off the loader lock. Menu
