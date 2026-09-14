@@ -287,16 +287,24 @@ static void BuildSettings(uint32_t menu, const Setting *rows, int n) {
 }
 
 /* Every plugin switch is a [plugins] toggle the loader's next scan
- * honours. A row reads with the plugin's own page title - the same
- * owner-keyed text the order page uses - so what is on screen is the
- * name the player sees in the root menu, not the folder name. The row's
- * text is resolved HERE rather than left as a key: this page belongs to
- * the framework, so the capture would look the key up under "" and an ID
- * would come out readable-mangled instead of translated.
+ * honours. A row reads as
  *
- * The config key and the callback stay the folder name, and a plugin
- * that is not loaded right now (switched off, or a mode has taken it
- * away) keeps its folder name as the label. The "restart needed" note
+ *     firstperson(第一人称)                 [关]
+ *
+ * because the two halves answer different questions: the folder is the
+ * file the player has to find, edit or delete (plugins\firstperson\), and
+ * the page name is what that plugin does, in this language. The state is
+ * the value column, drawn by the row's own kind - the same "[on] / [off]"
+ * every toggle in the menu uses.
+ *
+ * The page-name half is resolved HERE rather than left as a key: this page
+ * belongs to the framework, so the capture would look the key up under ""
+ * and an ID would come out readable-mangled instead of translated.
+ *
+ * The config key and the callback stay the bare folder name
+ * ([plugins] firstperson=1), and a plugin with no page in the root right
+ * now - switched off, or hidden by the mode blacklist - has no page name
+ * to show, so it reads as its folder alone. The "restart needed" note
  * lives once on the menu hint line, not on every row. A folder with no
  * line of its own reads as off, which is the same rule the loader
  * applies: by the time this page is built the loader has usually written
@@ -304,22 +312,80 @@ static void BuildSettings(uint32_t menu, const Setting *rows, int n) {
  * after that scan. */
 static void BuildPluginMenu(void) {
     ShMenuOrderRow rows[64];
-    int i, j, n = ShMenuRootOrderRows(rows, 64);
+    int i, j, n;
+
+    /* Dropped and rebuilt rather than added to: the first pass runs before
+     * the loader's worker thread has brought a single plugin page up, so
+     * every row comes out as its folder and nothing else. RefreshPluginMenu
+     * names them again once the pages exist. ShMenuClear keeps the title,
+     * the hint and the status, so the blacklist line the poll thread writes
+     * survives the rebuild - the order page leans on the same thing. */
+    if (!g_pluginMenu) return;
+    ShMenuClear(g_pluginMenu);
+    n = ShMenuRootOrderRows(rows, 64);
 
     if (n > (int)(sizeof(rows) / sizeof(rows[0])))
         n = (int)(sizeof(rows) / sizeof(rows[0]));
     for (i = 0; i < g_nplugins; i++) {
         const char *name = g_plugins[i];
-        const char *label = name;
+        char buf[224];
         int cur = ShConfigGetBool("plugins", name, 0);
 
+        /* "<folder>(<page name>)". The page name is dropped rather than
+         * faked when the plugin has no page in the root right now:
+         * switched off, or hidden by the mode blacklist. */
+        snprintf(buf, sizeof(buf), "%s", name);
         for (j = 0; j < n; j++) {
             if (_stricmp(rows[j].owner, name)) continue;
-            label = ShLangText(rows[j].owner, rows[j].key);
+            snprintf(buf, sizeof(buf), "%s(%s)", name,
+                     ShLangText(rows[j].owner, rows[j].key));
             break;
         }
-        ShMenuToggle(g_pluginMenu, label, cur, OnPlugin, (void *)name);
+        ShMenuToggle(g_pluginMenu, buf, cur, OnPlugin, (void *)name);
     }
+}
+
+/* Keep the switches page named after the plugins.
+ *
+ * Two moments need a rebuild. The first is the loader finishing: this
+ * module builds the page at start up, while the plugins are still being
+ * brought up on the loader's worker thread, so on that pass the root holds
+ * no plugin page yet and a row can only read as its folder - the page name
+ * has nothing to come from. Counting the plugin pages the root holds, and
+ * rebuilding when that number moves, catches exactly that.
+ *
+ * The second is a visit: every time the player opens the page it is built
+ * again, which is what re-reads the names after a language switch. A row
+ * label here is finished text rather than a key - the page belongs to the
+ * framework, so the capture would look an ID up under "" - and finished
+ * text has to be remade to change language.
+ *
+ * Called from the plugin-line thread, once a second. */
+static int g_pluginShown = 0;           /* the page was on screen    */
+static int g_pluginPages = -1;          /* plugin pages at the last build */
+static volatile LONG g_pluginBusy = 0;
+
+static void RefreshPluginMenu(void) {
+    ShMenuOrderRow rows[64];
+    int i, n, pages = 0, showing;
+
+    if (!g_pluginMenu) return;
+    showing = ShMenuIsShowing(g_pluginMenu);
+    if (!showing) g_pluginShown = 0;
+
+    n = ShMenuRootOrderRows(rows, 64);
+    if (n > (int)(sizeof(rows) / sizeof(rows[0])))
+        n = (int)(sizeof(rows) / sizeof(rows[0]));
+    for (i = 0; i < n; i++)
+        if (rows[i].owner[0]) pages++;      /* a plugin's own page */
+
+    if (!showing && pages == g_pluginPages) return;
+    if (showing && g_pluginShown && pages == g_pluginPages) return;
+    if (InterlockedCompareExchange(&g_pluginBusy, 1, 0)) return;
+    g_pluginShown = showing;
+    g_pluginPages = pages;
+    BuildPluginMenu();
+    InterlockedExchange(&g_pluginBusy, 0);
 }
 
 /* The language switch. The options are the codes [Settings] Languages
@@ -575,6 +641,7 @@ static DWORD WINAPI BlHintThread(LPVOID p) {
     for (;;) {
         Sleep(1000);
         if (!g_pluginMenu) continue;
+        RefreshPluginMenu();
         notice[0] = 0;
         ShPluginBlacklistNotice(notice, sizeof(notice));
         if (!strcmp(notice, g_blLast)) continue;
