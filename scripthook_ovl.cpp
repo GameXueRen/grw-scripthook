@@ -250,6 +250,12 @@ float TITLE_H = 40.0f, ROW_H = 34.0f, BAR_H = 26.0f, VALUE_W = 130.0f;
 // Menu text uses the same bold CJK font as the chat box, ~24px.
 float MENU_FS = 24.0f, MENU_TITLE_FS = 28.0f;
 float MENU_HINT_FS = 17.0f, MENU_HINT_LH = 24.0f, MENU_HINT_GAP = 6.0f;
+// How many hint lines a page may draw. The pages that carry the most
+// are the plugin switches one (note + rules + the mode blacklist line,
+// three) and the CPU one (note + caveat + the live line); the cap only
+// exists to keep a runaway string from building a panel taller than the
+// screen.
+int MENU_HINT_LINES = 8;
 float MENU_CREDIT_FS = 14.0f;
 // Title auto-shrink (root menu only): floor and step, scaled too.
 float TITLE_MIN_FS = 18.0f, TITLE_STEP_FS = 2.0f, TITLE_CREDIT_GAP = 10.0f;
@@ -1094,7 +1100,10 @@ void RenderMenu(const ShMenuView* v)
     const float s = g_uiScale;   // for the few inline pixel values
     int i;
 
-    // Control hints under the title: up to two \n-separated lines.
+    // Control hints under the title: every \n-separated line the page
+    // carries. This used to stop at two, which silently dropped the
+    // last line of the pages that have three - the mode blacklist
+    // notice on the plugin switches page was never on screen at all.
     int hintLines = 0;
     for (const char* hl = v->hint; *hl; ) {
         hintLines++;
@@ -1102,7 +1111,7 @@ void RenderMenu(const ShMenuView* v)
         if (!hl) break;
         hl++;
     }
-    if (hintLines > 2) hintLines = 2;
+    if (hintLines > MENU_HINT_LINES) hintLines = MENU_HINT_LINES;
     // Each hint line occupies a hintFs-tall text box; the first row
     // starts just below the last hint line's box.
     float hintH = 0.0f;
