@@ -93,7 +93,7 @@ static const char *g_prioOpts[] = {
  * and a plugin switch have nothing to say to each other. */
 static const Setting g_loaderSettings[] = {
     { "loader", "load_plugins",
-      "Load plugins (master switch)", 0, 0, 0, 0, 1, NULL, 0 },
+      "@settings.load", 0, 0, 0, 0, 1, NULL, 0 },
 };
 
 /* One pair of rows per stage of the game's start up: which set of
@@ -175,14 +175,24 @@ static void OnPlugin(uint32_t menu, uint32_t item, int value,
         ReportSaved(menu);
 }
 
+static void RefreshOwnText(void);
+
+/* The list shows a language's label; the value stored is its code, so
+ * the callback is handed the code array and indexes it by the option
+ * the player picked. The switch is immediate: the ini gets the code for
+ * the next launch, and the text layer is told right now - the menu
+ * itself follows on the next frame, because it translates as it
+ * captures. */
 static void OnLanguage(uint32_t menu, uint32_t item, int value,
                        void *user) {
-    const char *const *opts = (const char *const *)user;
+    char (*codes)[16] = (char (*)[16])user;
     (void)item;
-    if (!opts || value < 0 || value >= LANG_MAX) return;
-    if (!opts[value] || !opts[value][0]) return;
-    if (ShConfigSetStr("Settings", "Language", opts[value]))
+    if (!codes || value < 0 || value >= LANG_MAX) return;
+    if (!codes[value][0]) return;
+    if (ShConfigSetStr("Settings", "Language", codes[value]))
         ReportSaved(menu);
+    if (ShLangSet(codes[value]))
+        RefreshOwnText();
 }
 
 /* ---- plugin list ------------------------------------------------ */
@@ -290,54 +300,69 @@ static void BuildPluginMenu(void) {
     }
 }
 
-/* The language switch options come from [Settings] Languages, a
- * comma-separated list that must outlive the IT_LIST (the option
- * pointers are borrowed). "zh_cn,en" is the default when the key is
- * absent, so the list order is exactly the order the menu shows. */
-static char        g_langNames[LANG_MAX][16];
+/* The language switch. The options are the codes [Settings] Languages
+ * lists; with no such key they are the languages this build ships text
+ * for (ShLangBuiltin), so adding a language to the compile-time tables
+ * is enough to offer it. The option text is the code's label
+ * ([LanguageNames]); the code itself is what gets stored. Both arrays
+ * outlive the IT_LIST, whose option pointers are borrowed. */
+static char        g_langCodes[LANG_MAX][16];
+static char        g_langLabels[LANG_MAX][48];
 static const char *g_langOpts[LANG_MAX];
 static int         g_nLangs = 0;
+
+static void AddLang(const char *code) {
+    size_t len;
+
+    if (g_nLangs >= LANG_MAX || !code) return;
+    while (*code == ' ' || *code == '\t') code++;
+    len = strlen(code);
+    while (len > 0 && (code[len - 1] == ' ' || code[len - 1] == '\t'))
+        len--;
+    if (len == 0) return;
+    if (len >= sizeof(g_langCodes[0])) len = sizeof(g_langCodes[0]) - 1;
+    memcpy(g_langCodes[g_nLangs], code, len);
+    g_langCodes[g_nLangs][len] = 0;
+    snprintf(g_langLabels[g_nLangs], sizeof(g_langLabels[0]), "%s",
+             ShLangLabel(g_langCodes[g_nLangs]));
+    g_langOpts[g_nLangs] = g_langLabels[g_nLangs];
+    g_nLangs++;
+}
 
 static void LoadLanguages(void) {
     char raw[160];
     const char *p;
-    int n = 0;
+    int i;
 
     g_nLangs = 0;
-    if (ShConfigGetStr("Settings", "Languages", "zh_cn,en",
-                       raw, sizeof(raw)) && raw[0]) {
+    if (ShConfigGetStr("Settings", "Languages", "", raw, sizeof(raw)) &&
+        raw[0]) {
         p = raw;
-        while (*p && n < LANG_MAX) {
+        while (*p && g_nLangs < LANG_MAX) {
             const char *comma = strchr(p, ',');
             size_t len = comma ? (size_t)(comma - p) : strlen(p);
-            size_t lead = 0;
+            char code[32];
 
-            while (lead < len &&
-                   (p[lead] == ' ' || p[lead] == '\t'))
-                lead++;
-            while (len > lead &&
-                   (p[len - 1] == ' ' || p[len - 1] == '\t'))
-                len--;
-            if (len > lead) {
-                len -= lead;
-                if (len >= sizeof(g_langNames[n]))
-                    len = sizeof(g_langNames[n]) - 1;
-                memcpy(g_langNames[n], p + lead, len);
-                g_langNames[n][len] = 0;
-                g_langOpts[n] = g_langNames[n];
-                n++;
-            }
+            if (len >= sizeof(code)) len = sizeof(code) - 1;
+            memcpy(code, p, len);
+            code[len] = 0;
+            AddLang(code);
             if (!comma) break;
             p = comma + 1;
         }
     }
-    if (n == 0) {   /* fallback: keep the documented default */
-        strncpy(g_langNames[0], "zh_cn", sizeof(g_langNames[0]) - 1);
-        g_langNames[0][sizeof(g_langNames[0]) - 1] = 0;
-        g_langOpts[0] = g_langNames[0];
-        n = 1;
+    if (g_nLangs == 0) {
+        char one[48];
+
+        for (i = 0; ShLangBuiltin(i, one, sizeof(one)) &&
+                    g_nLangs < LANG_MAX; i++) {
+            char *tab = strchr(one, '\t');
+            if (tab) *tab = 0;
+            AddLang(one);
+        }
     }
-    g_nLangs = n;
+    if (g_nLangs == 0)              /* nothing anywhere: stay readable */
+        AddLang("zh-CN");
 }
 
 static void BuildLanguageRow(uint32_t parent) {
@@ -347,12 +372,12 @@ static void BuildLanguageRow(uint32_t parent) {
     LoadLanguages();
     if (cur) {
         for (i = 0; i < g_nLangs; i++)
-            if (!strcmp(cur, g_langOpts[i])) { idx = i; break; }
+            if (ShLangMatch(cur, g_langCodes[i])) { idx = i; break; }
     }
     if (g_nLangs > 0)
-        ShMenuList(parent, "Menu language",
+        ShMenuList(parent, "@settings.language",
                    g_langOpts, g_nLangs, idx, OnLanguage,
-                   (void *)g_langOpts);
+                   (void *)g_langCodes);
 }
 
 /* ---- the mode blacklist line ------------------------------------------
@@ -444,10 +469,108 @@ static void SetCpuLine(void) {
     ShMenuStatus(g_cpuMenu, text);
 }
 
+/* One hint per page: these rows only act on the next launch. On the CPU
+ * page the note is followed by the two facts about this machine that
+ * decide whether a dial can apply at all: a dial that cannot (E-cores
+ * off on a CPU without E-cores) otherwise reads as one that was
+ * ignored, and "the system already trimmed this process" is the one
+ * thing that decides whether an "All cores" dial is worth setting. What
+ * the dials are doing right now is the line at the bottom of that page,
+ * not this one.
+ *
+ * The text is resolved here rather than at capture time, so a language
+ * switch has to rebuild it - see RefreshOwnText. */
+static void BuildHints(void) {
+    char   hint[384];
+    char   line[160];
+    size_t used;
+    ShCpuStatus cf;
+
+    if (!g_modMenu) return;
+
+    /* The settings page: the rows that need a restart are the plugin and
+     * CPU ones, while the language row above applies at once - the note
+     * says both rather than sending the player to a restart it does not
+     * need. */
+    ShMenuHint(g_modMenu, ShLang("@settings.hint"));
+    /* The Plugins page shows the same note plus the mode blacklist line,
+     * which the thread started below keeps up to date. */
+    SetPluginHint();
+
+    /* The CPU page: one sentence - what the page does, and that it acts
+     * from the next launch on. The one thing worth a second line is the
+     * E-core caveat, and only on a machine where that dial cannot apply
+     * at all; anywhere else it would explain nothing. What the dials are
+     * doing right now is the line at the bottom of the page. */
+    used = (size_t)snprintf(hint, sizeof(hint), "%s",
+                            ShLang("Processor set and priority for each "
+                                   "start up stage - changes need a "
+                                   "restart."));
+    if (ShCpuGetStatus(&cf)) {
+        /* Two dials can be picked and then do nothing at all, and each of
+         * them needs a line of its own - the row alone would read as "set
+         * and quietly ignored": "E-cores off" on a CPU with no E-cores,
+         * and the efficiency mode on anything but Windows 11, where the
+         * call exists but the level it names does not. */
+        line[0] = 0;
+        if (cf.ecoreState == SH_CF_NA_NOT_INTEL)
+            snprintf(line, sizeof(line), "%s",
+                     ShLang("E-cores off: not applicable on this CPU."));
+        else if (cf.ecoreState == SH_CF_NA_NO_ECORE)
+            snprintf(line, sizeof(line), "%s",
+                     ShLang("E-cores off: this CPU has no E-cores."));
+        else if (cf.ecoreState == SH_CF_FAILED)
+            snprintf(line, sizeof(line), "%s",
+                     ShLang("E-cores off: detection failed."));
+        if (line[0] && used + 2 < sizeof(hint)) {
+            snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
+            used = strlen(hint);
+            line[0] = 0;
+        }
+        if (cf.ecoBoot) {
+            if (cf.eco == SH_ECO_NA)
+                snprintf(line, sizeof(line), "%s",
+                         ShLang("Efficiency mode: not available on this "
+                                "system - the loading stages hold the low "
+                                "priority instead."));
+            else if (cf.eco == SH_ECO_FAILED)
+                snprintf(line, sizeof(line), "%s",
+                         ShLang("Efficiency mode: the call failed - the "
+                                "loading stages hold the low priority "
+                                "instead."));
+        }
+        if (line[0] && used + 2 < sizeof(hint))
+            snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
+    }
+    ShMenuHint(g_cpuMenu, hint);
+}
+
+/* Text this module composed itself does not follow a language switch:
+ * menu rows do (they are translated as they are captured), but a hint
+ * and a status line are strings we handed over. Called right after a
+ * switch, and from the poll thread, so a switch made anywhere else lands
+ * within a tick. */
+static char g_langSeen[16];
+
+static void RefreshOwnText(void) {
+    const char *cur = ShLangGet();
+
+    if (cur) snprintf(g_langSeen, sizeof(g_langSeen), "%s", cur);
+    BuildHints();
+    SetCpuLine();
+}
+
 static DWORD WINAPI CpuLineThread(LPVOID p) {
     (void)p;
     for (;;) {
+        const char *cur;
+
         Sleep(1000);
+        cur = ShLangGet();
+        if (cur && strcmp(cur, g_langSeen)) {
+            snprintf(g_langSeen, sizeof(g_langSeen), "%s", cur);
+            BuildHints();
+        }
         SetCpuLine();
     }
     return 0;
@@ -463,10 +586,10 @@ void ShModSettingsStartup(void) {
     /* Pin our row first: [MenuOrder] ScriptHook settings = 0. Write it only
      * when it is not already pinned, so a normal launch does not
      * touch the ini file for nothing. */
-    if (ShConfigGetInt("MenuOrder", "ScriptHook settings", 1000) != 0)
-        ShConfigSetInt("MenuOrder", "ScriptHook settings", 0);
+    if (ShConfigGetInt("MenuOrder", "@settings.page", 1000) != 0)
+        ShConfigSetInt("MenuOrder", "@settings.page", 0);
 
-    g_modMenu = ShMenuCreate("ScriptHook settings");
+    g_modMenu = ShMenuCreate("@settings.page");
     if (!g_modMenu) return;
 
     /* Rows sort by the order they are made in: the plugin master switch
@@ -474,8 +597,8 @@ void ShModSettingsStartup(void) {
      * CPU dials on a page of their own - and the language row last. */
     BuildSettings(g_modMenu, g_loaderSettings,
                   (int)(sizeof(g_loaderSettings) / sizeof(g_loaderSettings[0])));
-    g_pluginMenu = ShMenuSub(g_modMenu, "Plugin switches");
-    g_cpuMenu    = ShMenuSub(g_modMenu, "CPU scheduling");
+    g_pluginMenu = ShMenuSub(g_modMenu, "@settings.plugins");
+    g_cpuMenu    = ShMenuSub(g_modMenu, "@settings.cpu");
 
     ScanPlugins();
     BuildSettings(g_cpuMenu, g_cpuSettings,
@@ -483,84 +606,11 @@ void ShModSettingsStartup(void) {
     BuildPluginMenu();
     BuildLanguageRow(g_modMenu);
 
-    /* One hint per page is enough: these rows only act on the next
-     * launch, as does the language switch. On the CPU page the note is
-     * followed by the two facts about this machine that decide whether a
-     * dial can apply at all: a dial that cannot (E-cores off on a CPU
-     * without E-cores) otherwise reads as one that was ignored, and "the
-     * system already trimmed this process" is the one thing that decides
-     * whether an "All cores" dial is worth setting. What the dials are
-     * doing right now is the line at the bottom of that page, not this
-     * one. The strings are pre-translated here (capture translates the
-     * stored hint again, a no-op for already-localised text). */
-    {
-        const char *restart =
-            ShLang("These changes take effect after a game restart.");
-        char   hint[384];
-        char   line[160];
-        size_t used;
-        ShCpuStatus cf;
-
-        /* The settings page carries the restart note and nothing else. */
-        snprintf(hint, sizeof(hint), "%s", restart);
-        ShMenuHint(g_modMenu, hint);
-        /* The Plugins page shows the same note plus the mode blacklist
-         * line, which the thread started below keeps up to date. */
-        SetPluginHint();
-
-        /* The CPU page: one sentence - what the page does, and that it
-         * acts from the next launch on. The one thing worth a second line
-         * is the E-core caveat, and only on a machine where that dial
-         * cannot apply at all; anywhere else it would explain nothing.
-         * What the dials are doing right now is the line at the bottom of
-         * the page, not this one. */
-        used = (size_t)snprintf(hint, sizeof(hint), "%s",
-                                ShLang("Processor set and priority for each "
-                                       "start up stage - changes need a "
-                                       "restart."));
-        if (ShCpuGetStatus(&cf)) {
-            /* Two dials can be picked and then do nothing at all, and each
-             * of them needs a line of its own - the row alone would read as
-             * "set and quietly ignored": "E-cores off" on a CPU with no
-             * E-cores, and the efficiency mode on anything but Windows 11,
-             * where the call exists but the level it names does not. */
-            line[0] = 0;
-            if (cf.ecoreState == SH_CF_NA_NOT_INTEL)
-                snprintf(line, sizeof(line), "%s",
-                         ShLang("E-cores off: not applicable on this CPU."));
-            else if (cf.ecoreState == SH_CF_NA_NO_ECORE)
-                snprintf(line, sizeof(line), "%s",
-                         ShLang("E-cores off: this CPU has no E-cores."));
-            else if (cf.ecoreState == SH_CF_FAILED)
-                snprintf(line, sizeof(line), "%s",
-                         ShLang("E-cores off: detection failed."));
-            if (line[0] && used + 2 < sizeof(hint)) {
-                snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
-                used = strlen(hint);
-                line[0] = 0;
-            }
-            if (cf.ecoBoot) {
-                if (cf.eco == SH_ECO_NA)
-                    snprintf(line, sizeof(line), "%s",
-                             ShLang("Efficiency mode: not available on this "
-                                    "system - the loading stages hold the low "
-                                    "priority instead."));
-                else if (cf.eco == SH_ECO_FAILED)
-                    snprintf(line, sizeof(line), "%s",
-                             ShLang("Efficiency mode: the call failed - the "
-                                    "loading stages hold the low priority "
-                                    "instead."));
-            }
-            if (line[0] && used + 2 < sizeof(hint))
-                snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
-        }
-        ShMenuHint(g_cpuMenu, hint);
-    }
-
-    /* Two lines follow something the menu cannot hear about: the blacklist
-     * line follows the play mode, and the CPU page's line follows the
-     * stage. A second is plenty for both - they only matter while a player
-     * has the menu open. */
+    /* The hints, then the live line. The note the pages carry is text we
+     * composed, so the language it is in is remembered here: the poll
+     * thread below rebuilds it when that changes. */
+    BuildHints();
+    snprintf(g_langSeen, sizeof(g_langSeen), "%s", ShLangGet());
     SetCpuLine();
     if (!CreateThread(NULL, 0, BlHintThread, NULL, 0, NULL))
         ShMenuStatus(g_pluginMenu, "blacklist line thread failed");

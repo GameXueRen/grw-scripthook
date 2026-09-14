@@ -1091,6 +1091,10 @@ typedef struct ShMenuView {
 
 /** Internal: snapshot the current menu for the overlay. */
 void ShMenuCaptureView(ShMenuView *v);
+/** Internal: drop every stored status line. The text layer calls this
+ *  when the language changes, because a stored line is text in the
+ *  language that was active when it was written. */
+void ShMenuStatusResetAll(void);
 /** Internal: tell the menu the overlay can render now. */
 void ShMenuSetOverlayReady(int ready);
 
@@ -2706,35 +2710,95 @@ SH_API int  ShLogPath(const char *name, char *buf, int size);
  *  the file part and strip the ".asi". */
 SH_API int  ShPluginIniPath(const char *plugin, char *buf, int size);
 
+/** <gamedir>\plugins\<name>\lang.ini, the text file that belongs
+ *  beside a plugin of the same name. The framework reads it for a
+ *  menu that plugin created (see @ref lang); a plugin does not have
+ *  to ship one, and should not write one - the framework never does.
+ *  Handy for a tool that wants to seed or inspect it. */
+SH_API int  ShPluginLangPath(const char *plugin, char *buf, int size);
+
 /** @} */
 /** @defgroup lang Localization
- *  Menu text is translated at capture time. The [Settings]
- *  Language key in scripthook.ini selects the language; for
- *  language "zh_cn" the [zh_cn] and [zh_cn.<scope>] sections
- *  hold translations keyed by the original English text. Lookup
- *  order: [lang.scope] -> [lang] -> [en.scope] -> [en] -> the
- *  original text.
+ *  Every piece of text a player can read goes through one lookup.
  *
- *  Menus created by a plugin (through ShMenuCreate) also consult
- *  that plugin's own ini, plugins\<name>\<name>.ini, FIRST: same
- *  [lang] / [lang.<scope>] sections, but they win over
- *  scripthook.ini, which stays the fallback. Ship a plugin's
- *  translations inside its own ini and they travel with it. @{ */
+ *  **Keys.** A key starting with '@' is a stable ID
+ *  ("@camo.page.visibility"); anything else is a literal and is its
+ *  own key. IDs survive a renamed row or menu title - which is what
+ *  the old "[lang.<menu title>]" scheme could not - and a literal is
+ *  how a plugin whose source you do not have is translated.
+ *
+ *  **Sources**, in order:
+ *    1. plugins\<owner>\lang.ini, section [<language>]   (the owner's)
+ *    2. <gamedir>\lang.ini,      section [<language>]   (shared override)
+ *    3. the compiled-in baseline this module declared with
+ *       ShLangDeclare, for the active language
+ *    4. the same baseline, for "en-US"
+ *    5. an ID with no text anywhere is shown readable ("@a.b" ->
+ *       "A B") and logged once; a literal falls through to itself
+ *
+ *  A lang.ini row overrides the baseline for that one key, so a file
+ *  only needs the lines it changes. Nothing in the framework ever
+ *  writes a lang.ini: the settings file is ours, the text is yours.
+ *
+ *  Language codes are standard BCP-47 tags ("zh-CN", "en-US") and are
+ *  compared case-insensitively and exactly. [Settings] Language is the
+ *  active language, [Settings] Languages the list the picker shows
+ *  (default: the languages this build ships text for).
+ *  @{ */
 
-/** Translate without a scope (framework text, plugin HUD text). */
+/** One row of compiled-in text: a key and its text in one language. */
+typedef struct ShText { const char *id; const char *text; } ShText;
+
+/** Declare this module's text for ONE language; call once per
+ *  language (call again later to add a language - code that already
+ *  declares two needs no change). `rows` must stay alive for the life
+ *  of the process: a static const array is what this is for. owner
+ *  NULL or "" means the framework. The languages declared here are
+ *  what ShLangBuiltin reports and what [Settings] Languages falls
+ *  back to. Returns 1 when kept. */
+SH_API int ShLangDeclare(const char *owner, const char *lang,
+                         const ShText *rows, int n);
+/** One of the languages this build ships text for, in declaration
+ *  order. Fills the tab-separated pair "code<TAB>label" and returns
+ *  1; 0 when i is out of range or buf is too small. */
+SH_API int ShLangBuiltin(int i, char *buf, int size);
+/** The label to show for a language code: its [LanguageNames] entry
+ *  when a lang.ini carries one, else the code itself. Never NULL. */
+SH_API const char *ShLangLabel(const char *code);
+
+/** Translate one key for one owner (NULL or "" = framework text).
+ *  Never NULL and never a failure: text that is missing everywhere
+ *  comes back readable rather than empty. */
+SH_API const char *ShLangText(const char *owner, const char *key);
+
+/** 1 when a source can answer for this key: a lang.ini row or a
+ *  baseline row, in the active language or in en-US. Ask this before
+ *  showing text that must stay empty when there is none (a hint line,
+ *  say): ShLangText always returns something, which is right for a
+ *  label and wrong for a line that takes room. */
+SH_API int ShLangHas(const char *owner, const char *key);
+
+/** Translate framework text: the same as ShLangText(NULL, text). */
 SH_API const char *ShLang(const char *text);
-/** Translate within a menu's scope (its English title). NULL
- *  scope is the same as ShLang. */
+/** Retained spellings for callers that still pass a scope. The scope
+ *  is ignored - a key says what text a row gets, not a menu path. */
 SH_API const char *ShLangFor(const char *scope, const char *text);
-/** Translate like ShLangFor, but check the owning plugin's ini
- *  first. owner is the plugin folder name (NULL or "" = the main
- *  ini only). The framework passes each menu's owner
- *  automatically; plugins only need this for their own HUD text. */
 SH_API const char *ShLangForOwned(const char *owner,
                                   const char *scope,
                                   const char *text);
-/** The active language name, from [Settings] Language. */
+/** The framework's own language-code comparison, for callers that keep
+ *  a code of their own: standard BCP-47 tags, case-insensitive. */
+SH_API int ShLangMatch(const char *a, const char *b);
+/** The active language, from [Settings] Language. */
 SH_API const char *ShLangGet(void);
+/** Switch the active language now: what was read for the old language is
+ *  dropped and the next lookup reads the files again, so the menu - which
+ *  translates as it captures - is in the new language on the next frame.
+ *  Text that was already written into a line (a status line, a toast) is
+ *  put away instead of left in the old language; a page that keeps its own
+ *  line current fills it again on the next tick. This does not write
+ *  scripthook.ini: the caller decides whether to persist the choice. */
+SH_API int ShLangSet(const char *code);
 
 /** @} */
 

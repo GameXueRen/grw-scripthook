@@ -183,6 +183,7 @@ $(GAMEDIR)/plugins/tp_roulette/tp_roulette.asi: tp_roulette.c scripthook.h libsc
 libscripthook.a: $(GAMEDIR)/dinput8.dll
 
 $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
+                        scripthook_text.c \
                         scripthook_physics.c \
                         scripthook_health.c scripthook_state.c \
                         scripthook_playmode.c scripthook_blacklist.c \
@@ -209,7 +210,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
                         third_party/minhook/src/trampoline.c \
                         third_party/minhook/src/hde/hde64.c
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
-		scripthook_config.c \
+		scripthook_config.c scripthook_text.c \
 		scripthook_physics.c scripthook_health.c \
 		scripthook_state.c scripthook_playmode.c scripthook_blacklist.c \
 		scripthook_entity.c \

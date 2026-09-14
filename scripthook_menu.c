@@ -336,19 +336,16 @@ static void VkName(int vk, char *out, int n) {
     snprintf(out, n, "VK%02X", vk);
 }
 
-/* Rendered text for the value side of a row. Fixed words and list
- * options are translated in the menu's scope (and in the owning
- * plugin's ini first); number and arrow formats are language-
- * neutral. */
-static void ValueText(const char *owner, const char *scope,
-                      const Item *it, char *out, int n) {
+/* Rendered text for the value side of a row. Fixed words ("on"/"off",
+ * a list option) go through the text lookup with the row's owner;
+ * number and arrow formats are language-neutral. */
+static void ValueText(const char *owner, const Item *it, char *out, int n) {
     out[0] = 0;
     if (it->kind == IT_SUB) snprintf(out, n, ">");
     else if (it->kind == IT_TOGGLE)
         snprintf(out, n, "[%s]", it->value
-                                       ? ShLangForOwned(owner, scope, "on")
-                                       : ShLangForOwned(owner, scope,
-                                                        "off"));
+                                      ? ShLangText(owner, "@menu.on")
+                                      : ShLangText(owner, "@menu.off"));
     else if (it->kind == IT_NUMBER)
         /* Integer step with a whole current value renders as an
          * integer (< 30 >); fractional steps keep two decimals. */
@@ -358,9 +355,9 @@ static void ValueText(const char *owner, const char *scope,
             snprintf(out, n, "< %.2f >", it->num);
     else if (it->kind == IT_LIST && it->nopts)
         snprintf(out, n, "< %s >",
-                 ShLangForOwned(owner, scope,
-                                it->opts[((it->value % it->nopts) +
-                                          it->nopts) % it->nopts]));
+                 ShLangText(owner,
+                            it->opts[((it->value % it->nopts) +
+                                      it->nopts) % it->nopts]));
     else if (it->kind == IT_KEYBIND) {
         if (g_capActive && it == g_capItem) {
             snprintf(out, n, "< ... >");   /* waiting for a key */
@@ -761,34 +758,6 @@ void ShMenuSetOverlayReady(int ready) {
     g_ovlReady = ready ? 1 : 0;
 }
 
-/* Dotted title path from the first submenu under the root down to
- * m, e.g. "First person.Custom". Empty for the root itself. Used as
- * the translation scope, so a deeper menu first matches its own
- * section and falls back up its ancestors: [zh_cn.A.B.C] ->
- * [zh_cn.A.B] -> [zh_cn.A] -> [zh_cn]. */
-static void MenuPath(const Menu *m, char *out, int n) {
-    const char *titles[8];
-    int k = 0;
-    size_t used = 0;
-    const Menu *cur = m;
-
-    out[0] = 0;
-    if (n <= 0) return;
-    while (cur && cur->parent && k < 8) {
-        titles[k++] = cur->title;
-        cur = MenuOf(cur->parent);
-    }
-    while (k > 0) {
-        const char *t = titles[--k];
-        int w = snprintf(out + used, n - used, "%s%s",
-                         used ? "." : "", t);
-        if (w < 0) break;
-        used += (size_t)w;
-        if (used >= (size_t)n) break;
-    }
-    out[n - 1] = 0;
-}
-
 /* strncpy truncates by bytes, which can split a UTF-8 sequence
  * and leave the renderer with an invalid lead byte (it draws it
  * as '?'). Copy then back up to the start of the last code point
@@ -892,9 +861,7 @@ void ShMenuCaptureView(ShMenuView *v) {
         m = MenuOf(g_current);
     }
     if (m) {
-        char path[64], parentPath[64];
         const char *owner = m->owner;
-        Menu *pm = MenuOf(m->parent);
 
         v->isRoot = (m->parent == 0);
 
@@ -905,48 +872,37 @@ void ShMenuCaptureView(ShMenuView *v) {
          * a row that is no longer drawn. */
         Scroll(m);
 
-        /* The root's rows and the submenus' titles read from the
-         * global table ([lang]), because MenuPath is empty for the
-         * root and for any menu whose parent is the root. Deeper
-         * menus use the dotted title path from the root's child
-         * down, falling back to [lang] level by level. */
-        MenuPath(m, path, sizeof(path));
-        MenuPath(pm, parentPath, sizeof(parentPath));
-
         /* The root shows the control hints; every submenu shows the
-         * plugin's own hint (ShMenuHint), translated in its scope.
-         * Third-party plugins that never call ShMenuHint get a hint
-         * from the [MenuHints] config section, keyed by menu title,
-         * translated the same way. An unset hint stays empty and
-         * takes no room. */
+         * plugin's own hint, or the one written for its page key
+         * ("<key>.hint") - which is how a plugin with no source gets a
+         * hint at all. A hint nobody wrote stays empty and takes no
+         * room, so this asks whether there is text before showing it. */
         if (m->parent == 0)
-            snprintf(v->hint, sizeof(v->hint), "%s\n%s",
-                     ShLang("F4 toggle menu, Enter select, ESC back"),
-                     ShLang("\xE2\x86\x91 \xE2\x86\x93 or W/S select, "
-                            "\xE2\x86\x90 \xE2\x86\x92 or A/D adjust"));
+            SafeCopy(v->hint, sizeof(v->hint),
+                     ShLangText(NULL, "@menu.root.hint"));
         else if (m->hint[0])
             SafeCopy(v->hint, sizeof(v->hint),
-                     ShLangForOwned(owner, path, m->hint));
+                     ShLangText(owner, m->hint));
         else {
-            char confHint[128];
-            if (ShConfigGetStr("MenuHints", m->title, NULL,
-                               confHint, sizeof(confHint)) &&
-                confHint[0])
+            char hintKey[80];
+
+            snprintf(hintKey, sizeof(hintKey), "%s.hint", m->title);
+            if (ShLangHas(owner, hintKey))
                 SafeCopy(v->hint, sizeof(v->hint),
-                         ShLangForOwned(owner, path, confHint));
+                         ShLangText(owner, hintKey));
         }
 
         SafeCopy(v->title, sizeof(v->title),
-                 ShLangForOwned(owner, parentPath, m->title));
+                 ShLangText(owner, m->title));
         SafeCopy(v->status, sizeof(v->status),
-                 ShLangForOwned(owner, path, m->status));
+                 ShLangText(owner, m->status));
         for (i = m->top; i < m->count && v->rows < VISIBLE; i++) {
             ShMenuRow *r = &v->row[v->rows];
             const Item *it = &m->items[i];
             /* A submenu row shows the child menu's title, so it is
              * translated with the CHILD's owner: the root is built
-             * in, but its plugin rows must still read the plugin's
-             * own ini first (scope stays the global table). */
+             * in, but its plugin rows must read that plugin's own
+             * lang.ini first. */
             const char *rowOwner = owner;
             /* A row the mode has switched off takes no room: the window
              * is filled with rows the player can actually see, and it is
@@ -957,8 +913,8 @@ void ShMenuCaptureView(ShMenuView *v) {
                 if (cm && cm->owner[0]) rowOwner = cm->owner;
             }
             SafeCopy(r->name, sizeof(r->name),
-                     ShLangForOwned(rowOwner, path, it->label));
-            ValueText(owner, path, it, r->value, sizeof(r->value));
+                     ShLangText(rowOwner, it->label));
+            ValueText(owner, it, r->value, sizeof(r->value));
             r->selected = (i == m->sel);
             if (r->selected) v->sel = v->rows;
             v->rows++;
@@ -966,7 +922,8 @@ void ShMenuCaptureView(ShMenuView *v) {
         {
             int vis = VisibleCount(m);
             if (vis > VISIBLE)
-                snprintf(v->footer, sizeof(v->footer), "%d / %d",
+                snprintf(v->footer, sizeof(v->footer),
+                         ShLangText(NULL, "@menu.footer.pos"),
                          VisibleOrdinal(m, m->sel), vis);
         }
     }
@@ -1295,13 +1252,28 @@ SH_API int ShMenuStatus(uint32_t menu, const char *text) {
     return 1;
 }
 
-/* The status line from a printf template: translate the English
- * template in the menu's own scope, then format once and store the
- * final text. The capture path translates m->status again, which
- * is a no-op for the stored result, so this is safe.
+/* Drop every stored line: they are text in the language that was
+ * active when they were written. Called by the text layer on a
+ * language switch; a page that keeps its line current writes it again
+ * on its next tick. */
+void ShMenuStatusResetAll(void) {
+    int i;
+
+    EnsureMenu();
+    Lock();
+    for (i = 0; i < MENUS; i++)
+        if (g_menus[i].used) g_menus[i].status[0] = 0;
+    Unlock();
+}
+
+/* The status line from a printf template: take the template's text for
+ * this menu's owner, format it once, store the result. The capture
+ * path translates m->status again, which is a no-op for the stored
+ * result, so this is safe. (Reordering a translation's placeholders -
+ * "%2$s" - needs the template parser the design doc reserves for the
+ * next pass; today a translation keeps the English order.)
  */
 SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
-    char path[64];
     char tmpl[96];
     char text[96];
     va_list ap;
@@ -1312,8 +1284,7 @@ SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
     Lock();
     m = MenuOf(menu);
     if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
-    MenuPath(m, path, sizeof(path));
-    SafeCopy(tmpl, sizeof(tmpl), ShLangForOwned(m->owner, path, fmt));
+    SafeCopy(tmpl, sizeof(tmpl), ShLangText(m->owner, fmt));
     Unlock();
 
     va_start(ap, fmt);

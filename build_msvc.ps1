@@ -137,6 +137,7 @@ if ($LASTEXITCODE -ne 0) { throw 'ml64 failed for guard.asm' }
 
 $fwSources = @(
     'loader.c', 'scripthook_api.c', 'scripthook_config.c',
+    'scripthook_text.c',
     'scripthook_physics.c', 'scripthook_health.c',
     'scripthook_state.c', 'scripthook_playmode.c',
     'scripthook_blacklist.c', 'scripthook_entity.c',
@@ -328,6 +329,28 @@ foreach ($name in @('EnemyReinforce', 'ModeProbe', 'ModeCallProbe',
         Copy-Item $iniSrc $iniDst -Force
         Write-Host "seeded $iniDst"
     }
+}
+
+# The same rule for text: "<name>.lang.ini" beside the source is seeded
+# as plugins\<name>\lang.ini, and the framework's own lang.ini as
+# <gamedir>\lang.ini. First time only again - a lang.ini is the
+# translator's file, and a later build must never overwrite one that
+# was edited in place.
+foreach ($src in (Get-ChildItem (Join-Path $root '*.lang.ini'))) {
+    $name = $src.Name -replace '\.lang\.ini$', ''
+    $dst = Join-Path $plugins "$name\lang.ini"
+    if (-not (Test-Path $dst)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $dst) |
+            Out-Null
+        Copy-Item $src.FullName $dst -Force
+        Write-Host "seeded $dst"
+    }
+}
+$fwLang    = Join-Path $root 'lang.ini'
+$fwLangDst = Join-Path $Gamedir 'lang.ini'
+if ((Test-Path $fwLang) -and -not (Test-Path $fwLangDst)) {
+    Copy-Item $fwLang $fwLangDst -Force
+    Write-Host "seeded $fwLangDst"
 }
 
 # cl generates a .lib/.exp beside any plugin that exports
