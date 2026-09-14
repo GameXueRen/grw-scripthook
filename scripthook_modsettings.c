@@ -287,19 +287,38 @@ static void BuildSettings(uint32_t menu, const Setting *rows, int n) {
 }
 
 /* Every plugin switch is a [plugins] toggle the loader's next scan
- * honours. Rows show the plugin folder name only; the "restart
- * needed" note lives once on the menu hint line, not on every row.
- * A folder with no line of its own reads as off, which is the same
- * rule the loader applies: by the time this page is built the loader
- * has usually written the line itself, so this default only covers a
- * folder that appeared after that scan. */
+ * honours. A row reads with the plugin's own page title - the same
+ * owner-keyed text the order page uses - so what is on screen is the
+ * name the player sees in the root menu, not the folder name. The row's
+ * text is resolved HERE rather than left as a key: this page belongs to
+ * the framework, so the capture would look the key up under "" and an ID
+ * would come out readable-mangled instead of translated.
+ *
+ * The config key and the callback stay the folder name, and a plugin
+ * that is not loaded right now (switched off, or a mode has taken it
+ * away) keeps its folder name as the label. The "restart needed" note
+ * lives once on the menu hint line, not on every row. A folder with no
+ * line of its own reads as off, which is the same rule the loader
+ * applies: by the time this page is built the loader has usually written
+ * the line itself, so this default only covers a folder that appeared
+ * after that scan. */
 static void BuildPluginMenu(void) {
-    int i;
+    ShMenuOrderRow rows[64];
+    int i, j, n = ShMenuRootOrderRows(rows, 64);
 
+    if (n > (int)(sizeof(rows) / sizeof(rows[0])))
+        n = (int)(sizeof(rows) / sizeof(rows[0]));
     for (i = 0; i < g_nplugins; i++) {
         const char *name = g_plugins[i];
+        const char *label = name;
         int cur = ShConfigGetBool("plugins", name, 0);
-        ShMenuToggle(g_pluginMenu, name, cur, OnPlugin, (void *)name);
+
+        for (j = 0; j < n; j++) {
+            if (_stricmp(rows[j].owner, name)) continue;
+            label = ShLangText(rows[j].owner, rows[j].key);
+            break;
+        }
+        ShMenuToggle(g_pluginMenu, label, cur, OnPlugin, (void *)name);
     }
 }
 

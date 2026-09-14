@@ -1001,10 +1001,41 @@ ShLangDeclare("firstperson", "zh-CN", kZh, N);
 ### 9.3 待办（建议顺序）
 
 1. ~~**位置参数 + 模板校验**（方案 B）~~ **已完成，见 §9.10**（`%n$` 重排 + 校验 + 回落英文）；
-2. **诊断与容量**（原 S4）：`LANGS_MAX` / 行表上限提高并让超限更醒目、缺译诊断页（以 en-US 基线为权威做差集）、骨架导出 `lang\<code>.missing.ini`、`[Settings] Languages` 与实际语言段的一致性提示；
-3. **插件源码改用 `@` ID**（原 S5，20 个仓库内插件，可分批，字面量通路一直有效）；
-4. **P1 小项**：黑名单状态行与「各插件开关」页改用**显示名**（现在都是目录名）；`ShMenuSetValue` 增加按页面键匹配的入口；
+2. ~~**诊断与容量**~~ **已完成，见 §9.11**：容量上限在实现期就已提高（`LANG_KEY_MAX 512` / `LANG_VAL_MAX 768` / `LROW_MAX`、`BASE_MAX` 各 2048 / `PLOAD_MAX 128`），超限一律写日志；缺译诊断页 + 骨架导出已落地。**唯一未做的是 `[Settings] Languages` 一致性提示**——它要为每个语言各扫一遍所有文件，而装载日志本来就逐文件报出"其它语言跳过的行数"，代价与收益不成比例；
+3. ~~**插件源码改用 `@` ID**~~ **已完成，见 §9.13**：21 个有菜单的插件全部改用自己的编译期基线；6 个无源码插件与 5 个无菜单插件留在字面量通路（设计如此）；
+4. **P1 小项**：`ShMenuSetValue` 按**页面键**匹配 —— 已随第 3 项自然满足（行标签现在就是键，`ShMenuSetValue(m, "@np.number", 1)` 即按 ID 匹配）；「各插件开关」页改用**显示名** **已完成**（行文本取该插件根页面的 owner+key：`ShMenuRootOrderRows` + `ShLangText`，与排序页同一套；未加载的插件回落目录名，配置键与回调仍用目录名。**行文本必须在此解析**，因为该页属框架、捕获时会以 owner="" 查表，留 ID 会被"可读化"成乱码）。**黑名单状态行仍是目录名** —— 那处需要在 `ShPluginBlacklistNotice` 里调菜单层，而菜单捕获会反向调 `ShPluginHidden`，会形成 menu ⇄ blacklist 的锁序环；要做的话得由调用方（设置页）先解析显示名再拼接；
 5. **文档**：`scripthook.h` 的 `@defgroup lang`、`README.md` 的汉化节、`docs/plugins.md`、`docs/npcspawner-reverse.md`、`docs/opticacamo-reverse.md`、`docs/plugin-blacklist.md` 已在 S1-e 一并更新。
+
+### 9.13 插件源码改 ID：全量完成（同日）
+
+§7.4 的②组剩余部分与③组（16 个晚绑定插件）一并做完：**21 个有菜单的插件**改用自己的编译期基线。只有 6 个黑盒插件（无源码）与 5 个无菜单插件留在字面量通路——这正是设计要的结果。
+
+| 组 | 插件 | ID 前缀 |
+|---|---|---|
+| ② 静态直连 | `fov_changer` / `OpticalCamo` / `chaos` / `cnchat` | `@fov.*` `@camo.*` `@chaos.*` `@chat.*` |
+| ③ 晚绑定 | `skipintro` / `firstperson` / `EnemyReinforce` / `NPCSpawner` | `@skip.*` `@fp.*` `@er.*` `@np.*` |
+| ③ 晚绑定 | `freecam` / `GhostNoWipe` / `GhostRevive` / `ModeProbe` | `@fc.*` `@gn.*` `@gr.*` `@mp.*` |
+| ③ 晚绑定 | `spawner`（只改自身 6 条；68 条车辆目录名留在它的 `lang.ini`）| `@sp.*` |
+| ③ 晚绑定 | `LastRites_dlcfix` / `GhostWipeProbe` / `ModeExitProbe` / `ModeCallProbe` / `draw_sample` / `file_watch_sample` / `blacklist_sample` | `@lr.*` `@gw.*` `@me.*` `@mc.*` `@ds.*` `@fw.*` `@bs.*` |
+| 跳过 | 无菜单：`hitfling` / `tp_roulette` / `tpgun` / `ui_sample` / `test_plugin` | |
+| 跳过 | 无源码：`AmmoCapacity` / `DayNightVisibility` / `EqualizeEnemyHealth` / `GunShotDetection` / `Time&Weather` / `trainer` | |
+
+**统一配方**（每个插件一到两处改动）：
+
+1. 顶部加 `kEn` / `kZh` 两张表（中文取自它原来的 `lang.ini`，没有的就补写）+ 一个 `TextInit()`；
+2. **一律晚绑定**取 `ShLangDeclare`（`GetModuleHandleA("dinput8.dll")` + `GetProcAddress`）——即使该插件链了静态库也走同一条路，两种构建方式行为一致；
+3. 调用点的字面量换 ID：菜单行/页面标题/提示由框架按 owner 查表；`ShMenuStatusF` 的模板还会与 en-US 表**逐条校验**（§9.10）；
+4. 需要**插件自己解析**的只有"作为模板参数"的文本（`T()` / `SetText()`）：框架只翻译模板，不翻译塞进 `%s` 的值（§9.12 第 2 条）；
+5. 插件 `lang.ini` 瘦身为覆盖层样例；`spawner` 例外——保留它拥有的 68 条车辆目录名译文。
+
+**过程中的四个坑**（都已修，对后续任何插件通用）：
+
+1. `ShText` 在**完全自包含**的插件里不可见（它们不 include 框架头，自带所有 typedef）→ 用同形结构 `TextRow`（布局一致，ABI 兼容）；
+2. `T()` 这类助手若定义在菜单函数旁边，**更靠上的状态函数会先用到它** → 在文件上方补一行前置声明；
+3. `pMenuSetValue(menu, "<标签>", v)` 是**按标签匹配**的：标签换成 ID 后必须同步改，否则那一行会**静默失效** —— `EnemyReinforce`、`NPCSpawner`（弹回中间档）、`blacklist_sample`（同步开关值）各有一处；`firstperson` 也有一处，是**热键翻转后回写菜单值**的（`g_menuSetValue(g_menu, "@fp.enabled", g_on)`），它只在收尾的**全量复查**里才露出来——所以改完必须跑一遍"菜单/状态调用里是否还有非 `@` 字面量"的扫描，光靠逐个改代码会漏；
+4. 把译文模板当 `snprintf` 的格式串有 UB 风险 → 统一改为"**字面量格式 + 译文词作参数**"（`ModeCallProbe` 的 `"%d %s, %d %s, %d %s - %s"` 即范例）。
+
+**验证**：全部 27 个插件与 DLL 重新构建通过（0 错误 0 警告），部署后 33 个 `.asi`。实机验证清单见 §9.4。
 
 ### 9.4 尚未经实机验证
 
@@ -1124,3 +1155,38 @@ s[10] = 0  →  剩下 "第一人" + 孤立的首字节 E7
 | 超限丢弃 | 0 | |
 
 **提示文案改为多行短句**（`@settings.diag.hint`、`@settings.order.hint`、`@forge.hint`）：原来一行两三百字符，面板不换行，右侧直接被切。**约定：提示按字面 `\n` 分行，一行别超过约 28 个汉字 / 55 个 ASCII 字符**——渲染层不自动折行。
+
+### 9.12 插件源码改 ID：第 ② 组（同日）
+
+§7.4 的"三件小事"首次落地。②组 4 个静态直连插件里，三个改完（`cnchat` 原先没有 `lang.ini`、中文需新写，留到下一批）：
+
+| 插件 | ID 前缀 | 基线 | 备注 |
+|---|---|---|---|
+| `fov_changer` | `@fov.*` | 7 + 7 | `@fov.status.on/off` 是**模板**：`ShMenuStatusF` 会用 `ShTextEnUS` 取它的英文来校验译文 |
+| `OpticalCamo` | `@camo.*` | 7 + 7 | 与设计稿 §3.3 的示例同名（`@camo.status.active`）|
+| `chaos` | `@chaos.*` | 9 + 9 | 拆成 `@chaos.status.off`（"off"）与 `@chaos.status.effects`（"off, %d effects"）：一个是状态行，一个是模板头 |
+
+三个插件的 `lang.ini` 随之瘦身为**覆盖层样例**（注释说明文案已在源码基线里，文件可留可删）——这正是 C8 想要的效果。**游戏目录里那三份旧 `lang.ini` 保持原样**：里面的字面量键从此是死行（按 ID 查不到即回落基线），正好当"旧文件继续可用"的实测样本。
+
+设计上未动任何菜单函数签名，所以晚绑定插件的 typedef 与 `GetProcAddress` 一行都不用改（§7.4 的注意）。
+
+待实测：这三个页面在中文下是否仍正确——尤其 chaos 的开关，它现在是 `@chaos.enabled`（混沌开关），与共享层那条「启用」再无关系。
+
+**同日续做**：`cnchat` 与 `skipintro` 也改完，②组 4 个全部落地，累计 **5 个插件**（`fov_changer`、`OpticalCamo`、`chaos`、`cnchat`、`skipintro`）。`cnchat` 原先根本没有 `lang.ini`——它的中文就是这次进基线的（`@chat.*`，含两个列表选项标签，选项名也是被翻译的键）。新增/瘦身的那几份 `lang.ini` 都是"覆盖层样例"。
+
+`firstperson` 留作单独一趟：它把标签放在**名字数组**里传给菜单（`g_catName`、`g_hotName`、`g_presetName`、`g_axisName`），还有状态宏与 `SayStatus` 的两条模板，改动面比前几个大；`EnemyReinforce`（44 行）、`NPCSpawner`（27 行）同理。
+
+**`firstperson` 已改完（同日）**：4 个名字数组 + 4 条状态宏换成 ID，27 行译文进基线（`@fp.*`）。两件只有它才会遇到的事，值得写下来：
+
+1. **它是纯晚绑定**：链接行里没有 `libscripthook.lib`（只用 `GetProcAddress`），所以 `ShLangDeclare` 也必须按名字取——直接调用会 `LNK2019`，而为它加上静态库又会丢掉"任何 dinput8 都能加载"的性质。于是 `FpText()` 通过一个函数指针调用它，取不到就退回显示 ID。
+2. **状态行模板的参数不经过翻译**：`ActiveSetName()` 的返回值被塞进 `@fp.status.on` 的 `%s`——如果它返回 `@fp.cat.foot` 这样的 ID，玩家就会直接看到 ID。所以插件自己用 `ShLangText("firstperson", id)` 把 ID 解析成文本（`SetText()`），框架只负责翻译模板。**这条对所有"把文本当参数传给模板"的插件都成立**，是 §3.3 那句"模板支持重排"之外的另一半契约。
+
+顺带修正：原先 firstperson 的 `"Enabled"` 被译成「第一人称」（与页面标题同词，是字面量撞车的产物），现在 `@fp.enabled` = 「启用」。
+
+**`EnemyReinforce` 已改完（同日，累计 7 个）**：44 行译文全部进基线（`@er.*`）——18 个菜单行、10 个选项标签（阵营 5 + 阵型 5）、11 条状态、5 条模板。同样两个坑：
+
+1. 它也是**纯晚绑定**（链接行 `@()`，连 `gdi32` 都没有），`ShLangDeclare`/`ShLangText` 都按名字取。
+2. 阵营名（`g_groupOpts`）既当**列表选项**（要 ID）又当**模板参数**（要文本），所以模板的 5 个实参都过一层 `SetText()`。顺带发现 `pMenuSetValue(g_menu, "NPC Number", 1)` 是**按标签匹配**的——标签换成 ID 后它必须同步改，否则"把行弹回中间档"会静默失效。
+3. 它在 `Log()` 里也用同一个数组，那些**是日志、不是界面文本**，但既然数组现在存 ID，日志会把 ID 打出来——保留原样（日志本就是给排查用的），需要时同样可以过 `SetText()`。
+
+死译文一条：`"nothing near to probe"` 在代码里根本没有（老版本残留），随 `lang.ini` 瘦身一并消失。
