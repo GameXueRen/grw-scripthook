@@ -1576,6 +1576,174 @@ const char *ShTextEnUS(const char *owner, const char *key)
     return v;
 }
 
+/* ---- diagnostics ------------------------------------------------
+ *
+ * What a translator needs to see, and what this can honestly say. The
+ * baseline's en-US rows are the authority for what the build can say: a
+ * baseline key with no text in the active language exists in English
+ * only. The other half is a row whose value is still plain ASCII - a
+ * file that carries the English line back has not been translated yet,
+ * which is exactly how the hint rows for plugins without source looked.
+ *
+ * Not covered: a literal key that no file mentions. Those live in a
+ * plugin's code and cannot be enumerated, so the report names what it
+ * can prove.
+ */
+
+#define DIAG_MAX 256
+
+/* A value with no byte above 0x7F. A translated hint never looks like
+ * that. The language's own name for English does, so those rows are
+ * left out by key. */
+static int TextIsAscii(const char *s) {
+    if (!s) return 1;
+    for (; *s; s++)
+        if ((unsigned char)*s >= 0x80) return 0;
+    return 1;
+}
+
+/* A row an earlier row of the same owner and key already answers:
+ * RowFind stops at the first match, so this one is dead, and a dead row
+ * must not be reported as text that is still wanted. Hand-edited files
+ * grow them easily - a translated row added at the top while the
+ * English line it replaces stays where it was. */
+static int RowShadowed(int idx) {
+    int j;
+
+    for (j = 0; j < idx; j++)
+        if (!_stricmp(g_rows[j].owner, g_rows[idx].owner) &&
+            !strcmp(g_rows[j].key, g_rows[idx].key))
+            return 1;
+    return 0;
+}
+
+static void MissFill(ShLangMissRow *out, int max, int *used,
+                     const char *owner, const char *key, const char *en) {
+    if (!out || !used || *used >= max) return;
+    CopyN(out[*used].owner, sizeof(out[0].owner), owner ? owner : "");
+    CopyN(out[*used].key, sizeof(out[0].key), key ? key : "");
+    CopyN(out[*used].en, sizeof(out[0].en), en ? en : "");
+    (*used)++;
+}
+
+int ShLangDiag(ShLangMissRow *out, int max, int *missing, int *english,
+               int *orphan, int *dup, int *dropped) {
+    int i, used = 0;
+    int nMiss = 0, nEng = 0, nOrph = 0, nDup = 0, nDrop = 0;
+
+    if (out && max > 0) memset(out, 0, sizeof(out[0]) * (size_t)max);
+
+    LoadConfig();
+    TextLock();
+    if (EnsureRows()) {
+        LoadLang(NULL);         /* the shared file and the framework's */
+
+        /* keys the baseline has in English only */
+        for (i = 0; i < g_nbase; i++) {
+            const char *own = g_base[i].owner;
+
+            if (!g_base[i].lang || _stricmp(g_base[i].lang, "en-US"))
+                continue;
+            if (!g_base[i].key || !g_base[i].key[0]) continue;
+            if (!_strnicmp(g_base[i].key, "@lang.name.", 11)) continue;
+            if (BaseFind(own, g_langName, g_base[i].key)) continue;
+            nMiss++;
+            MissFill(out, max, &used, own, g_base[i].key, g_base[i].text);
+        }
+
+        /* rows still carrying the English line, the effective one only */
+        for (i = 0; i < g_nrows; i++) {
+            if (RowShadowed(i)) continue;
+            if (!_strnicmp(g_rows[i].key, "@lang.name.", 11)) continue;
+            if (!TextIsAscii(g_rows[i].value)) continue;
+            nEng++;
+            MissFill(out, max, &used, g_rows[i].owner, g_rows[i].key,
+                     g_rows[i].value);
+        }
+
+        /* "@" keys nothing declares, and rows an earlier one shadows */
+        for (i = 0; i < g_nrows; i++) {
+            if (RowShadowed(i)) {
+                nDup++;
+                continue;
+            }
+            if (g_rows[i].key[0] == '@' &&
+                !BaseFind(g_rows[i].owner, "en-US", g_rows[i].key))
+                nOrph++;
+        }
+        nDrop = g_rowsDropped;
+    }
+    TextUnlock();
+
+    if (missing) *missing = nMiss;
+    if (english) *english = nEng;
+    if (orphan)  *orphan  = nOrph;
+    if (dup)     *dup     = nDup;
+    if (dropped) *dropped = nDrop;
+    return used;
+}
+
+int ShLangSkeleton(char *path, int cap) {
+    ShLangMissRow *rows;
+    char dir[GAME_DIR_MAX];
+    char file[GAME_DIR_MAX];
+    FILE *f;
+    const char *p;
+    int n, i, miss = 0, eng = 0, orph = 0, dup = 0, drop = 0;
+
+    rows = (ShLangMissRow *)calloc(DIAG_MAX, sizeof(ShLangMissRow));
+    if (!rows) return -1;
+
+    n = ShLangDiag(rows, DIAG_MAX, &miss, &eng, &orph, &dup, &drop);
+    if (snprintf(dir, sizeof(dir), "%slang", GameDir()) < 0 ||
+        snprintf(file, sizeof(file), "%s\\%s.missing.ini", dir,
+                 g_langName) < 0) {
+        free(rows);
+        return -1;
+    }
+    CreateDirectoryA(dir, NULL);
+    if (path && cap > 0) CopyN(path, (size_t)cap, file);
+
+    f = fopen(file, "wb");
+    if (!f) {
+        TextLog("skeleton: cannot write %s", file);
+        free(rows);
+        return -1;
+    }
+    fprintf(f,
+            "; Text this build still wants in %s.\n"
+            "; Each key is followed by what it says in English: fill a\n"
+            "; value in and move the row to the file it belongs to -\n"
+            ";   (framework)  ->  <gamedir>\\lang.ini\n"
+            ";   <owner>      ->  plugins\\<owner>\\lang.ini\n"
+            "; all of them under a [%s] section. A key starting with @ is a\n"
+            "; stable ID; any other key is the English literal a plugin\n"
+            "; passes, which is how a plugin without source is translated.\n"
+            "; An empty value is ignored, so an unfinished row is safe.\n"
+            ";\n"
+            "; %d row(s) still in English, %d with no text at all,\n"
+            "; %d \"@\" key(s) nothing declares, %d row(s) repeated,\n"
+            "; %d row(s) dropped (table full).\n",
+            g_langName, g_langName, eng, miss, orph, dup, drop);
+
+    for (i = 0; i < n; i++) {
+        if (i == 0 || _stricmp(rows[i].owner, rows[i - 1].owner))
+            fprintf(f, "\n; ---- %s ----\n",
+                    rows[i].owner[0] ? rows[i].owner : "(framework)");
+        fputs("; ", f);
+        for (p = rows[i].en; p && *p; p++) {
+            if (*p == '\n') fputs("\n; ", f);
+            else fputc(*p, f);
+        }
+        fputc('\n', f);
+        fprintf(f, "\"%s\" = \"\"\n", rows[i].key);
+    }
+    fclose(f);
+    free(rows);
+    TextLog("skeleton: %s (%d row(s) to translate)", file, n);
+    return n;
+}
+
 /* ---- lang.ini --------------------------------------------------- */
 
 /* [LanguageNames] rows: the label to show for a code, so the picker
@@ -1589,7 +1757,11 @@ static void LangNameAdd(const char *code, const char *label) {
         CopyN(g_disp[i].label, sizeof(g_disp[i].label), label);
         return;
     }
-    if (g_nDisp >= DISP_MAX) return;
+    if (g_nDisp >= DISP_MAX) {
+        TextLog("[LanguageNames] full at %d rows: \"%s\" dropped",
+                DISP_MAX, code);
+        return;
+    }
     CopyN(g_disp[g_nDisp].code, sizeof(g_disp[0].code), code);
     CopyN(g_disp[g_nDisp].label, sizeof(g_disp[0].label), label);
     g_nDisp++;

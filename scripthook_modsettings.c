@@ -385,6 +385,7 @@ static void LoadLanguages(void) {
  * since the last look.
  */
 static uint32_t g_orderMenu = 0;
+static uint32_t g_diagMenu = 0;     /* the translation report */
 #define ORDER_MAX 64
 
 typedef struct {
@@ -644,6 +645,8 @@ static void BuildHints(void) {
     /* The order page: one sentence, because the rows carry the rest -
      * the number is the place, left and right move it. */
     ShMenuHint(g_orderMenu, "@settings.order.hint");
+    /* The report page explains what it counts. */
+    if (g_diagMenu) ShMenuHint(g_diagMenu, "@settings.diag.hint");
 
     /* The CPU page: one sentence - what the page does, and that it acts
      * from the next launch on. The one thing worth a second line is the
@@ -693,6 +696,65 @@ static void BuildHints(void) {
     ShMenuHint(g_cpuMenu, hint);
 }
 
+/* ---- translation report ------------------------------------------ */
+
+/* The counts a translator acts on, then the rows themselves. The list
+ * is capped so the page stays readable; the export writes all of them.
+ * Rows carry text this module composed, so they are not keys - the
+ * capture passes a label it cannot find anywhere through unchanged. */
+#define DIAG_SHOW 10
+
+static void OnDiagInfo(uint32_t menu, uint32_t item, int value, void *user) {
+    (void)menu; (void)item; (void)value; (void)user;
+}
+
+static void OnDiagExport(uint32_t menu, uint32_t item, int value,
+                         void *user) {
+    char path[512];
+    int n;
+
+    (void)item; (void)value; (void)user;
+    n = ShLangSkeleton(path, (int)sizeof(path));
+    if (n < 0)
+        ShMenuStatus(menu, "Export failed - see logs\\scripthook_text.log");
+    else
+        ShMenuStatusF(menu, "%d row(s) written to %s", n, path);
+}
+
+static void BuildDiagMenu(void) {
+    ShLangMissRow rows[DIAG_SHOW];
+    char line[512];
+    char prefix[160];
+    int miss = 0, eng = 0, orph = 0, dup = 0, drop = 0;
+    int n, i;
+
+    if (!g_diagMenu) return;
+    n = ShLangDiag(rows, DIAG_SHOW, &miss, &eng, &orph, &dup, &drop);
+    ShMenuClear(g_diagMenu);
+
+    snprintf(line, sizeof(line), "%s %d", ShLang("Still in English:"), eng);
+    ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
+    snprintf(line, sizeof(line), "%s %d", ShLang("No text at all:"), miss);
+    ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
+    snprintf(line, sizeof(line), "%s %d",
+             ShLang("Not declared (\"@\" keys):"), orph);
+    ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
+    snprintf(line, sizeof(line), "%s %d", ShLang("Repeated rows:"), dup);
+    ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
+    snprintf(line, sizeof(line), "%s %d",
+             ShLang("Dropped (table full):"), drop);
+    ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
+
+    ShMenuAction(g_diagMenu, "@settings.diag.export", OnDiagExport, NULL);
+
+    snprintf(prefix, sizeof(prefix), "%s", ShLang("(framework)"));
+    for (i = 0; i < n; i++) {
+        snprintf(line, sizeof(line), "%s - %s", rows[i].key,
+                 rows[i].owner[0] ? rows[i].owner : prefix);
+        ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
+    }
+}
+
 /* Text this module composed itself does not follow a language switch:
  * menu rows do (they are translated as they are captured), but a hint
  * and a status line are strings we handed over. Called right after a
@@ -706,6 +768,7 @@ static void RefreshOwnText(void) {
     if (cur) snprintf(g_langSeen, sizeof(g_langSeen), "%s", cur);
     BuildHints();
     SetCpuLine();
+    BuildDiagMenu();
     /* The order page's row labels are the pages' own titles, resolved
      * when the list was taken, so they need reading again in the new
      * language - OrderTick does that on its next pass. */
@@ -754,6 +817,7 @@ void ShModSettingsStartup(void) {
     g_pluginMenu = ShMenuSub(g_modMenu, "@settings.plugins");
     g_cpuMenu    = ShMenuSub(g_modMenu, "@settings.cpu");
     g_orderMenu  = ShMenuSub(g_modMenu, "@settings.order");
+    g_diagMenu   = ShMenuSub(g_modMenu, "@settings.diag");
 
     ScanPlugins();
     BuildSettings(g_cpuMenu, g_cpuSettings,
@@ -761,6 +825,7 @@ void ShModSettingsStartup(void) {
     BuildPluginMenu();
     OrderReload();
     BuildOrderMenu();
+    BuildDiagMenu();
     BuildLanguageRow(g_modMenu);
 
     /* The hints, then the live line. The note the pages carry is text we

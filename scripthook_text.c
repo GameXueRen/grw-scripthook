@@ -49,18 +49,22 @@ static const ShText kEnUS[] = {
       "applies at once." },
     { "@settings.order",      "Menu order" },
     { "@settings.order.hint",
-      "Left / right moves the highlighted page one place. Every move is "
-      "saved at once and the root menu follows it; a plugin switched off "
-      "keeps the place it will come back to." },
+      "Left / right moves the highlighted page one place.\n"
+      "Every move is saved at once and the root menu\n"
+      "follows it; a plugin switched off keeps the place\n"
+      "it will come back to." },
     { "@settings.order.empty", "No plugin menu to order yet." },
     { "@settings.order.saved", "Order saved" },
 
     /* the Forge page */
     { "@forge.hint",
-      "Loads loose files from mods\\ over existing .forge entries without "
-      "touching the archives. Lay them out as mods\\<archive>\\<file> or "
-      "mods\\<mod name>\\<archive>\\<file>; '~' disables a mod folder, and "
-      "'<n>_-_<name>.data' names the entry. Changes need a restart." },
+      "Loads loose files from mods\\ over existing\n"
+      ".forge entries without touching the archives.\n"
+      "Lay them out as mods\\<archive>\\<file> or\n"
+      "mods\\<mod name>\\<archive>\\<file>.\n"
+      "'~' disables a mod folder, and\n"
+      "'<n>_-_<name>.data' names the entry.\n"
+      "Changes need a restart." },
     { "@forge.enabled",       "Enabled" },
     { "@forge.dryrun",        "Dry run" },
     { "@forge.status.off",    "Off ([forgemod] enabled=0)." },
@@ -130,6 +134,28 @@ static const ShText kEnUS[] = {
     { "window",               "window" },
     { "play",                 "play" },
 
+    /* the translation report */
+    { "@settings.diag",       "Translation report" },
+    { "@settings.diag.hint",
+      "File text this build still wants.\n"
+      "Still in English - the row's value is\n"
+      "English text; translate it in place.\n"
+      "No text at all: keys only the build has.\n"
+      "Export writes them all to\n"
+      "lang\\<code>.missing.ini, ready to fill in.\n"
+      "A plugin without source is translated this\n"
+      "way too: its English literal is the key." },
+    { "@settings.diag.export", "Write lang\\<code>.missing.ini" },
+    { "Still in English:",    "Still in English:" },
+    { "No text at all:",      "No text at all:" },
+    { "Not declared (\"@\" keys):", "Not declared (\"@\" keys):" },
+    { "Repeated rows:",       "Repeated rows:" },
+    { "Dropped (table full):", "Dropped (table full):" },
+    { "(framework)",          "(framework)" },
+    { "%d row(s) written to %s", "%d row(s) written to %s" },
+    { "Export failed - see logs\\scripthook_text.log",
+      "Export failed - see logs\\scripthook_text.log" },
+
     /* the languages this build ships, named in their own language, so
      * the picker reads with no lang.ini present (a [LanguageNames] row
      * in a file overrides these) */
@@ -156,15 +182,18 @@ static const ShText kZhCN[] = {
       "插件开关下次启动生效；语言立即生效。" },
     { "@settings.order",      "菜单排序" },
     { "@settings.order.hint",
-      "← → 把当前行上移 / 下移一位；每次改动立即存盘，根菜单顺序同时生效。"
+      "← → 把当前行上移 / 下移一位；\n"
+      "每次改动立即存盘，根菜单顺序同时生效。\n"
       "被关掉的插件会记住它原来的位置。" },
     { "@settings.order.empty", "还没有可排序的插件菜单。" },
     { "@settings.order.saved", "顺序已保存" },
 
     { "@forge.hint",
-      "把 mods\\ 下的松散文件叠加到已有 .forge 条目上，不改动原版归档。"
-      "布局：mods\\<归档名>\\<文件> 或 mods\\<mod 名>\\<归档名>\\<文件>；"
-      "文件夹名前加 '~' 表示禁用，'<数字>_-_<条目名>.data' 指定条目。"
+      "把 mods\\ 下的松散文件叠加到已有 .forge 条目上，\n"
+      "不改动原版归档。布局：\n"
+      "mods\\<归档名>\\<文件> 或 mods\\<mod 名>\\<归档名>\\<文件>。\n"
+      "文件夹名前加 '~' 表示禁用，\n"
+      "'<数字>_-_<条目名>.data' 指定条目。\n"
       "改动需重启游戏生效。" },
     { "@forge.enabled",       "启用" },
     { "@forge.dryrun",        "仅检查不生效" },
@@ -229,6 +258,25 @@ static const ShText kZhCN[] = {
     { "boot",                 "启动" },
     { "window",               "窗口加载" },
     { "play",                 "游玩" },
+
+    { "@settings.diag",       "译文诊断" },
+    { "@settings.diag.hint",
+      "文件还欠这个版本哪些文本。\n"
+      "仍是英文：该行的值还是英文，就地改值即可。\n"
+      "完全没有文本：只有基线里才有的键。\n"
+      "导出会把它们写到\n"
+      "lang\\<语言>.missing.ini，填好即可用。\n"
+      "没有源码的插件也走这条路：它的英文原文就是键。" },
+    { "@settings.diag.export", "导出到 lang\\<语言>.missing.ini" },
+    { "Still in English:",    "仍是英文：" },
+    { "No text at all:",      "完全没有文本：" },
+    { "Not declared (\"@\" keys):", "基线未声明的 “@” 键：" },
+    { "Repeated rows:",       "重复行：" },
+    { "Dropped (table full):", "超限丢弃：" },
+    { "(framework)",          "（框架）" },
+    { "%d row(s) written to %s", "已写入 %d 行：%s" },
+    { "Export failed - see logs\\scripthook_text.log",
+      "导出失败，详见 logs\\scripthook_text.log" },
 
     { "@lang.name.zh-CN",     "简体中文" },
     { "@lang.name.en-US",     "English" }
