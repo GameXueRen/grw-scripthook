@@ -327,6 +327,13 @@ Build-Plugin 'test_plugin'  'test_plugin.c'  @('ws2_32.lib', 'gdi32.lib', 'user3
 # framework is the one thing that writes engine memory; this plugin owns
 # the six values, the ini and the menu, and links the import library.
 Build-Plugin 'ammo_capacity' 'ammo_capacity.c' @($libPath, 'libscripthook.lib')
+# TimeWeatherControl - the rewrite that replaced the third-party
+# Time&Weather.asi outright (see docs/timeweather-reverse.md): the old
+# plugin's folder, its three ini and its switch in scripthook.ini are gone
+# from both the tree and the game folder. It installs no hook at all - it is
+# a consumer of this framework's own weather API. No MinHook, no engine
+# memory.
+Build-Plugin 'TimeWeatherControl' 'TimeWeatherControl.c' @($libPath, 'libscripthook.lib')
 
 # A plugin's own files are seeded next to its .asi the first time only:
 # a later build must never overwrite settings changed in game, and never

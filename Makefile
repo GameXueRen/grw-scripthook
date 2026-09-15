@@ -20,7 +20,7 @@ GAMEDIR = ../..
 .PHONY: all roulette fling spawner npcspawner enemyreinforce modeprobe \
         modecallprobe blacklistsample filewatchsample drawsample cnchat \
         crazycars freecam fov fps chaos sample skipintro opticalcamo \
-        ammocapacity \
+        ammocapacity timeweathercontrol \
         docs clean
 
 capprobe: $(GAMEDIR)/plugins/CapProbe/CapProbe.asi
@@ -40,6 +40,17 @@ ammocapacity: $(GAMEDIR)/plugins/ammo_capacity/ammo_capacity.asi
 $(GAMEDIR)/plugins/ammo_capacity/ammo_capacity.asi: plugins/ammo_capacity/ammo_capacity.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/ammo_capacity/ammo_capacity.c -L. -lscripthook
+
+timeweathercontrol: $(GAMEDIR)/plugins/TimeWeatherControl/TimeWeatherControl.asi
+
+# The rewrite that replaced the third-party Time&Weather.asi outright
+# (docs/timeweather-reverse.md); the old plugin's folder, its three ini and
+# its switch are gone from the tree and from the game folder. It installs no
+# hook either: every change goes through the framework's own weather API, so
+# there is nothing to take over from anyone.
+$(GAMEDIR)/plugins/TimeWeatherControl/TimeWeatherControl.asi: plugins/TimeWeatherControl/TimeWeatherControl.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ plugins/TimeWeatherControl/TimeWeatherControl.c -L. -lscripthook
 
 blacklistsample: $(GAMEDIR)/plugins/blacklist_sample/blacklist_sample.asi
 

@@ -1007,7 +1007,12 @@ SH_API int  ShMenuToggle(uint32_t menu, const char *label,
 SH_API int  ShMenuNumber(uint32_t menu, const char *label,
                          float initial, float lo, float hi,
                          float step, ShMenuFn fn, void *user);
-/** opts must outlive the menu. String literals are fine. */
+/** opts must outlive the menu. String literals are fine, and so are
+ *  numbers built once into a static buffer - an hour row is just "0" to
+ *  "23" and needs no translation. The row WRAPS: one step past the last
+ *  option is the first, which is what makes a clock row usable with the
+ *  left/right keys at all. Up to 64 options; anything past that is
+ *  dropped. */
 SH_API int  ShMenuList(uint32_t menu, const char *label,
                        const char **opts, int n, int initial,
                        ShMenuFn fn, void *user);

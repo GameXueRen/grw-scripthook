@@ -153,6 +153,22 @@ fields you took; fields held by other plugins keep running.
 Struct fields that use degrees say so. World axes: x east,
 y north, z up.
 
+**Hooks.** A plugin does not install one. Anything that patches code
+or writes engine memory is the framework's, one owner, with an API in
+front of it: that is what keeps two plugins off the same byte, and what
+keeps a session that goes wrong diagnosable. A plugin that needs an
+effect the API does not have is the reason the API grows a call for it -
+`ShSetAmmoScale` is the most recent one, written because a plugin wanted
+the magazine capacity and only a hook over the engine's own computation
+can reach it (docs/ammocapacity-reverse.md). When the effect is a rule
+over someone else's calls - a file that must look missing, a read that
+must be answered differently - a plugin registers with the layer that
+already owns those calls instead (@ref files).
+
+Four plugin sources still carry MinHook of their own, from before this
+rule: `skipintro`, `ModeExitProbe`, `ModeCallProbe` and `LastRites_dlcfix`.
+Each is a convergence item, not a licence.
+
 ## Credits
 
 Firejumper93 (GhostReconWildlandsVR, MIT) for the camera
@@ -160,5 +176,13 @@ structure, the rig transforms and the no-blur byte. AngelSoleil
 and ClowdPanini's Last Rites table for head identification.
 The GRW Environment table for weather. neburas for the Windows
 spawn fix.
+
+The two third-party plugins this repository rewrote, both read from
+their shipped binaries: AmmoCapacity
+(nexusmods.com/ghostreconwildlands/mods/123), which is where the
+capacity hook point came from, and Time&Weather
+(nexusmods.com/ghostreconwildlands/mods/124), whose day/night windows
+and weather behaviour the rewrite follows. The derivations are in
+docs/ammocapacity-reverse.md and docs/timeweather-reverse.md.
 
 Source: https://github.com/PhialsBasement/grw-scripthook

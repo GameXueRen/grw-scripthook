@@ -91,7 +91,8 @@ C ABI，并按 ASI 插件约定加载 `plugins\` 下的 `.asi` 插件。
 | 敌人增援强化插件 | 计划中 | 新插件开发 |
 | 魅影模式不删档插件 | 已完成，已验证 | 见 GhostNoWipe 插件：在存档写入处用干净副本守住内容、拦下删档改名与墓碑写入，磁盘不残留删档痕迹；死亡后屏幕常驻状态提示，重启后档仍在且可继续 |
 | 魅影模式死亡改为重生（实验） | 引擎机制，不可行 | 取证确认：分支由「AI 队友是否在场」决定——有队友时死亡走 `state 7→5→4`（重载检查点 + 血量重置 = 重生），无队友时走 `state 7→4→7` 反复、血量恒为 0，最后 `5→1` 回菜单删档。插件在外部改血量（游戏内补满 3750 仍于 56ms 后判死）、调 `ShTriggerGameOver(1)`（返回成功但被忽略）均无效；GAMEOVER 态下 `ShSetHealthPlayer` 直接被拒。详见 `GhostRevive.c` 头注释与 `.codebuddy/plans/ghost-revive-findings.md` |
-| 时间天气精细化控制插件 | 计划中 | 新插件开发，N网已有大佬发布 |
+| 弹药容量插件 | 已完成 | 见 `ammo_capacity` 插件 + 框架 `ShSetAmmoScale`：逆向重写 N网 `AmmoCapacity.asi`（详见 `docs/ammocapacity-reverse.md`）。旧插件用 `VirtualProtect`+`VirtualAlloc` 手工内联钩子改弹匣容量；重写把钩子收进框架（`scripthook_ammocap.c`，MinHook 钩 `SH_IMG(0x614CB0)`，即那个**返回容量**的函数），插件只当消费者，六档倍率 0.50x…2.00x，`1.00x` 时框架不装钩。老插件需在 `scripthook.ini` 关掉（两套钩同一入口 = 竞争，框架检测到会拒绝安装）|
+| 时间天气精细化控制插件 | 已完成 | 见 `TimeWeatherControl` 插件：**正式替代** N网 `Time&Weather.asi`（详见 `docs/timeweather-reverse.md`），旧插件的目录、三个 ini 与 `scripthook.ini` 开关已从仓库与游戏目录中清除。旧插件本就是本框架天气 API 的**纯消费者**（导入表里没有 `VirtualProtect`，一个钩子都不装），故重写同样零钩子。昼夜调度照其 `.rdata` 常量表读出的两条渐变窗实现：白天 07:00-18:00 用白天速度、夜晚 20:00-05:00 用夜晚速度，05:00-07:00 与 18:00-20:00 过渡；天气走 `ShSetWeatherBlend`（带引擎过渡），`Default` 即 `ShReleaseWeather` 交还给环境系统。配置为插件自有键 `plugins\TimeWeatherControl\TimeWeatherControl.ini`；状态行显示 `时:分` + 当前时段（方括号标出）+ 实际流速；Ghost War / Mercenaries 已声明黑名单，被禁时主动交还 |
 
 
 
@@ -227,10 +228,10 @@ ShMenuToggle(page, "@fp.hidehead", 1, NULL, NULL);
 **第三方插件（没有源码）同样能汉化**——它代码里的字面量本身就是键，只要在它的目录里放一份 `lang.ini`，它的 `.asi` 一个字节都不用改：
 
 ```ini
-; plugins\Time&Weather\lang.ini
+; plugins\DayNightVisibility\lang.ini
 [zh-CN]
-"Time & Weather"      = 时间与天气
-"Time & Weather.hint" = W/S 选择，回车确认，Esc 返回
+"Day/Night Visibility"      = 敌人昼夜感知
+"Day/Night Visibility.hint" = 调整敌人视觉探测灵敏度。
 ```
 
 几条固定约定：

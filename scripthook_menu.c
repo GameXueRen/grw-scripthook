@@ -36,7 +36,12 @@
 #define LABEL       160
 #define VISIBLE     12
 #define TICK_MS     40
-#define OPTS        12
+/* Options a list row can carry. A list WRAPS at the ends - one step past
+ * the last option is the first - which is what makes a clock row possible:
+ * hours are 24 options and minutes 60, and the player cycles them with
+ * left/right. That is why this is no longer 12: a row that needs 24 would
+ * have been silently cut to 12 before. */
+#define OPTS        64
 
 /* A key that is held down repeats, and gets quicker while it is held:
  * a pause first so a single press stays a single step, then a slow
