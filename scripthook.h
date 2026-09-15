@@ -1016,11 +1016,6 @@ SH_API int  ShMenuNumber(uint32_t menu, const char *label,
 SH_API int  ShMenuList(uint32_t menu, const char *label,
                        const char **opts, int n, int initial,
                        ShMenuFn fn, void *user);
-/** A key-bind row: shows the current key; pressing Enter on it waits
- *  for the next key press, which becomes the row's value (a VK code).
- *  Esc cancels. The callback fires with the new VK. */
-SH_API int  ShMenuKeyBind(uint32_t menu, const char *label,
-                          int initial, ShMenuFn fn, void *user);
 /** Sync a toggle/list row's displayed value without firing its
  *  callback. A plugin that changed the state behind the menu's
  *  back (a hotkey flip) calls this so the next capture shows
