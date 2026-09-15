@@ -101,8 +101,17 @@ SH_API int ShSetLightningFrequency(int enable, float value) {
         ShSetError(SH_ERR_NO_GLOBAL);
         return 0;
     }
-    *(volatile float *)(uintptr_t)(wr + 0x154) = value;
-    *(volatile uint8_t *)(uintptr_t)(wr + 0x150) = enable ? 1 : 0;
+    {
+        uint8_t e = enable ? 1 : 0;
+        if (!WriteProcessMemory(GetCurrentProcess(),
+                                (void *)(uintptr_t)(wr + 0x154), &value, 4, NULL) ||
+            !WriteProcessMemory(GetCurrentProcess(),
+                                (void *)(uintptr_t)(wr + 0x150), &e, 1, NULL)) {
+            ShSetError(SH_ERR_UNWRITABLE);
+            return 0;
+        }
+    }
+    ShSetError(SH_OK);
     return 1;
 }
 
@@ -114,7 +123,15 @@ static int ModeByte(int off, int on) {
         ShSetError(SH_ERR_NO_GLOBAL);
         return 0;
     }
-    *(volatile uint8_t *)(uintptr_t)(g + off) = on ? 1 : 0;
+    {
+        uint8_t v = on ? 1 : 0;
+        if (!WriteProcessMemory(GetCurrentProcess(),
+                                (void *)(uintptr_t)(g + off), &v, 1, NULL)) {
+            ShSetError(SH_ERR_UNWRITABLE);
+            return 0;
+        }
+    }
+    ShSetError(SH_OK);
     return 1;
 }
 

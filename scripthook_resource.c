@@ -31,6 +31,7 @@
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
+extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern void ShSetError(int err);
 extern int ShStatRead(uint64_t stat, uint32_t *out);
 extern int ShStatWrite(uint64_t stat, uint32_t value);
@@ -128,7 +129,12 @@ SH_API int ShGetSkillPoints(uint32_t *out) {
 
     if (!out) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (!a) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
-    memcpy(out, (void *)(uintptr_t)a, 4);
+    /* Kernel-mediated read, so a page the engine frees under us costs a
+     * failed call instead of a fault. */
+    if (!ShReadMem(a, out, 4)) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
     ShSetError(SH_OK);
     return 1;
 }
@@ -137,7 +143,11 @@ SH_API int ShSetSkillPoints(uint32_t value) {
     uint64_t a = SkillAddr();
 
     if (!a) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
-    memcpy((void *)(uintptr_t)a, &value, 4);
+    if (!WriteProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)a,
+                            &value, 4, NULL)) {
+        ShSetError(SH_ERR_UNWRITABLE);
+        return 0;
+    }
     ShSetError(SH_OK);
     return 1;
 }

@@ -346,11 +346,17 @@ SH_API int ShSetCannotDiePlayer(int on) {
     uint64_t comp = 0;
     if (!ShRequireInGame()) return 0;
     if (!PlayerComponent(&comp)) return 0;
-    if (!ShReadableAddr(comp + OFF_NODEATH, 1)) {
-        ShSetError(SH_ERR_UNWRITABLE);
-        return 0;
+    {
+        uint8_t v = on ? 1 : 0;
+        /* Kernel-mediated write: a readable check followed by a bare store
+         * loses the race with a component the engine frees in between. */
+        if (!WriteProcessMemory(GetCurrentProcess(),
+                                (void *)(uintptr_t)(comp + OFF_NODEATH),
+                                &v, 1, NULL)) {
+            ShSetError(SH_ERR_UNWRITABLE);
+            return 0;
+        }
     }
-    *(uint8_t *)(uintptr_t)(comp + OFF_NODEATH) = on ? 1 : 0;
     ShSetError(SH_OK);
     return 1;
 }

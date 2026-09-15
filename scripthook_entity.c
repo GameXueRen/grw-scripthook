@@ -602,20 +602,22 @@ static int SetGroupHidden(uint64_t ctrl, int hidden, int *seen) {
     uint16_t n = 0, i;
     int touched = 0;
 
-    if (!arr || !ShReadableAddr(ctrl + CTRL_COUNT, 2)) return 0;
-    memcpy(&n, (void *)(uintptr_t)(ctrl + CTRL_COUNT), 2);
+    if (!arr) return 0;
+    if (!ShReadMem(ctrl + CTRL_COUNT, &n, 2)) return 0;
     if (!n || n > 64) return 0;
 
     for (i = 0; i < n; i++) {
         uint64_t node = ShReadQ(arr + (uint64_t)i * 8);
         uint16_t f;
 
-        if (!node || !ShReadableAddr(node + NODE_FLAGS, 2)) continue;
+        if (!node) continue;
+        if (!ShReadMem(node + NODE_FLAGS, &f, 2)) continue;
         if (seen) (*seen)++;
-        memcpy(&f, (void *)(uintptr_t)(node + NODE_FLAGS), 2);
         f = hidden ? (uint16_t)(f | NODE_HIDDEN)
                    : (uint16_t)(f & ~NODE_HIDDEN);
-        memcpy((void *)(uintptr_t)(node + NODE_FLAGS), &f, 2);
+        if (!WriteProcessMemory(GetCurrentProcess(),
+                                (void *)(uintptr_t)(node + NODE_FLAGS),
+                                &f, 2, NULL)) continue;
         touched++;
     }
     return touched;
