@@ -629,7 +629,7 @@ static void Scroll(Menu *m) {
 static void Navigate(void) {
     Menu *m = MenuOf(g_current);
     Item *it;
-    int upE, wE, dnE, sE, lfE, aE, rtE, dE;
+    int upE, dnE, lfE, rtE;
     int upHeld, dnHeld, lfHeld, rtHeld;
     int navDown, navDir, valDown, valDir, r;
 
@@ -639,20 +639,21 @@ static void Navigate(void) {
     BackOutOfHiddenPage(m);
     m = MenuOf(g_current);
     if (!m || VisibleCount(m) == 0) return;
-    /* Arrows and WASD both navigate, and every one of them is polled
-     * on its own so the two sets coexist instead of stealing presses
-     * from each other: a short circuit here would leave one of them
-     * with a stale idea of whether it is down.
+    /* The arrows navigate and nothing else does. WASD used to navigate as
+     * well, which is why the menu had to hide the whole keyboard while it
+     * was open; giving it back is what lets the player keep playing. Each
+     * arrow is polled on its own so none of them is left with a stale idea
+     * of whether it is down.
      */
-    upE = Pressed(VK_UP);     wE = Pressed('W');
-    dnE = Pressed(VK_DOWN);   sE = Pressed('S');
-    lfE = Pressed(VK_LEFT);   aE = Pressed('A');
-    rtE = Pressed(VK_RIGHT);  dE = Pressed('D');
+    upE = Pressed(VK_UP);
+    dnE = Pressed(VK_DOWN);
+    lfE = Pressed(VK_LEFT);
+    rtE = Pressed(VK_RIGHT);
 
-    upHeld = upE || wE || KeyDown(VK_UP)    || KeyDown('W');
-    dnHeld = dnE || sE || KeyDown(VK_DOWN)  || KeyDown('S');
-    lfHeld = lfE || aE || KeyDown(VK_LEFT)  || KeyDown('A');
-    rtHeld = rtE || dE || KeyDown(VK_RIGHT) || KeyDown('D');
+    upHeld = upE || KeyDown(VK_UP);
+    dnHeld = dnE || KeyDown(VK_DOWN);
+    lfHeld = lfE || KeyDown(VK_LEFT);
+    rtHeld = rtE || KeyDown(VK_RIGHT);
 
     navDown = upHeld || dnHeld;
     navDir  = dnHeld ? 1 : -1;
@@ -717,52 +718,90 @@ static void Navigate(void) {
     }
 }
 
-/* Keys are taken only while the menu is actually drawn. A
- * menu that is wanted but cannot render yet (overlay not up,
- * game state not PLAYING, a world reload) must never swallow
- * the keyboard: that is exactly the bug where the character
- * freezes with no menu on screen.
+/* The menu's own keys: the only ones it acts on, and the only ones it hides
+ * from the game while it is up. Everything else stays the player's - WASD,
+ * the mouse and the rest keep driving the character, which is what makes it
+ * possible to tune a row and watch what it does.
+ *
+ * ESC and Backspace are the two that mean "leave" (back a level, or out), and
+ * they are in the list for the same reason the rest are: a game that also saw
+ * them would act on the same press.
+ *
+ * One key at a time, never the whole keyboard. The capture that hid every
+ * key (ShCaptureKeys) froze the character for as long as the menu was open,
+ * and it was one flag shared with whichever plugin last took the keyboard -
+ * a chat box closing could take the menu's keys back with it. These are this
+ * module's own flags, so nothing outside can clear them.
+ */
+static const int g_menuKeys[] = {
+    VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_ESCAPE, VK_BACK
+};
+#define MENU_KEYS (int)(sizeof(g_menuKeys) / sizeof(g_menuKeys[0]))
+
+static int LeaveKey(int vk) {
+    return vk == VK_ESCAPE || vk == VK_BACK;
+}
+
+static int LeaveHeld(void) {
+    return (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0 ||
+           (GetAsyncKeyState(VK_BACK) & 0x8000) != 0;
+}
+
+/* Keys are hidden only while the menu is actually drawn. A menu that is
+ * wanted but cannot render yet (overlay not up, game state not PLAYING, a
+ * world reload) must hide nothing at all: that is exactly the bug where the
+ * character freezes with no menu on screen.
  */
 static volatile int g_captureNow = 0;
-static volatile int g_escDefer = 0;
-static DWORD g_escDeferAt = 0;
+static volatile int g_leaveDefer = 0;
+static DWORD g_leaveDeferAt = 0;
+static int g_hotkeyHidden = 0;      /* the menu hotkey currently hidden, or 0 */
 
 /* Not SetCapture: that is a Win32 API and the name collides. */
 static void MenuCapture(int on) {
+    int i;
+
     if (on == g_captureNow) return;
     g_captureNow = on;
-    ShCaptureKeys(on);
+
     if (on) {
-        /* While the menu is up, ESC belongs to it: the menu
-         * navigates with it (back a level, or exit). Without
-         * the block the game would open its own pause menu on
-         * the same press and the two fight. */
-        ShBlockKey(VK_ESCAPE, 1);
-        g_escDefer = 0;
+        for (i = 0; i < MENU_KEYS; i++) ShBlockKey(g_menuKeys[i], 1);
+        g_hotkeyHidden = (int)g_key;
+        if (g_hotkeyHidden) ShBlockKey(g_hotkeyHidden, 1);
+        g_leaveDefer = 0;
         return;
     }
-    /* Releasing capture: if ESC is still held, the very press
-     * that closed the menu is in flight. Keep it blocked until
-     * the key goes up (or a short timeout) so it never reaches
-     * the game and pops its pause menu on the way out. */
-    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) {
-        g_escDefer = 1;
-        g_escDeferAt = GetTickCount();
+
+    /* Closing: the navigation keys go back. The two leave keys wait - if one
+     * of them is still held, the press that closed the menu is in flight, and
+     * handing it over would make the game act on the way out (its own pause
+     * menu, on the way to something else). */
+    for (i = 0; i < MENU_KEYS; i++)
+        if (!LeaveKey(g_menuKeys[i])) ShBlockKey(g_menuKeys[i], 0);
+    if (g_hotkeyHidden) {
+        ShBlockKey(g_hotkeyHidden, 0);
+        g_hotkeyHidden = 0;
+    }
+    if (LeaveHeld()) {
+        g_leaveDefer = 1;
+        g_leaveDeferAt = GetTickCount();
         return;
     }
-    ShBlockKey(VK_ESCAPE, 0);
+    for (i = 0; i < MENU_KEYS; i++)
+        if (LeaveKey(g_menuKeys[i])) ShBlockKey(g_menuKeys[i], 0);
 }
 
-/* A deferred ESC block ends once the key is up, or after a
- * second so a stuck key cannot swallow ESC forever. */
-static void EscDeferTick(void) {
+/* A deferred leave ends once both keys are up, or after a second so a stuck
+ * key cannot swallow them forever. */
+static void LeaveDeferTick(void) {
     DWORD now;
-    if (!g_escDefer) return;
+
+    if (!g_leaveDefer) return;
     now = GetTickCount();
-    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) == 0 ||
-        (int)(now - g_escDeferAt) > 1000) {
-        g_escDefer = 0;
+    if (!LeaveHeld() || (int)(now - g_leaveDeferAt) > 1000) {
+        g_leaveDefer = 0;
         ShBlockKey(VK_ESCAPE, 0);
+        ShBlockKey(VK_BACK, 0);
     }
 }
 
@@ -1061,7 +1100,7 @@ static DWORD WINAPI MenuThread(LPVOID p) {
     for (;;) {
         Sleep(TICK_MS);
 
-        EscDeferTick();
+        LeaveDeferTick();
 
         /* Background window: the menu must not react to keys.
          * Forget held keys too, so nothing fires on refocus. */
