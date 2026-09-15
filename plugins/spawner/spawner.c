@@ -155,7 +155,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
-        CreateThread(NULL, 0, BindThread, NULL, 0, NULL);
+        {
+            HANDLE h = CreateThread(NULL, 0, BindThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);   /* never waited on */
+        }
     }
     return TRUE;
 }

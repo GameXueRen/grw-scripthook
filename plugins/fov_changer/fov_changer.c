@@ -23,9 +23,13 @@
 #define TICK_MS     500
 
 static uint32_t g_menu = 0;
-static volatile int   g_on = 0;
+static volatile LONG  g_on = 0;      /* read by the tick, written by the menu */
 static volatile float g_deg = 0.0f;
 static volatile float g_defaultRad = 0.0f;
+
+static int OverrideOn(void) {
+    return InterlockedCompareExchange(&g_on, 0, 0) ? 1 : 0;
+}
 
 /* Captured while the override is off, so it is the game's
  * value rather than one of ours read back.
@@ -33,7 +37,7 @@ static volatile float g_defaultRad = 0.0f;
 static void LearnDefault(void) {
     ShCamera c;
 
-    if (g_on || g_defaultRad > 0.0f) return;
+    if (OverrideOn() || g_defaultRad > 0.0f) return;
     if (!ShIsInGame()) return;
     if (!ShGetCamera(&c)) return;
     if (c.fov > 0.05f && c.fov < 3.0f) {
@@ -111,14 +115,17 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
     if (value) {
         LearnDefault();
         if (g_deg <= 0.0f) g_deg = DefaultRad() * RAD2DEG;
-        g_on = 1;
+        InterlockedExchange(&g_on, 1);
         if (!Push()) {
-            g_on = 0;
+            InterlockedExchange(&g_on, 0);
+            /* The framework's row already flipped to "on"; put it back, or
+             * the menu claims an override that is not in force. */
+            ShMenuSetValue(g_menu, "@fov.override", 0);
             ShMenuStatus(g_menu, "@fov.notready");
             return;
         }
     } else {
-        g_on = 0;
+        InterlockedExchange(&g_on, 0);
         ShCameraReleaseFields(SH_CAM_FOV);
     }
     Report();
@@ -128,7 +135,7 @@ static void OnFov(uint32_t menu, uint32_t item, int value,
                   void *user) {
     (void)menu; (void)item; (void)user;
     g_deg = (float)value;
-    if (g_on) Push();
+    if (OverrideOn()) Push();
     Report();
 }
 
@@ -136,24 +143,73 @@ static void OnReset(uint32_t menu, uint32_t item, int value,
                     void *user) {
     (void)menu; (void)item; (void)value; (void)user;
     g_deg = DefaultRad() * RAD2DEG;
-    if (g_on) Push();
+    /* The number row shows the framework's copy, so it has to be told. */
+    ShMenuSetValue(g_menu, "@fov.vertical", (int)(g_deg + 0.5f));
+    if (OverrideOn()) Push();
     Report();
+}
+
+/* A blocked (PvP) mode: the framework takes this page out of the menu, so
+ * the override has to let go here - a fov left pushed in Ghost War is
+ * exactly what the blacklist exists to prevent. */
+static void OnBlocked(int allowed, int blocked, void *user) {
+    (void)blocked; (void)user;
+
+    if (!allowed) ShCameraReleaseFields(SH_CAM_FOV);
+    else if (OverrideOn()) Push();
 }
 
 /* Entering a session reinstalls the camera hook, so the
  * override is pushed again to survive the transition.
  */
 static DWORD WINAPI TickThread(LPVOID p) {
-    int wasIn = 0;
+    int held = 0;      /* the override is in force right now */
     (void)p;
 
     for (;;) {
         int in = ShIsInGame();
+        int allowed = ShPluginAllowed();
 
         LearnDefault();
-        if (g_on && in && !wasIn) Push();
-        wasIn = in;
+
+        if (!allowed) {
+            /* Blocked: the menu cannot switch it off, so it is let go
+             * here and pushed again once the mode allows it. */
+            if (held) { ShCameraReleaseFields(SH_CAM_FOV); held = 0; }
+        } else if (OverrideOn() && in && !held) {
+            if (Push()) held = 1;
+        } else if (held && (!OverrideOn() || !in)) {
+            held = 0;      /* off, or off the camera: the hold is over */
+        }
         Sleep(TICK_MS);
+    }
+    return 0;
+}
+
+/* All initialization is here, not in DllMain: that runs under the loader
+ * lock, where taking the framework's own locks and allocating is what the
+ * plugin contract forbids. */
+static DWORD WINAPI InitThread(LPVOID p) {
+    (void)p;
+    g_deg = FALLBACK * RAD2DEG;
+    FovText();
+    g_menu = ShMenuCreate("@fov.page");
+    if (!g_menu) return 0;          /* nothing to drive without a page */
+    ShMenuToggle(g_menu, "@fov.override", 0, OnToggle, NULL);
+    ShMenuNumber(g_menu, "@fov.vertical", g_deg, DEG_MIN, DEG_MAX,
+                 DEG_STEP, OnFov, NULL);
+    ShMenuAction(g_menu, "@fov.reset", OnReset, NULL);
+    Report();
+    /* A view override is not something a PvP match wants; saying it out
+     * loud is what makes the release in the tick deliberate rather than an
+     * accident of the default. */
+    ShPluginBlacklist(SH_MODE_BLACKLIST_GHOST_WAR |
+                      SH_MODE_BLACKLIST_MERCENARIES);
+    ShPluginOnBlocked(OnBlocked, NULL);
+    {
+        HANDLE h = CreateThread(NULL, 0, TickThread, NULL, 0, NULL);
+
+        if (h) CloseHandle(h);
     }
     return 0;
 }
@@ -162,18 +218,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
+        {
+            HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
 
-        g_deg = FALLBACK * RAD2DEG;
-        FovText();
-        g_menu = ShMenuCreate("@fov.page");
-        ShMenuToggle(g_menu, "@fov.override", 0, OnToggle, NULL);
-        ShMenuNumber(g_menu, "@fov.vertical", g_deg, DEG_MIN, DEG_MAX,
-                     DEG_STEP, OnFov, NULL);
-        ShMenuAction(g_menu, "@fov.reset", OnReset,
-                     NULL);
-        Report();
-
-        CreateThread(NULL, 0, TickThread, NULL, 0, NULL);
+            if (h) CloseHandle(h);   /* never waited on */
+        }
     }
     return TRUE;
 }

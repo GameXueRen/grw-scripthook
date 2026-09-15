@@ -162,6 +162,17 @@ static volatile LONG  g_nrules;     /* rules live right now            */
 static volatile LONG  g_released;   /* 1 = the rules are out again     */
 static DWORD          g_started;    /* when the first rule went in     */
 
+/* Registration and release are driven from two threads - the menu callback
+ * thread (a switch) and the watcher thread (the release) - and both walk
+ * g_rules. Without this they can interleave into "released, then a rule put
+ * back by the other thread": the watcher has already returned by then, so
+ * that rule would stay in the layer for the rest of the session. The
+ * section is recursive, so the nested take inside GroupRules is fine. */
+static CRITICAL_SECTION g_lock;
+
+static void SkipLock(void)   { EnterCriticalSection(&g_lock); }
+static void SkipUnlock(void) { LeaveCriticalSection(&g_lock); }
+
 /* The menu, and the one framework call the status line needs. Bound by
  * name in BuildMenu; declared up here because the release thread updates
  * the line as well. */
@@ -238,6 +249,7 @@ static void GroupRules(int group, int on) {
     int  base  = group ? (int)ARRAY_LEN(g_launch) : 0;
     int  i;
 
+    SkipLock();
     for (i = 0; i < count; i++) {
         SkipRule *r = &g_rules[base + i];
 
@@ -274,6 +286,7 @@ static void GroupRules(int group, int on) {
             InterlockedDecrement(&g_nrules);
         }
     }
+    SkipUnlock();
 }
 
 /* How many names the enabled groups cover right now, and how many of them
@@ -289,9 +302,19 @@ static int NeedCount(void) {
 
 static int HaveCount(void) {
     int i, c = 0;
+    int nLaunch = (int)ARRAY_LEN(g_launch);
+    int launch = WantLaunch(), legal = WantLegal();
 
-    for (i = 0; i < (int)ARRAY_LEN(g_rules); i++)
+    /* Counted over the enabled groups only, so it is the same basis as
+     * NeedCount: a group switched off after the engine already asked for
+     * its names must not make "have" reach "need" before the other group
+     * has been intercepted at all. */
+    for (i = 0; i < (int)ARRAY_LEN(g_rules); i++) {
+        int group = (i < nLaunch) ? 0 : 1;
+        if (group == 0 && !launch) continue;
+        if (group == 1 && !legal) continue;
         if (InterlockedCompareExchange(&g_rules[i].hit, 0, 0)) c++;
+    }
     return c;
 }
 
@@ -353,9 +376,12 @@ static void UpdateStatus(void) {
  * last rule is gone, so this is also what puts the process back the way it
  * was found - there is no slot of ours to check any more. */
 static void ReleaseAll(const char *why) {
-    if (InterlockedExchange(&g_released, 1)) return;   /* once, ever */
+    SkipLock();
+    if (InterlockedExchange(&g_released, 1)) { SkipUnlock(); return; }
     GroupRules(0, 0);
     GroupRules(1, 0);
+    SkipUnlock();
+    /* Outside the lock: this flushes a file. */
     SkipLog("released (%s) after %lu ms; %lu file call(s) had been through "
             "the layer by then",
             why, (unsigned long)(GetTickCount() - g_started),
@@ -398,6 +424,14 @@ static DWORD WINAPI ReleaseThread(LPVOID p) {
         }
         if (g_getGameState && g_getGameState() == SH_STATE_MENU_LOCAL) {
             ReleaseAll("the main menu was up");
+            return 0;
+        }
+        /* The keeper above leans on an export that can be missing, and on
+         * the state ever being reported. This is the hard stop: by now the
+         * intro is over whatever happened, and holding the rules past it
+         * would be the opposite of "one-shot". */
+        if (GetTickCount() - g_started > 120000u) {
+            ReleaseAll("timeout - the intro is over");
             return 0;
         }
     }
@@ -508,7 +542,11 @@ static void SaveIni(void) {
 
 static void OnLaunch(int v) {
     InterlockedExchange(&g_skipLaunch, v ? 1 : 0);
+    /* The check and the registration share the release lock, so a release
+     * running right now cannot be followed by a rule slipping back in. */
+    SkipLock();
     if (!Released()) GroupRules(0, WantLaunch());
+    SkipUnlock();
     SkipLog("menu: skip_launch_videos=%d%s", WantLaunch(),
             Released() ? " (the rules are already out - this applies to the "
                          "next launch)" : "");
@@ -517,7 +555,9 @@ static void OnLaunch(int v) {
 
 static void OnLegal(int v) {
     InterlockedExchange(&g_skipLegal, v ? 1 : 0);
+    SkipLock();
     if (!Released()) GroupRules(1, WantLegal());
+    SkipUnlock();
     SkipLog("menu: skip_legal_videos=%d%s", WantLegal(),
             Released() ? " (the rules are already out - this applies to the "
                          "next launch)" : "");
@@ -581,6 +621,7 @@ static DWORD WINAPI InitThread(LPVOID p) {
     HMODULE di;
 
     (void)p;
+    InitializeCriticalSection(&g_lock);
     OpenLog();
     SkipLog("--- skipintro plugin, hiding through the framework's layer ---");
     ResolveIniPath();
@@ -609,7 +650,19 @@ static DWORD WINAPI InitThread(LPVOID p) {
             "soon as the enabled names have been intercepted",
             (long)InterlockedCompareExchange(&g_nrules, 0, 0));
     UpdateStatus();
-    CreateThread(NULL, 0, ReleaseThread, NULL, 0, NULL);
+    {
+        HANDLE h = CreateThread(NULL, 0, ReleaseThread, NULL, 0, NULL);
+
+        if (h) {
+            CloseHandle(h);   /* never waited on */
+        } else {
+            /* No watcher means the rules would stay in the layer for the
+             * whole session - the opposite of what this plugin promises, so
+             * they are handed back here and now instead. */
+            SkipLog("no watcher thread: releasing the rules at once");
+            ReleaseAll("no watcher thread");
+        }
+    }
     return 0;
 }
 
@@ -618,7 +671,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_inst = inst;
         DisableThreadLibraryCalls(inst);
-        CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+        {
+            HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);
+        }
     }
     return TRUE;
 }

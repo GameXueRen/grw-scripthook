@@ -1772,6 +1772,12 @@ SH_API int  ShHeadBone(void);
 #define SH_CAM_FOV    0x04
 #define SH_CAM_SKEW   0x08
 #define SH_CAM_MODE   0x10
+/** The first person eye claim `ShCameraFirstPerson` takes. It is separate
+ *  from SH_CAM_POS on purpose (the eye is the engine's own answer, not an
+ *  absolute position), so releasing it must not be done by passing
+ *  SH_CAM_POS: that also clears the position and the orbit arm, which
+ *  another plugin may be holding. */
+#define SH_CAM_HEAD   0x200u
 
 typedef struct {
     uint32_t apply;

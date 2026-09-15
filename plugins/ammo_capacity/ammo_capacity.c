@@ -67,8 +67,7 @@ static const ShText kEn[] = {
     { "@ac.note",  "Changes apply after visiting an ammo crate." },
     { "@ac.err.build", "Unsupported game build" },
     { "@ac.err.hook",  "Hook validation failed" },
-    { "@ac.err.save",  "INI save failed" },
-    { "@ac.state", "%s  (capacity %s)" }
+    { "@ac.err.save",  "INI save failed" }
 };
 
 static const ShText kZh[] = {
@@ -77,8 +76,7 @@ static const ShText kZh[] = {
     { "@ac.note",  "修改后需到弹药箱补给后生效。" },
     { "@ac.err.build", "不支持的游戏版本" },
     { "@ac.err.hook",  "Hook校验失败" },
-    { "@ac.err.save",  "配置保存失败" },
-    { "@ac.state", "%s（容量 %s）" }
+    { "@ac.err.save",  "配置保存失败" }
 };
 
 static void AcText(void) {
@@ -166,15 +164,18 @@ static void LoadIni(void) {
           g_labels[InterlockedCompareExchange(&g_index, 0, 0)]);
 }
 
-static void SaveIni(void) {
+static int SaveIni(void) {
     char buf[32];
     LONG i = InterlockedCompareExchange(&g_index, 0, 0);
 
-    if (!g_iniPath[0]) return;
+    if (!g_iniPath[0]) return 0;
     if (i < 0 || i >= NVALS) i = VANILLA;
     snprintf(buf, sizeof(buf), "%d.%02d",
              g_num[i] / g_den[i], (g_num[i] % g_den[i]) * 100 / g_den[i]);
-    WritePrivateProfileStringA("AmmoCapacity", "Multiplier", buf, g_iniPath);
+    /* Reported, so @ac.err.save is reachable: it was the old plugin's line
+     * for exactly this failure. */
+    return WritePrivateProfileStringA("AmmoCapacity", "Multiplier", buf,
+                                      g_iniPath) ? 1 : 0;
 }
 
 /* ---- the scale, through the framework --------------------------------- */
@@ -200,20 +201,6 @@ static int Apply(int index) {
     return 1;
 }
 
-static void UpdateStatus(int applied) {
-    int num = 0, den = 0;
-
-    if (!g_menu) return;
-    if (!applied) return;              /* Apply already put the error up */
-    ShGetAmmoScale(&num, &den);
-    if (num == 1 && den == 1)
-        ShMenuStatus(g_menu, "@ac.note");
-    else
-        ShMenuStatusF(g_menu, "@ac.state", g_labels[
-                          InterlockedCompareExchange(&g_index, 0, 0)],
-                      g_labels[InterlockedCompareExchange(&g_index, 0, 0)]);
-}
-
 /* ---- menu ------------------------------------------------------------- */
 
 static void OnPick(uint32_t menu, uint32_t item, int value, void *user) {
@@ -222,7 +209,11 @@ static void OnPick(uint32_t menu, uint32_t item, int value, void *user) {
     AcLog("menu: index %d (%s)", value,
           (value >= 0 && value < NVALS) ? g_labels[value] : "?");
     if (!Apply(value)) return;
-    SaveIni();
+    if (!SaveIni()) {
+        AcLog("SaveIni failed for index %d", value);
+        ShMenuStatus(g_menu, "@ac.err.save");
+        return;
+    }
     /* The status line carries the plain statement the old plugin used, so
      * the one thing a player has to know - when it lands - is always on
      * screen. */
@@ -259,6 +250,22 @@ static void OpenLog(void) {
     g_log = fopen(path, "a");
 }
 
+/* Blocked, or unblocked, mid-session: this plugin has no tick thread of
+ * its own, so this callback is where the change lands. Vanilla is 1/1,
+ * which makes the framework leave the engine's own capacity alone - the
+ * honest state for a mode this plugin is not allowed to touch. */
+static void OnBlocked(int allowed, int blocked, void *user) {
+    (void)blocked; (void)user;
+
+    if (!allowed) {
+        ShSetAmmoScale(1, 1);
+        AcLog("blocked in this mode: the capacity is the game's own again");
+    } else {
+        Apply((int)InterlockedCompareExchange(&g_index, 0, 0));
+        AcLog("allowed again: the configured multiplier is back");
+    }
+}
+
 static DWORD WINAPI InitThread(LPVOID p) {
     LONG idx;
 
@@ -269,6 +276,16 @@ static DWORD WINAPI InitThread(LPVOID p) {
     LoadIni();
     BuildMenu();
 
+    /* The one mode rule this plugin has: a capacity multiplier is not
+     * something a PvP match wants. Declared so the framework takes the page
+     * out of the menu there and ShPluginAllowed turns false. */
+    if (!ShPluginBlacklist(SH_MODE_BLACKLIST_GHOST_WAR |
+                           SH_MODE_BLACKLIST_MERCENARIES))
+        AcLog("blacklist: declaration refused (error %d)", ShLastError());
+    if (!ShPluginOnBlocked(OnBlocked, NULL))
+        AcLog("blacklist: ShPluginOnBlocked refused (error %d)",
+              ShLastError());
+
     /* Vanilla costs nothing: the framework installs its hook on the first
      * call that asks for something else, so a session left at 1.00x runs
      * with no hook at all. */
@@ -276,6 +293,12 @@ static DWORD WINAPI InitThread(LPVOID p) {
     AcLog("ready: index %ld (%s), framework scale %s", (long)idx,
           (idx >= 0 && idx < NVALS) ? g_labels[idx] : "?",
           ShAmmoScaleActive() ? "active" : "not needed yet");
+    if (!ShPluginAllowed()) {
+        /* A session that starts in a blocked mode: the page is hidden, so
+         * the engine keeps its own capacity. */
+        AcLog("blocked in this session: the multiplier is not applied");
+        return 0;
+    }
     if (!Apply((int)idx)) return 0;
     return 0;
 }
@@ -285,7 +308,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_inst = inst;
         DisableThreadLibraryCalls(inst);
-        CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+        {
+            HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);   /* never waited on */
+        }
     }
     return TRUE;
 }

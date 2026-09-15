@@ -219,40 +219,50 @@ static void InstallHook(void) {
 
     for (i = 0; i < 480; i++) {
         HMODULE up = GetModuleHandleA(TARGET_DLL);
+        LPVOID fn;
 
-        if (up) {
-            LPVOID fn = (LPVOID)GetProcAddress(up, TARGET_FN);
+        if (!up) {
+            if (i == 0)
+                DlcLog("waiting for %s to be loaded...", TARGET_DLL);
+            Sleep(i < 240 ? 250 : 1000);
+            continue;
+        }
 
-            if (!fn) {
-                DlcLog("install: %s has no %s export - not one call is "
-                       "touched, the game keeps its own answers",
-                       TARGET_DLL, TARGET_FN);
-                return;
-            }
-            st = MH_CreateHook(fn, (LPVOID)HookIsOwned,
-                               (LPVOID *)&g_realIsOwned);
-            if (st != MH_OK) {
-                DlcLog("install: MH_CreateHook failed (%d) - not one call is "
-                       "touched, the game keeps its own answers", (int)st);
-                return;
-            }
-            st = MH_EnableHook(fn);
-            if (st != MH_OK) {
-                DlcLog("install: MH_EnableHook failed (%d) - not one call is "
-                       "touched, the game keeps its own answers", (int)st);
-                return;
-            }
-            DlcLog("install: %s!%s hooked at %p (original %p)",
-                   TARGET_DLL, TARGET_FN, fn, (void *)g_realIsOwned);
-            DlcLog("install: id %d alone will be answered owned",
-                   TARGET_ID);
+        fn = (LPVOID)GetProcAddress(up, TARGET_FN);
+        if (!fn) {
+            DlcLog("install: %s has no %s export - not one call is "
+                   "touched, the game keeps its own answers",
+                   TARGET_DLL, TARGET_FN);
+            MH_Uninitialize();
             return;
         }
-        if (i == 0)
-            DlcLog("waiting for %s to be loaded...", TARGET_DLL);
-        Sleep(i < 240 ? 250 : 1000);
+        st = MH_CreateHook(fn, (LPVOID)HookIsOwned,
+                           (LPVOID *)&g_realIsOwned);
+        if (st != MH_OK) {
+            DlcLog("install: MH_CreateHook failed (%d) - not one call is "
+                   "touched, the game keeps its own answers", (int)st);
+            MH_Uninitialize();
+            return;
+        }
+        st = MH_EnableHook(fn);
+        if (st != MH_OK) {
+            DlcLog("install: MH_EnableHook failed (%d) - not one call is "
+                   "touched, the game keeps its own answers", (int)st);
+            /* Not a half-installed state: the trampoline goes with the
+             * hook, and MinHook is shut down again. */
+            MH_RemoveHook(fn);
+            g_realIsOwned = NULL;
+            MH_Uninitialize();
+            return;
+        }
+        DlcLog("install: %s!%s hooked at %p (original %p)",
+               TARGET_DLL, TARGET_FN, fn, (void *)g_realIsOwned);
+        DlcLog("install: id %d alone will be answered owned",
+               TARGET_ID);
+        return;
     }
     DlcLog("gave up waiting for %s - not one call is touched", TARGET_DLL);
+    MH_Uninitialize();
 }
 
 /* ---- menu -------------------------------------------------------------- */
@@ -369,7 +379,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_inst = inst;
         DisableThreadLibraryCalls(inst);
-        CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+        {
+            HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);   /* never waited on */
+        }
     }
     return TRUE;
 }

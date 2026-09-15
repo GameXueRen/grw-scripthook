@@ -386,6 +386,9 @@ static void RefreshStatus(float hours, float rate, int inGame, int allowed) {
     int h, m;
 
     if (!g_menu) return;
+    /* Only while this page is the one on screen - nobody can read the line
+     * otherwise, and the tick runs four times a second. */
+    if (!ShMenuIsShowing(g_menu)) return;
     if (!inGame) { ShMenuStatus(g_menu, "@tw.wait"); return; }
     if (!allowed) { ShMenuStatus(g_menu, "@tw.blocked"); return; }
     /* Switched off is not "waiting for a game": that was the old line's
@@ -405,6 +408,32 @@ static void RefreshStatus(float hours, float rate, int inGame, int allowed) {
     ShMenuStatusF(g_menu, "@tw.status", clock, phases, (double)shown);
 }
 
+/* The speed rows are lists, not number rows. A number row's value reaches
+ * its callback as an int (scripthook_menu.c casts it), so a 0.25 step would
+ * arrive as 0 for "0.75" - the day clock would stop. Entries are 0.25 apart
+ * and the callback gets the index, which maps straight to hundredths. */
+#define SPEED_STEPS 41
+static char        g_speedLabel[SPEED_STEPS][8];
+static const char *g_speedOpts[SPEED_STEPS];
+
+static void BuildSpeedOpts(void) {
+    int i;
+
+    if (g_speedOpts[0]) return;
+    for (i = 0; i < SPEED_STEPS; i++) {
+        snprintf(g_speedLabel[i], sizeof(g_speedLabel[i]), "%.2fx", i * 0.25);
+        g_speedOpts[i] = g_speedLabel[i];
+    }
+}
+
+static int SpeedIndex(LONG hundredths) {
+    int i = (int)((hundredths + 12) / 25);      /* nearest 0.25 step */
+
+    if (i < 0) i = 0;
+    if (i >= SPEED_STEPS) i = SPEED_STEPS - 1;
+    return i;
+}
+
 static void OnEnabled(uint32_t menu, uint32_t item, int value, void *user) {
     (void)menu; (void)item; (void)user;
     InterlockedExchange(&g_enabled, value ? 1 : 0);
@@ -416,18 +445,20 @@ static void OnEnabled(uint32_t menu, uint32_t item, int value, void *user) {
 
 static void OnDay(uint32_t menu, uint32_t item, int value, void *user) {
     (void)menu; (void)item; (void)user;
-    InterlockedExchange(&g_daySpeed, (LONG)(value * 100.0f + 0.5f));
+    if (value < 0 || value >= SPEED_STEPS) return;
+    InterlockedExchange(&g_daySpeed, (LONG)value * 25);
     InterlockedExchange(&g_sentRate, -1);
     SaveConfig();
-    TwLog("menu: day_speed=%.2f", value);
+    TwLog("menu: day_speed=%d.%02d", (value * 25) / 100, (value * 25) % 100);
 }
 
 static void OnNight(uint32_t menu, uint32_t item, int value, void *user) {
     (void)menu; (void)item; (void)user;
-    InterlockedExchange(&g_nightSpeed, (LONG)(value * 100.0f + 0.5f));
+    if (value < 0 || value >= SPEED_STEPS) return;
+    InterlockedExchange(&g_nightSpeed, (LONG)value * 25);
     InterlockedExchange(&g_sentRate, -1);
     SaveConfig();
-    TwLog("menu: night_speed=%.2f", value);
+    TwLog("menu: night_speed=%d.%02d", (value * 25) / 100, (value * 25) % 100);
 }
 
 static void OnWeather(uint32_t menu, uint32_t item, int value, void *user) {
@@ -495,11 +526,12 @@ static void BuildMenu(void) {
                OnMinute, NULL);
     ShMenuAction(g_menu, "@tw.apply", OnApply, NULL);
     /* The speed rows: 0.00 to 10.00 in 0.25 steps, 1.00 being the game's
-     * own rate. */
-    ShMenuNumber(g_menu, "@tw.day", (float)day / 100.0f, 0.0f, 10.0f, 0.25f,
-                 OnDay, NULL);
-    ShMenuNumber(g_menu, "@tw.night", (float)night / 100.0f, 0.0f, 10.0f,
-                 0.25f, OnNight, NULL);
+     * own rate. Lists, so left/right cycles like every other row. */
+    BuildSpeedOpts();
+    ShMenuList(g_menu, "@tw.day", g_speedOpts, SPEED_STEPS,
+               SpeedIndex(day), OnDay, NULL);
+    ShMenuList(g_menu, "@tw.night", g_speedOpts, SPEED_STEPS,
+               SpeedIndex(night), OnNight, NULL);
     ShMenuHint(g_menu, "@tw.hint");
     TwLog("menu created");
 }
@@ -540,9 +572,21 @@ static DWORD WINAPI TickThread(LPVOID p) {
         gaveBack = 0;
 
         if (!InterlockedCompareExchange(&g_enabled, 0, 0)) {
+            /* Switching the plugin off hands back what it took, exactly
+             * like a blocked mode does: leaving a 2x clock and a pinned
+             * weather behind would be the same as never switching off. */
+            if (!gaveBack) {
+                ShReleaseWeather();
+                ShSetTimeSpeed(1.0f);
+                InterlockedExchange(&g_sentRate, -1);
+                InterlockedExchange(&g_sentWeather, -1);
+                gaveBack = 1;
+                TwLog("handed back (switch off)");
+            }
             if (ShGetTime(&hours)) RefreshStatus(hours, 0.0f, inGame, allowed);
             continue;
         }
+        gaveBack = 0;
 
         if (ShGetTime(&hours)) {
             rate = WantRate(hours);
@@ -587,17 +631,20 @@ static DWORD WINAPI TickThread(LPVOID p) {
 /* ---- startup ---------------------------------------------------------- */
 
 static void OpenLog(void) {
-    char path[MAX_PATH];
+    char dir[MAX_PATH], logs[MAX_PATH], path[MAX_PATH];
     char *slash;
 
-    if (!GetModuleFileNameA(NULL, path, MAX_PATH)) return;
-    slash = strrchr(path, '\\');
+    if (!GetModuleFileNameA(NULL, dir, MAX_PATH)) return;
+    slash = strrchr(dir, '\\');
     if (!slash) return;
     slash[1] = 0;
-    if (strlen(path) + 24 >= sizeof(path)) return;
-    strcat(path, "logs");
-    CreateDirectoryA(path, NULL);
-    strcat(path, "\\TimeWeatherControl.log");
+    /* Built with snprintf: the old fixed addend was four bytes short of
+     * what "\\TimeWeatherControl.log" needs, so a long game path ran off
+     * the end of the buffer. */
+    if (snprintf(logs, sizeof(logs), "%slogs", dir) < 0) return;
+    CreateDirectoryA(logs, NULL);
+    if (snprintf(path, sizeof(path), "%s\\TimeWeatherControl.log", logs) < 0)
+        return;
     g_log = fopen(path, "a");
 }
 
@@ -619,7 +666,11 @@ static DWORD WINAPI InitThread(LPVOID p) {
     else
         TwLog("blacklist: declaration refused (%d)", ShLastError());
 
-    CreateThread(NULL, 0, TickThread, NULL, 0, NULL);
+    {
+        HANDLE h = CreateThread(NULL, 0, TickThread, NULL, 0, NULL);
+
+        if (h) CloseHandle(h);   /* never waited on */
+    }
     TwLog("ready: enabled=%ld day=%ld night=%ld weather=%s",
           (long)g_enabled, (long)g_daySpeed / 100, (long)g_nightSpeed / 100,
           g_weatherIni[InterlockedCompareExchange(&g_weather, 0, 0)]);
@@ -632,7 +683,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_inst = inst;
         DisableThreadLibraryCalls(inst);
-        CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+        {
+            HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);   /* never waited on */
+        }
     }
     return TRUE;
 }

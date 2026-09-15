@@ -230,6 +230,7 @@ typedef int      (*Fp2HeadOk_t)(void);
 typedef void     (*Fp2HeadShow_t)(int);
 typedef int      (*Fp2Bow_t)(void);
 typedef uint32_t (*Fp2Age_t)(void);
+typedef int      (*PluginAllowed_t)(void);
 
 static LogPath_t    g_logPath;
 
@@ -259,6 +260,9 @@ static MenuSetValue_t g_menuSetValue;
 static MenuStatus_t g_status;
 static MenuStatusF_t g_statusF;
 static SetBlur_t    g_setBlur;
+/* The framework's mode gate. Optional, like the rest of the bindings: a
+ * dinput8 without the blacklist API never blocks this plugin. */
+static PluginAllowed_t g_allowed;
 
 static Fp2Install_t   g_fpxInstall;
 static Fp2Extras_t    g_fpxExtras;
@@ -445,19 +449,33 @@ static void PushCamera(void) {
 }
 
 /* The hook reapplies the eye every frame until it is given
- * back, so a screen the player opens has to release it. */
+ * back, so a screen the player opens has to release it.
+ *
+ * SetFp is reachable from the menu worker and from the hotkey thread, and
+ * the tick thread calls Hold as well, so the transition is serialised: two
+ * threads flipping this at once left a release landing after a newer
+ * claim, and the eye stayed off until the next state change. The lock is a
+ * static initialiser, so there is no window before it exists. */
 static volatile int g_held = 0;
+static SRWLOCK g_holdLock = SRWLOCK_INIT;
 
 static void Hold(int want) {
     if (want == g_held) return;
-    g_held = want;
-    if (want) {
-        if (g_fpxUp && g_fpxEnable) g_fpxEnable(1);
-        PushCamera();
-    } else {
-        if (g_fpxUp && g_fpxEnable) g_fpxEnable(0);
-        if (g_release) g_release(SH_CAM_POS);
+    AcquireSRWLockExclusive(&g_holdLock);
+    if (want != g_held) {          /* re-checked: the other thread may have won */
+        g_held = want;
+        if (want) {
+            if (g_fpxUp && g_fpxEnable) g_fpxEnable(1);
+            PushCamera();
+        } else {
+            if (g_fpxUp && g_fpxEnable) g_fpxEnable(0);
+            /* Only the claim this plugin took. SH_CAM_POS would also clear
+             * the position and the orbit arm, which another plugin may be
+             * holding. */
+            if (g_release) g_release(SH_CAM_HEAD);
+        }
     }
+    ReleaseSRWLockExclusive(&g_holdLock);
 }
 
 /* Handing the head back. The engine side shows it on its own
@@ -479,6 +497,15 @@ static void ShowHead(void) {
  * again. */
 static void HideHead(void) {
     if (g_fpxUp && g_fpxHeadShow) g_fpxHeadShow(0);
+}
+
+/* The mode gate, late bound like everything else here: a pointer that is
+ * not there means "allowed". A blocked plugin is one the framework has
+ * taken the page away from - which is why the tick has to let the view and
+ * the head go by itself rather than wait for a switch the player cannot
+ * reach. */
+static int Allowed(void) {
+    return !g_allowed || g_allowed();
 }
 
 /* ---- what the bar says -----------------------------------
@@ -944,7 +971,7 @@ static DWORD WINAPI TickThread(LPVOID p) {
          * back, and the engine path shows the head on its way
          * (the show window opened by ShFp2Enable(0) runs on the
          * camera frame, so this needs no per frame help). */
-        if (!g_on || !HoldThroughScreens()) {
+        if (!g_on || !Allowed() || !HoldThroughScreens()) {
             if (g_held) {
                 Hold(0);
                 Report();
@@ -1223,6 +1250,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
         GetProcAddress(m, "ShCameraHandoverClear");
     /* Optional: an older dinput8 just keeps the blur. */
     *(FARPROC *)&g_setBlur = GetProcAddress(m, "ShSetCameraBlur");
+    *(FARPROC *)&g_allowed = GetProcAddress(m, "ShPluginAllowed");
     *(FARPROC *)&g_menuIsOpen = GetProcAddress(m, "ShMenuIsOpen");
     *(FARPROC *)&g_menuSetValue =
         GetProcAddress(m, "ShMenuSetValue");

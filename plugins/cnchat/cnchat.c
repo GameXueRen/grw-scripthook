@@ -119,10 +119,14 @@ static void TextBackLocked(void) {
 static void TakePendingChars(void) {
     char got[256];
     while (ShDrawInputTake(got, (int)sizeof(got)) > 0) {
-        wchar_t wide[128];
-        int n = MultiByteToWideChar(CP_UTF8, 0, got, -1, wide, 128);
+        /* Same width as got: a full block of ASCII is 255 characters plus
+         * the NUL, and the old 128-wide buffer made the conversion fail -
+         * which dropped the whole block, silently, since the framework had
+         * already handed the bytes over. */
+        wchar_t wide[256];
+        int n = MultiByteToWideChar(CP_UTF8, 0, got, -1, wide, 256);
         int i;
-        if (n <= 1) continue;   /* -1 bytes, or a conversion failure */
+        if (n <= 1) continue;   /* empty, or a conversion failure */
         Lock();
         for (i = 0; i < n - 1; i++) TextAppendLocked((unsigned)wide[i]);
         Unlock();
@@ -229,7 +233,15 @@ static int CtrlHeld(void) {
 
 static void TakeKeys(void) {
     if (g_ownsKeys) return;
-    ShCaptureKeys(1);
+    /* Only own the keyboard if the framework actually took it: when the
+     * capture is refused the game still sees the physical keys, and
+     * claiming otherwise would put every character into this buffer and the
+     * game's own chat box at the same time. */
+    if (!ShCaptureKeys(1)) {
+        Log("ShCaptureKeys(1) was refused (error %d) - the box opens without "
+            "touching the keyboard", ShLastError());
+        return;
+    }
     g_ownsKeys = 1;
 }
 
@@ -906,7 +918,11 @@ static DWORD WINAPI InitThread(LPVOID p) {
         return 0;
     }
     BuildMenu();
-    CreateThread(NULL, 0, ChatThread, NULL, 0, NULL);
+    {
+        HANDLE h = CreateThread(NULL, 0, ChatThread, NULL, 0, NULL);
+
+        if (h) CloseHandle(h);   /* never waited on */
+    }
     Log("poll thread up");
     return 0;
 }
@@ -916,7 +932,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_inst = inst;
         DisableThreadLibraryCalls(inst);
-        CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+        {
+            HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);   /* never waited on */
+        }
     }
     return TRUE;
 }

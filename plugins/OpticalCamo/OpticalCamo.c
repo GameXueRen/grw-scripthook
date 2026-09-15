@@ -212,7 +212,12 @@ static void LoadSettings(void) {
     if (!GetPrivateProfileStringA(INI_SECTION, INI_KEY_STEP, "0.50", buf,
                                   sizeof(buf), g_iniPath))
         strcpy(buf, "0.50");
-    step = NearestStep((float)strtod(buf, &end));
+    {
+        double v = strtod(buf, &end);
+        /* Text that is not a number parses as 0.0, which would land on the
+         * strongest step (0.1x) instead of the documented default 0.5x. */
+        step = (end == buf) ? STEP_DEFAULT : NearestStep((float)v);
+    }
     InterlockedExchange(&g_step, step);
 
     Log("ini: %s=%d, %s=%s -> step %d (%s)",
@@ -299,17 +304,28 @@ static void Pump(int state) {
         need = 1;                /* something is applied and must move   */
 
     if (need) {
-        if (!ShSetVisibility(want))
-            Log("ShSetVisibility(%.3f) failed, error %d", want, ShLastError());
-        else
+        static float failLoggedFor = 1e9f;
+
+        if (!ShSetVisibility(want)) {
+            /* Once per target: the poll runs at 20 Hz, so a refusal would
+             * otherwise write twenty lines a second. g_wroteF is NOT
+             * advanced - the send was refused, so the next tick retries. */
+            if (failLoggedFor != want) {
+                failLoggedFor = want;
+                Log("ShSetVisibility(%.3f) failed, error %d",
+                    want, ShLastError());
+            }
+        } else {
+            failLoggedFor = 1e9f;
             Log("visibility %.3fx (switch %s, state %s, step %s)",
                 want, on ? "on" : "off",
                 state == CAMO_ACTIVE ? "active" :
                 state == CAMO_INACTIVE ? "inactive" : "unavailable",
                 kStepName[step]);
-        g_wroteF = want;
-        g_wroteEver = 1;
-        InterlockedExchange(&g_live, want == 1.0f ? 0 : 1);
+            g_wroteF = want;
+            g_wroteEver = 1;
+            InterlockedExchange(&g_live, want == 1.0f ? 0 : 1);
+        }
     }
 
     ShGetVisibility(&shown);   /* what is actually in force */
@@ -444,11 +460,15 @@ static void OnBlocked(int allowed, int blocked, void *user) {
 
 /* ---- threads -------------------------------------------------------- */
 
+/* Set on unload. DllMain only flips it and wakes the poll thread, which
+ * does the actual restoring. */
+static volatile LONG g_stop;
+
 static DWORD WINAPI PollThread(LPVOID arg) {
     int idleWas = -1;
     (void)arg;
 
-    for (;;) {
+    while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         CamoVote vote;
         int state, clean, idle;
 
@@ -457,7 +477,11 @@ static DWORD WINAPI PollThread(LPVOID arg) {
          * the step and a play-mode change all signal the event, so
          * leaving idle is immediate. */
         idle = IdleNow();
-        WaitForSingleObject(g_wake, idle ? IDLE_MS : POLL_MS);
+        /* With no event (CreateEventA failed) the wait would return at once
+         * every time - and this loop would then spin a core at full speed.
+         * Sleeping is the honest fallback: the same cadence, no busy wait. */
+        if (g_wake) WaitForSingleObject(g_wake, idle ? IDLE_MS : POLL_MS);
+        else        Sleep(idle ? IDLE_MS : POLL_MS);
 
         if (idle != idleWas) {
             idleWas = idle;
@@ -481,14 +505,32 @@ static DWORD WINAPI PollThread(LPVOID arg) {
          * can still surprise us. */
         clean = vote.parts && vote.failed == 0 &&
                 (vote.flagged == vote.parts || vote.clear == vote.parts);
-        if (!clean && vote.parts)
-            Log("vote: parts=%d flagged=%d clear=%d failed=%d -> %s",
-                vote.parts, vote.flagged, vote.clear, vote.failed,
-                state == CAMO_ACTIVE ? "active" :
-                state == CAMO_INACTIVE ? "inactive" : "unavailable");
+        {
+            /* The edge, not every tick: a mixed read is a state, and at
+             * 20 Hz a single wobble would write twenty lines. */
+            static int uncleanLogged;
+            if (!clean && vote.parts) {
+                if (!uncleanLogged) {
+                    uncleanLogged = 1;
+                    Log("vote: parts=%d flagged=%d clear=%d failed=%d -> %s",
+                        vote.parts, vote.flagged, vote.clear, vote.failed,
+                        state == CAMO_ACTIVE ? "active" :
+                        state == CAMO_INACTIVE ? "inactive" : "unavailable");
+                }
+            } else {
+                uncleanLogged = 0;
+            }
+        }
 
         Pump(state);
     }
+
+    /* Unloading: hand the normal visibility back, so whatever runs next is
+     * not left invisible. Done here rather than in DllMain, which runs
+     * under the loader lock and must not call framework APIs. */
+    if (InterlockedCompareExchange(&g_live, 0, 0))
+        ShSetVisibility(1.0f);
+    return 0;
 }
 
 static DWORD WINAPI InitThread(LPVOID arg) {
@@ -517,7 +559,11 @@ static DWORD WINAPI InitThread(LPVOID arg) {
     BuildMenu();
     Log("switch %s, step %d (%s), starting the poll thread",
         OnNow() ? "on" : "off", StepNow(), kStepName[StepNow()]);
-    CreateThread(NULL, 0, PollThread, NULL, 0, NULL);
+    {
+        HANDLE h = CreateThread(NULL, 0, PollThread, NULL, 0, NULL);
+
+        if (h) CloseHandle(h);   /* never waited on */
+    }
     return 0;
 }
 
@@ -527,13 +573,18 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         g_inst = inst;
         DisableThreadLibraryCalls(inst);
         g_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
-        CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+        {
+            HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);   /* never waited on */
+        }
     } else if (reason == DLL_PROCESS_DETACH) {
-        /* Leaving a multiplier behind would make the player invisible for
-         * whatever runs next, so put the normal value back - the original
-         * restored it on the way out too. */
-        if (InterlockedCompareExchange(&g_live, 0, 0))
-            ShSetVisibility(1.0f);
+        /* The restore belongs to the poll thread: this runs under the
+         * loader lock, where a framework call is what the plugin contract
+         * forbids. At process exit the thread freezes with the process and
+         * nothing needs restoring. */
+        InterlockedExchange(&g_stop, 1);
+        if (g_wake) SetEvent(g_wake);
     }
     return TRUE;
 }
