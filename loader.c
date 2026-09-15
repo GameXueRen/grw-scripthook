@@ -65,6 +65,7 @@ static void LoadRealDinput8(void) {
 }
 
 extern void ShStateStartup(void);
+extern void ShNpcShutdown(void);
 extern void ShCrashStartup(void);
 extern void ShCoreFixStartup(void);
 extern void ShCoreFixLateStartup(void);
@@ -295,7 +296,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 
             if (h) CloseHandle(h);   /* never waited on: prompt close */
         }
-    } else if (reason == DLL_PROCESS_DETACH && g_logFile) {
+    } else if (reason == DLL_PROCESS_DETACH) {
+        /* Handed back, not left to the OS: the pump event is the one kernel
+         * object the framework holds that outlives its users. */
+        ShNpcShutdown();
+        if (!g_logFile) return TRUE;
         Log("unloading");
         LogClose();
         /* No FreeLibrary(g_realDinput8) here: this also runs on

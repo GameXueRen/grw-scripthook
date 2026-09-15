@@ -119,6 +119,37 @@ static void ListOnGameThread(void) {
  * engine needs and no polling granularity on top. */
 static HANDLE g_pumpEvent;
 
+/* The pump's wake event, created once. Check-then-create was not atomic:
+ * two threads could each make one and the second store dropped the first -
+ * and a thread already waiting on the dropped handle would sit out its whole
+ * timeout instead of being woken by the SetEvent that went to the newer one.
+ * One compare-and-swap; the loser closes its own copy. Both callers take the
+ * handle through here, so every SetEvent and every wait are on the same
+ * object and a signal can no longer be missed.
+ */
+static HANDLE GetPumpEvent(void) {
+    HANDLE h = g_pumpEvent;
+
+    if (h) return h;
+    h = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (!h) return NULL;
+    if (InterlockedCompareExchangePointer((PVOID volatile *)&g_pumpEvent,
+                                          h, NULL) != NULL) {
+        CloseHandle(h);              /* another thread won; use its handle */
+        h = g_pumpEvent;
+    }
+    return h;
+}
+
+/* Process detach only: the event outlives every waiter by design, so it is
+ * not released in the middle of a session. */
+void ShNpcShutdown(void) {
+    HANDLE h = (HANDLE)InterlockedExchangePointer(
+        (PVOID volatile *)&g_pumpEvent, NULL);
+
+    if (h) CloseHandle(h);
+}
+
 static volatile uint64_t g_pendId = 0;
 static const void *g_pendMtx = NULL;
 static volatile uint64_t g_pendSpec = 0;
@@ -222,19 +253,22 @@ void ShNpcPump(void) {
         g_pendDone = 1;
         did = 1;
     }
-    if (did && g_pumpEvent) SetEvent(g_pumpEvent);
+    if (did) {
+        HANDLE ev = GetPumpEvent();
+
+        if (ev) SetEvent(ev);
+    }
 }
 
 static int WaitFlag(volatile int *flag, int ms) {
     DWORD end = GetTickCount() + (DWORD)ms;
+    HANDLE ev = GetPumpEvent();
 
-    if (!g_pumpEvent)
-        g_pumpEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
     while (!*flag) {
         DWORD now = GetTickCount();
         if (now >= end) break;
-        if (g_pumpEvent)
-            WaitForSingleObject(g_pumpEvent, end - now);
+        if (ev)
+            WaitForSingleObject(ev, end - now);
         else
             Sleep(1);
     }

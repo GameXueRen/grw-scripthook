@@ -191,6 +191,13 @@ uint64_t ShReadQ(uint64_t addr) {
 
 /* Stub must land within rel32 of the hook site, so
  * probe upward and downward near the target.
+ *
+ * One page per hook site, and deliberately never released: what lives there
+ * is the jump stub a patched call site reaches, so it has to stay mapped and
+ * executable for as long as that site is patched - which is the session.
+ * Freeing one would be a use-after-free the first time the hooked path ran,
+ * not a cleanup. The count is bounded by the number of sites the framework
+ * patches, and the OS unmaps them with the process.
  */
 void *ShAllocNear(uint64_t target) {
     MEMORY_BASIC_INFORMATION mbi;
