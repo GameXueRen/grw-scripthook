@@ -266,6 +266,48 @@ static int EndsWithForge(const char *p) {
     return _stricmp(p + n - 6, ".forge") == 0;
 }
 
+/* ---- the mode gate --------------------------------------------------
+ * Ghost War (4v4) and Mercenaries (the eight player PvPvE mode) are the
+ * two places where serving a swapped archive entry could hand someone an
+ * edge: Forge replaces entries in the game's OWN archives, weapon data
+ * among them. So while either is the selected mode nothing is served -
+ * the read goes back to the engine untouched.
+ *
+ * The declaration is in the source, deliberately: like a plugin's
+ * blacklist bitmask, no ini can widen or narrow it. The menu is left
+ * alone too - the page is not hidden, only its effect is held; a player
+ * wondering why a mod stopped showing up gets the log line below.
+ *
+ * The mode is asked only where a patch would actually land (see
+ * CountFixup) plus once per read that could have built an overlay, so the
+ * cost is nothing next to the reads themselves. A mode the framework has
+ * not read yet (SH_PLAYMODE_NONE, which is also what the front end
+ * reports) blocks nobody - the same rule the plugin blacklist uses.
+ */
+#define FORGE_BLOCKED_MODES (SH_MODE_BLACKLIST_GHOST_WAR | \
+                             SH_MODE_BLACKLIST_MERCENARIES)
+
+/* The last answer, so the transition is logged once. A race can at worst
+ * print the line twice, which is why a plain volatile read is enough. */
+static volatile LONG g_gateOn = 0;
+
+static int ForgeBlocked(void) {
+    const char *name;
+    int mode = ShSelectedPlayMode();
+    int blocked;
+
+    if (mode == SH_PLAYMODE_NONE) return 0;
+    blocked = (ShPlayModeBit(mode) & FORGE_BLOCKED_MODES) != 0;
+
+    if (blocked != (int)g_gateOn) {
+        g_gateOn = blocked;
+        name = ShPlayModeName(mode);
+        Log("mode gate: %s - %s", name && name[0] ? name : "unknown mode",
+            blocked ? "mods\\ is not served" : "mods\\ is served again");
+    }
+    return blocked;
+}
+
 /* Does a read of [off, off+len) cover any patched byte? Reads that do
  * not are left exactly as they were. */
 static int TouchesOverlay(const ShForgeOverlay *o, uint64_t off,
@@ -280,7 +322,14 @@ static int TouchesOverlay(const ShForgeOverlay *o, uint64_t off,
 
 static void CountFixup(ShForgeOverlay *o, uint64_t off, const uint8_t *buf,
                        uint32_t len, const char *what) {
-    int c = (int)InterlockedIncrement(&g_fixups);
+    int c;
+
+    /* Every patch path comes through here - synchronous, completed in
+     * place, and the pending sweep - so this one check also covers a read
+     * that was already in flight when the mode changed. */
+    if (ForgeBlocked()) return;
+
+    c = (int)InterlockedIncrement(&g_fixups);
     ShForgeOverlayFixup(o, off, (uint8_t *)buf, len);
     if (c <= 4 || (c % 4096) == 0)
         Log("read/%s: %s off=%llu len=%lu (fixup %d)", what, o->path,
@@ -493,6 +542,13 @@ static void ForgeReadAfter(ShFileCall *c, void *user) {
 
     /* Also covers a caller that polls instead of waiting. */
     PendingSweep();
+
+    /* The mode gate comes first: while a PvP mode is selected nothing is
+     * served, and an overlay must not even be built - that is what reads
+     * the mod payloads and parses the archive's tables. The sweep above
+     * still ran, so the pending table stays clean, and CountFixup refuses
+     * any patch it finds there. */
+    if (ForgeBlocked()) return;
 
     o = LookupOrResolve(h);
     if (o) {

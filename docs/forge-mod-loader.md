@@ -25,6 +25,16 @@ disk stays exactly as shipped and nothing is written anywhere.
   Rebuilding the payload after changing a resource inside it is a job for
   the toolkit; this loader only swaps payloads.
 - **Off by default.** Nothing is loaded until `[forgemod] enabled=1`.
+- **Nothing is served in the two PvP modes.** While Ghost War (4v4) or
+  Mercenaries (the eight player PvPvE mode) is the selected mode the loader
+  stands down: reads go back to the engine untouched, no overlay is built,
+  and the log says which way it went (`mode gate: Ghost War - mods\ is not
+  served`, `mode gate: campaign - mods\ is served again`). The declaration
+  lives in the source (`FORGE_BLOCKED_MODES` in `scripthook_forge_io.c`), so
+  no ini can widen or narrow it. The menu page is deliberately **not**
+  hidden: a mod that stops working is announced by the log, not by a missing
+  page. The front end, and any mode the framework has not read yet, block
+  nobody.
 
 ---
 
