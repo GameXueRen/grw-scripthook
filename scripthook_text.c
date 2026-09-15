@@ -60,6 +60,7 @@ static const ShText kEnUS[] = {
     { "@settings.order.saved", "Order saved" },
 
     /* the Forge page */
+    { "@forge.page",          "Forge Mod Loader" },
     { "@forge.hint",
       "Loads loose files from mods\\ over existing\n"
       ".forge entries without touching the archives.\n"
@@ -185,6 +186,7 @@ static const ShText kZhCN[] = {
     { "@settings.order.empty", "还没有可排序的插件菜单。" },
     { "@settings.order.saved", "菜单显示顺序已保存" },
 
+    { "@forge.page",          "Forge 资源侧载" },
     { "@forge.hint",
       "把 mods\\ 下的文件覆盖到已有 .forge 游戏文件上。此项开关改变需下次启动生效。" },
     { "@forge.enabled",       "启用" },

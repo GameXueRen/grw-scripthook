@@ -836,8 +836,11 @@ static void OnDryRun(uint32_t menu, uint32_t item, int v, void *u) {
 }
 
 /* The page's key: what [MenuOrder] is keyed by, both for the default
- * weight written at start up and for the mod menu's ordering page. */
-#define SH_FORGE_PAGE "Forge Mod Loader"
+ * weight written at start up and for the mod menu's ordering page - and
+ * what the capture translates the title by. An ID, like every other page
+ * (the framework's table is in scripthook_text.c); it used to be the
+ * English literal, which left this one title untranslated. */
+#define SH_FORGE_PAGE "@forge.page"
 
 void ShForgeMenuRegister(void) {
     uint32_t m;
