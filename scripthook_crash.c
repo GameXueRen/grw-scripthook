@@ -40,16 +40,29 @@ static char     g_buf[4096];
 static char     g_first[4096];
 static int      g_haveFirst = 0;
 
+/* The framework's own file interception layer has CreateFileA/WriteFile/
+ * CloseHandle hooked, so the report is marked as the framework's own I/O
+ * and passes straight through: a crash inside that layer would otherwise
+ * re-enter the dispatch that faulted, and the report would be lost with it.
+ * ShFileOwn is a thread-local store - no lock, no allocation - which is
+ * what makes it usable from an exception handler. */
+extern void ShFileOwn(int on);
+
 static void Emit(const char *text, int len) {
     HANDLE f;
     DWORD wrote = 0;
 
+    ShFileOwn(1);
     f = CreateFileA(g_crashPath[0] ? g_crashPath : CRASH_FILE,
                     FILE_APPEND_DATA, FILE_SHARE_READ,
                     NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f == INVALID_HANDLE_VALUE) return;
+    if (f == INVALID_HANDLE_VALUE) {
+        ShFileOwn(0);
+        return;
+    }
     WriteFile(f, text, (DWORD)len, &wrote, NULL);
     CloseHandle(f);
+    ShFileOwn(0);
 }
 
 /* module+offset, which is what a report needs to be
@@ -345,11 +358,29 @@ static LONG WINAPI CrashUef(EXCEPTION_POINTERS *ep) {
 static int g_intercept = 0;
 static void *g_veh = NULL;
 
+/* The last-chance filter is a slot, and the game - or the packer around it
+ * - installs its own, which is how a real crash can end up with no report
+ * at all. A vectored handler is a list instead of a slot, so this one is
+ * armed by default: it writes the report and then lets normal handling
+ * continue, which is why it cannot change behaviour. Fatal codes only, and
+ * Report dedupes by code+address, so a title that faults on purpose does
+ * not fill the log. */
+static void *g_vehReport = NULL;
+
+static LONG CALLBACK CrashVehReport(EXCEPTION_POINTERS *ep) {
+    if (!Fatal(ep->ExceptionRecord->ExceptionCode))
+        return EXCEPTION_CONTINUE_SEARCH;
+    Report(ep, 0);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 void ShCrashStartup(void) {
     /* All logs live in <gamedir>\logs; resolve the path once
      * so the crash handler itself stays minimal. */
     LogPath(g_crashPath, sizeof(g_crashPath), CRASH_FILE);
     SetUnhandledExceptionFilter(CrashUef);
+    if (!g_vehReport)
+        g_vehReport = AddVectoredExceptionHandler(1, CrashVehReport);
 }
 
 /** Watch faults first and resume ones with a null path.
@@ -378,6 +409,10 @@ SH_API int ShCrashInterceptOn(void) {
  */
 void ShCrashRearm(void) {
     SetUnhandledExceptionFilter(CrashUef);
+    /* A vectored handler is not a slot, but another module can still pull
+     * the whole list down; put ours back if it is gone. */
+    if (!g_vehReport)
+        g_vehReport = AddVectoredExceptionHandler(1, CrashVehReport);
 }
 
 /** How many crashes have been caught this session. */

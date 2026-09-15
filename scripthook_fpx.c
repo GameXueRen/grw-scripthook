@@ -158,6 +158,9 @@ extern int ShReadableAddr(uint64_t addr, size_t len);
 extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern void *ShAllocNear(uint64_t target);
 extern void ShSetError(int err);
+/* Read only, no state tracking: in the world with no screen up. See
+ * scripthook_state.c. */
+extern int ShInLivePlay(void);
 
 /* ---- byte level helpers ---------------------------------- */
 
@@ -753,9 +756,28 @@ static int Writable(uint64_t addr, size_t len) {
                          PAGE_EXECUTE_READWRITE |
                          PAGE_EXECUTE_WRITECOPY)))
         return 0;
+    /* ...and it has to be the engine's own heap. An address inside a
+     * loaded module is not a node, and an image's data sections are
+     * writable, so the protection test above waves them through: two
+     * crashes in the head-visibility call (GRW.exe+0x14ED39CD, the
+     * `and [node+0x54], bx`) were handed exactly that - an address in
+     * GRW.exe's own image, from a tag that named a slot the chain had no
+     * business trusting. Engine objects are the process's own private
+     * memory. */
+    if (mbi.Type != MEM_PRIVATE) return 0;
     return (uint64_t)(uintptr_t)mbi.BaseAddress
            + mbi.RegionSize >= addr + len;
 }
+
+/* What the visibility call touches. The flag it writes sits at +0x54, so
+ * the checked range has to reach past +0x40 - otherwise the check passes
+ * on a node whose page ends in between and the write faults anyway. */
+#define HEAD_NODE_WRITE 0x60u
+
+/* The highest slot tag the head chain will act on. The table is small and
+ * per state (0x0F on foot, 0x15 around vehicles); a read that lands far
+ * outside it is a stale layout, not a state. */
+#define HEAD_TAG_MAX 0x20u
 
 /* The head, for the visibility call. A chain the table walks
  * by hand; it ends in a small table indexed by a type tag the
@@ -774,13 +796,24 @@ static uint64_t HeadPtrChain(void) {
     if (!ShReadableAddr(c + 3, 2)) return HeadPtrStop(7);
     memcpy(&tag, (const void *)(uintptr_t)(c + 3), 2);
     tag &= 0xFFu;
-    /* The tag names the slot, and it is not a constant: the
-     * log caught 0x0F on foot, 0x15 around vehicles and 0xC7
-     * after a map screen - three states, three slots. The
-     * table's own check reads "15", which in Cheat Engine's
-     * assembler is hex, and a white list kept missing states.
-     * Any of them indexes the same table; what matters is
-     * that the slot yields a pointer at all. */
+    /* The tag names the slot. 0x0F on foot and 0x15 around vehicles are
+     * the ones that have ever been seen to answer; the table's own check
+     * reads "15", which in Cheat Engine's assembler is hex.
+     *
+     * 0xC7 was taken for a third state because it showed up after a map
+     * screen - and that is what has been crashing the game. It indexes the
+     * table 199 entries deep, past everything the table holds, and what
+     * comes back is not a head node: handed to the visibility call the
+     * engine reads a sub-object out of it, gets an address inside GRW.exe's
+     * image, and faults writing the flag at +0x54. Four crash reports, and
+     * every one of them resolved this tag as 199. A tag that far out is a
+     * stale read of a layout that has already gone, not a state: the frame
+     * does without instead. */
+    if (tag > HEAD_TAG_MAX) {
+        if (HpLogReady())
+            Log("headptr: tag %u is out of range", (unsigned)tag);
+        return 0;
+    }
     a = RdQ(a + 0x27);  if (!a) return HeadPtrStop(9);
     a = RdQ(a + (uint64_t)tag * 8u);
     if (!a) {
@@ -788,7 +821,7 @@ static uint64_t HeadPtrChain(void) {
             Log("headptr: tag %u, empty slot", (unsigned)tag);
         return 0;
     }
-    if (!Writable(a, 0x40)) {
+    if (!Writable(a, HEAD_NODE_WRITE)) {
         if (HpLogReady())
             Log("headptr: tag %u, node not writable", (unsigned)tag);
         return 0;
@@ -796,18 +829,34 @@ static uint64_t HeadPtrChain(void) {
     return a;
 }
 
-/* Chain first, so a respawn picks the fresh pointer the same
- * frame it exists; the last good one only answers when the
- * chain will not resolve right now, which is the ordinary
- * state in a menu rather than an error. */
+/* Only the chain is trusted. It re-derives the node from the engine's live
+ * state on every attempt, so what it names is a node as of this frame.
+ *
+ * There used to be a second answer: the last node that worked, handed back
+ * when the chain did not resolve - "the ordinary state in a menu rather
+ * than an error". That is what crashed the game on the way into a menu. The
+ * engine frees the node when the world goes away, the memory stops reading
+ * as a node, and FN_VIS walked into it and faulted writing the flag at
+ * +0x54 (AV on write, GRW.exe+0x14ED39CD; three reports, the last one from
+ * a perfectly ordinary-looking heap address). No page test can tell a live
+ * node from a freed one, so nothing remembered is handed over any more: the
+ * frame does without, and the engine's own state governs the head until the
+ * chain resolves again - which is exactly what the show window is for.
+ *
+ * What is remembered is only "the chain last named a node", for
+ * ShFp2HeadOk. */
 static uint64_t HeadPtr(void) {
     uint64_t a = HeadPtrChain();
 
-    if (a) {
-        g_fp.headPtr = a;
-        return a;
+    if (!a || !Writable(a, HEAD_NODE_WRITE)) {
+        if (a && HpLogReady())
+            Log("headptr: %016llX is not a node this frame",
+                (unsigned long long)a);
+        g_fp.headPtr = 0;
+        return 0;
     }
-    return g_fp.headPtr;
+    g_fp.headPtr = a;
+    return a;
 }
 
 /* The camera frame, whether first person runs or not: hold the
@@ -844,8 +893,16 @@ static int Sane(uint64_t tf) {
  * One call a frame is the price of a head that stays away.
  */
 static void HeadVis(int hide) {
-    uint64_t head = HeadPtr();
+    uint64_t head;
 
+    /* Only inside the world. Entering a menu is exactly where the chain
+     * goes stale - the tag reads 199 there - and it is where every crash
+     * into this call has been. While a screen is up the head is the
+     * engine's own business, and it shows it on its own when first person
+     * lets go; a show window with nothing to show costs nothing. */
+    if (!ShInLivePlay()) return;
+
+    head = HeadPtr();
     if (!head) return;
     g_fp.headPtr = head;
     ((VisFn)(uintptr_t)FN_VIS)(head, hide ? 1u : 0u);
