@@ -190,14 +190,6 @@ static int IsPlaying(void) {
            s == SH_STATE_BINOCULAR || s == SH_STATE_CINEMATIC;
 }
 
-static int WindowFocused(void) {
-    DWORD pid = 0;
-    HWND fg = GetForegroundWindow();
-    if (!fg) return 0;
-    GetWindowThreadProcessId(fg, &pid);
-    return pid == GetCurrentProcessId();
-}
-
 /* The window the finished text is posted into: the game's own, which is
  * what has focus while playing (the box only opens with focus, see the
  * poll thread).  The class is logged with it, because the injection is a
@@ -631,7 +623,7 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
 
         if (!g_chat.open) {
             compLatch = 0;
-            if (!IsPlaying() || !WindowFocused()) {
+            if (!IsPlaying() || !ShGameFocused()) {
                 memset(g_keyWas, 0, sizeof(g_keyWas));
                 tDown = 0;
                 continue;
@@ -671,7 +663,7 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
             continue;
         }
 
-        if (!WindowFocused()) {
+        if (!ShGameFocused()) {
             /* Focus went elsewhere: the keys typed out there belong
              * to that window, so ignore them and keep the text for
              * when the game comes back to the front.  Two things still
