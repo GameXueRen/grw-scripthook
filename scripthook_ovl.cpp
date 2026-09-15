@@ -1786,23 +1786,28 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
     // Present interval far longer than a frame, and this log is the only
     // place that can say afterwards whether it was the mod's doing or the
     // game's own streaming. Only outliers are written, so a clean session
-    // costs one compare a frame. The upper bound keeps a load screen (a
-    // gap of many seconds, which is normal) out of it.
+    // costs one compare a frame. A gap past three seconds is written too,
+    // under its own name and rate limited, because a hang and a load screen
+    // look the same from here - and a hang that wrote nothing would be
+    // indistinguishable from a session that simply ended.
     {
         static DWORD lastPresent = 0;
+        static DWORD lastStall = 0;
         static uint32_t lastCalls = 0;
         DWORD now = GetTickCount();
         uint32_t calls = ShFileCallCount();
         int gap = (int)(now - lastPresent);
-        if (g_ready && lastPresent && gap > 100 && gap < 3000)
+        if (g_ready && lastPresent && gap > 100 &&
+            (gap < 3000 || (int)(now - lastStall) > 10000))
         {
+            if (gap >= 3000) lastStall = now;
             /* The context is what makes the line worth having afterwards: a
              * loading or map bit in the ui state says the game was
              * streaming, and the file-call delta says whether the engine
              * was hammering the interception layer while it happened. Both
              * are only paid on a hitch. */
-            OvlLog("frame hitch: %d ms (state %d ui %04X menu %d draw %d "
-                   "file %u)",
+            OvlLog("%s: %d ms (state %d ui %04X menu %d draw %d file %u)",
+                   gap < 3000 ? "frame hitch" : "frame stall",
                    gap, ShGetGameState(),
                    (unsigned)ShGetUiState(),
                    ShMenuIsOpen() ? 1 : 0, ShDrawWantFrame() ? 1 : 0,
