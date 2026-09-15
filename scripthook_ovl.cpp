@@ -68,6 +68,11 @@ static ResizeFn  g_origResize = nullptr;
 
 static ID3D11Device*        g_pd3dDevice = nullptr;
 static ID3D11DeviceContext* g_pd3dContext = nullptr;
+/* Cached view of the swapchain's back buffer. Creating one per Present
+ * ran the driver every frame for nothing; it is dropped in
+ * HookResizeBuffers (which invalidates every view of the old buffer) and
+ * whenever the device is recreated. */
+static ID3D11RenderTargetView* g_backRtv = nullptr;
 static HWND   g_hwnd = nullptr;
 static WNDPROC g_origWndProc = nullptr;
 static volatile LONG g_ready = 0;
@@ -437,9 +442,9 @@ static void ImeApplyAnchor(HWND hWnd)
         ImmSetCandidateWindow(hImc, &cdf);
         ImmReleaseContext(hWnd, hImc);
     }
-    OvlLog("ime anchor: client=%dx%d caret=(%ld,%ld) screen=(%ld,%ld) imc=%p",
-           rc.right - rc.left, rc.bottom - rc.top,
-           cx, cy, (long)pt.x, (long)pt.y, (void*)hImc);
+    /* No per-message log: ImeApplyAnchor runs on every WM_IME_* message
+     * while the IME is up, and the log flushes every line - it showed up
+     * as typing stutter. */
 }
 
 /* Screen-space anchor under the chat input box (horizontal centre),
@@ -541,7 +546,11 @@ static int ImeReadState(HWND hWnd)
                 if (pageSize > IME_CAND_MAX) pageSize = IME_CAND_MAX;
                 for (int i = 0; i < pageSize; i++) {
                     DWORD ofs = cl->dwOffset[page + i];
-                    const wchar_t *w = (const wchar_t *)(raw.data() + ofs);
+                    const wchar_t *w;
+                    /* The offsets come from an in-process IME; a bad one
+                     * would walk past the buffer looking for a NUL. */
+                    if (ofs >= raw.size()) { cand[i][0] = 0; continue; }
+                    w = (const wchar_t *)(raw.data() + ofs);
                     W2U8(w, cand[i], sizeof(cand[i]));
                 }
             }
@@ -1773,6 +1782,35 @@ static void LoadCjkFont()
 // ---------------------------------------------------------------------------
 static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, UINT flags)
 {
+    // Frame pacing, for attribution: what a player calls a stutter is a
+    // Present interval far longer than a frame, and this log is the only
+    // place that can say afterwards whether it was the mod's doing or the
+    // game's own streaming. Only outliers are written, so a clean session
+    // costs one compare a frame. The upper bound keeps a load screen (a
+    // gap of many seconds, which is normal) out of it.
+    {
+        static DWORD lastPresent = 0;
+        static uint32_t lastCalls = 0;
+        DWORD now = GetTickCount();
+        uint32_t calls = ShFileCallCount();
+        int gap = (int)(now - lastPresent);
+        if (g_ready && lastPresent && gap > 100 && gap < 3000)
+        {
+            /* The context is what makes the line worth having afterwards: a
+             * loading or map bit in the ui state says the game was
+             * streaming, and the file-call delta says whether the engine
+             * was hammering the interception layer while it happened. Both
+             * are only paid on a hitch. */
+            OvlLog("frame hitch: %d ms (state %d ui %04X menu %d draw %d "
+                   "file %u)",
+                   gap, ShGetGameState(),
+                   (unsigned)ShGetUiState(),
+                   ShMenuIsOpen() ? 1 : 0, ShDrawWantFrame() ? 1 : 0,
+                   (unsigned)(calls - lastCalls));
+        }
+        lastCalls = calls;
+        lastPresent = now;
+    }
     if (!g_ready)
     {
         static DWORD retryAt = 0;   /* back off after a failed init */
@@ -1857,6 +1895,7 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                 ImGui::DestroyContext();
                 /* Drop the COM references so a retry starts clean
                  * instead of stacking leaked device/context refs. */
+                if (g_backRtv)     { g_backRtv->Release(); g_backRtv = nullptr; }
                 if (g_pd3dContext) g_pd3dContext->Release();
                 if (g_pd3dDevice)  g_pd3dDevice->Release();
                 g_pd3dContext = nullptr;
@@ -1906,16 +1945,17 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
             // Bind the swapchain back buffer as the render target so
             // the overlay is drawn on the surface that gets
             // presented, whatever the game left bound.
-            ID3D11Texture2D* back = nullptr;
-            ID3D11RenderTargetView* rtv = nullptr;
             DXGI_SWAP_CHAIN_DESC desc = {};
             HRESULT dhr = pSwap->GetDesc(&desc);
-            if (SUCCEEDED(dhr) &&
-                SUCCEEDED(pSwap->GetBuffer(0, __uuidof(ID3D11Texture2D),
-                                           (void**)&back)))
+            if (!g_backRtv && SUCCEEDED(dhr))
             {
-                g_pd3dDevice->CreateRenderTargetView(back, nullptr, &rtv);
-                back->Release();
+                ID3D11Texture2D* back = nullptr;
+                if (SUCCEEDED(pSwap->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                               (void**)&back)))
+                {
+                    g_pd3dDevice->CreateRenderTargetView(back, nullptr, &g_backRtv);
+                    back->Release();
+                }
             }
             // A failed GetDesc would leave desc zeroed and the whole
             // frame blank while the menu still swallows every key -
@@ -1923,13 +1963,10 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
             // the frame; keys reach the game until the desc returns.
             if (!SUCCEEDED(dhr) || desc.BufferDesc.Width == 0 ||
                 desc.BufferDesc.Height == 0)
-            {
-                if (rtv) rtv->Release();
                 return g_origPresent(pSwap, sync, flags);
-            }
-            if (rtv)
+            if (g_backRtv)
             {
-                g_pd3dContext->OMSetRenderTargets(1, &rtv, nullptr);
+                g_pd3dContext->OMSetRenderTargets(1, &g_backRtv, nullptr);
                 D3D11_VIEWPORT vp;
                 vp.TopLeftX = 0; vp.TopLeftY = 0;
                 vp.Width = (float)desc.BufferDesc.Width;
@@ -1964,21 +2001,23 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
             ImGui::Render();
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-            if (rtv)
-            {
+            if (g_backRtv)
                 g_pd3dContext->OMSetRenderTargets(0, nullptr, nullptr);
-                rtv->Release();
-            }
 
-            static DWORD logAt = GetTickCount();
-            ImDrawData* dd = ImGui::GetDrawData();
-            if ((int)(GetTickCount() - logAt) > 5000)
+            /* The frame dump is diagnostics, so it rides with the leak
+             * probe instead of writing to every session's log forever. */
+            if (g_leakProbe)
             {
-                logAt = GetTickCount();
-                OvlLog("frame: display %.0fx%.0f vtx=%d idx=%d",
-                       io.DisplaySize.x, io.DisplaySize.y,
-                       dd ? dd->TotalVtxCount : -1,
-                       dd ? dd->TotalIdxCount : -1);
+                static DWORD logAt = GetTickCount();
+                ImDrawData* dd = ImGui::GetDrawData();
+                if ((int)(GetTickCount() - logAt) > 5000)
+                {
+                    logAt = GetTickCount();
+                    OvlLog("frame: display %.0fx%.0f vtx=%d idx=%d",
+                           io.DisplaySize.x, io.DisplaySize.y,
+                           dd ? dd->TotalVtxCount : -1,
+                           dd ? dd->TotalIdxCount : -1);
+                }
             }
         }
     }
@@ -2038,6 +2077,9 @@ static HRESULT STDMETHODCALLTYPE HookResizeBuffers(IDXGISwapChain* pSwap, UINT b
                                                    UINT w, UINT h, DXGI_FORMAT f,
                                                    UINT flags)
 {
+    /* ResizeBuffers refuses to run while a view of the back buffer is
+     * still alive, so drop ours first - it is rebuilt on the next frame. */
+    if (g_backRtv) { g_backRtv->Release(); g_backRtv = nullptr; }
     if (g_ready)
         ImGui_ImplDX11_InvalidateDeviceObjects();
     HRESULT hr = g_origResize(pSwap, bc, w, h, f, flags);
@@ -2098,11 +2140,20 @@ static bool InstallSwapChainHooks()
     g_origPresent = (PresentFn)vtbl[8];
     g_origResize  = (ResizeFn)vtbl[13];
     DWORD oldProtect = 0;
+    bool patched = false;
     if (VirtualProtect(&vtbl[8], sizeof(void*) * 6, PAGE_READWRITE, &oldProtect))
     {
         vtbl[8]  = (void*)&HookPresent;
         vtbl[13] = (void*)&HookResizeBuffers;
         VirtualProtect(&vtbl[8], sizeof(void*) * 6, oldProtect, &oldProtect);
+        patched = true;
+    }
+    else
+    {
+        /* Nothing was written, so neither entry point is ours. Report it
+         * rather than logging a success the overlay can never live up to. */
+        g_origPresent = nullptr;
+        g_origResize  = nullptr;
     }
 
     swap->Release();
@@ -2112,8 +2163,8 @@ static bool InstallSwapChainHooks()
     OvlLog("hooks installed: origPresent=%llx origResize=%llx ok=%d",
            (unsigned long long)(uintptr_t)g_origPresent,
            (unsigned long long)(uintptr_t)g_origResize,
-           g_origPresent ? 1 : 0);
-    return g_origPresent != nullptr;
+           patched ? 1 : 0);
+    return patched && g_origPresent != nullptr;
 }
 
 // ---------------------------------------------------------------------------

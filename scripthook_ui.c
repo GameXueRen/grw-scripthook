@@ -189,11 +189,19 @@ static struct {
     uint64_t fontAsset, imageAsset, pool;
 } g_ctx;
 
-/* The asset records sit in the image's data section, so the
- * offset from the module base is stable across sessions. A
- * cached offset is verified before use; a recycled or moved
- * block simply misses and falls back to the full scan. */
+/* Where the two records were found, kept as "record - image base". The
+ * record is an engine object on the heap, so the difference is not a
+ * stable offset and does not survive a session - which is why the first
+ * resolve of every session has to scan. What the pair does buy is the rest
+ * of the session: a world reload re-verifies in place instead of scanning
+ * again. A recycled or moved block simply misses and falls back to the
+ * scan, because AssetAt re-checks the GUID and the class. */
 static uint64_t g_assetFontOff, g_assetImageOff;
+
+/* When a scan last came up empty. A miss is a whole-address-space walk
+ * and the HUD poller asks for the assets every 120 ms; one empty result is
+ * worth a wait, not a repeat. */
+static DWORD    g_scanMissAt;
 
 /* batches: edits recorded per thread, one job per commit */
 typedef struct {
@@ -344,10 +352,18 @@ static uint64_t AssetAt(uint64_t rec, const uint8_t *guid) {
     return rec;
 }
 
-/* One shot scan of the heap for the two asset records, in a
- * single walk so a cold first build does not pay for the
- * missing assets twice. Stops early once both are found. */
-static void ScanAssets(uint64_t *font, uint64_t *image) {
+/* One walk of the address space looking for the two asset records, in a
+ * single pass so a cold first build does not pay for the missing assets
+ * twice. Stops early once both are found.
+ *
+ * privateOnly leaves out everything that is not the process's own heap.
+ * The engine maps its .forge archives - tens of gigabytes of MEM_MAPPED
+ * pages - and the sweep used to read those through the kernel as well.
+ * That is where the twenty-nine seconds went (measured in the field, right
+ * as the world came up, which is the stutter that was reported), and it
+ * read them for nothing: an asset record is an engine object, so it lives
+ * on the private heap. */
+static void ScanPass(uint64_t *font, uint64_t *image, int privateOnly) {
     MEMORY_BASIC_INFORMATION mbi;
     uint8_t *scan = NULL;
 
@@ -356,6 +372,7 @@ static void ScanAssets(uint64_t *font, uint64_t *image) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
         if (next <= scan) break;
         if (mbi.State == MEM_COMMIT &&
+            (!privateOnly || mbi.Type == MEM_PRIVATE) &&
             (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
                             PAGE_EXECUTE_READWRITE)) &&
             !(mbi.Protect & PAGE_GUARD) &&
@@ -393,6 +410,15 @@ static void ScanAssets(uint64_t *font, uint64_t *image) {
     }
 }
 
+/* The heap first, and the whole address space only if that misses. The
+ * records are heap objects, so the second pass is not expected to run at
+ * all - it is there so a build this code has not seen still finds them. */
+static void ScanAssets(uint64_t *font, uint64_t *image) {
+    ScanPass(font, image, 1);
+    if (!*font || !*image)
+        ScanPass(font, image, 0);
+}
+
 /* Cached asset records, verified in place, then one combined
  * scan for whatever is still missing. The scan is a whole
  * address space walk and takes seconds on a cold session, so
@@ -410,9 +436,11 @@ static void FindAssets(uint64_t *font, uint64_t *image) {
         if (rec) *image = rec; else g_assetImageOff = 0;
     }
     if (*font && *image) return;
+    if (g_scanMissAt && (DWORD)(t0 - g_scanMissAt) < 10000u) return;
     ScanAssets(font, image);
     if (*font) g_assetFontOff = *font - ShImageBase();
     if (*image) g_assetImageOff = *image - ShImageBase();
+    if (!*font || !*image) g_scanMissAt = t0;
     Log("asset scan: %lu ms, font %llx image %llx",
         (unsigned long)(GetTickCount() - t0),
         (unsigned long long)*font, (unsigned long long)*image);
@@ -810,8 +838,9 @@ static uint64_t __attribute__((ms_abi)) Job(uint64_t op, uint64_t arg,
     ShSceneLock(scenePriv);
     r = JobBody((int)op, w);
     ShSceneUnlock(scenePriv);
-    Log("job op %d on thread %lu -> %llu", (int)op,
-        (unsigned long)GetCurrentThreadId(), (unsigned long long)r);
+    /* No log here: this runs on the game thread for every UI op, and a
+     * plugin that drives ShUiSet* per frame would turn it into a
+     * synchronous file write per frame (Log flushes every line). */
     return r;
 }
 

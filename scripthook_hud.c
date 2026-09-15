@@ -62,7 +62,10 @@ static HudView g_view[HUD_SLOTS];
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
 static volatile LONG g_started = 0;
-static volatile int g_rev = 0;
+/* 1 once the tick thread exists. Started by the first native slot and by
+ * nothing else - see EnsureHudThread. */
+static volatile LONG g_tick = 0;
+static volatile LONG g_rev = 0;
 
 extern void ShSetError(int err);
 
@@ -75,7 +78,9 @@ static void HudUnlock(void) {
 }
 
 static void HudChanged(void) {
-    g_rev++;
+    /* Any thread may change HUD text; the tick thread compares the
+     * revision to decide whether to re-sync. A plain ++ lost updates. */
+    InterlockedIncrement(&g_rev);
 }
 
 /* Slots for one corner, priority first then registration,
@@ -253,9 +258,14 @@ static void SyncAll(void) {
     }
     for (i = 0; i < HUD_SLOTS; i++) {
         HudView *v = &g_view[i];
+        int used;
         if (active[i] || !v->panel) continue;
         if (v->gen != ShUiGen()) { memset(v, 0, sizeof(*v)); continue; }
-        if (!g_slots[i].used) { DropView(v); continue; }
+        /* g_slots is what ShHudCreate/Destroy rewrite under HudLock. */
+        HudLock();
+        used = g_slots[i].used;
+        HudUnlock();
+        if (!used) { DropView(v); continue; }
         if (v->visible) { ShUiShow(v->panel, 0); v->visible = 0; }
     }
 }
@@ -372,6 +382,24 @@ static void RestartTimers(void) {
     if (n) Log("ui up: %d line(s) given their time back", n);
 }
 
+/* Does the engine's widget tree need us at all? It is worth waking only
+ * while a native slot is live - bringing it up costs a full asset scan,
+ * tens of seconds after a load - or while a panel made earlier is still on
+ * screen and has to be taken down. Toasts, the tick's other job, are pure
+ * data and never touch it. */
+static int NativeWanted(void) {
+    int i, want = 0;
+
+    HudLock();
+    for (i = 0; i < HUD_SLOTS; i++)
+        if (g_slots[i].used) { want = 1; break; }
+    HudUnlock();
+    if (want) return 1;
+    for (i = 0; i < HUD_SLOTS; i++)      /* the tick thread owns g_view */
+        if (g_view[i].panel) return 1;
+    return 0;
+}
+
 static DWORD WINAPI HudThread(LPVOID p) {
     int seen = -1, gen = -1, uiUp = 0;
     (void)p;
@@ -379,6 +407,17 @@ static DWORD WINAPI HudThread(LPVOID p) {
     for (;;) {
         int rev = g_rev, g;
         Sleep(HUD_TICK_MS);
+        if (!NativeWanted()) {
+            /* Nothing on the native side: the engine's UI is left alone, so
+             * a session whose plugins only raise toasts never pays the
+             * asset scan. seen/gen are reset so a slot made while we are
+             * idle is synced on the next tick instead of skipped. */
+            ExpireSlots();
+            uiUp = 0;
+            seen = -1;
+            gen = -1;
+            continue;
+        }
         if (!ShUiReady()) { uiUp = 0; continue; }
         if (!uiUp) { uiUp = 1; RestartTimers(); }
         ExpireSlots();
@@ -391,6 +430,8 @@ static DWORD WINAPI HudThread(LPVOID p) {
     return 0;
 }
 
+/* The lock and the log, once. This is all a toast needs: a toast is data,
+ * and whoever draws it reads that data - no engine widget is involved. */
 static void EnsureHud(void) {
     for (;;) {
         LONG s = InterlockedCompareExchange(&g_started, 0, 0);
@@ -400,9 +441,23 @@ static void EnsureHud(void) {
         InitializeCriticalSection(&g_lock);
         g_lockReady = 1;
         LogInit("scripthook_hud.log");
-        CreateThread(NULL, 0, HudThread, NULL, 0, NULL);
         InterlockedExchange(&g_started, 1);
         return;
+    }
+}
+
+/* The tick that drives the engine's own widget tree, started by the first
+ * native slot and by nothing else. Waking that tree costs a full asset
+ * scan - tens of seconds after a load - and a session that only wants
+ * toasts must not pay it. */
+static void EnsureHudThread(void) {
+    EnsureHud();
+    if (InterlockedExchange(&g_tick, 1)) return;
+    {
+        HANDLE h = CreateThread(NULL, 0, HudThread, NULL, 0, NULL);
+
+        if (!h) InterlockedExchange(&g_tick, 0);
+        else    CloseHandle(h);   /* never waited on */
     }
 }
 
@@ -410,7 +465,7 @@ SH_API uint32_t ShHudCreate(const char *name, int anchor,
                             int priority) {
     int i;
 
-    EnsureHud();
+    EnsureHudThread();
     HudLock();
     for (i = 0; i < HUD_SLOTS; i++) {
         if (g_slots[i].used) continue;

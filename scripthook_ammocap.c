@@ -38,8 +38,12 @@
 
 /* num in the high 16 bits, den in the low. 0 = never set. */
 static volatile LONG g_scale;
+/* 0 = no hook, 1 = one thread is installing, 2 = installed. */
 static volatile LONG g_installed;
 static volatile LONG g_logged;
+/* Set once AmmoCapacity.asi is seen, so the check and the log happen once
+ * instead of on every refused attempt. */
+static volatile LONG g_asiBlocked;
 
 typedef int (*CapFn_t)(uint64_t, uint64_t, uint64_t, uint64_t);
 /* The original function, through MinHook's trampoline.
@@ -68,13 +72,21 @@ static int NumDen(LONG s, uint32_t *num, uint32_t *den) {
 }
 
 /* The old plugin's algorithm, unchanged: zero in, zero out; otherwise
- * value * num / den, clamped to what a 16-bit capacity can hold. */
+ * value * num / den, clamped to what a 16-bit capacity can hold.
+ *
+ * The read is a plain aligned 32-bit load, not a lock cmpxchg: writers
+ * publish through InterlockedExchange, so loading the packed word cannot
+ * tear - and this runs on the engine's own capacity path, where a locked
+ * read per call was pure overhead. */
 static int ScaleValue(int ret) {
     uint32_t num, den, value = (uint32_t)ret & CAP_MAX;
+    LONG s = g_scale;                          /* aligned; writers atomic */
     uint64_t out;
 
-    if (!NumDen(InterlockedCompareExchange(&g_scale, 0, 0), &num, &den))
-        return ret;
+    if (!s) return ret;
+    num = (uint32_t)s >> 16;
+    den = (uint32_t)s & 0xFFFFu;
+    if (!num || !den) return ret;
     if (num == 1 && den == 1) return ret;      /* pass through untouched */
     if (!value) return 0;
     out = (uint64_t)value * num / den;
@@ -103,9 +115,11 @@ static int Install(void) {
     /* The old plugin hooks the very same byte. Two inline hooks on one entry
      * is a race worth losing before it starts, so the framework stays out
      * and says why. */
-    if (GetModuleHandleA("AmmoCapacity.asi")) {
-        Log("ammocap: AmmoCapacity.asi is loaded and owns this hook - "
-            "remove that plugin to use the framework's scale");
+    if (InterlockedCompareExchange(&g_asiBlocked, 0, 0) ||
+        GetModuleHandleA("AmmoCapacity.asi")) {
+        if (!InterlockedExchange(&g_asiBlocked, 1))
+            Log("ammocap: AmmoCapacity.asi is loaded and owns this hook - "
+                "remove that plugin to use the framework's scale");
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
     }
@@ -139,6 +153,10 @@ static int Install(void) {
     s = MH_EnableHook(tgt);
     if (s != MH_OK) {
         Log("ammocap: MH_EnableHook failed (%s)", MH_StatusToString(s));
+        /* Do not leave a created-but-disabled hook behind: the trampoline
+         * it handed us goes away with it. */
+        MH_RemoveHook(tgt);
+        g_orig = NULL;
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
     }
@@ -150,31 +168,54 @@ static int Install(void) {
 /* ---- public API ------------------------------------------------------ */
 
 SH_API int ShSetAmmoScale(int num, int den) {
+    LONG packed;
+
     if (num <= 0 || den <= 0 || num > 0xFFFF || den > 0xFFFF) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
+    packed = (LONG)(((uint32_t)num << 16) | (uint32_t)den);
     /* Asking for 1/1 before anything else is the "leave it alone" case: no
      * hook is installed for it, the game keeps its own number. */
-    if (num == 1 && den == 1 && !InterlockedCompareExchange(&g_installed, 0, 0)) {
+    if (packed == SCALE_ONE && InterlockedCompareExchange(&g_installed, 0, 0) == 0) {
         InterlockedExchange(&g_scale, SCALE_ONE);
         ShSetError(SH_OK);
         return 1;
     }
-    if (!InterlockedCompareExchange(&g_installed, 0, 0)) {
-        if (!Install()) return 0;
-        InterlockedExchange(&g_installed, 1);
+    /* One installer at a time: two plugins asking at the same instant used
+     * to both call Install(), and the loser was handed a hook failure even
+     * though the hook had just been installed. */
+    if (InterlockedCompareExchange(&g_installed, 0, 0) != 2) {
+        LONG prev = InterlockedCompareExchange(&g_installed, 1, 0);
+        if (prev == 0) {
+            if (!Install()) {
+                InterlockedExchange(&g_installed, 0);
+                return 0;
+            }
+            InterlockedExchange(&g_installed, 2);
+        } else if (prev == 1) {
+            int spins = 0;
+            while (InterlockedCompareExchange(&g_installed, 0, 0) == 1 &&
+                   spins++ < 5000)
+                Sleep(1);
+            if (InterlockedCompareExchange(&g_installed, 0, 0) != 2)
+                return 0;
+        } else {
+            return 0;
+        }
     }
-    InterlockedExchange(&g_scale, (LONG)(((uint32_t)num << 16) | (uint32_t)den));
-    LogOnce();
-    Log("ammocap: scale set to %d/%d", num, den);
+    /* Log only a real change: the setter can be called in a loop. */
+    if (InterlockedExchange(&g_scale, packed) != packed) {
+        LogOnce();
+        Log("ammocap: scale set to %d/%d", num, den);
+    }
     ShSetError(SH_OK);
     return 1;
 }
 
 SH_API void ShGetAmmoScale(int *num, int *den) {
     uint32_t n, d;
-    LONG s = InterlockedCompareExchange(&g_scale, 0, 0);
+    LONG s = g_scale;
 
     if (!NumDen(s, &n, &d)) { n = 1; d = 1; }
     if (num) *num = (int)n;
@@ -182,7 +223,7 @@ SH_API void ShGetAmmoScale(int *num, int *den) {
 }
 
 SH_API int ShAmmoScaleActive(void) {
-    LONG s = InterlockedCompareExchange(&g_scale, 0, 0);
+    LONG s = g_scale;
 
     return (s && s != SCALE_ONE) ? 1 : 0;
 }
