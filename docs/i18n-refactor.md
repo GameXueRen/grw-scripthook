@@ -1083,6 +1083,74 @@ ShLangDeclare("firstperson", "zh-CN", kZh, N);
 
 **通用教训**：改一个键的**值**之前，先查这个键还被谁引用（`grep '"键"'`）。同一个键出现在两个语义位置就是设计缺陷，应当**先拆键再改词**，而不是改词。收尾复查的脚本里已加上"同一键被多处不同语义引用"的检查项。
 
+### 9.15 首启配置模板瘦身：151 行 → 17 行（同日）
+
+`DEFAULT_CONFIG`（`scripthook_config.c`，只在 `<gamedir>\scripthook.ini` **不存在**时写一次）原先把每个键的用法都写成注释，首启就给玩家一份 151 行的"说明书"。现在只留开关本身：**CPU 六个旋钮保留**（最可能手改的一项，顺序与「CPU 调度控制」页的行序、README 示例的顺序都一致），其余靠代码默认值 ——
+
+```ini
+[loader]
+load_plugins=1
+cpu_boot=0
+cpu_window=0
+cpu_eco_boot=0
+cpu_play=0
+cpu_prio_play=0
+cpu_cores=0
+
+[plugins]
+
+[forgemod]
+enabled=0
+
+[Settings]
+Language=zh-CN
+Languages=zh-CN,en-US
+```
+
+**没写进模板的那些键，缺键时的默认值 = 原来写出的值**（落之前逐键核对过；注意 `read_dial` / `read_prio` 的第 2 参是**上限**而不是默认值，真正的默认在 `ShConfigGetInt(..., 0)` / `P_LEAVE`）：
+
+| 键 | 缺键时的默认值（代码处）|
+|---|---|
+| `leak_probe` | `0`（`scripthook_ovl.cpp`）|
+| `[forgemod] dry_run / report_copies / apply_all_copies / probe / log_reads` | `0 / 1 / 0 / 0 / 0` |
+| `[Settings] MenuScale / MenuScaleMin / MenuScaleMax` | `"0" / "0.75" / "3.0"`（`scripthook_ovl.cpp`）|
+
+CPU 那六个写了也只是**把它钉住、让玩家看得见**：`read_dial` / `read_prio` 的默认同样是 0，写与不写读起来一样。
+
+说明的落点（删掉的注释不是唯一出处）：`README.md` 的「主配置文件（scripthook.ini）说明」一节（全套中文注释）、仓库参考 `scripthook.ini`（详解版）、`docs/cpu-scheduling.md` / `docs/forge-mod-loader.md` / `docs/ui-drawing.md`。
+
+顺带修的两处：`README.md` 的语言码 `zh_cn,en` / `zh_cn` → `zh-CN,en-US` / `zh-CN`（**下划线不匹配**，照抄的人会静默落到英文）；同节 `cpu_eco_boot` 的注释补上第三档（`0 不干预 / 1 开 / 2 关`）。
+
+**另有两个键代码会读、模板从未列出**：`[forgemod] strict`（=1，`docs/forge-mod-loader.md` 有说明）与 `[forgemod] ledger`（=1，文档没写）——它们一直靠代码默认值生效，模板瘦身后依然如此。
+
+> 注意：**已存在的 `scripthook.ini` 不会被改写**。模板只在文件缺失时生成；要看新长相得删掉/改名现有那份再启动。
+
+### 9.16 两处复查漏网 + 一处插入点修正（同日）
+
+**① `@forge.page`：一个宏骗过了复查，代价是中文下 Forge 页标题一直是英文。**
+
+`scripthook_forge.c` 的 `#define SH_FORGE_PAGE "Forge Mod Loader"` 是**全框架唯一还用英文原文当键的页面**。§9.14 那次全量复查只匹配"字面量当第 2 参"的调用（`ShLang("…")`、`ShMenu*(m, "…")`），而这里是**宏**，所以漏了。它不只是键不一致：S1 删掉 `[zh_cn]` 表时把 `"Forge Mod Loader" = "Forge 资源侧载"` 这条译文一起删了 —— 于是中文下这一页的标题一直是英文。
+
+修法：基线加 `@forge.page`（`Forge Mod Loader` / `Forge 资源侧载`），宏改成这个 ID。旧 ini 里的 `Forge Mod Loader=10` 从此是死键；启动时按"缺失才写"补上 `@forge.page=10`。
+
+**复查规则补充**：`ShMenuCreate` / `ShMenuSub` 的**每个实参都要落到 ID** —— 含宏、含常量拼接、含 `#define`，不能只看字面量。（这一条也解释了为什么"眼见"仍然必要：它是从玩家截图的 `[MenuOrder]` 里露出来的。）
+
+**② `[plugins]` 下面多一行空行：追加键的插入点把空行留在了键上面。**
+
+首启模板写的是 `[plugins]` + 空行 + `[forgemod]`，那行空行是"header 前导空行"，全文件统一风格 —— 新建段的路径同样是先吐空行再吐 header（`IniWriteValue` 末尾）。但补缺失键的时机是**遇到下一个 header 时**（"append it here, at the very end of the target section"），于是首次扫描补进去的 32 行落在了空行**下面**。
+
+修法：目标段内的空行**先按住不吐**，等这一段的键补完再吐，空行于是仍然紧贴它所属的 header：
+
+| 输入 | 修前 | 修后 |
+|---|---|---|
+| `[plugins]` / 空行 / `[forgemod]` | 空行在补进去的键**上面** | 键紧贴 header，空行留在 `[forgemod]` 前 |
+| `[plugins]` / `chaos=0` / 空行 / `[forgemod]` | 新键在空行下面 | 新键接在 `chaos=0` 后，空行仍在 `[forgemod]` 前 |
+| 目标段是文件最后一段 | 同上 | 键补在末尾，按住的空行跟在它后面 |
+
+只对**目标段**生效；注释不被按住（保持"注释 → 它后面的键"的顺序）；其它段逐字节复制不变。
+
+**验证**：仓库里没有宿主测试框架，只能实机验 —— 删掉/改名 `<gamedir>\scripthook.ini`，启动一次，看 `[plugins]` 段第一行是否紧贴 header、空行是否落在 `[forgemod]` 之前。
+
 ### 9.4 尚未经实机验证
 
 - 18 份插件 `lang.ini` 的实际显示（含第三方插件的 `<页面键>.hint`）；

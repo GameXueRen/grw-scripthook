@@ -168,158 +168,35 @@ static CfgEntry g_entries[ENTRIES_MAX];
 static int     g_nentries = 0;
 static int     g_configReady = 0;
 
-/* The default written on first launch, so the schema is
- * visible without hunting for it. */
+/* The default written on first launch: only the switches that have no
+ * other home. README.md documents the rest (and the reference
+ * scripthook.ini in the repo keeps the long form).
+ *
+ * Every key left out reads exactly the value it was given here before:
+ * the code's own default is that same value - read_dial / read_prio take a
+ * ceiling and fall back to 0, and each ShConfigGet* passes the value the
+ * old template wrote - so omitting a line does not change behaviour. It
+ * only stops the generated file from being the manual. The CPU dials are
+ * listed all the same - they are the part a player is most likely to tune
+ * by hand, and they are written in the order the CPU page shows them. */
 static const char *DEFAULT_CONFIG =
-    "; GRW ScriptHook main config\n"
-    "; The master switch for every big feature.\n"
-    "\n"
     "[loader]\n"
-    "; 0 refuses to load any plugin this launch.\n"
     "load_plugins=1\n"
-    "; --- CPU scheduling, by stage of the game's start up ---\n"
-    "; One dial per stage. Values:\n"
-    ";   0 leave alone     set nothing at all - the system schedules it,\n"
-    ";                     its own trimming included\n"
-    ";   1 all cores       force every processor the machine has; this is\n"
-    ";                     what undoes a trim the system did by itself\n"
-    ";   2 SMT off         one thread per physical core\n"
-    ";   3 E-cores off     P-cores only (Intel 12th-gen+ hybrid; on any\n"
-    ";                     other CPU it does not apply and nothing changes)\n"
-    ";   4 SMT + E-cores off\n"
-    "; The play dial adds: 5 CPU 0 off, 6 SMT + CPU0 off,\n"
-    "; 7 E-cores + CPU0 off, 8 SMT + E-cores + CPU0 off.\n"
-    "; The logo screen: SMT off here is what makes it pass at once.\n"
     "cpu_boot=0\n"
-    "; The game window (loading, main menu, lobby): E-cores off fixes the\n"
-    "; endless loading on some machines, all cores on others.\n"
     "cpu_window=0\n"
-    "; In play: SMT off and CPU 0 off are the ones that help the odd\n"
-    "; stutter.\n"
-    "cpu_play=0\n"
-    "; The play stage's priority: 0 leave alone, 1 normal, 2 above normal,\n"
-    "; 3 high. 0 is the default. The play stage is everything from the\n"
-    "; first main menu on. Realtime is offered nowhere: it can starve the\n"
-    "; desktop and the audio threads. The engine sets a class of its own\n"
-    "; during start up, so a stage that holds one keeps it held.\n"
-    "cpu_prio_play=0\n"
-    "; The two loading stages - the logo screen and the first load into the\n"
-    "; menu - have this one switch between them: 1 = hold the Windows 11\n"
-    "; efficiency mode (EcoQoS, the column Task Manager shows) while they\n"
-    "; last, which lets the scheduler run the process slower and on the\n"
-    "; efficiency cores: 0 (the default) leaves the class alone, 1 holds\n"
-    "; the mode, 2 drops it for those two stages. 0 and 1 keep the meaning\n"
-    "; the old on/off switch had.\n"
-    "; Where the machine cannot do efficiency mode - it is a Windows 11\n"
-    "; feature, and before it the same request only marks the process\n"
-    "; LowQoS - 1 holds the LOW priority class instead: a loading screen\n"
-    "; yielding the machine is the same intent, said with what is there.\n"
-    "; One log line and the CPU page both say when that happens. Either\n"
-    "; way the play stage puts it back, and a state the process arrived\n"
-    "; with is never touched at all.\n"
     "cpu_eco_boot=0\n"
-    "; A ceiling on the PLAY stage alone (0..64, 0 = none). The start-up\n"
-    "; stages are never capped: trimming the set while the game is still\n"
-    "; starting is a good way to make it not start.\n"
+    "cpu_play=0\n"
+    "cpu_prio_play=0\n"
     "cpu_cores=0\n"
-    "; 1 = render-thread heartbeat every 5s logging process memory and\n"
-    "; UI/scene object counts (\"leak:\" lines) for leak hunting.\n"
-    "; Default 0: off - one branch per frame, nothing else runs.\n"
-    "leak_probe=0\n"
     "\n"
     "[plugins]\n"
-    "; One line per plugin folder, and a plugin with NO line here is not\n"
-    "; loaded. Write <name>=1 to load it, or switch it on in the mod menu's\n"
-    "; Plugins page; either way it takes effect on the next launch. The\n"
-    "; first scan writes a line for every folder it finds, so this list\n"
-    "; always spells out each plugin and its state - a third-party .asi\n"
-    "; dropped into plugins\\ is off until it is asked for, like any other.\n"
-    "; Deleting this file is the reset: a fresh default is written, every\n"
-    "; plugin off, and the [loader] dials and the language go back to their\n"
-    "; defaults as well.\n"
-    "; firstperson - the camera work, with a page of its own in the menu.\n"
-    "; GhostNoWipe - the wipe of a Ghost Mode save when a run ends.\n"
-    "; Two records mark the slot as gone: the game renames N.save to\n"
-    "; N.save.delete and writes a .delete beside it, and before that it\n"
-    "; has already written the run's end into N.save's own content. Both\n"
-    "; are held - the marked write is refused and the save put back from\n"
-    "; a clean copy, the rename is dropped, and .delete writes go to the\n"
-    "; plugin's own temp folder. No trace of the wipe is left on disk and\n"
-    "; the save keeps the content it had before the death.\n"
-    "; The list still shows the slot as gone for the rest of the session\n"
-    "; - that is in the process - so a status line goes up saying the save\n"
-    "; was kept, and comes down once you are in a game again. The slot is\n"
-    "; listed again on the next launch. Deleting a slot by hand is caught\n"
-    "; too - turn the plugin off to remove one. Single player only; delete\n"
-    "; the plugin folder once the game itself is patched.\n"
-    "; LastRites_dlcfix - the crash on entering the \"Last Rite\"\n"
-    "; DLC. One switch, off by default, in the mod menu; the single id\n"
-    "; it answers for is built in and cannot be pointed elsewhere.\n"
-    "; Single player only, and delete the plugin folder once the game\n"
-    "; itself is patched.\n"
-    "; GhostRevive - experimental, answered, switched off in its own ini.\n"
-    "; Whether a Ghost Mode death can be sent down the reviving path: it\n"
-    "; cannot. The branch turns on whether the AI squad is aboard - with\n"
-    "; one the death goes 7 -> 5 -> 4 and play carries on, without one it\n"
-    "; bounces 7 -> 4 -> 7 at zero health and ends at the menu with the\n"
-    "; slot gone - and nothing outside the engine reaches that decision:\n"
-    "; ShTriggerGameOver is accepted and ignored, and refilling the health\n"
-    "; changes nothing (the game kills the player again 56 ms later).\n"
-    "; GhostNoWipe is what solves it, by keeping the file. This line stays\n"
-    "; 1 so the menu is there, but the plugin's own enabled=0 means it\n"
-    "; registers nothing until asked. Single player only.\n"
     "\n"
     "[forgemod]\n"
-    "; Forge Mod Loader: loose files under <gamedir>\\mods override entries\n"
-    "; that already exist in the .forge archives. No archive is modified and\n"
-    "; nothing is written to disk. Layout:\n"
-    ";     mods\\<archive name>\\<file>              flat, wins over\n"
-    ";     mods\\<mod name>\\<archive name>\\<file>   ordered by folder name\n"
-    "; A folder whose name starts with \"~\" is skipped, a file ending in\n"
-    "; \".delete\" is recognised and skipped, and \"<n>_-_<name>.data\" names\n"
-    "; the entry by index and name. A replacement has to fit the room the\n"
-    "; entry already has, because no other entry is ever moved.\n"
-    "; Off by default: create mods\\ and set enabled=1 to use it.\n"
     "enabled=0\n"
-    "; 1 = resolve and log only; nothing is served.\n"
-    "dry_run=0\n"
-    "; 1 = report the other archives a targeted resource also lives in.\n"
-    "report_copies=1\n"
-    "; 1 = override those other copies as well.\n"
-    "apply_all_copies=0\n"
-    "; Diagnostic rounds, off in normal use.\n"
-    "probe=0\n"
-    "log_reads=0\n"
     "\n"
     "[Settings]\n"
-    "; Menu language: a standard code - zh-CN = Chinese (default),\n"
-    "; en-US = English. Case does not matter.\n"
     "Language=zh-CN\n"
-    "; Languages the menu language switch offers (comma separated;\n"
-    "; the order here is the order shown; both codes are built in).\n"
-    "Languages=zh-CN,en-US\n"
-    "; Mod menu / plugin window UI scale, driven by the game resolution:\n"
-    ";   MenuScale = 0 auto (height/1080, so 4K -> 2.0); >0 fixed rate\n"
-    ";   (still clamped by Min/Max).  MenuScaleMin/Max bound the final\n"
-    ";   scale in both modes.  Restart to apply.  1080p baseline = 1.0.\n"
-    "MenuScale=0\n"
-    "MenuScaleMin=0.75\n"
-    "MenuScaleMax=3.0\n"
-    "; Log level (reserved, not yet implemented): none/error/warn/info/debug\n"
-    "; LogLevel=info\n"
-    "\n"
-    "; ------------------------------------------------------------\n"
-    "; Text lives in a lang.ini now, not here (docs/i18n-refactor.md):\n"
-    ";     <gamedir>\\lang.ini           the framework text\n"
-    ";     plugins\\<name>\\lang.ini      one per plugin\n"
-    "; A section is a language code ([zh-CN], [en-US]) and a row\n"
-    "; overrides the text this build already ships for that key, so a\n"
-    "; file carries only the lines it changes. A key starting with\n"
-    "; \"@\" is a stable ID; any other key is the English literal.\n"
-    "; Delete a lang.ini and the menu still reads: Chinese and English\n"
-    "; text ship inside the build.\n"
-    "; ------------------------------------------------------------\n";
-
+    "Languages=zh-CN,en-US\n";
 static void WriteDefaultConfig(const char *path) {
     FILE *f = fopen(path, "w");
     if (f) {
@@ -2126,8 +2003,11 @@ static const char *IniEol(const char *whole, long len) {
 /* Replace the value of key=... inside [section] in the on-disk
  * scripthook.ini. Comments, blank lines and every other section
  * survive byte for byte; a missing key is appended at the end of
- * its section (the section itself is created if absent). The file
- * is treated as opaque bytes, so UTF-8 content is preserved.
+ * its section (the section itself is created if absent). A blank line
+ * sitting just before the header that ends the section stays before
+ * that header - i.e. below the appended key, not above it, which is
+ * what copying the blanks as they came would look like.
+ * The file is treated as opaque bytes, so UTF-8 content is preserved.
  * Returns 1 when the file was rewritten. */
 static int IniWriteValue(const char *section, const char *key,
                          const char *value) {
@@ -2140,6 +2020,11 @@ static int IniWriteValue(const char *section, const char *key,
     char curSec[48];
     int curSecSet = 0;
     int inSec = 0;
+    /* Blank lines held back at the end of the target section: they are
+     * the separator that belongs to the header ending it, so they are
+     * flushed after a key this call appends (see the loop). */
+    const char *pendBlanks = NULL;
+    size_t pendLen = 0;
     int replaced = 0;
     int wrote = 0;
     char *out = NULL;
@@ -2214,6 +2099,24 @@ static int IniWriteValue(const char *section, const char *key,
         SplitLine(p, end, &next, &li);
         q = SkipWs(li.s, li.s + li.n);
 
+        /* Inside the target section a blank line is held back rather than
+         * copied: it is the separator that belongs to the header ending
+         * this section, and a key appended below it would read as though
+         * the section had grown a line too many. */
+        if (inSec && !replaced && q >= li.s + li.n) {
+            if (!pendLen) pendBlanks = p;
+            pendLen += li.total;
+            p = next;
+            continue;
+        }
+        /* Held blanks go before this line - except before a header, which
+         * flushes them after the key it appends (see the copy below). */
+        if (pendLen && !(q < li.s + li.n && *q == '[')) {
+            OutPrint(&out, &outLen, &outCap, "%.*s", (int)pendLen, pendBlanks);
+            pendLen = 0;
+            pendBlanks = NULL;
+        }
+
         if (q < li.s + li.n && *q == '[') {
             /* A section header. If the section we are leaving was the
              * target one and its key was never placed, append it here,
@@ -2275,6 +2178,15 @@ static int IniWriteValue(const char *section, const char *key,
             }
         }
 
+        /* The header that closed the target section has already appended
+         * its key above; the held blanks follow it, so they stay the
+         * separator before this header. */
+        if (pendLen) {
+            OutPrint(&out, &outLen, &outCap, "%.*s", (int)pendLen, pendBlanks);
+            pendLen = 0;
+            pendBlanks = NULL;
+        }
+
         /* Verbatim copy of the line. */
         if (outLen + li.total + 1 > outCap) {
             char *np = (char *)realloc(out, outCap + li.total + 1);
@@ -2299,6 +2211,11 @@ static int IniWriteValue(const char *section, const char *key,
             OutPrint(&out, &outLen, &outCap, "[%s]%s", section, eol);
         }
         OutPrint(&out, &outLen, &outCap, "%s=%s%s", key, value, eol);
+        /* The section is the last thing in the file: the blanks held
+         * above stay where they were, at the end of it. */
+        if (pendLen)
+            OutPrint(&out, &outLen, &outCap, "%.*s", (int)pendLen,
+                     pendBlanks);
         wrote = 1;
     }
 

@@ -121,7 +121,7 @@ Tom Clancy's Ghost Recon Wildlands/
 load_plugins=1          ; 0 = 启动时不加载任何插件
 cpu_boot=0              ; Logo 阶段：        0=不干涉 1=全部核心(强制) 2=禁超线程 3=禁小核 4=禁超线程+小核
 cpu_window=0            ; 游戏窗口加载阶段：同上（例：解 logo 卡用 2；解窗口无限加载用 3 或 1）
-cpu_eco_boot=0          ; 加载阶段(Logo+窗口加载)用效率模式：0=关(默认) 1=开；本机不支持时改用"低"优先级
+cpu_eco_boot=0          ; 加载阶段(Logo+窗口加载)用效率模式：0=不干预(默认) 1=开 2=关；本机不支持时改用"低"优先级
 cpu_play=0              ; 游玩阶段：        附加 5=仅禁CPU0 6=禁超线程+CPU0 7=禁小核+CPU0 8=三者全禁
 cpu_prio_play=0         ; 游玩阶段优先级：  0=不干涉 1=正常 2=高于正常 3=高
 cpu_cores=0             ; 游玩阶段最大逻辑核心数（0 = 不限制；启动阶段不做限制）
@@ -139,8 +139,8 @@ probe=0                 ; 1 = 安装取证探针（排查用）
 log_reads=0             ; 1 = 记录每次读取（排查用）
 
 [Settings]
-Languages=zh_cn,en      ; 设置菜单中可选的语言列表（逗号分隔）
-Language=zh_cn          ; 当前菜单语言
+Languages=zh-CN,en-US   ; 设置菜单中可选的语言列表（逗号分隔，BCP-47 语言码）
+Language=zh-CN          ; 当前菜单语言
 ```
 
 ---
