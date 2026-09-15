@@ -506,7 +506,8 @@ static void HandleDone(void) {
  * Persisted in the plugin's own ini, plugins\cnchat\cnchat.ini:
  *   [Settings]
  *   enabled  = 0/1   (default 0: the self-drawn box is off)
- *   startkey = VK    (default 0x54 'T'; must match the in-game chat key)
+ *   startkey = VK    (default 0x54 'T'; must match the in-game chat key.
+ *                     The menu offers T / Y / U; the ini stores the code)
  *   candmode = 0/1   (0 overlay-drawn candidate list [default],
  *                     1 the input method's own candidate window)
  * Loaded once at startup; menu toggles update the globals AND write the
@@ -522,6 +523,23 @@ static void HandleDone(void) {
 static volatile int g_cfgEnabled = 0;   /* default off */
 static volatile int g_cfgKey     = VK_CHAT; /* 'T' */
 static volatile int g_cfgCand    = 0;   /* default overlay-drawn */
+
+/* The start key's choices, in menu order. The ini stores the VK code, not
+ * the index - a hand-written 84 keeps working - so both directions are
+ * needed: the row shows the index, the plugin listens for the code. The
+ * names are key names rather than prose, which is why they stay literals
+ * (the row's label, @chat.startkey, is the part that translates). */
+static const char *kKeyNames[] = { "T", "Y", "U" };
+static const int   kKeyCodes[] = { 0x54, 0x59, 0x55 };
+#define KEY_COUNT ((int)(sizeof(kKeyCodes) / sizeof(kKeyCodes[0])))
+
+static int KeyIndexFromVk(int vk) {
+    int i;
+
+    for (i = 0; i < KEY_COUNT; i++)
+        if (kKeyCodes[i] == vk) return i;
+    return -1;
+}
 
 static HINSTANCE g_inst;
 static char      g_iniPath[MAX_PATH];
@@ -745,7 +763,15 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
 static void ChatCfgLoad(void) {
     g_cfgEnabled = IniInt(CFG_KEY_CFG, 0) ? 1 : 0;
     g_cfgKey = IniInt(CFG_KEY_KEY, VK_CHAT);
-    if (g_cfgKey < 1 || g_cfgKey > 0xFE) g_cfgKey = VK_CHAT;
+    /* The menu offers three keys. A file may still name any VK by hand; one
+     * that is not on the list would leave the row showing a key the plugin
+     * is not listening for, so it falls back to the first choice and the log
+     * says why. */
+    if (KeyIndexFromVk(g_cfgKey) < 0) {
+        if (g_cfgKey != kKeyCodes[0])
+            Log("startkey 0x%02X is not one of T/Y/U; using T", g_cfgKey);
+        g_cfgKey = kKeyCodes[0];
+    }
     g_cfgCand = IniInt(CFG_KEY_CAND, 0) ? 1 : 0;
 }
 
@@ -762,8 +788,9 @@ static void ChatSetCandMode(int mode) {
  * A root page of its own, like every other plugin.  The rows read and
  * write this plugin's ini directly; "Enabled" only takes effect on the
  * next launch (the config is read once at startup), so it is not
- * mirrored into g_cfg* live.  CandMode is applied live through
- * ChatSetCandMode, which keeps the ini in sync. */
+ * mirrored into g_cfg* live.  CandMode and the start key are applied
+ * live - the poll thread reads both globals on every tick - and their
+ * rows keep the ini in sync. */
 
 static void ChatOnEnabled(uint32_t menu, uint32_t item, int value,
                           void *user) {
@@ -776,6 +803,17 @@ static void ChatOnCandMode(uint32_t menu, uint32_t item, int value,
                            void *user) {
     (void)menu; (void)item; (void)user;
     ChatSetCandMode(value);
+}
+
+/* The start key applies at once: the poll thread reads g_cfgKey on every
+ * tick, so the next press uses the new key.  Writing the ini keeps the
+ * choice across a restart. */
+static void ChatOnStartKey(uint32_t menu, uint32_t item, int value,
+                           void *user) {
+    (void)menu; (void)item; (void)user;
+    if (value < 0 || value >= KEY_COUNT) return;
+    g_cfgKey = kKeyCodes[value];
+    IniSet(CFG_KEY_KEY, g_cfgKey);
 }
 
 /* ---- text ---------------------------------------------------------
@@ -816,11 +854,8 @@ static void ChatText(void) {
 
 static void BuildMenu(void) {
     static const char *kCandOpts[] = { "@chat.cand.self", "@chat.cand.ime" };
-    /* The start key is not user-configurable yet: it is fixed to the
-     * game's own text-chat key ("T").  A single-option list shows the
-     * current value without arming a key capture. */
-    static const char *kKeyOpts[] = { "T" };
     uint32_t m;
+    int ki;
 
     ChatText();
     m = ShMenuCreate("@chat.page");
@@ -828,7 +863,13 @@ static void BuildMenu(void) {
 
     ShMenuToggle(m, "@chat.enabled", IniInt(CFG_KEY_CFG, 0),
                  ChatOnEnabled, NULL);
-    ShMenuList(m, "@chat.startkey", kKeyOpts, 1, 0, NULL, NULL);
+    /* Three keys, like the game's own chat binding: the row writes the VK
+     * code into the ini and updates the live global, so a change needs no
+     * restart.  It has to match the key the game opens its own chat box
+     * with - that press is the only cue this plugin gets. */
+    ki = KeyIndexFromVk(g_cfgKey);
+    ShMenuList(m, "@chat.startkey", kKeyNames, KEY_COUNT,
+               ki < 0 ? 0 : ki, ChatOnStartKey, NULL);
     ShMenuList(m, "@chat.cand", kCandOpts, 2,
                IniInt(CFG_KEY_CAND, 0), ChatOnCandMode, NULL);
     ShMenuHint(m, "@chat.hint");
