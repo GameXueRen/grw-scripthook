@@ -838,6 +838,10 @@ static int hook_api(const wchar_t *mod, const char *name, LPVOID detour, LPVOID 
     s = MH_EnableHook(target);
     if (s != MH_OK) {
         core_log("  enable %-30s FAILED (MH_STATUS=%d)", name, (int)s);
+        /* A created-but-disabled hook still owns its trampoline; giving it
+         * back keeps this symmetric with the files/ammocap installers. */
+        MH_RemoveHook(target);
+        *real_out = NULL;
         return 0;
     }
     return 1;
@@ -2091,5 +2095,9 @@ void ShCoreFixLateStartup(void)
 
     if (InterlockedExchange(&up, 1))
         return;
-    CreateThread(NULL, 0, StageThread, NULL, 0, NULL);
+    {
+        HANDLE h = CreateThread(NULL, 0, StageThread, NULL, 0, NULL);
+
+        if (h) CloseHandle(h);   /* never waited on */
+    }
 }

@@ -31,23 +31,31 @@ extern void ShSetError(int err);
 #define GAME_DIR_MAX MAX_PATH
 
 static char g_gameDir[GAME_DIR_MAX];
-static int  g_dirInit = 0;
+static volatile LONG g_dirInit = 0;
 
 /* The folder holding GRW.exe, with a trailing backslash.
  * Anchored to the module file: the game is free to change
- * the working directory. */
+ * the working directory.
+ *
+ * Loader thread, state-watch thread, menu thread and plugin threads all
+ * reach this. The flag used to be set before the string was filled, so a
+ * second thread could take the flag and use an empty path. It is now
+ * published after the string, with interlocked accesses; a reader that
+ * loses the race (or sees 0) simply computes it too, and both writers
+ * produce the same bytes. */
 static const char *GameDir(void) {
     char *slash;
 
-    if (g_dirInit) return g_gameDir;
-    g_dirInit = 1;
+    if (InterlockedCompareExchange(&g_dirInit, 0, 0)) return g_gameDir;
     if (!GetModuleFileNameA(NULL, g_gameDir, GAME_DIR_MAX)) {
         g_gameDir[0] = 0;
+        InterlockedExchange(&g_dirInit, 1);
         return g_gameDir;
     }
     slash = strrchr(g_gameDir, '\\');
     if (slash) slash[1] = 0;
     else g_gameDir[0] = 0;
+    InterlockedExchange(&g_dirInit, 1);
     return g_gameDir;
 }
 
@@ -441,7 +449,7 @@ static char g_langDisp[LANG_LIST_MAX][32];
 
 static CRITICAL_SECTION g_textLock;
 static volatile LONG    g_textLockReady = 0;
-static int              g_textLogging;
+static volatile LONG    g_textLogging;
 
 static void LoadLang(const char *owner);
 static int  EnsureRows(void);
@@ -451,10 +459,10 @@ static void AddRow(const char *owner, const char *key,
 static void TextLog(const char *fmt, ...) {
     va_list ap;
 
-    if (!g_textLogging) {
+    /* As ApiLog: one winner opens the file, so the other thread cannot
+     * overwrite the FILE* and leak it. */
+    if (InterlockedExchange(&g_textLogging, 1) == 0)
         LogInit("scripthook_text.log");
-        g_textLogging = 1;
-    }
     va_start(ap, fmt);
     Logv(fmt, ap);
     va_end(ap);
@@ -1808,7 +1816,16 @@ static void LoadConfig(void) {
         n = fread(g_config, 1, sizeof(g_config) - 1, f);
         fclose(f);
         g_config[n] = 0;
-        ParseConfig(g_config);
+        /* A UTF-8 BOM would glue itself to the first section header and
+         * drop that whole section - for the shipped file that is [loader],
+         * so load_plugins and every CPU dial would silently fall back to
+         * their defaults. Same check LoadLangFile makes for lang.ini. */
+        if (n >= 3 && (unsigned char)g_config[0] == 0xEF &&
+            (unsigned char)g_config[1] == 0xBB &&
+            (unsigned char)g_config[2] == 0xBF)
+            ParseConfig(g_config + 3);
+        else
+            ParseConfig(g_config);
         ResolveLanguage();
         /* Parse once. The flag below was read but never set, so every
          * ShConfigGet* / ShLang call re-read the file and appended the
@@ -1818,21 +1835,28 @@ static void LoadConfig(void) {
     LeaveCriticalSection(&g_cfgLock);
 }
 
-static const char *FindEntry(const char *section, const char *key) {
-    int i;
-    const char *hit = NULL;
-    /* SetEntry rewrites entries field-by-field under this lock; a
-     * reader without it could strcmp a half-written key. */
+static int FindEntryCopy(const char *section, const char *key,
+                         char *out, int n) {
+    int i, found = 0;
+    /* SetEntry rewrites entries field-by-field under this lock; a reader
+     * without it could strcmp a half-written key. The value is copied out
+     * before the lock is dropped - handing back the internal pointer let a
+     * concurrent ShConfigSetStr rewrite the string under the reader. */
     EnsureConfigLock();
     EnterCriticalSection(&g_cfgLock);
     for (i = 0; i < g_nentries; i++)
         if (!strcmp(g_entries[i].section, section) &&
             !strcmp(g_entries[i].key, key)) {
-            hit = g_entries[i].value;
+            if (n > 0) {
+                strncpy(out, g_entries[i].value, (size_t)n - 1);
+                out[n - 1] = 0;
+            }
+            found = 1;
             break;
         }
     LeaveCriticalSection(&g_cfgLock);
-    return hit;
+    if (!found && n > 0) out[0] = 0;
+    return found;
 }
 
 /** Parse scripthook.ini now. The loader calls this before
@@ -1844,14 +1868,16 @@ SH_API void ShConfigInit(void) {
 /** Integer setting from the main config; def when missing. */
 SH_API int ShConfigGetInt(const char *section, const char *key,
                           int def) {
-    const char *v;
+    char v[256];
     char *end;
     long r;
 
     if (!section || !key) { ShSetError(SH_ERR_BAD_ARG); return def; }
     LoadConfig();
-    v = FindEntry(section, key);
-    if (!v) { ShSetError(SH_OK); return def; }
+    if (!FindEntryCopy(section, key, v, sizeof(v))) {
+        ShSetError(SH_OK);
+        return def;
+    }
     r = strtol(v, &end, 0);
     if (end == v) { ShSetError(SH_OK); return def; }
     ShSetError(SH_OK);
@@ -1861,18 +1887,24 @@ SH_API int ShConfigGetInt(const char *section, const char *key,
 /** Boolean setting: 1/0, true/false, yes/no, on/off. */
 SH_API int ShConfigGetBool(const char *section, const char *key,
                            int def) {
-    const char *v;
+    char v[256];
 
     if (!section || !key) { ShSetError(SH_ERR_BAD_ARG); return def; }
     LoadConfig();
-    v = FindEntry(section, key);
-    if (!v) { ShSetError(SH_OK); return def; }
+    if (!FindEntryCopy(section, key, v, sizeof(v))) {
+        ShSetError(SH_OK);
+        return def;
+    }
     if (!_stricmp(v, "1") || !_stricmp(v, "true") ||
-        !_stricmp(v, "yes") || !_stricmp(v, "on"))
+        !_stricmp(v, "yes") || !_stricmp(v, "on")) {
+        ShSetError(SH_OK);
         return 1;
+    }
     if (!_stricmp(v, "0") || !_stricmp(v, "false") ||
-        !_stricmp(v, "no") || !_stricmp(v, "off"))
+        !_stricmp(v, "no") || !_stricmp(v, "off")) {
+        ShSetError(SH_OK);
         return 0;
+    }
     ShSetError(SH_OK);
     return def;
 }
@@ -1881,7 +1913,8 @@ SH_API int ShConfigGetBool(const char *section, const char *key,
  *  ShErrorString explains a bad argument. */
 SH_API int ShConfigGetStr(const char *section, const char *key,
                           const char *def, char *out, int size) {
-    const char *v;
+    char v[256];
+    const char *src;
     size_t n;
 
     if (!out || size <= 0) { ShSetError(SH_ERR_BAD_ARG); return 0; }
@@ -1891,11 +1924,11 @@ SH_API int ShConfigGetStr(const char *section, const char *key,
         return 0;
     }
     LoadConfig();
-    v = FindEntry(section, key);
-    if (!v) v = def ? def : "";
-    n = strlen(v);
+    if (FindEntryCopy(section, key, v, sizeof(v))) src = v;
+    else src = def ? def : "";
+    n = strlen(src);
     if (n >= (size_t)size) n = (size_t)size - 1;
-    memcpy(out, v, n);
+    memcpy(out, src, n);
     out[n] = 0;
     ShUtf8Trim(out);
     ShSetError(SH_OK);

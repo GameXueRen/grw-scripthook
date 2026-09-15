@@ -175,6 +175,26 @@ static int EngineCamera(uint32_t ui) {
     return 0;
 }
 
+/* Is the session in live play right now: in the world, with no screen up
+ * that keeps the player out of it.
+ *
+ * Deliberately NOT ShGetGameState: that one tracks the state, and tracking
+ * can run OnStateChanged, which calls back into the player scanner. This is
+ * asked from inside that scanner's own lock, where anything recursive is a
+ * deadlock, so it is read only - same inputs, no side effects, no lock. */
+int ShInLivePlay(void) {
+    uint32_t h = StateHash(CurrentState());
+    uint32_t ui;
+
+    if (h != HASH_PLAYING && h != HASH_INGAME) return 0;
+    ui = ShGetUiState();
+    if (ui & SH_UI_LOADING) return 0;
+    if (ui & SH_UI_GAMEOVER) return 0;
+    /* Drone, binoculars and cinematics are the engine holding the camera
+     * of a player who is still there, so they count as play. */
+    return Paused(ui) ? 0 : 1;
+}
+
 SH_API int ShGetGameStateName(char *buf, int len) {
     uint64_t s;
     uint32_t h;
@@ -258,12 +278,15 @@ static void OnStateChanged(uint32_t h) {
 }
 
 static void TrackState(uint32_t h) {
-    static uint32_t prev = 0;
+    static volatile LONG prev = 0;
     static volatile LONG busy = 0;
 
-    if (h == prev || !h) return;
+    if (!h) return;
+    if ((uint32_t)InterlockedCompareExchange(&prev, 0, 0) == h) return;
     if (InterlockedCompareExchange(&busy, 1, 0) != 0) return;
-    prev = h;
+    /* Published with an interlocked store: the state hash is read and
+     * written from the watch thread and from every ShGetGameState caller. */
+    InterlockedExchange(&prev, (LONG)h);
     OnStateChanged(h);
     InterlockedExchange(&busy, 0);
 }
@@ -321,7 +344,11 @@ static DWORD WINAPI StateWatchThread(LPVOID p) {
 }
 
 void ShStateStartup(void) {
-    CreateThread(NULL, 0, StateWatchThread, NULL, 0, NULL);
+    HANDLE h = CreateThread(NULL, 0, StateWatchThread, NULL, 0, NULL);
+
+    /* Nobody waits on it, so the thread object is released at once rather
+     * than held for the session. */
+    if (h) CloseHandle(h);
 }
 
 int ShRequireInGame(void) {

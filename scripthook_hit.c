@@ -39,6 +39,10 @@
 #define MAX_SINKS     8
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
+/* The non-blocking lookup. The detour below runs on the game thread inside
+ * the projectile step, where ShGetPlayer's fallback heap walk would take
+ * the player lock for seconds and stall the frame. */
+extern int ShPeekPlayer(ShPlayer *out);
 extern uint64_t ShReadQ(uint64_t addr);
 extern void ShSetError(int err);
 extern void *ShAllocNear(uint64_t target);
@@ -397,7 +401,7 @@ static void ReportShot(uint64_t proj) {
     if (shot.shooter) {
         ShPlayer me;
         shot.kind = ShGetEntityKind(shot.shooter);
-        if (ShGetPlayer(&me))
+        if (ShPeekPlayer(&me))
             shot.byPlayer = (shot.shooter == me.entity ||
                              shot.shooter == me.root);
     }
@@ -422,7 +426,7 @@ static void __attribute__((ms_abi)) HitDispatch(uint64_t proj) {
     list = ShReadQ(proj + PROJ_LIST);
     if (!list) return;
 
-    havePlayer = ShGetPlayer(&me);
+    havePlayer = ShPeekPlayer(&me);
     owner = ResolveOwner(proj);
     byPlayer = havePlayer && owner &&
                (owner == me.entity || owner == me.root);
@@ -524,8 +528,12 @@ SH_API int ShHitHookInstall(void) {
     FlushInstructionCache(GetCurrentProcess(),
                           (void *)(uintptr_t)fn, n);
     g_hitStub = s;
-    if (!g_pump)
+    if (!g_pump) {
         g_pump = CreateThread(NULL, 0, HitPump, NULL, 0, NULL);
+        /* The value is only ever read as "the pump exists": nothing waits
+         * on it, so the thread object is released now. */
+        if (g_pump) CloseHandle(g_pump);
+    }
     ShSetError(SH_OK);
     return 1;
 }

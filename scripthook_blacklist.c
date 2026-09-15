@@ -545,6 +545,10 @@ void ShBlacklistStartup(void) {
     Unlock();
 
     Log("blacklist: registry up with %d plugin(s) from plugins\\", n);
-    if (!CreateThread(NULL, 0, WatchThread, NULL, 0, NULL))
-        Log("blacklist: watcher thread failed to start");
+    {
+        HANDLE h = CreateThread(NULL, 0, WatchThread, NULL, 0, NULL);
+
+        if (!h) Log("blacklist: watcher thread failed to start");
+        else    CloseHandle(h);   /* never waited on */
+    }
 }

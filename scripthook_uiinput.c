@@ -21,6 +21,10 @@ static uint8_t g_down[256];
 static uint8_t g_held[256];      /* consumed on down, blocked */
 static POINT g_lastPos;
 
+/* g_fn/g_user are written by ShUiSetInput on a plugin thread and read by
+ * InputThread. Static initialiser, so there is no lazy-init window. */
+static SRWLOCK g_lock = SRWLOCK_INIT;
+
 /* pointer in the 1920 x 1080 reference space */
 static void Pointer(int *x, int *y) {
     HWND w = GetForegroundWindow();
@@ -40,11 +44,15 @@ static int Deliver(int type, int key, int x, int y) {
     uint32_t s = g_focus;
     ShUiEvent e;
     ShUiInputFn fn;
+    void *user;
     if (!s || s > MAX_SCENES) return 0;
-    fn = g_fn[s];
+    AcquireSRWLockShared(&g_lock);
+    fn   = g_fn[s];
+    user = g_user[s];
+    ReleaseSRWLockShared(&g_lock);
     if (!fn) return 0;
     e.type = type; e.key = key; e.x = x; e.y = y;
-    return fn(s, &e, g_user[s]);
+    return fn(s, &e, user);
 }
 
 static DWORD WINAPI InputThread(LPVOID arg) {
@@ -84,10 +92,18 @@ static DWORD WINAPI InputThread(LPVOID arg) {
 
 SH_API int ShUiSetInput(uint32_t scene, ShUiInputFn fn, void *user) {
     if (scene == 0 || scene > MAX_SCENES) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    /* Under the lock, so a reader never pairs a fresh function pointer
+     * with a stale user pointer, and two racing registrations cannot
+     * start two input threads. */
+    AcquireSRWLockExclusive(&g_lock);
     g_fn[scene] = fn;
     g_user[scene] = user;
-    if (fn && !g_thread)
+    if (fn && !g_thread) {
         g_thread = CreateThread(NULL, 0, InputThread, NULL, 0, NULL);
+        /* Only ever read as "the thread exists"; nothing waits on it. */
+        if (g_thread) CloseHandle(g_thread);
+    }
+    ReleaseSRWLockExclusive(&g_lock);
     return 1;
 }
 

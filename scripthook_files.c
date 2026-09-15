@@ -101,6 +101,15 @@
 static FILE_TLS int t_depth;
 static FILE_TLS int t_own;
 
+/* A redirect target is handed to the detour as a pointer, and the rule
+ * slot that owns it can be released and reused by another module while the
+ * call is still in flight - the header's promise that a target "stays
+ * valid" only holds if the pointer is not the rule's own buffer. The copy
+ * lives in thread-local storage, so it stays valid for the whole call and
+ * two threads cannot clobber each other's. */
+static FILE_TLS wchar_t t_redirW[FILES_PATH_MAX];
+static FILE_TLS char    t_redirA[FILES_PATH_MAX];
+
 /* ---- rules -------------------------------------------------------------
  *
  * A fixed table, entries never freed: `live` is the only thing that goes
@@ -150,6 +159,22 @@ static void FileLock(void)
 static void FileUnlock(void)
 {
     InterlockedExchange(&g_lock, 0);
+}
+
+/* Hook installation/removal gets its own lock: the rule table is under
+ * FileLock, but SyncTargets runs after FileUnlock, and two plugin threads
+ * adding rules in the same group would otherwise drive MinHook's
+ * CreateHook/EnableHook on one target at the same time. */
+static volatile LONG g_syncLock = 0;
+
+static void SyncLock(void)
+{
+    while (InterlockedExchange(&g_syncLock, 1)) Sleep(0);
+}
+
+static void SyncUnlock(void)
+{
+    InterlockedExchange(&g_syncLock, 0);
 }
 
 /* ---- strings ------------------------------------------------------------
@@ -1448,11 +1473,14 @@ static int MinHookReady(void)
 
 static void SyncTargets(void)
 {
-    uint32_t need = (uint32_t)InterlockedCompareExchange(&g_mask, 0, 0);
-    int      was  = (int)InterlockedCompareExchange(&g_installed, 0, 0);
-    int      have = 0, changed = 0, i;
+    uint32_t need;
+    int      was, have = 0, changed = 0, i;
 
-    if (need && !MinHookReady()) return;
+    SyncLock();
+    need = (uint32_t)InterlockedCompareExchange(&g_mask, 0, 0);
+    was  = (int)InterlockedCompareExchange(&g_installed, 0, 0);
+
+    if (need && !MinHookReady()) { SyncUnlock(); return; }
 
     for (i = 0; i < (int)ARRAY_LEN(g_api); i++) {
         FileApi *a = &g_api[i];
@@ -1481,6 +1509,7 @@ static void SyncTargets(void)
                 Log("files: enabling %s failed (%s)", a->name,
                     MH_StatusToString(s));
                 MH_RemoveHook(a->target);
+                *(a->real) = NULL;  /* the trampoline went with it */
                 continue;
             }
             a->hooked = 1;
@@ -1501,6 +1530,7 @@ static void SyncTargets(void)
             have, (int)ARRAY_LEN(g_api));
     if (was && !have)
         Log("files: the layer is out - not one file call is intercepted");
+    SyncUnlock();
 }
 
 /* ---- the pass -----------------------------------------------------------
@@ -1596,10 +1626,12 @@ static int FilesDecide(ShFileCall *c, FilePath *p)
 
     if (best->action == SH_FILE_REDIRECT) {
         if (c->wide) {
-            c->path = best->toW;
+            CopyW(t_redirW, FILES_PATH_MAX, best->toW);
+            c->path = t_redirW;
             PathOf(p, c->path, 1);
         } else {
-            c->pathA = best->toA;
+            ToAnsi(t_redirA, FILES_PATH_MAX, best->toW);
+            c->pathA = t_redirA;
             PathOf(p, c->pathA, 0);
         }
         NoteHit(best, "redirected");

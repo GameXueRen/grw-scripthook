@@ -422,9 +422,15 @@ static void CallPush(ShMenuFn fn, void *user, uint32_t menu,
         Log("menu: callback queue full, dropped menu=%u item=%u",
             (unsigned)menu, (unsigned)item);
     }
-    Unlock();
-    if (!g_callThread)
+    /* Created under the lock: two threads pushing at the same instant both
+     * saw g_callThread==NULL and each started a permanent consumer. */
+    if (!g_callThread) {
         g_callThread = CreateThread(NULL, 0, CallThread, NULL, 0, NULL);
+        /* Only ever read as "the consumer exists"; nothing waits on it, so
+         * the thread object is released at once. */
+        if (g_callThread) CloseHandle(g_callThread);
+    }
+    Unlock();
 }
 
 static DWORD WINAPI CallThread(LPVOID p) {
@@ -1117,7 +1123,11 @@ static void EnsureMenu(void) {
         InitializeCriticalSection(&g_lock);
         g_lockReady = 1;              /* lock live before the thread */
         g_root = NewMenu("SCRIPTHOOK", 0, NULL);
-        CreateThread(NULL, 0, MenuThread, NULL, 0, NULL);
+        {
+            HANDLE h = CreateThread(NULL, 0, MenuThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);   /* never waited on */
+        }
         InterlockedExchange(&g_started, 1);
         return;
     }

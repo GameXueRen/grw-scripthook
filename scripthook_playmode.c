@@ -218,7 +218,11 @@ static int ArmOne(uint32_t site, uint32_t proof, void *detour, void **orig,
     }
     s = MH_EnableHook(target);
     if (s != MH_OK) {
+        /* Not left half-installed: a created-but-disabled hook still owns
+         * the trampoline *orig points at, and this install is retried. */
         Log("playmode: enabling %s at %08X failed (%d)", what, site, (int)s);
+        MH_RemoveHook(target);
+        *orig = NULL;
         return -1;
     }
     return 1;
@@ -442,6 +446,10 @@ void ShPlayModeStart(void) {
         return;
     }
     GmInstall();
-    if (!CreateThread(NULL, 0, ModeThread, NULL, 0, NULL))
-        Log("playmode: watcher thread failed to start");
+    {
+        HANDLE h = CreateThread(NULL, 0, ModeThread, NULL, 0, NULL);
+
+        if (!h) Log("playmode: watcher thread failed to start");
+        else    CloseHandle(h);   /* never waited on */
+    }
 }

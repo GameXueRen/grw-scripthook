@@ -41,7 +41,7 @@
 
 static ShPlayer g_player;
 static int      g_resolved;
-static int      g_logReady;
+static volatile LONG g_logReady;
 static int      g_lastError;
 
 /* The scan fallback is a VirtualQuery walk of the whole
@@ -50,9 +50,10 @@ static int      g_lastError;
 static SRWLOCK  g_playerLock = SRWLOCK_INIT;
 
 /* A scan that found nothing will find nothing 250ms later
- * either, and a menu keeps the player hidden for seconds.
+ * either, and a menu keeps the player hidden for seconds. A miss costs a
+ * whole-address-space walk, so the backoff is generous.
  */
-#define SCAN_BACKOFF_MS 2000u
+#define SCAN_BACKOFF_MS 5000u
 static uint64_t g_scanFailAt;
 
 static int ShFail(int err) {
@@ -106,10 +107,11 @@ SH_API const char *ShErrorString(int err) {
 
 static void ApiLog(const char *fmt, ...) {
     va_list ap;
-    if (!g_logReady) {
+    /* Claimed with an interlocked exchange: two threads first-calling at the
+     * same moment used to both fopen the log, and the overwritten FILE* was
+     * a leaked handle. */
+    if (InterlockedExchange(&g_logReady, 1) == 0)
         LogInit("scripthook_api.log");
-        g_logReady = 1;
-    }
     va_start(ap, fmt);
     Logv(fmt, ap);
     va_end(ap);
@@ -420,10 +422,19 @@ static int ShResolvePlayer(void) {
     uint8_t *scan = (uint8_t *)0x1000000;
     uint64_t best = 0, root = 0;
 
-    if (!ShGetPlayerPosition(&want)) {
-        ApiLog("resolve: no player position, global=%p",
-               (void *)(uintptr_t)ShQ(SH_PLAYER_GLOBAL));
-        return 0;
+    /* The global is read directly rather than through
+     * ShGetPlayerPosition: that one starts with ShPeekPlayer's TryAcquire,
+     * which cannot succeed here - this thread already owns g_playerLock -
+     * so it silently fell back to the global anyway. Saying so is clearer
+     * than looking like a working peek. */
+    {
+        uint64_t obj = ShQ(SH_PLAYER_GLOBAL);
+
+        if (!obj || !ShVec(obj + OFF_GLOBAL_TF + OFF_TF_POS, &want)) {
+            ApiLog("resolve: no player position, global=%p",
+                   (void *)(uintptr_t)obj);
+            return 0;
+        }
     }
     /* Menus and loads park the position at the origin. */
     if (fabsf(want.x) < 1.0f && fabsf(want.y) < 1.0f
@@ -510,11 +521,25 @@ static int ShStillValid(void) {
 
 SH_API void ShInvalidate(void) {
     extern void ShEntityCacheClear(void);
+    /* Cleared with one aligned store, and NOT under g_playerLock.
+     *
+     * This is reached from the frame path: MgrCallback calls ShHeadPump,
+     * which asks ShGetGameState, which lands in OnStateChanged here - all
+     * on the game thread, inside the engine's own camera callback. The
+     * lock can meanwhile be held for seconds by a plugin's ShGetPlayer
+     * heap walk, and blocking the game thread there is what crashed the
+     * game on ESC.
+     *
+     * A bare clear cannot pair a cleared flag with a stale player: the
+     * scanner publishes entity/node/root first and g_resolved last, so the
+     * worst case is "not resolved", which ShStillValid() re-checks. */
     g_resolved = 0;
     ShEntityCacheClear();
 }
 
 extern int ShRequireInGame(void);
+/* Read only, no state tracking: safe to ask while holding g_playerLock. */
+extern int ShInLivePlay(void);
 
 /* Caller holds g_playerLock. With scan set the heap walk
  * is allowed as a last resort, otherwise a player the
@@ -537,6 +562,13 @@ static int ShPlayerLocked(ShPlayer *out, int scan) {
 
         if (!scan) return ShFail(SH_ERR_NO_CANDIDATE);
         if (now - g_scanFailAt < SCAN_BACKOFF_MS)
+            return ShFail(SH_ERR_NO_CANDIDATE);
+        /* The walk reads every read/write committed page in the process
+         * and takes seconds. It is only worth that inside the world: with
+         * a menu or a load up, the position it searches for is a stale
+         * world coordinate and the player is hidden, so the walk buys
+         * nothing and sits exactly on the frame that changed the state. */
+        if (!ShInLivePlay())
             return ShFail(SH_ERR_NO_CANDIDATE);
         if (!ShResolvePlayer()) {
             /* Parked at the origin is a load, and cheap to

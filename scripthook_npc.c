@@ -707,10 +707,18 @@ SH_API uint32_t ShNpcSpawnBegin(const ShNpcSpawnRequest *req) {
     j->count = 0;
     j->req = *req;
 
-    if (!CreateThread(NULL, 0, JobThread, j, 0, NULL)) {
-        j->used = 0;
-        ShSetError(SH_ERR_NO_CANDIDATE);
-        return 0;
+    {
+        /* Closed at once: the job is polled through j->done and never
+         * joined, so keeping the thread object would leak one kernel
+         * handle per spawn request for the rest of the session. */
+        HANDLE th = CreateThread(NULL, 0, JobThread, j, 0, NULL);
+
+        if (!th) {
+            j->used = 0;
+            ShSetError(SH_ERR_NO_CANDIDATE);
+            return 0;
+        }
+        CloseHandle(th);
     }
     ShSetError(SH_OK);
     return (uint32_t)(slot + 1);

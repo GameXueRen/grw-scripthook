@@ -760,7 +760,7 @@ static ShForgeOverlay *OverlayBuild(const char *path, const char *base) {
 ShForgeOverlay *ShForgeOverlayFor(const char *archivePath) {
     char base[128];
     ShForgeOverlay *o;
-    int i;
+    int i, dropped = 0;
 
     if (!g_enabled || g_dryRun || !archivePath) return NULL;
 
@@ -778,8 +778,21 @@ ShForgeOverlay *ShForgeOverlayFor(const char *archivePath) {
     if (!o) return NULL;
 
     EnterCriticalSection(&g_lock);
-    if (g_novl < OVL_MAX) g_ovl[g_novl++] = o;
+    if (g_novl < OVL_MAX) {
+        g_ovl[g_novl++] = o;
+    } else {
+        /* The table is full: the overlay would never be reachable again,
+         * and it holds a whole archive's worth of patch bytes, so it is
+         * released instead of dropped. The caller gets NULL and leaves the
+         * archive's reads alone - unpatched beats patched with a leak. */
+        FreeOverlay(o);
+        o = NULL;
+        dropped = 1;
+    }
     LeaveCriticalSection(&g_lock);
+    if (dropped)
+        Log("forge: %s: all %d overlay slot(s) are in use - this archive "
+            "is read unpatched", base, OVL_MAX);
     return o;
 }
 
@@ -945,8 +958,11 @@ void ShForgeStartup(void) {
          * dry run is handled inside it, by dropping the overlay rather
          * than the resolve. */
         if (applied > 0 || g_ledger) ShForgeIoStartup();
-        if (g_reportCopies || g_applyAll)
-            CreateThread(NULL, 0, CopyIndexThread, NULL, 0, NULL);
+        if (g_reportCopies || g_applyAll) {
+            HANDLE h = CreateThread(NULL, 0, CopyIndexThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);   /* never waited on */
+        }
     } else {
         snprintf(g_status, sizeof(g_status),
                  "Forge Mod Loader: on, mods\\ has no files");

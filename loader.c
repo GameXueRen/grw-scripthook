@@ -220,6 +220,10 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     (void)p;
     ShConfigInit();
     Log("config loaded from scripthook.ini");
+    /* Watch state before plugins, so the world is resolved by the time any
+     * of them ask. Here rather than in DllMain, where creating a thread
+     * can deadlock against the loader lock. */
+    ShStateStartup();
     /* Forge Mod Loader, evidence round: watch how the engine reads
      * .forge. Off unless [forgemod] probe=1, because both this and the
      * loader's own I/O hooks want ReadFile and MinHook keeps one hook
@@ -283,11 +287,14 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
          */
         ShCoreFixStartup();
         LoadRealDinput8();
-        /* Watch state before plugins, so the world is
-         * resolved by the time any of them ask.
-         */
-        ShStateStartup();
-        CreateThread(NULL, 0, LoaderThread, NULL, 0, NULL);
+        /* State watching moved into LoaderThread: starting a thread here
+         * is the one thing this file warns about (the loader lock), and
+         * the watch only has to be up before the plugins load. */
+        {
+            HANDLE h = CreateThread(NULL, 0, LoaderThread, NULL, 0, NULL);
+
+            if (h) CloseHandle(h);   /* never waited on: prompt close */
+        }
     } else if (reason == DLL_PROCESS_DETACH && g_logFile) {
         Log("unloading");
         LogClose();

@@ -929,8 +929,16 @@ void ShModSettingsStartup(void) {
     BuildHints();
     snprintf(g_langSeen, sizeof(g_langSeen), "%s", ShLangGet());
     SetCpuLine();
-    if (!CreateThread(NULL, 0, BlHintThread, NULL, 0, NULL))
-        ShMenuStatus(g_pluginMenu, "@settings.thread.blacklist");
-    if (!CreateThread(NULL, 0, CpuLineThread, NULL, 0, NULL))
-        ShMenuStatus(g_cpuMenu, "@settings.thread.cpu");
+    {
+        HANDLE h = CreateThread(NULL, 0, BlHintThread, NULL, 0, NULL);
+
+        if (!h) ShMenuStatus(g_pluginMenu, "@settings.thread.blacklist");
+        else    CloseHandle(h);   /* never waited on */
+    }
+    {
+        HANDLE h = CreateThread(NULL, 0, CpuLineThread, NULL, 0, NULL);
+
+        if (!h) ShMenuStatus(g_cpuMenu, "@settings.thread.cpu");
+        else    CloseHandle(h);
+    }
 }
