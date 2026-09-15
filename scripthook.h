@@ -1959,10 +1959,11 @@ void ShFp2HeadFrame(void);
 typedef void (*ShCpuStageFn)(int stage, void *user);
 
 /** The values ShCpuStatus.prio[] carries: the four the play dial offers,
- *  and the two states the loading stages' one switch can resolve to. The
- *  last two are never a choice - they are only ever the state that is in
- *  force, and SH_PRIO_LOW is what SH_PRIO_ECO falls back to on a machine
- *  which cannot do efficiency mode.
+ *  and the states the loading stages' dial can resolve to. The efficiency
+ *  ones are never a choice in themselves - they are only ever the state
+ *  that is in force: SH_PRIO_LOW is what SH_PRIO_ECO falls back to on a
+ *  machine which cannot do efficiency mode, and SH_PRIO_ECO_OFF is the
+ *  dial's "off" (cpu_eco_boot=2), where the mode is dropped outright.
  */
 #define SH_PRIO_LEAVE  0
 #define SH_PRIO_NORMAL 1
@@ -1986,7 +1987,8 @@ typedef struct {
     int      ecoreState;    /* SH_CF_* for this CPU's applicability   */
     int      eco;           /* SH_ECO_* : the efficiency mode now     */
     int      ecoOurs;       /* 1 when that switch is one we turned on */
-    int      ecoBoot;       /* the loading switch as it was set (0/1) */
+    int      ecoBoot;       /* the loading dial as it was set:
+                             * 0 leave alone, 1 efficiency mode, 2 off  */
     unsigned origCount;     /* processors this process started with   */
     unsigned sysCount;      /* processors the machine has             */
     unsigned reportCount;   /* what the engine is told (0 = as-is)    */

@@ -169,17 +169,26 @@ enum {
  *
  * The order is the ini's order for the four values the play dial stores:
  * 0 leave alone, 1 normal, 2 above normal, 3 high. P_ECO and P_IDLE are
- * markers for what the loading stages' switch resolved to - never written
+ * markers for what the loading stages' dial resolved to - never written
  * to the ini and never offered as a choice, which is what keeps the two
- * scales from having to agree on anything. */
+ * scales from having to agree on anything. P_ECO_OFF is the loading dial's
+ * own third value (cpu_eco_boot=2), so that one IS a choice - and, like the
+ * other two, not a class. */
 enum {
     P_LEAVE = 0,        /* touch nothing                       */
     P_NORMAL,           /* NORMAL_PRIORITY_CLASS               */
     P_ABOVE,            /* ABOVE_NORMAL_PRIORITY_CLASS         */
     P_HIGH,             /* HIGH_PRIORITY_CLASS                 */
     P_ECO,              /* efficiency mode (EcoQoS): no class  */
-    P_IDLE              /* where P_ECO falls back to: the low class */
+    P_IDLE,             /* where P_ECO falls back to: the low class */
+    P_ECO_OFF           /* cpu_eco_boot=2: the mode is dropped */
 };
+
+/* cpu_eco_boot, the dial the two loading stages share: 0 leaves the class
+ * alone, 1 holds the efficiency mode through them, 2 drops it. 0 and 1
+ * mean what the old on/off switch meant, so an existing cpu_eco_boot=0 or
+ * =1 keeps the behaviour it had. */
+enum { ECO_LEAVE = 0, ECO_HOLD = 1, ECO_DROP = 2 };
 
 /* Every processor the machine has, whatever this process is currently
  * allowed. A "force all cores" dial needs this rather than the process'
@@ -1056,6 +1065,7 @@ static const char *prio_name(int p)
     case P_HIGH:   return "high";
     case P_ECO:    return "efficiency mode";
     case P_IDLE:   return "low";
+    case P_ECO_OFF: return "efficiency mode off";
     default:       return "?";
     }
 }
@@ -1261,12 +1271,12 @@ static int EcoSet(int on)
 }
 
 /* Put the efficiency mode where this stage wants it. want 1 = the stage's
- * resolved priority is the efficiency mode (the loading switch, on a
+ * resolved priority is the efficiency mode (the loading dial's "on", on a
  * machine that has it); want 0 = it is not, so one an earlier stage turned
- * on goes back. A switch nobody here turned on is never touched: the state
- * a process arrived in is not ours to change. A stage whose resolved
- * priority is not the mode costs not one call - the "ours" flag is clear
- * and this returns at once. */
+ * on goes back; want -1 = the dial's "off", which is the one instruction
+ * that cannot mean "as we found it" - a state the process arrived with goes
+ * too. A switch nobody here turned on is never touched by want 0: the state
+ * a process arrived in is not ours to change. */
 static void EcoWant(int stage, int want)
 {
     if (!EcoAvailable()) {
@@ -1293,6 +1303,21 @@ static void EcoWant(int stage, int want)
         note(&c_ECO, 3, "corefix: %s: efficiency mode ON (asked for by this "
                         "stage's priority dial; the system reports it %s)",
              stage_name(stage), EcoIsOn() == 1 ? "on" : "NOT set");
+        return;
+    }
+    if (want < 0) {
+        /* "Off, period": turned off whether it is ours or whether the
+         * process arrived throttled. The "ours" flag is set anyway, so the
+         * play stage still tries to hand the arrival state back - that is
+         * the one place a state we did not choose is restored. */
+        if (EcoIsOn() == 1 && !EcoSet(0)) {
+            g_ecoState = SH_ECO_FAILED;
+            return;
+        }
+        InterlockedExchange(&g_ecoOurs, 1);
+        g_ecoState = SH_ECO_OFF;
+        note(&c_ECO, 3, "corefix: %s: efficiency mode OFF (asked for by "
+                        "this stage's dial)", stage_name(stage));
         return;
     }
     if (!InterlockedCompareExchange(&g_ecoOurs, 0, 0))
@@ -1345,20 +1370,23 @@ static ULONG_PTR system_mask(void)
 /* What the two loading stages hold, resolved into what will actually be in
  * force on this machine - and it is a resolution rather than a reading
  * because the answer has to be true even when the machine cannot do what
- * the switch asks:
+ * the dial asks:
  *
- *   off                                -> leave alone
- *   on, and the system has it          -> efficiency mode
- *   on, and it has not (or the call
+ *   0 leave alone                      -> leave alone
+ *   1 on, and the system has it        -> efficiency mode
+ *   1 on, and it has not (or the call
  *   has already failed)                -> the low class instead
+ *   2 off                              -> the mode dropped
  *
- * The last line is the point: a loading screen yielding the machine to
+ * The low-class line is the point: a loading screen yielding the machine to
  * whatever else wants it is the same intent the efficiency mode has, said
- * with what this machine actually has. Giving up on the switch instead
- * would leave it reading as "on" while doing nothing at all. */
+ * with what this machine actually has. Giving up on the dial instead would
+ * leave it reading as "on" while doing nothing at all. "Off" needs no
+ * fallback: it is the state every machine already has. */
 static int LoadingPrio(void)
 {
-    if (!g_ecoBoot) return P_LEAVE;
+    if (g_ecoBoot == ECO_LEAVE) return P_LEAVE;
+    if (g_ecoBoot == ECO_DROP)  return P_ECO_OFF;
     if (!EcoAvailable()) return P_IDLE;
     if (InterlockedCompareExchange(&g_ecoFailed, 0, 0)) return P_IDLE;
     return P_ECO;
@@ -1386,7 +1414,7 @@ static void ApplyPriority(int stage)
      * priority lands, so the process is never left running on a class this
      * stage did not choose. And the switch is not a class, so nothing below
      * here can be it. */
-    EcoWant(stage, p == P_ECO);
+    EcoWant(stage, p == P_ECO ? 1 : (p == P_ECO_OFF ? -1 : 0));
 
     /* Two of the values hold no class, and both give back the one the
      * process came with: the efficiency mode is not a class at all, and
@@ -1394,7 +1422,7 @@ static void ApplyPriority(int stage)
      * stage before left in force. That second case is also what the loading
      * switch's fallback needs - there the class really was changed, to the
      * low one, and "leave alone" in play has to hand it back. */
-    if (p == P_LEAVE || p == P_ECO) {
+    if (p == P_LEAVE || p == P_ECO || p == P_ECO_OFF) {
         g_prioNow = 0;
         if (g_prioTouched) {
             SetPriorityClass(GetCurrentProcess(), g_prioOrig);
@@ -1600,7 +1628,8 @@ void ShCoreFixStartup(void)
      * switch instead - the efficiency mode, or the low class where this
      * machine cannot do efficiency mode; see LoadingPrio. */
     g_prioPlay = read_prio("cpu_prio_play", P_HIGH);
-    g_ecoBoot  = ShConfigGetBool("loader", "cpu_eco_boot", 0) ? 1 : 0;
+    v = ShConfigGetInt("loader", "cpu_eco_boot", ECO_LEAVE);
+    g_ecoBoot  = (v >= ECO_LEAVE && v <= ECO_DROP) ? v : ECO_LEAVE;
 
     /* The cap is a ceiling: 0, a missing key and junk all mean "no cap",
      * and one processor group's worth of bits is as far as a single mask
@@ -1640,7 +1669,7 @@ void ShCoreFixStartup(void)
 
     if (g_dial[STAGE_BOOT] == D_LEAVE && g_dial[STAGE_WINDOW] == D_LEAVE &&
         g_dial[STAGE_PLAY] == D_LEAVE && g_coreCap == 0 &&
-        g_prioPlay == P_LEAVE && !g_ecoBoot) {
+        g_prioPlay == P_LEAVE && g_ecoBoot == ECO_LEAVE) {
         /* Nothing is applied on this path: no hook goes in and not one
          * scheduling API is touched. The one call made above is the read
          * of the efficiency mode's arrival state - a getter, not a
@@ -1661,8 +1690,10 @@ void ShCoreFixStartup(void)
         g_dial[STAGE_WINDOW], dial_name(g_dial[STAGE_WINDOW]),
         g_dial[STAGE_PLAY], dial_name(g_dial[STAGE_PLAY]),
         (unsigned long)g_coreCap);
-    Log("corefix: priorities loading=%s (the switch is %s) play=%s "
-        "(found 0x%lX)", prio_name(LoadingPrio()), g_ecoBoot ? "on" : "off",
+    Log("corefix: priorities loading=%s (the dial is %s) play=%s "
+        "(found 0x%lX)", prio_name(LoadingPrio()),
+        g_ecoBoot == ECO_HOLD ? "on" : (g_ecoBoot == ECO_DROP ? "off"
+                                                             : "leave alone"),
         prio_name(g_prioPlay), (unsigned long)g_prioOrig);
     Log("corefix: the machine has %lu processors, this process started on "
         "%lu (mask 0x%zX)",
@@ -2020,14 +2051,22 @@ static DWORD WINAPI StageThread(LPVOID p)
             note(&c_PHOLD, 3, "  priority class was 0x%lX, held back to "
                  "0x%lX", (unsigned long)was, (unsigned long)g_prioNow);
         }
-        /* The switch is checked the same way and for the same reason, and
-         * EcoWant is idempotent - it adopts a switch that is already on and
-         * sets one that is missing - so one call per tick is the whole
-         * check. No call at all while no dial asks for the mode: the "ours"
-         * flag is clear and the second test short-circuits. */
+        /* The efficiency mode is checked the same way and for the same
+         * reason, and EcoWant is idempotent - it adopts a switch that is
+         * already on, sets one that is missing and costs nothing when it is
+         * already where the dial wants it - so one call per tick is the
+         * whole check. The dial's "off" is a state to hold, not a one-off:
+         * something outside this process ticking that box in Task Manager
+         * is exactly what this loop exists to catch. No call at all while
+         * the dial leaves it alone: the "ours" flag is clear and the last
+         * test short-circuits. */
         if (g_stage >= 0) {
-            if (EffectivePrio(g_stage) == P_ECO)
+            int p = EffectivePrio(g_stage);
+
+            if (p == P_ECO)
                 EcoWant(g_stage, 1);
+            else if (p == P_ECO_OFF)
+                EcoWant(g_stage, -1);
             else if (InterlockedCompareExchange(&g_ecoOurs, 0, 0) &&
                      EcoIsOn() == 1)
                 EcoWant(g_stage, 0);
