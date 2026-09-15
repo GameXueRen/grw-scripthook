@@ -1156,7 +1156,7 @@ static const ShText kZh[] = {
     { "@chaos.enabled",        "混沌开关" },
     { "@chaos.every",          "每次间隔" },
     { "@chaos.hold",           "特效时长" },
-    { "@chaos.now",            "立即随机一个" },
+    { "@chaos.now",            "立即随机一个特效" },
     { "@chaos.clear",          "清除当前特效" },
     { "@chaos.status.off",     "已关闭" },
     { "@chaos.status.on",      "运行中" },

@@ -291,9 +291,9 @@ static const TextRow kEn[] = {
 };
 
 static const TextRow kZh[] = {
-    { "@lr.page", "DLC 崩溃修复" },
-    { "@lr.fix",  "修复崩溃（重启后生效）" },
-    { "@lr.hint", "临时修复。游戏本体修好后请关掉并删除本插件。" }
+    { "@lr.page", "《最后的仪式》闪退修复" },
+    { "@lr.fix",  "闪退修复（重启游戏后生效）" },
+    { "@lr.hint", "此为临时修复方案。若在未来官服修复此BUG，请关闭和移除此修复插件。" }
 };
 
 static void TextInit(void) {

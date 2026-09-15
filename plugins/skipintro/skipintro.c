@@ -326,8 +326,8 @@ static const ShText kEn[] = {
 
 static const ShText kZh[] = {
     { "@skip.page",   "跳过启动时的动画视频" },
-    { "@skip.legal",  "跳过启动时的 警告、提示 视频" },
-    { "@skip.launch", "跳过启动时的 Ubisoft、NVidia 视频" },
+    { "@skip.legal",  "跳过启动时的警告、提示视频" },
+    { "@skip.launch", "跳过启动时的Ubisoft、Nvidia视频" },
     { "@skip.status", "改变开关后重启生效" }
 };
 

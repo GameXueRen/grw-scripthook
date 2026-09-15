@@ -431,7 +431,7 @@ static const TextRow kEn[] = {
 };
 
 static const TextRow kZh[] = {
-    { "@gw.page", "幽灵清档探测" },
+    { "@gw.page", "魅影模式删档探测" },
     { "@gw.log",  "记录存档文件操作" },
     { "@gw.hint", "记录存档目录上的每一次文件操作，便于从日志里反推清档过程。"
                   "不修改任何东西，也不保护任何存档。" }

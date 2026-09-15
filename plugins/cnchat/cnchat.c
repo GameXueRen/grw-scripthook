@@ -794,13 +794,13 @@ static const ShText kEn[] = {
 };
 
 static const ShText kZh[] = {
-    { "@chat.page",      "中文聊天框" },
+    { "@chat.page",      "自绘聊天框（支持输入中文）" },
     { "@chat.enabled",   "启用" },
-    { "@chat.startkey",  "聊天按键" },
+    { "@chat.startkey",  "开始聊天键（游戏内文本聊天键需设置一致）" },
     { "@chat.cand",      "候选词窗口" },
-    { "@chat.cand.self", "自绘窗口" },
-    { "@chat.cand.ime",  "输入法原生窗口" },
-    { "@chat.hint",      "重启后生效。" }
+    { "@chat.cand.self", "自绘候选词窗口" },
+    { "@chat.cand.ime",  "输入法候选词窗口" },
+    { "@chat.hint",      "启用、禁用需重启后生效。" }
 };
 
 static void ChatText(void) {

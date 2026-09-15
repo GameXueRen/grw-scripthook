@@ -85,7 +85,7 @@ static const TextRow kEn[] = {
 
 static const TextRow kZh[] = {
     { "@sp.page",     "载具" },
-    { "@sp.hint",     "提示：第一次召唤可能需要一点时间。" },
+    { "@sp.hint",     "提示：首次召唤可能需要一点时间。" },
     { "@sp.noplayer", "无法获取玩家位置" },
     { "@sp.spawning", "正在生成……" },
     { "@sp.spawned",  "已生成，本次会话共 %d 辆" },

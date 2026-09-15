@@ -167,8 +167,7 @@ static const ShText kEnUS[] = {
 
 static const ShText kZhCN[] = {
     { "@menu.root.hint",
-      "F4 开关菜单，回车选择，ESC 返回\n"
-      "↑ ↓ 或 W/S 选择，← → 或 A/D 调整" },
+      "F4 开关菜单，回车选择，ESC 返回；↑ ↓ 或 W/S 选择，← → 或 A/D 调整" },
     { "@menu.on",             "开" },
     { "@menu.off",            "关" },
     { "@menu.footer.pos",     "第 %d / %d 行" },
@@ -179,24 +178,17 @@ static const ShText kZhCN[] = {
     { "@settings.cpu",        "CPU 调度" },
     { "@settings.language",   "菜单语言" },
     { "@settings.hint",
-      "插件开关下次启动生效；语言立即生效。" },
+      "插件开关改变需下次启动生效；其他立即生效。" },
     { "@settings.order",      "菜单排序" },
     { "@settings.order.hint",
-      "← → 把当前行上移 / 下移一位；\n"
-      "每次改动立即存盘，根菜单顺序同时生效。\n"
-      "被关掉的插件会记住它原来的位置。" },
+      "改变菜单显示顺序。← → 把当前行上移 / 下移。" },
     { "@settings.order.empty", "还没有可排序的插件菜单。" },
-    { "@settings.order.saved", "顺序已保存" },
+    { "@settings.order.saved", "菜单显示顺序已保存" },
 
     { "@forge.hint",
-      "把 mods\\ 下的松散文件叠加到已有 .forge 条目上，\n"
-      "不改动原版归档。布局：\n"
-      "mods\\<归档名>\\<文件> 或 mods\\<mod 名>\\<归档名>\\<文件>。\n"
-      "文件夹名前加 '~' 表示禁用，\n"
-      "'<数字>_-_<条目名>.data' 指定条目。\n"
-      "改动需重启游戏生效。" },
+      "把 mods\\ 下的文件覆盖到已有 .forge 游戏文件上。此项开关改变需下次启动生效。" },
     { "@forge.enabled",       "启用" },
-    { "@forge.dryrun",        "仅检查不生效" },
+    { "@forge.dryrun",        "仅验证能否覆盖成功，不实际应用" },
     { "@forge.status.off",    "已关闭（[forgemod] enabled=0）。" },
     { "@forge.status.nomods", "已开启，但 mods\\ 下没有 mod 文件。" },
     { "@forge.status.mods",
@@ -215,7 +207,7 @@ static const ShText kZhCN[] = {
       "当前：%s - 核心 %s - 优先级 %s" },
     { "Processor set and priority for each start up stage - changes need "
       "a restart.",
-      "每个启动阶段的处理器集合与优先级 —— 改动需重启。" },
+      "设定每个启动阶段的处理器集合与优先级，改动需重启。" },
     { "E-cores off: not applicable on this CPU.",
       "关闭能效核：本 CPU 不适用。" },
     { "E-cores off: this CPU has no E-cores.",
@@ -224,21 +216,21 @@ static const ShText kZhCN[] = {
       "关闭能效核：检测失败。" },
     { "Efficiency mode: not available on this system - the loading stages "
       "hold the low priority instead.",
-      "效率模式：本系统不支持 —— 加载阶段改用低优先级。" },
+      "效率模式：本系统不支持。加载阶段将改用低优先级。" },
     { "Efficiency mode: the call failed - the loading stages hold the low "
       "priority instead.",
-      "效率模式：调用失败 —— 加载阶段改用低优先级。" },
+      "效率模式：调用失败。加载阶段将改用低优先级。" },
     { "blacklist line thread failed",
       "黑名单状态行线程创建失败" },
     { "CPU line thread failed",
       "CPU 状态行线程创建失败" },
 
-    { "Boot cores",           "启动核心" },
-    { "Loading cores",        "加载核心" },
-    { "Efficiency mode while loading", "加载期间效率模式" },
-    { "Play cores",           "游戏核心" },
-    { "Play priority",        "游戏优先级" },
-    { "Play max cores",       "游戏最大核心数" },
+    { "Boot cores",           "1-启动Logo窗口加载阶段" },
+    { "Loading cores",        "2-游戏主窗口加载阶段" },
+    { "Efficiency mode while loading", "加载阶段使用效率模式" },
+    { "Play cores",           "3-游戏中..." },
+    { "Play priority",        "游戏中的CPU优先级" },
+    { "Play max cores",       "游戏中的CPU核心数（0为不限制）" },
 
     { "Leave alone",          "不干预" },
     { "All cores",            "全部核心" },
@@ -249,28 +241,25 @@ static const ShText kZhCN[] = {
     { "SMT + CPU0 off",       "关闭超线程+CPU 0" },
     { "E-cores + CPU0 off",   "关闭能效核+CPU 0" },
     { "SMT + E-cores + CPU0 off", "关闭超线程+能效核+CPU 0" },
-    { "Normal",               "普通" },
-    { "Above normal",         "高于普通" },
+    { "Normal",               "正常" },
+    { "Above normal",         "高于正常" },
     { "High",                 "高" },
     { "Efficiency mode",      "效率模式" },
     { "Low",                  "低" },
 
-    { "boot",                 "启动" },
-    { "window",               "窗口加载" },
-    { "play",                 "游玩" },
+    { "boot",                 "启动Logo窗口" },
+    { "window",               "主窗口加载" },
+    { "play",                 "游戏中" },
 
     { "@settings.diag",       "译文诊断" },
     { "@settings.diag.hint",
-      "文件还欠这个版本哪些文本。\n"
-      "仍是英文：该行的值还是英文，就地改值即可。\n"
-      "完全没有文本：只有基线里才有的键。\n"
-      "导出会把它们写到\n"
-      "lang\\<语言>.missing.ini，填好即可用。\n"
-      "没有源码的插件也走这条路：它的英文原文就是键。" },
+      "文件还欠这个版本哪些文本。\n仍是英文：该行的值还是英文，就地改值即可。\n完全没有文本：只有内部才有的key。"
+      "\n导出会把它们写到\nlang\\<语言>.missing.ini，填好即可用。\n没有源码的插件也走这条路："
+      "它的英文原文就是键。" },
     { "@settings.diag.export", "导出到 lang\\<语言>.missing.ini" },
     { "Still in English:",    "仍是英文：" },
     { "No text at all:",      "完全没有文本：" },
-    { "Not declared (\"@\" keys):", "基线未声明的 “@” 键：" },
+    { "Not declared (\"@\" keys):", "内部未声明的 “@” 键：" },
     { "Repeated rows:",       "重复行：" },
     { "Dropped (table full):", "超限丢弃：" },
     { "(framework)",          "（框架）" },

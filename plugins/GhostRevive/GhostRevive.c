@@ -304,12 +304,11 @@ static const TextRow kEn[] = {
 };
 
 static const TextRow kZh[] = {
-    { "@gr.page",   "幽灵复活" },
+    { "@gr.page",   "魅影模式复活" },
     { "@gr.watch",  "监视并尝试复活" },
     { "@gr.switch", "切换复活方式" },
     { "@gr.hint",
-      "实验功能。会让本局结束的幽灵模式死亡与普通死亡走的是不同路径；"
-      "本插件尝试让每次死亡都走可复活的那条。方式循环：off、probe、"
+      "实验功能。会让本局结束的魅影模式死亡与普通死亡走的是不同路径；本插件尝试让每次死亡都走可复活的那条。方式循环：off、probe、"
       "noscene、reload、fixhp、cannotdie、prehp。" }
 };
 
