@@ -9,9 +9,13 @@ cannot be fixed - only this API can.
 
 Status: **shelved after 5 recon rounds.**  The send path was NOT
 found.  This file preserves everything learned so the work can
-resume.  `scripthook_chatapi.c` (dormant, NOT in the build) holds the
-recon/hook tooling; re-add it to Makefile + build_msvc.ps1 +
-loader.c (`ShChatApiStartup`) to continue.
+resume.
+
+The module the recon ran in, `scripthook_chatapi.c`, was removed on
+2026-09-15: it was never in the build, nothing called its entry point, and
+it had no one-shot guard - so a second call would have re-armed twelve
+engine hooks and leaked a thread.  What it did is written down under
+"Tooling" below; recreating it from that section is the way back in.
 
 ## Facts established (GRW.exe, build ~2026-08, 2026-09-07/08)
 
@@ -65,7 +69,7 @@ Conclusion: the actual chat send happens through a different path
 travels through an engine-string handle, maybe via a UI-side
 serialize before bcast sees an already-empty object).
 
-## Tooling that works (kept in scripthook_chatapi.c)
+## Tooling that works (recreate it from here; the module is gone)
 
 - MinHook on engine thunks at fixed RVAs: 12/12 armed, zero crashes,
   trivially extensible (`g_slots` table + DEFINE_HOOK macro).
