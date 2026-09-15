@@ -826,13 +826,13 @@ int ShForgeLogReads(void) { return g_logReads; }
 static void OnEnabled(uint32_t menu, uint32_t item, int v, void *u) {
     (void)item; (void)u;
     ShConfigSetBool("forgemod", "enabled", v);
-    ShMenuStatus(menu, "Saved. Restart to apply.");
+    ShMenuStatus(menu, "@settings.saved");
 }
 
 static void OnDryRun(uint32_t menu, uint32_t item, int v, void *u) {
     (void)item; (void)u;
     ShConfigSetBool("forgemod", "dry_run", v);
-    ShMenuStatus(menu, "Saved. Restart to apply.");
+    ShMenuStatus(menu, "@settings.saved");
 }
 
 /* The page's key: what [MenuOrder] is keyed by, both for the default

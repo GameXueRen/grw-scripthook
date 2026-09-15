@@ -411,7 +411,8 @@ SH_API int ShPluginBlacklistNotice(char *buf, int cap) {
     ConditionsText(bits, why, (int)sizeof(why));
     /* Kept short on purpose: the Plugins page has one hint line, and the
      * "changes need a restart" note shares it. */
-    snprintf(buf, (size_t)cap, "%s (%s): %s", ShLang("Off now"), why, names);
+    snprintf(buf, (size_t)cap, "%s (%s): %s", ShLang("@menu.offnow"), why,
+             names);
     return 1;
 }
 

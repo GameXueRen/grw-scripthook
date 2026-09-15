@@ -1055,6 +1055,34 @@ ShLangDeclare("firstperson", "zh-CN", kZh, N);
 
 **未做（有意）**：不删除任何玩家已经改过的 `lang.ini`（本次删的那份经比对确系未被编辑的旧种入副本）；`lang.example.ini` 也不进游戏目录。
 
+### 9.14 框架侧字面量键清零 + 一个键两用这个坑（同日）
+
+§9.13 只把**插件**改成了 ID；框架自己的表里还留着 45 条"英文原文当键"（迁移期从旧 `[zh_cn]` 表搬过来时省事的做法，文件头原先也写着这个理由）。这 45 条现已全部改成 ID：
+
+| 组 | 现键 → ID |
+|---|---|
+| 状态行 / 提示（13）| `@settings.saved` `@settings.restart` `@settings.plugins.note` `@menu.offnow` `@cpu.now` `@cpu.hint` `@cpu.hint.ecore.na/none/failed` `@cpu.hint.eco.na/failed` `@settings.thread.blacklist/cpu` |
+| CPU 页行标签（6）| `@cpu.row.boot/window/eco/play/prio/cores` |
+| 两把刻度（15）| `@cpu.opt.leave/all/nosmt/noecore/nosmt_noecore/nocpu0/nosmt_nocpu0/noecore_nocpu0/nosmt_noecore_nocpu0`、`@cpu.prio.normal/above/high/eco/low` |
+| 三个阶段名（3）| `@cpu.stage.boot/window/play` |
+| 译文诊断页（8）| `@diag.english/missing/orphan/dup/dropped/framework/exported/exportfail` |
+
+**做法**：只换键，**值一律照搬**。核对方式是机械的：重导 `docs/text-cn-review.ini` 后按**键**做 diff —— 只应有新增的档位键，**没有任何值发生变化**（见下）。现在框架侧残留的字面量键为 **0**，字面量通路只剩一种正当用途：**没有源码的插件**（它的英文原文就是它唯一的键）。`docs/text-cn-review.ini` 的 framework 段、`lang.example.ini` 的框架行都已跟着改键。
+
+**为什么必须做**（本轮踩到的坑，值得单列）：**一个键被两个语义位置共用**。
+
+「CPU 调度控制」页里 `Efficiency mode` / `Efficiency mode off` 这两个键同时被两处引用：
+
+1. `g_ecoOpts[]` —— **加载阶段使用效率模式**这一行的三个档位（0 不干预 / 1 开 / 2 关）；
+2. `g_prioOpts[4]` —— **状态行**里"加载阶段当前持有的优先级"（`ShLang(prio)`，显示成"效率模式"）。
+
+我把表里的值改成 `效率模式` / `关闭效率模式` 之后，第 1 处跟着变，屏幕上那一行就从玩家熟悉的 `不干预 / 开 / 关` 变成了 `不干预 / 效率模式 / 关闭效率模式` —— 这正是"改了一个键，坏了一处不相干的界面"。修法是**把两个语义拆成两个键**：
+
+- 行档位：`@cpu.eco.leave` / `@cpu.eco.on` / `@cpu.eco.off`（`不干预` / `开` / `关`）；
+- 状态行：`@cpu.prio.eco` / `@cpu.prio.low`（`效率模式` / `低`）。
+
+**通用教训**：改一个键的**值**之前，先查这个键还被谁引用（`grep '"键"'`）。同一个键出现在两个语义位置就是设计缺陷，应当**先拆键再改词**，而不是改词。收尾复查的脚本里已加上"同一键被多处不同语义引用"的检查项。
+
 ### 9.4 尚未经实机验证
 
 - 18 份插件 `lang.ini` 的实际显示（含第三方插件的 `<页面键>.hint`）；

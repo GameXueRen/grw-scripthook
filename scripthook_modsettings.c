@@ -56,15 +56,15 @@ typedef struct {
  * also offers processor 0, whose combinations sit after them. The ini
  * stores the index into this list. */
 static const char *g_stageOpts[] = {
-    "Leave alone",              /* 0 */
-    "All cores",                /* 1 */
-    "SMT off",                  /* 2 */
-    "E-cores off",              /* 3 */
-    "SMT + E-cores off",        /* 4 */
-    "CPU 0 off",                /* 5 */
-    "SMT + CPU0 off",           /* 6 */
-    "E-cores + CPU0 off",       /* 7 */
-    "SMT + E-cores + CPU0 off"  /* 8 */
+    "@cpu.opt.leave",                  /* 0 */
+    "@cpu.opt.all",                    /* 1 */
+    "@cpu.opt.nosmt",                  /* 2 */
+    "@cpu.opt.noecore",                /* 3 */
+    "@cpu.opt.nosmt_noecore",          /* 4 */
+    "@cpu.opt.nocpu0",                 /* 5 */
+    "@cpu.opt.nosmt_nocpu0",           /* 6 */
+    "@cpu.opt.noecore_nocpu0",         /* 7 */
+    "@cpu.opt.nosmt_noecore_nocpu0"    /* 8 */
 };
 /* The logo and window stages stop before the processor-0 values: the
  * engine needs processor 0 while it is starting up. */
@@ -79,12 +79,12 @@ static const char *g_stageOpts[] = {
  * rather than what was asked for. Realtime is offered nowhere: it can
  * starve the desktop and the audio threads. */
 static const char *g_prioOpts[] = {
-    "Leave alone",      /* 0 */
-    "Normal",           /* 1 */
-    "Above normal",     /* 2 */
-    "High",             /* 3 */
-    "Efficiency mode",  /* 4: what the loading switch resolves to */
-    "Low"               /* 5: ... on a machine that cannot do that */
+    "@cpu.opt.leave",      /* 0 */
+    "@cpu.prio.normal",    /* 1 */
+    "@cpu.prio.above",     /* 2 */
+    "@cpu.prio.high",      /* 3 */
+    "@cpu.prio.eco",       /* 4: what the loading switch resolves to */
+    "@cpu.prio.low"        /* 5: ... on a machine that cannot do that */
 };
 #define PRIO_NOPTS      6                   /* names: the status line's range */
 #define PRIO_PLAY_NOPTS 4                   /* what the play row offers */
@@ -99,6 +99,19 @@ static const Setting g_loaderSettings[] = {
       "@settings.load", 0, 0, 0, 0, 1, NULL, 0 },
 };
 
+/* The loading stages' efficiency-mode dial. The order is the ini's, so an
+ * option's index IS the value stored: 0 leave alone, 1 hold the mode, 2
+ * drop it. 0 and 1 keep the meaning the old on/off switch had, so an
+ * existing cpu_eco_boot=0 or =1 reads the same as before.
+ *
+ * The words are the row's own ("on" / "off"), not the priority scale's:
+ * this row is a switch, while the status line names the mode it resolves
+ * to. One key serving both made the row read "efficiency mode" instead of
+ * "on" - the split is what keeps each place saying what it means. */
+static const char *g_ecoOpts[] = {
+    "@cpu.opt.leave", "@cpu.eco.on", "@cpu.eco.off"
+};
+
 /* One pair of rows per stage of the game's start up: which set of
  * processors it runs on, and which priority (or the efficiency mode) it
  * holds. Same rows, same ini keys and same order as before - only the page
@@ -106,23 +119,24 @@ static const Setting g_loaderSettings[] = {
  * the value the ini stores and no row needs a mapping. */
 static const Setting g_cpuSettings[] = {
     { "loader", "cpu_boot",
-      "Boot cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
+      "@cpu.row.boot", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
     { "loader", "cpu_window",
-      "Loading cores", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
-    /* One switch for the two loading stages between them: on = efficiency
-     * mode while they last, off (the default) = the class is left alone. */
+      "@cpu.row.window", 1, 0, STAGE_NOPTS - 1, 1, 0, g_stageOpts, STAGE_NOPTS },
+    /* One dial for the two loading stages between them: hold the efficiency
+     * mode while they last, drop it for them, or leave the class alone
+     * (the default). */
     { "loader", "cpu_eco_boot",
-      "Efficiency mode while loading", 0, 0, 0, 0, 0, NULL, 0 },
+      "@cpu.row.eco", 0, 0, 2, 1, 0, g_ecoOpts, 3 },
     { "loader", "cpu_play",
-      "Play cores", 1, 0, 8, 1, 0, g_stageOpts, 9 },
+      "@cpu.row.play", 1, 0, 8, 1, 0, g_stageOpts, 9 },
     { "loader", "cpu_prio_play",
-      "Play priority", 1, 0, PRIO_PLAY_NOPTS - 1, 1, 0, g_prioOpts,
+      "@cpu.row.prio", 1, 0, PRIO_PLAY_NOPTS - 1, 1, 0, g_prioOpts,
       PRIO_PLAY_NOPTS },
     /* A ceiling on the play stage alone (0 = none): trimming the set
      * while the game is still starting is a good way to make it not
      * start, and the stutter it is for is a play-time thing. */
     { "loader", "cpu_cores",
-      "Play max cores", 1, 0, 64, 1, 0, NULL, 0 },
+      "@cpu.row.cores", 1, 0, 64, 1, 0, NULL, 0 },
 };
 
 /* ---- menu handles ---------------------------------------------- */
@@ -144,7 +158,7 @@ static int  g_nplugins = 0;
 /* ---- callbacks -------------------------------------------------- */
 
 static void ReportSaved(uint32_t menu) {
-    ShMenuStatus(menu, "Saved. Restart to apply.");
+    ShMenuStatus(menu, "@settings.saved");
 }
 
 static void OnLoaderBool(uint32_t menu, uint32_t item, int value,
@@ -626,9 +640,8 @@ static void SetPluginHint(void) {
 
     ShPluginBlacklistNotice(notice, sizeof(notice));
     n = snprintf(text, sizeof(text), "%s\n%s",
-                 ShLang("These changes take effect after a game restart."),
-                 ShLang("No [plugins] line means off. Switch it on here; "
-                        "deleting scripthook.ini resets every plugin to off."));
+                 ShLang("@settings.restart"),
+                 ShLang("@settings.plugins.note"));
     if (notice[0] && n > 0 && (size_t)n + 2 < sizeof(text))
         snprintf(text + n, sizeof(text) - (size_t)n, "\n%s", notice);
     ShMenuHint(g_pluginMenu, text);
@@ -665,9 +678,9 @@ static char g_cpuLast[128];
 /* The stage as the translation table spells it: "boot" / "window" / "play"
  * are keys there, and read as Logo / 窗口加载 / 游玩. */
 static const char *StageKey(int stage) {
-    return stage == SH_STAGE_BOOT ? "boot"
-         : stage == SH_STAGE_WINDOW ? "window"
-         : "play";
+    return stage == SH_STAGE_BOOT ? "@cpu.stage.boot"
+         : stage == SH_STAGE_WINDOW ? "@cpu.stage.window"
+         : "@cpu.stage.play";
 }
 
 static void SetCpuLine(void) {
@@ -692,9 +705,11 @@ static void SetCpuLine(void) {
     dial = g_stageOpts[d];
     prio = g_prioOpts[p];
 
+    /* The English literal stays here on purpose: ShTextFormat checks a
+     * translation against it. Only the template is keyed. */
     ShTextFormat(text, sizeof(text),
                  "Now: %s - cores %s - priority %s",
-                 ShLang("Now: %s - cores %s - priority %s"),
+                 ShLang("@cpu.now"),
                  ShLang(StageKey(st)), ShLang(dial), ShLang(prio));
     if (!strcmp(text, g_cpuLast)) return;
     snprintf(g_cpuLast, sizeof(g_cpuLast), "%s", text);
@@ -740,9 +755,7 @@ static void BuildHints(void) {
      * at all; anywhere else it would explain nothing. What the dials are
      * doing right now is the line at the bottom of the page. */
     used = (size_t)snprintf(hint, sizeof(hint), "%s",
-                            ShLang("Processor set and priority for each "
-                                   "start up stage - changes need a "
-                                   "restart."));
+                            ShLang("@cpu.hint"));
     if (ShCpuGetStatus(&cf)) {
         /* Two dials can be picked and then do nothing at all, and each of
          * them needs a line of its own - the row alone would read as "set
@@ -752,13 +765,13 @@ static void BuildHints(void) {
         line[0] = 0;
         if (cf.ecoreState == SH_CF_NA_NOT_INTEL)
             snprintf(line, sizeof(line), "%s",
-                     ShLang("E-cores off: not applicable on this CPU."));
+                     ShLang("@cpu.hint.ecore.na"));
         else if (cf.ecoreState == SH_CF_NA_NO_ECORE)
             snprintf(line, sizeof(line), "%s",
-                     ShLang("E-cores off: this CPU has no E-cores."));
+                     ShLang("@cpu.hint.ecore.none"));
         else if (cf.ecoreState == SH_CF_FAILED)
             snprintf(line, sizeof(line), "%s",
-                     ShLang("E-cores off: detection failed."));
+                     ShLang("@cpu.hint.ecore.failed"));
         if (line[0] && used + 2 < sizeof(hint)) {
             snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
             used = strlen(hint);
@@ -767,14 +780,10 @@ static void BuildHints(void) {
         if (cf.ecoBoot) {
             if (cf.eco == SH_ECO_NA)
                 snprintf(line, sizeof(line), "%s",
-                         ShLang("Efficiency mode: not available on this "
-                                "system - the loading stages hold the low "
-                                "priority instead."));
+                         ShLang("@cpu.hint.eco.na"));
             else if (cf.eco == SH_ECO_FAILED)
                 snprintf(line, sizeof(line), "%s",
-                         ShLang("Efficiency mode: the call failed - the "
-                                "loading stages hold the low priority "
-                                "instead."));
+                         ShLang("@cpu.hint.eco.failed"));
         }
         if (line[0] && used + 2 < sizeof(hint))
             snprintf(hint + used, sizeof(hint) - used, "\n%s", line);
@@ -802,9 +811,9 @@ static void OnDiagExport(uint32_t menu, uint32_t item, int value,
     (void)item; (void)value; (void)user;
     n = ShLangSkeleton(path, (int)sizeof(path));
     if (n < 0)
-        ShMenuStatus(menu, "Export failed - see logs\\scripthook_text.log");
+        ShMenuStatus(menu, "@diag.exportfail");
     else
-        ShMenuStatusF(menu, "%d row(s) written to %s", n, path);
+        ShMenuStatusF(menu, "@diag.exported", n, path);
 }
 
 static void BuildDiagMenu(void) {
@@ -818,22 +827,22 @@ static void BuildDiagMenu(void) {
     n = ShLangDiag(rows, DIAG_SHOW, &miss, &eng, &orph, &dup, &drop);
     ShMenuClear(g_diagMenu);
 
-    snprintf(line, sizeof(line), "%s %d", ShLang("Still in English:"), eng);
+    snprintf(line, sizeof(line), "%s %d", ShLang("@diag.english"), eng);
     ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
-    snprintf(line, sizeof(line), "%s %d", ShLang("No text at all:"), miss);
-    ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
-    snprintf(line, sizeof(line), "%s %d",
-             ShLang("Not declared (\"@\" keys):"), orph);
-    ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
-    snprintf(line, sizeof(line), "%s %d", ShLang("Repeated rows:"), dup);
+    snprintf(line, sizeof(line), "%s %d", ShLang("@diag.missing"), miss);
     ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
     snprintf(line, sizeof(line), "%s %d",
-             ShLang("Dropped (table full):"), drop);
+             ShLang("@diag.orphan"), orph);
+    ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
+    snprintf(line, sizeof(line), "%s %d", ShLang("@diag.dup"), dup);
+    ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
+    snprintf(line, sizeof(line), "%s %d",
+             ShLang("@diag.dropped"), drop);
     ShMenuAction(g_diagMenu, line, OnDiagInfo, NULL);
 
     ShMenuAction(g_diagMenu, "@settings.diag.export", OnDiagExport, NULL);
 
-    snprintf(prefix, sizeof(prefix), "%s", ShLang("(framework)"));
+    snprintf(prefix, sizeof(prefix), "%s", ShLang("@diag.framework"));
     for (i = 0; i < n; i++) {
         snprintf(line, sizeof(line), "%s - %s", rows[i].key,
                  rows[i].owner[0] ? rows[i].owner : prefix);
@@ -921,7 +930,7 @@ void ShModSettingsStartup(void) {
     snprintf(g_langSeen, sizeof(g_langSeen), "%s", ShLangGet());
     SetCpuLine();
     if (!CreateThread(NULL, 0, BlHintThread, NULL, 0, NULL))
-        ShMenuStatus(g_pluginMenu, "blacklist line thread failed");
+        ShMenuStatus(g_pluginMenu, "@settings.thread.blacklist");
     if (!CreateThread(NULL, 0, CpuLineThread, NULL, 0, NULL))
-        ShMenuStatus(g_cpuMenu, "CPU line thread failed");
+        ShMenuStatus(g_cpuMenu, "@settings.thread.cpu");
 }

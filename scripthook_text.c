@@ -11,10 +11,13 @@
  * [Settings] Languages falls back to (ResolveLanguage in
  * scripthook_config.c builds that list).
  *
- * Keys that start with '@' are stable IDs, so renaming a page or a row
- * never breaks a translation. The other keys are the English literals
- * the settings module passes - the same keys the old [zh_cn] tables
- * used, so those rows move here without touching that module.
+ * Keys are stable IDs ('@' and a dotted path), so renaming a page or a row
+ * never breaks a translation, and one screen never has to borrow another
+ * screen's word: the loading stages' efficiency-mode dial says on / off
+ * while the status line names the mode it resolves to. Every string this
+ * file lists is keyed that way - the English literals are the values,
+ * never the keys. The one place a literal is still a key is a plugin
+ * shipped without source: its own English text is all it has.
  * Diagnostics treat the en-US table as the authoritative list of what
  * this build can say.
  *
@@ -73,66 +76,64 @@ static const ShText kEnUS[] = {
       "%d mod(s): %d applied, %d rejected or overridden." },
 
     /* lines and hints those pages carry */
-    { "Saved. Restart to apply.",
-      "Saved. Restart to apply." },
-    { "These changes take effect after a game restart.",
-      "These changes take effect after a game restart." },
-    { "No [plugins] line means off. Switch it on here; deleting "
-      "scripthook.ini resets every plugin to off.",
+    { "@settings.saved",      "Saved. Restart to apply." },
+    { "@settings.restart",    "These changes take effect after a game restart." },
+    { "@settings.plugins.note",
       "No [plugins] line means off. Switch it on here; deleting "
       "scripthook.ini resets every plugin to off." },
-    { "Off now",              "Off now" },
-    { "Now: %s - cores %s - priority %s",
-      "Now: %s - cores %s - priority %s" },
-    { "Processor set and priority for each start up stage - changes need "
-      "a restart.",
+    { "@menu.offnow",         "Off now" },
+    { "@cpu.now",             "Now: %s - cores %s - priority %s" },
+    { "@cpu.hint",
       "Processor set and priority for each start up stage - changes need "
       "a restart." },
-    { "E-cores off: not applicable on this CPU.",
-      "E-cores off: not applicable on this CPU." },
-    { "E-cores off: this CPU has no E-cores.",
-      "E-cores off: this CPU has no E-cores." },
-    { "E-cores off: detection failed.",
-      "E-cores off: detection failed." },
-    { "Efficiency mode: not available on this system - the loading stages "
-      "hold the low priority instead.",
+    { "@cpu.hint.ecore.na",   "E-cores off: not applicable on this CPU." },
+    { "@cpu.hint.ecore.none", "E-cores off: this CPU has no E-cores." },
+    { "@cpu.hint.ecore.failed", "E-cores off: detection failed." },
+    { "@cpu.hint.eco.na",
       "Efficiency mode: not available on this system - the loading stages "
       "hold the low priority instead." },
-    { "Efficiency mode: the call failed - the loading stages hold the low "
-      "priority instead.",
+    { "@cpu.hint.eco.failed",
       "Efficiency mode: the call failed - the loading stages hold the low "
       "priority instead." },
-    { "blacklist line thread failed", "blacklist line thread failed" },
-    { "CPU line thread failed",       "CPU line thread failed" },
+    { "@settings.thread.blacklist", "blacklist line thread failed" },
+    { "@settings.thread.cpu",       "CPU line thread failed" },
 
     /* CPU page rows */
-    { "Boot cores",           "Boot cores" },
-    { "Loading cores",        "Loading cores" },
-    { "Efficiency mode while loading", "Efficiency mode while loading" },
-    { "Play cores",           "Play cores" },
-    { "Play priority",        "Play priority" },
-    { "Play max cores",       "Play max cores" },
+    { "@cpu.row.boot",        "Boot cores" },
+    { "@cpu.row.window",      "Loading cores" },
+    { "@cpu.row.eco",         "Efficiency mode while loading" },
+    { "@cpu.row.play",        "Play cores" },
+    { "@cpu.row.prio",        "Play priority" },
+    { "@cpu.row.cores",       "Play max cores" },
 
     /* the stage scales (row options, and the CPU status line) */
-    { "Leave alone",          "Leave alone" },
-    { "All cores",            "All cores" },
-    { "SMT off",              "SMT off" },
-    { "E-cores off",          "E-cores off" },
-    { "SMT + E-cores off",    "SMT + E-cores off" },
-    { "CPU 0 off",            "CPU 0 off" },
-    { "SMT + CPU0 off",       "SMT + CPU0 off" },
-    { "E-cores + CPU0 off",   "E-cores + CPU0 off" },
-    { "SMT + E-cores + CPU0 off", "SMT + E-cores + CPU0 off" },
-    { "Normal",               "Normal" },
-    { "Above normal",         "Above normal" },
-    { "High",                 "High" },
-    { "Efficiency mode",      "Efficiency mode" },
-    { "Low",                  "Low" },
+    { "@cpu.opt.leave",       "Leave alone" },
+    { "@cpu.opt.all",         "All cores" },
+    { "@cpu.opt.nosmt",       "SMT off" },
+    { "@cpu.opt.noecore",     "E-cores off" },
+    { "@cpu.opt.nosmt_noecore", "SMT + E-cores off" },
+    { "@cpu.opt.nocpu0",      "CPU 0 off" },
+    { "@cpu.opt.nosmt_nocpu0", "SMT + CPU0 off" },
+    { "@cpu.opt.noecore_nocpu0", "E-cores + CPU0 off" },
+    { "@cpu.opt.nosmt_noecore_nocpu0", "SMT + E-cores + CPU0 off" },
+    { "@cpu.prio.normal",     "Normal" },
+    { "@cpu.prio.above",      "Above normal" },
+    { "@cpu.prio.high",       "High" },
+    { "@cpu.prio.eco",        "Efficiency mode" },
+    { "@cpu.prio.low",        "Low" },
+
+    /* the loading stages' efficiency-mode dial: the three places that row
+     * offers, in the ini's own order (0 leave alone, 1 hold the mode, 2
+     * drop it). The words are its own, not the priority scale's - the row
+     * reads as a switch ("on" / "off"), while the status line names the
+     * mode it resolves to. */
+    { "@cpu.eco.on",          "on" },
+    { "@cpu.eco.off",         "off" },
 
     /* the three start up stages, as the CPU status line names them */
-    { "boot",                 "boot" },
-    { "window",               "window" },
-    { "play",                 "play" },
+    { "@cpu.stage.boot",      "boot" },
+    { "@cpu.stage.window",    "window" },
+    { "@cpu.stage.play",      "play" },
 
     /* the translation report */
     { "@settings.diag",       "Translation report" },
@@ -146,15 +147,14 @@ static const ShText kEnUS[] = {
       "A plugin without source is translated this\n"
       "way too: its English literal is the key." },
     { "@settings.diag.export", "Write lang\\<code>.missing.ini" },
-    { "Still in English:",    "Still in English:" },
-    { "No text at all:",      "No text at all:" },
-    { "Not declared (\"@\" keys):", "Not declared (\"@\" keys):" },
-    { "Repeated rows:",       "Repeated rows:" },
-    { "Dropped (table full):", "Dropped (table full):" },
-    { "(framework)",          "(framework)" },
-    { "%d row(s) written to %s", "%d row(s) written to %s" },
-    { "Export failed - see logs\\scripthook_text.log",
-      "Export failed - see logs\\scripthook_text.log" },
+    { "@diag.english",        "Still in English:" },
+    { "@diag.missing",        "No text at all:" },
+    { "@diag.orphan",         "Not declared (\"@\" keys):" },
+    { "@diag.dup",            "Repeated rows:" },
+    { "@diag.dropped",        "Dropped (table full):" },
+    { "@diag.framework",      "(framework)" },
+    { "@diag.exported",       "%d row(s) written to %s" },
+    { "@diag.exportfail",     "Export failed - see logs\\scripthook_text.log" },
 
     /* the languages this build ships, named in their own language, so
      * the picker reads with no lang.ini present (a [LanguageNames] row
@@ -194,62 +194,53 @@ static const ShText kZhCN[] = {
     { "@forge.status.mods",
       "%d 个 mod：%d 已生效，%d 被拒绝或覆盖" },
 
-    { "Saved. Restart to apply.",
-      "已保存。重启后生效。" },
-    { "These changes take effect after a game restart.",
-      "这些改动需重启游戏才生效。" },
-    { "No [plugins] line means off. Switch it on here; deleting "
-      "scripthook.ini resets every plugin to off.",
+    { "@settings.saved",      "已保存。重启后生效。" },
+    { "@settings.restart",    "这些改动需重启游戏才生效。" },
+    { "@settings.plugins.note",
       "没有 [plugins] 行即为关闭。在这里打开；删除 scripthook.ini 会把所有"
       "插件重置为关闭。" },
-    { "Off now",              "当前不可用" },
-    { "Now: %s - cores %s - priority %s",
-      "当前：%s - 核心 %s - 优先级 %s" },
-    { "Processor set and priority for each start up stage - changes need "
-      "a restart.",
+    { "@menu.offnow",         "当前不可用" },
+    { "@cpu.now",             "当前：%s - 核心 %s - 优先级 %s" },
+    { "@cpu.hint",
       "设定每个启动阶段的处理器集合与优先级，改动需重启。" },
-    { "E-cores off: not applicable on this CPU.",
-      "关闭能效核：本 CPU 不适用。" },
-    { "E-cores off: this CPU has no E-cores.",
-      "关闭能效核：本 CPU 没有能效核。" },
-    { "E-cores off: detection failed.",
-      "关闭能效核：检测失败。" },
-    { "Efficiency mode: not available on this system - the loading stages "
-      "hold the low priority instead.",
+    { "@cpu.hint.ecore.na",   "关闭能效核：本 CPU 不适用。" },
+    { "@cpu.hint.ecore.none", "关闭能效核：本 CPU 没有能效核。" },
+    { "@cpu.hint.ecore.failed", "关闭能效核：检测失败。" },
+    { "@cpu.hint.eco.na",
       "效率模式：本系统不支持。加载阶段将改用低优先级。" },
-    { "Efficiency mode: the call failed - the loading stages hold the low "
-      "priority instead.",
+    { "@cpu.hint.eco.failed",
       "效率模式：调用失败。加载阶段将改用低优先级。" },
-    { "blacklist line thread failed",
-      "黑名单状态行线程创建失败" },
-    { "CPU line thread failed",
-      "CPU 状态行线程创建失败" },
+    { "@settings.thread.blacklist", "黑名单状态行线程创建失败" },
+    { "@settings.thread.cpu",       "CPU 状态行线程创建失败" },
 
-    { "Boot cores",           "1-启动Logo窗口加载阶段" },
-    { "Loading cores",        "2-游戏主窗口加载阶段" },
-    { "Efficiency mode while loading", "加载阶段使用效率模式" },
-    { "Play cores",           "3-游戏中..." },
-    { "Play priority",        "游戏中的CPU优先级" },
-    { "Play max cores",       "游戏中的CPU核心数（0为不限制）" },
+    { "@cpu.row.boot",        "1-启动Logo窗口加载阶段" },
+    { "@cpu.row.window",      "2-游戏主窗口加载阶段" },
+    { "@cpu.row.eco",         "加载阶段使用效率模式" },
+    { "@cpu.row.play",        "3-游戏中..." },
+    { "@cpu.row.prio",        "游戏中的CPU优先级" },
+    { "@cpu.row.cores",       "游戏中的CPU核心数（0为不限制）" },
 
-    { "Leave alone",          "不干预" },
-    { "All cores",            "全部核心" },
-    { "SMT off",              "关闭超线程" },
-    { "E-cores off",          "关闭能效核" },
-    { "SMT + E-cores off",    "关闭超线程+能效核" },
-    { "CPU 0 off",            "关闭 CPU 0" },
-    { "SMT + CPU0 off",       "关闭超线程+CPU 0" },
-    { "E-cores + CPU0 off",   "关闭能效核+CPU 0" },
-    { "SMT + E-cores + CPU0 off", "关闭超线程+能效核+CPU 0" },
-    { "Normal",               "正常" },
-    { "Above normal",         "高于正常" },
-    { "High",                 "高" },
-    { "Efficiency mode",      "效率模式" },
-    { "Low",                  "低" },
+    { "@cpu.opt.leave",       "不干预" },
+    { "@cpu.opt.all",         "全部核心" },
+    { "@cpu.opt.nosmt",       "关闭超线程" },
+    { "@cpu.opt.noecore",     "关闭能效核" },
+    { "@cpu.opt.nosmt_noecore", "关闭超线程+能效核" },
+    { "@cpu.opt.nocpu0",      "关闭 CPU 0" },
+    { "@cpu.opt.nosmt_nocpu0", "关闭超线程+CPU 0" },
+    { "@cpu.opt.noecore_nocpu0", "关闭能效核+CPU 0" },
+    { "@cpu.opt.nosmt_noecore_nocpu0", "关闭超线程+能效核+CPU 0" },
+    { "@cpu.prio.normal",     "正常" },
+    { "@cpu.prio.above",      "高于正常" },
+    { "@cpu.prio.high",       "高" },
+    { "@cpu.prio.eco",        "效率模式" },
+    { "@cpu.prio.low",        "低" },
 
-    { "boot",                 "启动Logo窗口" },
-    { "window",               "主窗口加载" },
-    { "play",                 "游戏中" },
+    { "@cpu.eco.on",          "开" },
+    { "@cpu.eco.off",         "关" },
+
+    { "@cpu.stage.boot",      "启动Logo窗口" },
+    { "@cpu.stage.window",    "主窗口加载" },
+    { "@cpu.stage.play",      "游戏中" },
 
     { "@settings.diag",       "译文诊断" },
     { "@settings.diag.hint",
@@ -257,15 +248,14 @@ static const ShText kZhCN[] = {
       "\n导出会把它们写到\nlang\\<语言>.missing.ini，填好即可用。\n没有源码的插件也走这条路："
       "它的英文原文就是键。" },
     { "@settings.diag.export", "导出到 lang\\<语言>.missing.ini" },
-    { "Still in English:",    "仍是英文：" },
-    { "No text at all:",      "完全没有文本：" },
-    { "Not declared (\"@\" keys):", "内部未声明的 “@” 键：" },
-    { "Repeated rows:",       "重复行：" },
-    { "Dropped (table full):", "超限丢弃：" },
-    { "(framework)",          "（框架）" },
-    { "%d row(s) written to %s", "已写入 %d 行：%s" },
-    { "Export failed - see logs\\scripthook_text.log",
-      "导出失败，详见 logs\\scripthook_text.log" },
+    { "@diag.english",        "仍是英文：" },
+    { "@diag.missing",        "完全没有文本：" },
+    { "@diag.orphan",         "内部未声明的 “@” 键：" },
+    { "@diag.dup",            "重复行：" },
+    { "@diag.dropped",        "超限丢弃：" },
+    { "@diag.framework",      "（框架）" },
+    { "@diag.exported",       "已写入 %d 行：%s" },
+    { "@diag.exportfail",     "导出失败，详见 logs\\scripthook_text.log" },
 
     { "@lang.name.zh-CN",     "简体中文" },
     { "@lang.name.en-US",     "English" }
