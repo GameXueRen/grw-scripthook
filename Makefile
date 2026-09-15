@@ -20,13 +20,26 @@ GAMEDIR = ../..
 .PHONY: all roulette fling spawner npcspawner enemyreinforce modeprobe \
         modecallprobe blacklistsample filewatchsample drawsample cnchat \
         crazycars freecam fov fps chaos sample skipintro opticalcamo \
+        ammocapacity \
         docs clean
+
+capprobe: $(GAMEDIR)/plugins/CapProbe/CapProbe.asi
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 
 $(GAMEDIR)/plugins/ui_sample/ui_sample.asi: plugins/ui_sample/ui_sample.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/ui_sample/ui_sample.c -L. -lscripthook -luser32
+
+ammocapacity: $(GAMEDIR)/plugins/ammo_capacity/ammo_capacity.asi
+
+# The third-party AmmoCapacity.asi rewritten against this framework
+# (docs/ammocapacity-reverse.md). The hook and the arithmetic are the
+# framework's (scripthook_ammocap.c); this plugin owns the values, the ini
+# and the menu, and links the import library.
+$(GAMEDIR)/plugins/ammo_capacity/ammo_capacity.asi: plugins/ammo_capacity/ammo_capacity.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ plugins/ammo_capacity/ammo_capacity.c -L. -lscripthook
 
 blacklistsample: $(GAMEDIR)/plugins/blacklist_sample/blacklist_sample.asi
 
@@ -196,7 +209,8 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
                         scripthook_head.c scripthook_fov.c \
                         scripthook_blur.c scripthook_fpx.c \
                         scripthook_stat.c scripthook_resource.c \
-                        scripthook_stealth.c scripthook_ammo.c \
+                        scripthook_stealth.c \
+			scripthook_ammocap.c \
                         scripthook_weather.c scripthook_crash.c \
                         scripthook_input.c scripthook_havok.c \
                         scripthook_reflect.c scripthook_ui.c \
@@ -221,7 +235,8 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c \
 		scripthook_camera.c scripthook_head.c \
 		scripthook_fov.c scripthook_blur.c scripthook_fpx.c \
 		scripthook_stat.c scripthook_resource.c \
-		scripthook_stealth.c scripthook_ammo.c \
+		scripthook_stealth.c \
+			scripthook_ammocap.c \
 		scripthook_weather.c scripthook_crash.c \
 		scripthook_input.c scripthook_havok.c \
 		scripthook_reflect.c scripthook_ui.c \

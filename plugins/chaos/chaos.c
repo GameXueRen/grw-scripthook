@@ -249,11 +249,6 @@ static int PlayerPos(ShVec3 *out) {
     return ShGetPlayerPosition(out);
 }
 
-static void SetAmmoAll(uint32_t n) {
-    int i;
-    for (i = 0; i < 3; i++) ShSetAmmo(i, n);
-}
-
 static int NearbyNpcs(ShEntity *out, int max, float radius) {
     return ShFindEntities(SH_KIND_NPC, radius, 0, out, max);
 }
@@ -309,9 +304,6 @@ static void FxSmite(void) {
 
 static void FxRich(void)  { ShSetAllResources(9999); ShSetSkillPoints(50); }
 static void FxBroke(void) { ShSetAllResources(0); }
-static void FxDry(void)   { SetAmmoAll(0); }
-static void FxLoaded(void) { SetAmmoAll(999); }
-
 static void FxMidnight(void) { ShSetTime(0.5f); }
 static void FxNoon(void)     { ShSetTime(12.0f); }
 static void FxDawn(void)     { ShSetTime(6.0f); }
@@ -772,8 +764,6 @@ static const Effect g_fx[] = {
     { "Smite the Cartel",   0, FxSmite,    NULL, NULL, 0 },
     { "Supply Drop",        0, FxRich,     NULL, NULL, 0 },
     { "Bankrupt",           0, FxBroke,    NULL, NULL, 0 },
-    { "Click Click",        0, FxDry,      NULL, NULL, 0 },
-    { "Full Mags",          0, FxLoaded,   NULL, NULL, 0 },
     { "Midnight",           0, FxMidnight, NULL, NULL, 0 },
     { "High Noon",          0, FxNoon,     NULL, NULL, 0 },
     { "Sunrise",            0, FxDawn,     NULL, NULL, 0 },

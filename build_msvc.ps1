@@ -153,7 +153,8 @@ $fwSources = @(
     'scripthook_fov.c', 'scripthook_blur.c',
     'scripthook_fpx.c',
     'scripthook_stat.c', 'scripthook_resource.c',
-    'scripthook_stealth.c', 'scripthook_ammo.c',
+    'scripthook_stealth.c',
+    'scripthook_ammocap.c',
     'scripthook_weather.c', 'scripthook_crash.c',
     'scripthook_input.c', 'scripthook_havok.c',
     'scripthook_reflect.c', 'scripthook_ui.c',
@@ -320,6 +321,12 @@ Build-Plugin 'CrazyCars'    'crazycars.c'    @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tp_roulette'  'tp_roulette.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'test_plugin'  'test_plugin.c'  @('ws2_32.lib', 'gdi32.lib', 'user32.lib')
+# ammo_capacity - behaviour-equivalent rewrite of the third-party
+# AmmoCapacity.asi (see docs/ammocapacity-reverse.md). The hook and the
+# arithmetic belong to the framework (scripthook_ammocap.c), because the
+# framework is the one thing that writes engine memory; this plugin owns
+# the six values, the ini and the menu, and links the import library.
+Build-Plugin 'ammo_capacity' 'ammo_capacity.c' @($libPath, 'libscripthook.lib')
 
 # A plugin's own files are seeded next to its .asi the first time only:
 # a later build must never overwrite settings changed in game, and never

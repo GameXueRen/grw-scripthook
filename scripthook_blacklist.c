@@ -72,7 +72,7 @@
 
 /* The framework's single error channel lives in scripthook_api.c, and the
  * modules that use it declare it themselves - the same line
- * scripthook_blur.c, scripthook_ammo.c and the rest carry. */
+ * scripthook_blur.c, scripthook_ammocap.c and the rest carry. */
 extern void ShSetError(int err);
 
 #ifdef _MSC_VER

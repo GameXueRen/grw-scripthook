@@ -2372,9 +2372,23 @@ SH_API int  ShSetSkillPoints(uint32_t value);
 SH_API int  ShSetVisibility(float factor);
 SH_API int  ShGetVisibility(float *out);
 
-/** Ammo by weapon slot: 0 primary, 1 second, 2 sidearm. */
-SH_API int  ShGetAmmo(int slot, uint32_t *out);
-SH_API int  ShSetAmmo(int slot, uint32_t value);
+/** The MAGAZINE CAPACITY the game computes for a weapon, scaled by a
+ *  num/den pair (2,1 double, 1,2 half, 1,1 the game's own value).
+ *
+ *  Capacity is the return value of one engine function (RVA 0x614CB0) and
+ *  is stored nowhere, so this hook is the only way to change it - reading
+ *  memory cannot find it. See docs/ammocapacity-reverse.md.
+ *
+ *  The hook installs on the first call that asks for something other than
+ *  1,1; asking for 1,1 first leaves the game alone and installs nothing.
+ *  A change takes effect at the next refill: an ammo crate is what puts the
+ *  number to use. 1 on success, 0 with ShLastError saying why
+ *  (SH_ERR_BAD_ARG, SH_ERR_HOOK_FAILED). */
+SH_API int  ShSetAmmoScale(int num, int den);
+/** What is in force, as the pair. 1/1 when nothing was ever set. */
+SH_API void ShGetAmmoScale(int *num, int *den);
+/** 1 while a scale other than 1/1 is in force. */
+SH_API int  ShAmmoScaleActive(void);
 
 /** @} */
 /** @defgroup weather Weather and time

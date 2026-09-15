@@ -387,8 +387,9 @@ PAGE_READWRITE, 0, 44, L"…W_VisibilityBus_v2")`（UTF-16 名字在 `0x1800041F
 
 **不在本轮**：通用的"当前装备 / 背包 / 武器"查询 API。本次逆向已证明
 这份插件既没有、也不需要装备信息；要做通用装备查询得另立一轮去逆
-inventory / gadget 对象图（起点：`scripthook_ammo.c` 的 `FindInventory`、
-`gadget_probe` 的 `gadget_*.log`、以及 `@defgroup entities` 的组件哈希）。
+inventory / gadget 对象图（`gadget_probe` 的 `gadget_*.log`、`@defgroup entities`
+的组件哈希；库存对象的定位法 —— vtable `SH_IMG(0x3905CF0)` + `+0x250` 的 owner ——
+记在 `docs/ammocapacity-reverse.md` §6，那个模块本身已随本轮清理移除）。
 
 ---
 
