@@ -223,16 +223,40 @@ typedef struct {
 static Batch g_batches[MAX_BATCH];
 
 /* explicit TLS, no winpthread dependency */
-static DWORD g_tlsBatch = TLS_OUT_OF_INDEXES;
+#define TLS_NONE ((LONG)-1)
+static volatile LONG g_tlsBatch = TLS_NONE;
+
+/* The index is claimed once. Check-then-alloc was two steps, so two threads
+ * could each be handed one and the second store won: a thread that had put
+ * its batch at the first index then read the second through BatchOf and
+ * found nothing - the batch handle was lost, and its slot stayed marked in
+ * use until the table ran out. One compare-and-swap makes exactly one of
+ * them the owner; the loser gives its index straight back.
+ */
+static DWORD BatchTls(void) {
+    LONG idx = g_tlsBatch;
+
+    if (idx != TLS_NONE) return (DWORD)idx;
+    idx = (LONG)TlsAlloc();
+    if (idx == TLS_NONE) return TLS_OUT_OF_INDEXES;
+    if (InterlockedCompareExchange(&g_tlsBatch, idx, TLS_NONE) != TLS_NONE) {
+        TlsFree((DWORD)idx);              /* another thread won */
+        idx = g_tlsBatch;
+    }
+    return (DWORD)idx;
+}
 
 static Batch *BatchOf(void) {
-    if (g_tlsBatch == TLS_OUT_OF_INDEXES) return NULL;
-    return (Batch *)TlsGetValue(g_tlsBatch);
+    LONG idx = g_tlsBatch;
+
+    if (idx == TLS_NONE) return NULL;
+    return (Batch *)TlsGetValue((DWORD)idx);
 }
 
 static void SetBatch(Batch *b) {
-    if (g_tlsBatch == TLS_OUT_OF_INDEXES) g_tlsBatch = TlsAlloc();
-    if (g_tlsBatch != TLS_OUT_OF_INDEXES) TlsSetValue(g_tlsBatch, b);
+    DWORD idx = BatchTls();
+
+    if (idx != TLS_OUT_OF_INDEXES) TlsSetValue(idx, b);
 }
 #define t_batch (BatchOf())
 
