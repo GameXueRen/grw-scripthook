@@ -559,12 +559,17 @@ static void ForgeReadAfter(ShFileCall *c, void *user) {
             off = c->offset;
             haveOff = 1;
         } else if (p_SetFilePointerEx) {
-            /* A zero distance at FILE_CURRENT only asks. It is the only
-             * way to know where this read starts. */
+            /* A zero distance at FILE_CURRENT only asks where the read
+             * ENDED: this is the after callback, so the file pointer has
+             * already moved by c->done. The read's start is that minus the
+             * transfer - the same arithmetic as the evidence probe in
+             * scripthook_forgeprobe.c. Using the pointer as-is shifted
+             * every patch by the number of bytes just read, which made
+             * TouchesOverlay miss (or patch the wrong range). */
             LARGE_INTEGER cur, zero;
             zero.QuadPart = 0;
             if (p_SetFilePointerEx(h, zero, &cur, FILE_CURRENT)) {
-                off = (uint64_t)cur.QuadPart;
+                off = (uint64_t)cur.QuadPart - (uint64_t)c->done;
                 haveOff = 1;
             }
         }
