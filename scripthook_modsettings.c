@@ -36,6 +36,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 
 /* ---- the exposed settings -------------------------------------- */
 
@@ -876,6 +877,7 @@ static DWORD WINAPI CpuLineThread(LPVOID p) {
         const char *cur;
 
         Sleep(1000);
+        ShTickPing(SH_TICK_CPULINE);
         cur = ShLangGet();
         if (cur && strcmp(cur, g_langSeen)) {
             snprintf(g_langSeen, sizeof(g_langSeen), "%s", cur);

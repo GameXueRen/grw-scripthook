@@ -68,6 +68,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "log.h"
 
 /* The framework's single error channel lives in scripthook_api.c, and the
@@ -448,6 +449,7 @@ static DWORD WINAPI WatchThread(LPVOID p) {
         int i, n = 0, conditionsChanged = 0;
 
         Sleep(TICK_MS);
+        ShTickPing(SH_TICK_BLACKLIST);
         bits = ActiveBits();
         Lock();
         if (bits != lastBits) {

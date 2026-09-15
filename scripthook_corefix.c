@@ -113,6 +113,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "log.h"
 #include "third_party/minhook/include/MinHook.h"
 
@@ -2020,6 +2021,8 @@ static DWORD WINAPI StageThread(LPVOID p)
     (void)p;
     for (;;) {
         int stage = StageFromNow();
+
+        ShTickPing(SH_TICK_COREFIX);
 
         if (stage == STAGE_BOOT &&
             GetTickCount64() - stageAt >= STAGE_STATE_MS) {

@@ -8,6 +8,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "image.h"
 
 /* FUN_146E02C00 returns *(DAT_144B87978 + 0x20), the
@@ -336,6 +337,7 @@ static DWORD WINAPI StateWatchThread(LPVOID p) {
 
     (void)p;
     for (;;) {
+        ShTickPing(SH_TICK_STATE);
         TrackState(StateHash(CurrentState()));
         if (++tick >= 20) { tick = 0; ShCrashRearm(); }
         Sleep(100);

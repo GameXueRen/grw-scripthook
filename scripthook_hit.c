@@ -8,6 +8,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "image.h"
 
 /* Inside FUN_154D38550, after its casts, where MOV RCX,RDI
@@ -304,6 +305,7 @@ static DWORD WINAPI HitPump(LPVOID p) {
     for (;;) {
         uint32_t head = g_ringHead;
 
+        ShTickPing(SH_TICK_HITPUMP);
         PumpShots();
         FlushSettled();
         head = g_ringHead;

@@ -17,6 +17,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "log.h"
 
 /* One slot per menu, and a plugin that offers its settings per
@@ -360,6 +361,7 @@ static DWORD WINAPI CallThread(LPVOID p) {
         Call c;
         int has = 0;
 
+        ShTickPing(SH_TICK_MENUCALL);
         Lock();
         if (g_callHead != g_callTail) {
             c = g_call[g_callTail];
@@ -941,6 +943,7 @@ static DWORD WINAPI MenuThread(LPVOID p) {
 
     for (;;) {
         Sleep(TICK_MS);
+        ShTickPing(SH_TICK_MENU);
 
         LeaveDeferTick();
 

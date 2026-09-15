@@ -68,6 +68,7 @@
  * at all. */
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "log.h"
 #include "third_party/minhook/include/MinHook.h"
 
@@ -1584,10 +1585,26 @@ static void NoteHit(struct ShFileRule *r, const char *what)
         (long)n, n == 3 ? " (the rest is only counted)" : "");
 }
 
+static int DecideRules(ShFileCall *c, FilePath *p);
+
+/* Weigh the rules that match this call, and time it. While the engine
+ * streams, this runs tens of thousands of times a second - it is the
+ * hottest path the framework owns - so its share of a late frame belongs
+ * in the hitch line: "the engine was streaming" and "our hooks slowed the
+ * stream down" look identical from the outside. */
+static int FilesDecide(ShFileCall *c, FilePath *p)
+{
+    uint64_t at = ShTickNow();
+    int r = DecideRules(c, p);
+
+    ShDecideFeed(at);
+    return r;
+}
+
 /* Weigh the rules that match this call. The winner decides it, and a hide
  * wins over everything - the most conservative answer a rule can give is
  * the one that cannot be wrong. */
-static int FilesDecide(ShFileCall *c, FilePath *p)
+static int DecideRules(ShFileCall *c, FilePath *p)
 {
     struct ShFileRule *best = NULL;
     int bestRank = 0, i;

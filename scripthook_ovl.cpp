@@ -32,6 +32,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "scripthook_draw.h"
 #include "log.h"
 
@@ -1780,8 +1781,16 @@ static void LoadCjkFont()
 // ---------------------------------------------------------------------------
 // Present hook
 // ---------------------------------------------------------------------------
+/* How long our own part of the previous frame took, from this hook's entry
+ * to the moment the real Present is called: the gap the next hitch line
+ * measures covers that tail, so the frame before is the one it reports. */
+static int g_oursUs = 0;
+
 static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, UINT flags)
 {
+    /* Taken here and read at the bottom: only what is in between is ours. */
+    uint64_t hookAt = ShTickNow();
+
     // Frame pacing, for attribution: what a player calls a stutter is a
     // Present interval far longer than a frame, and this log is the only
     // place that can say afterwards whether it was the mod's doing or the
@@ -1794,24 +1803,39 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
         static DWORD lastPresent = 0;
         static DWORD lastStall = 0;
         static uint32_t lastCalls = 0;
+        static int decideUs = 0;
         DWORD now = GetTickCount();
         uint32_t calls = ShFileCallCount();
         int gap = (int)(now - lastPresent);
+
+        /* This frame's share of the interception layer, added up until a
+         * hitch is written, so the number in the line covers the window
+         * and not the session. One exchange a frame. */
+        decideUs += ShDecideTake();
+
         if (g_ready && lastPresent && gap > 100 &&
             (gap < 3000 || (int)(now - lastStall) > 10000))
         {
+            char threads[192];
+
             if (gap >= 3000) lastStall = now;
             /* The context is what makes the line worth having afterwards: a
              * loading or map bit in the ui state says the game was
-             * streaming, and the file-call delta says whether the engine
-             * was hammering the interception layer while it happened. Both
-             * are only paid on a hitch. */
-            OvlLog("%s: %d ms (state %d ui %04X menu %d draw %d file %u)",
+             * streaming, the file-call delta says whether the engine was
+             * hammering the interception layer while it happened, and the
+             * last three fields split the blame between our own Present
+             * work, that layer, and the framework's own threads. All of it
+             * is paid only on a hitch. */
+            ShTickReport(threads, (int)sizeof threads, now);
+            OvlLog("%s: %d ms (state %d ui %04X menu %d draw %d file %u "
+                   "decide %dus ours %dus%s)",
                    gap < 3000 ? "frame hitch" : "frame stall",
                    gap, ShGetGameState(),
                    (unsigned)ShGetUiState(),
                    ShMenuIsOpen() ? 1 : 0, ShDrawWantFrame() ? 1 : 0,
-                   (unsigned)(calls - lastCalls));
+                   (unsigned)(calls - lastCalls), decideUs, g_oursUs,
+                   threads);
+            decideUs = 0;
         }
         lastCalls = calls;
         lastPresent = now;
@@ -1968,7 +1992,10 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
             // the frame; keys reach the game until the desc returns.
             if (!SUCCEEDED(dhr) || desc.BufferDesc.Width == 0 ||
                 desc.BufferDesc.Height == 0)
+            {
+                g_oursUs = ShTickUsSince(hookAt);
                 return g_origPresent(pSwap, sync, flags);
+            }
             if (g_backRtv)
             {
                 g_pd3dContext->OMSetRenderTargets(1, &g_backRtv, nullptr);
@@ -2072,6 +2099,7 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
         }
     }
 
+    g_oursUs = ShTickUsSince(hookAt);
     return g_origPresent(pSwap, sync, flags);
 }
 

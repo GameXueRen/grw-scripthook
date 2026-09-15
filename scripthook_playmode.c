@@ -79,6 +79,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "log.h"
 #include "image.h"
 #include "third_party/minhook/include/MinHook.h"
@@ -337,6 +338,7 @@ static DWORD WINAPI ModeThread(LPVOID p) {
         const char *name;
 
         Sleep(200);
+        ShTickPing(SH_TICK_PLAYMODE);
         now = GetTickCount();
         if (!(g_gmArmed && g_gmCmArmed) && now - lastTry >= GM_TRY_MS) {
             lastTry = now;

@@ -8,6 +8,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "log.h"
 
 #define HUD_SLOTS   32
@@ -407,6 +408,7 @@ static DWORD WINAPI HudThread(LPVOID p) {
     for (;;) {
         int rev = g_rev, g;
         Sleep(HUD_TICK_MS);
+        ShTickPing(SH_TICK_HUD);
         if (!NativeWanted()) {
             /* Nothing on the native side: the engine's UI is left alone, so
              * a session whose plugins only raise toasts never pays the

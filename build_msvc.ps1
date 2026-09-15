@@ -170,7 +170,7 @@ if ($LASTEXITCODE -ne 0) { throw 'ml64 failed for guard.asm' }
 
 $fwSources = @(
     'loader.c', 'scripthook_api.c', 'scripthook_config.c',
-    'scripthook_text.c',
+    'scripthook_text.c', 'scripthook_tick.c',
     'scripthook_physics.c', 'scripthook_health.c',
     'scripthook_state.c', 'scripthook_playmode.c',
     'scripthook_blacklist.c', 'scripthook_entity.c',
