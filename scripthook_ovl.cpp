@@ -245,23 +245,33 @@ static void ImePlaceCaret(HWND hWnd)
 namespace {
 
 float MENU_X = 16.0f, MENU_Y = 16.0f, MENU_W = 520.0f;
-float PAD = 16.0f, PAD_TOP = 0.0f;
-float TITLE_H = 40.0f, ROW_H = 34.0f, BAR_H = 26.0f, VALUE_W = 130.0f;
+/* PAD_TOP is not 0 any more: the two credit lines in the top right (18 px
+ * each, 2 px apart = 38) are centred on the same band as the title, and a
+ * 36 px band cannot hold them, so the panel needs a little room above. 4 px
+ * leaves the credits 3 px clear of the first hint line. */
+float PAD = 16.0f, PAD_TOP = 4.0f;
+/* The title band and the gap under it are tuned together: the title (28
+ * px) is centred in TITLE_H, so its box ends (TITLE_H - 28) / 2 above the
+ * band bottom, and the hints sit MENU_HINT_GAP below that. 36 + 4 puts the
+ * title-to-hints gap on the same visual footing as the gap between the
+ * hints and the first row, (ROW_H - 24) / 2 - which is what the eye
+ * compares them to. */
+float TITLE_H = 36.0f, ROW_H = 34.0f, BAR_H = 26.0f, VALUE_W = 130.0f;
 // Menu text uses the same bold CJK font as the chat box, ~24px.
 float MENU_FS = 24.0f, MENU_TITLE_FS = 28.0f;
-float MENU_HINT_FS = 17.0f, MENU_HINT_LH = 24.0f, MENU_HINT_GAP = 6.0f;
+float MENU_HINT_FS = 18.0f, MENU_HINT_LH = 26.0f, MENU_HINT_GAP = 4.0f;
 // How many hint lines a page may draw. The pages that carry the most
 // are the plugin switches one (note + rules + the mode blacklist line,
 // three) and the CPU one (note + caveat + the live line); the cap only
 // exists to keep a runaway string from building a panel taller than the
 // screen.
 int MENU_HINT_LINES = 8;
-float MENU_CREDIT_FS = 14.0f;
+float MENU_CREDIT_FS = 18.0f;
 // Title auto-shrink (root menu only): floor and step, scaled too.
 float TITLE_MIN_FS = 18.0f, TITLE_STEP_FS = 2.0f, TITLE_CREDIT_GAP = 10.0f;
 
 float CHAT_W_MAX = 720.0f, CHAT_H = 56.0f, CHAT_PAD = 14.0f;
-float CHAT_FS = 24.0f, HINT_FS = 17.0f;
+float CHAT_FS = 24.0f, HINT_FS = 18.0f;
 float CAND_FS = 22.0f, CAND_ROW = 34.0f, CAND_PADX = 12.0f;
 // IME anchor: the caret sits CHAT_ANCHOR_H below the 72% line - same
 // value as CHAT_H so the candidate windows track the drawn box.
@@ -317,17 +327,17 @@ static void ApplyUiScale(float s)
 {
     g_uiScale = s;
     MENU_X  = 16.0f * s;  MENU_Y  = 16.0f * s;  MENU_W  = 520.0f * s;
-    PAD     = 16.0f * s;  PAD_TOP = 0.0f;
-    TITLE_H = 40.0f * s;  ROW_H  = 34.0f * s;   BAR_H   = 26.0f * s;
+    PAD     = 16.0f * s;  PAD_TOP = 4.0f * s;
+    TITLE_H = 36.0f * s;  ROW_H  = 34.0f * s;   BAR_H   = 26.0f * s;
     VALUE_W = 130.0f * s;
     MENU_FS = 24.0f * s;  MENU_TITLE_FS = 28.0f * s;
-    MENU_HINT_FS = 17.0f * s; MENU_HINT_LH = 24.0f * s;
-    MENU_HINT_GAP = 6.0f * s; MENU_CREDIT_FS = 14.0f * s;
+    MENU_HINT_FS = 18.0f * s; MENU_HINT_LH = 26.0f * s;
+    MENU_HINT_GAP = 4.0f * s; MENU_CREDIT_FS = 18.0f * s;
     TITLE_MIN_FS = 18.0f * s; TITLE_STEP_FS = 2.0f * s;
     TITLE_CREDIT_GAP = 10.0f * s;
     CHAT_W_MAX = 720.0f * s;  CHAT_H  = 56.0f * s;
     CHAT_PAD   = 14.0f * s;   CHAT_FS = 24.0f * s;
-    HINT_FS    = 17.0f * s;
+    HINT_FS    = 18.0f * s;
     CAND_FS    = 22.0f * s;   CAND_ROW = 34.0f * s;
     CAND_PADX  = 12.0f * s;
     CHAT_ANCHOR_H = 56.0f * s; CHAT_ANCHOR_GAP = 6.0f * s;
