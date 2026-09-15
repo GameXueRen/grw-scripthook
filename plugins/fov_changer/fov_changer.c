@@ -24,6 +24,9 @@
 
 static uint32_t g_menu = 0;
 static volatile LONG  g_on = 0;      /* read by the tick, written by the menu */
+/* Set on unload. Only a flag: the release belongs to the tick thread, because
+ * DllMain runs under the loader lock, where a framework call is forbidden. */
+static volatile LONG  g_stop = 0;
 static volatile float g_deg = 0.0f;
 static volatile float g_defaultRad = 0.0f;
 
@@ -31,18 +34,24 @@ static int OverrideOn(void) {
     return InterlockedCompareExchange(&g_on, 0, 0) ? 1 : 0;
 }
 
-/* Captured while the override is off, so it is the game's
- * value rather than one of ours read back.
+/* Captured while the override is off, so it is the game's value rather than
+ * one of ours read back. Both the tick and a menu switch can call this, and
+ * the test-and-set was two separate steps: the flag makes exactly one of
+ * them the learner. The two writes below are aligned 32-bit, so a reader
+ * sees one value or the other - never a mix of two.
  */
+static volatile LONG g_learned;
+
 static void LearnDefault(void) {
     ShCamera c;
 
-    if (OverrideOn() || g_defaultRad > 0.0f) return;
+    if (OverrideOn() || InterlockedCompareExchange(&g_learned, 0, 0)) return;
     if (!ShIsInGame()) return;
     if (!ShGetCamera(&c)) return;
     if (c.fov > 0.05f && c.fov < 3.0f) {
         g_defaultRad = c.fov;
         if (g_deg <= 0.0f) g_deg = c.fov * RAD2DEG;
+        InterlockedExchange(&g_learned, 1);
     }
 }
 
@@ -166,7 +175,7 @@ static DWORD WINAPI TickThread(LPVOID p) {
     int held = 0;      /* the override is in force right now */
     (void)p;
 
-    for (;;) {
+    while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         int in = ShIsInGame();
         int allowed = ShPluginAllowed();
 
@@ -183,6 +192,10 @@ static DWORD WINAPI TickThread(LPVOID p) {
         }
         Sleep(TICK_MS);
     }
+
+    /* Unloading: an override left pushed would be one with no owner left to
+     * release it. */
+    if (held) ShCameraReleaseFields(SH_CAM_FOV);
     return 0;
 }
 
@@ -223,6 +236,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 
             if (h) CloseHandle(h);   /* never waited on */
         }
+    } else if (reason == DLL_PROCESS_DETACH) {
+        InterlockedExchange(&g_stop, 1);
     }
     return TRUE;
 }

@@ -278,7 +278,14 @@ static Fp2Age_t       g_fpxAge;
 static int            g_fpxUp = 0;   /* engine sites are patched */
 
 static uint32_t g_menu = 0;
-static volatile int   g_on = 0;
+/* The toggle, flipped from the menu worker and from the hotkey thread, so
+ * every read-modify-write of it goes through Interlocked. Reading it is a
+ * plain aligned load: the value that lands is one of the two. */
+static volatile LONG  g_on = 0;
+/* Set on unload. Only a flag: the release belongs to the tick thread, the
+ * only place a framework call is allowed - DllMain runs under the loader
+ * lock. */
+static volatile LONG  g_stop = 0;
 /* [Settings] engine_extras takes the body and shoulder patches,
  * one bit each: 1 the body position hook, 2 body visibility,
  * 4 the shoulder swap, 8 the wall push. All four by default -
@@ -554,7 +561,7 @@ static void SaveIni(void);
  * nothing, so neither thread can stall the other. */
 static void SetFp(int on) {
     if (on) {
-        g_on = 1;
+        InterlockedExchange(&g_on, 1);
         Hold(1);
         /* Whatever the head was doing - shown through a menu,
          * handed back by an earlier switch - first person
@@ -569,7 +576,7 @@ static void SetFp(int on) {
         Say(SAY_FP_ON, "第一人称已开启（头部若未隐藏请重切一次）",
             SAY_RGB_DONE, SH_TOAST_MS_DEFAULT);
     } else {
-        g_on = 0;
+        InterlockedExchange(&g_on, 0);
         /* Turning first person off is a change of view, not a
          * camera handed to the engine for an aim, so the grace
          * that keeps the head hidden across an aim has to go
@@ -585,7 +592,8 @@ static void SetFp(int on) {
      * changed behind the menu's back; sync it so the next
      * capture renders the truth. */
     if (g_menuSetValue && g_menu)
-        g_menuSetValue(g_menu, "@fp.enabled", g_on);
+        g_menuSetValue(g_menu, "@fp.enabled",
+                       InterlockedCompareExchange(&g_on, 0, 0) ? 1 : 0);
     Report();
 }
 
@@ -892,7 +900,7 @@ static DWORD WINAPI TickThread(LPVOID p) {
     int menuStuckSaid = 0;
     (void)p;
 
-    for (;;) {
+    while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         int playing, menu = 0, drone = 0, ads = 0, fresh = 0;
         int away, ctx = -1;
         uint64_t nowMs;
@@ -1022,6 +1030,15 @@ static DWORD WINAPI TickThread(LPVOID p) {
             }
         }
     }
+
+    /* Unloading: the eye and the head go back from here. Shown rather than
+     * simply dropped, because the engine's own path only shows the head once
+     * first person has let go of it. */
+    if (InterlockedCompareExchange(&g_on, 0, 0)) {
+        InterlockedExchange(&g_on, 0);
+        ShowHead();
+        Hold(0);
+    }
     return 0;
 }
 
@@ -1035,7 +1052,7 @@ static DWORD WINAPI HotkeyThread(LPVOID p) {
     uint64_t at = 0;
     (void)p;
 
-    for (;;) {
+    while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         Sleep(30);
         /* Playing state, not in the ScriptHook menu. The game's
          * own pause screens keep playing true. */
@@ -1044,9 +1061,15 @@ static DWORD WINAPI HotkeyThread(LPVOID p) {
             down = (GetAsyncKeyState(g_hotVk[g_hotKey]) &
                     0x8000) != 0;
             if (down && !prev && GetTickCount64() - at >= 300u) {
+                /* Decided with the flip, not apart from it: the menu switch
+                 * is on another thread, and reading the toggle and writing
+                 * it back in two steps lost one of two flips that landed
+                 * together. */
+                int want = !InterlockedCompareExchange(&g_on, 0, 0);
+
                 at = GetTickCount64();
-                Diag("hotkey flip -> fp=%d", !g_on);
-                SetFp(!g_on);
+                Diag("hotkey flip -> fp=%d", want);
+                SetFp(want);
             }
             prev = down;
         } else {
@@ -1404,6 +1427,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(inst);
         h = CreateThread(NULL, 0, BindThread, NULL, 0, NULL);
         if (h) CloseHandle(h);
+    } else if (reason == DLL_PROCESS_DETACH) {
+        InterlockedExchange(&g_stop, 1);
     }
     return TRUE;
 }

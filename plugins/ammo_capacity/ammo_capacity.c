@@ -247,7 +247,10 @@ static void OpenLog(void) {
     strcat(path, "logs");
     CreateDirectoryA(path, NULL);
     strcat(path, "\\ammo_capacity.log");
-    g_log = fopen(path, "a");
+    /* "w", not "a": the framework's own logs are per session, and a
+     * diagnostic that only ever grows is a file that grows on the player's
+     * disk forever. */
+    g_log = fopen(path, "w");
 }
 
 /* Blocked, or unblocked, mid-session: this plugin has no tick thread of

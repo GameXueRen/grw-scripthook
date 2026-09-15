@@ -536,6 +536,11 @@ static void BuildMenu(void) {
     TwLog("menu created");
 }
 
+/* Set on unload. Only a flag: the release belongs to the tick thread, the
+ * only place a framework call is allowed - DllMain runs under the loader
+ * lock. */
+static volatile LONG g_stop = 0;
+
 /* ---- the tick ---------------------------------------------------------
  * 250 ms: the old plugin's own fastest loop. Nothing is sent unless it
  * differs from what is out there, so a session that changes nothing costs
@@ -546,7 +551,7 @@ static DWORD WINAPI TickThread(LPVOID p) {
 
     (void)p;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-    for (;;) {
+    while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         float hours = 0.0f, rate = 0.0f;
         int inGame, allowed;
 
@@ -626,6 +631,12 @@ static DWORD WINAPI TickThread(LPVOID p) {
 
         RefreshStatus(hours, rate, inGame, allowed);
     }
+
+    /* Unloading: hand the clock and the weather back from here, the only
+     * place that may - DllMain runs under the loader lock. */
+    ShReleaseWeather();
+    ShSetTimeSpeed(1.0f);
+    return 0;
 }
 
 /* ---- startup ---------------------------------------------------------- */
@@ -645,7 +656,10 @@ static void OpenLog(void) {
     CreateDirectoryA(logs, NULL);
     if (snprintf(path, sizeof(path), "%s\\TimeWeatherControl.log", logs) < 0)
         return;
-    g_log = fopen(path, "a");
+    /* "w", not "a": the framework's own logs are per session, and a
+     * diagnostic that only ever grows is a file that grows on the player's
+     * disk forever. */
+    g_log = fopen(path, "w");
 }
 
 static DWORD WINAPI InitThread(LPVOID p) {
@@ -688,6 +702,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 
             if (h) CloseHandle(h);   /* never waited on */
         }
+    } else if (reason == DLL_PROCESS_DETACH) {
+        InterlockedExchange(&g_stop, 1);
     }
     return TRUE;
 }

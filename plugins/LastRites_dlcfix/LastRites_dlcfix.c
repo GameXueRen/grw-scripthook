@@ -133,7 +133,10 @@ static void OpenLog(void) {
         strcpy(path + len, "logs\\LastRites_dlcfix.log");
     else
         strcpy(path + len, "LastRites_dlcfix.log");
-    g_log = fopen(path, "a");
+    /* "w", not "a": the framework's own logs are per session, and a
+     * diagnostic that only ever grows is a file that grows on the player's
+     * disk forever. */
+    g_log = fopen(path, "w");
 }
 
 /* ---- plugin ini -------------------------------------------------------- */
@@ -183,6 +186,8 @@ static void SaveIni(void) {
 typedef uint32_t (*IsOwned_t)(const int aUplayId);
 
 static IsOwned_t g_realIsOwned;
+/* Where the hook went, so unload can take it back. */
+static LPVOID     g_hookedAt;
 
 static uint32_t HookIsOwned(const int aUplayId) {
     uint32_t real = g_realIsOwned ? g_realIsOwned(aUplayId) : 0;
@@ -255,6 +260,7 @@ static void InstallHook(void) {
             MH_Uninitialize();
             return;
         }
+        g_hookedAt = fn;
         DlcLog("install: %s!%s hooked at %p (original %p)",
                TARGET_DLL, TARGET_FN, fn, (void *)g_realIsOwned);
         DlcLog("install: id %d alone will be answered owned",
@@ -383,6 +389,17 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
             HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
 
             if (h) CloseHandle(h);   /* never waited on */
+        }
+    } else if (reason == DLL_PROCESS_DETACH) {
+        /* The detour is this module's code, so an unload that left it in
+         * place would be a jump into unmapped memory the next time the game
+         * asked. There is no thread of ours left that could take it back,
+         * so it happens here. */
+        if (g_hookedAt && g_realIsOwned) {
+            MH_DisableHook(g_hookedAt);
+            MH_RemoveHook(g_hookedAt);
+            g_realIsOwned = NULL;
+            g_hookedAt = NULL;
         }
     }
     return TRUE;

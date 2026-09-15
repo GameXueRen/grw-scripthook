@@ -588,6 +588,11 @@ static void IniSet(const char *key, int v) {
 
 /* ---- poll thread ---------------------------------------------------- */
 
+/* Set on unload. Only a flag: the release belongs to the poll thread, the
+ * only place a framework call is allowed - DllMain runs under the loader
+ * lock. */
+static volatile LONG g_stop = 0;
+
 /* Defined with the box's open/close path below; the poll thread is what
  * calls it most (menu opened, feature switched off). */
 static void ChatClose(void);
@@ -599,7 +604,7 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
     DWORD backNext = 0;     /* when a held Backspace repeats next  */
     DWORD focusLostAt = 0;  /* 0 = the game window is in front     */
     DWORD escDownAt = 0;    /* Esc held during a composition       */
-    for (;;) {
+    while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         Sleep(POLL_MS);
 
         /* Injection in progress on the send thread: swallow every key
@@ -766,6 +771,14 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
 
         if (g_chat.cmd != 0) HandleDone();
     }
+
+    /* Unloading: the keyboard and the text session go back before this thread
+     * ends. A drawer left registered is a callback into unmapped code, and
+     * keys left captured are a game that cannot be played - both worse than
+     * the code staying mapped for a while longer. */
+    ShCaptureKeys(0);
+    ShDrawInputClose();
+    ShDrawDel(DRAW_NAME);
     return 0;
 }
 
@@ -937,6 +950,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 
             if (h) CloseHandle(h);   /* never waited on */
         }
+    } else if (reason == DLL_PROCESS_DETACH) {
+        InterlockedExchange(&g_stop, 1);
     }
     return TRUE;
 }

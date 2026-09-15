@@ -614,7 +614,10 @@ static void OpenLog(void) {
         strcpy(path + len, "logs\\skipintro.log");
     else
         strcpy(path + len, "skipintro.log");
-    g_log = fopen(path, "a");
+    /* "w", not "a": the framework's own logs are per session, and a
+     * diagnostic that only ever grows is a file that grows on the player's
+     * disk forever. */
+    g_log = fopen(path, "w");
 }
 
 static DWORD WINAPI InitThread(LPVOID p) {
@@ -676,6 +679,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 
             if (h) CloseHandle(h);
         }
+    } else if (reason == DLL_PROCESS_DETACH) {
+        /* A rule's callbacks live in this module, so an unload with rules
+         * still in the layer is a jump into unmapped memory the next time
+         * the game opens a file. Given back here because there is no thread
+         * of ours left that could. */
+        if (!Released()) ReleaseAll("unloading");
     }
     return TRUE;
 }
