@@ -10,6 +10,8 @@ Usage:
   pwsh ./build_msvc.ps1
   pwsh ./build_msvc.ps1 -Gamedir "D:\Games\GRW"
   pwsh ./build_msvc.ps1 -Clean
+  pwsh ./build_msvc.ps1 -Beta        # public beta: only the nine shipped plugins
+  pwsh ./build_msvc.ps1 -Release     # -Beta plus diagnostics compiled out
 #>
 [CmdletBinding()]
 param(
@@ -31,13 +33,33 @@ param(
     # Dear ImGui source folder (imgui.h / imgui.cpp / backends\),
     # compiled into dinput8.dll for the menu overlay. Vendored under
     # third_party/imgui; -Imgui overrides for a newer checkout.
-    [string]$Imgui = (Join-Path $PSScriptRoot 'third_party\imgui')
+    [string]$Imgui = (Join-Path $PSScriptRoot 'third_party\imgui'),
+
+    # Public beta: build and deploy only the plugins that ship in it, and
+    # move every other plugin folder out of the game's plugins\ into
+    # plugins_off\<stamp>\ - moved, never deleted, so a plain build puts
+    # them back. Their source and their build entries stay in the tree.
+    [switch]$Beta,
+
+    # Same set as -Beta, and in addition the framework's own module-level
+    # diagnostics are compiled out (SH_RELEASE): only logs\scripthook.log
+    # and the crash report are still written.
+    [switch]$Release
 )
 
 $ErrorActionPreference = 'Stop'
 
 $root   = $PSScriptRoot
 $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+
+# The plugin set the first public beta ships. Everything else is built by a
+# plain run, and left out of a -Beta / -Release one.
+$betaSet = @(
+    'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat',
+    'TimeWeatherControl', 'OpticalCamo', 'LastRites_dlcfix', 'ammo_capacity'
+)
+$script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
+$releaseBuild     = [bool]$Release
 
 if (-not $Gamedir) {
     $candidate = Join-Path (Join-Path $root '..\..') "Tom Clancy's Ghost Recon Wildlands"
@@ -107,6 +129,7 @@ $c = @(
     '/D_CRT_SECURE_NO_WARNINGS',
     "/Fo$tmp\"
 )
+if ($releaseBuild) { $c += '/DSH_RELEASE=1' }
 
 # The framework DLL and the import library plugins link.
 function Invoke-FrameworkBuild {
@@ -121,6 +144,10 @@ function Invoke-FrameworkBuild {
 function Build-Plugin {
     param([string]$Name, [string]$Source, [string[]]$LinkArgs,
           [string[]]$ExtraSources)
+    if ($script:BetaOnly -and ($script:BetaOnly -notcontains $Name)) {
+        Write-Host "skipped (not in the -Beta set): $Name"
+        return
+    }
     $dir = Join-Path $outPlugins $Name
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $dll = Join-Path $dir "$Name.asi"
@@ -178,6 +205,7 @@ $cpp = @(
     "/I$root", "/I$Imgui", "/I$Imgui\backends",
     "/Fo$tmp\"
 )
+if ($releaseBuild) { $cpp += '/DSH_RELEASE=1' }
 $cppSources = @(
     (Join-Path $Imgui 'imgui.cpp'),
     (Join-Path $Imgui 'imgui_draw.cpp'),
@@ -342,6 +370,7 @@ Build-Plugin 'TimeWeatherControl' 'TimeWeatherControl.c' @($libPath, 'libscripth
 # game folder line up file for file.
 foreach ($dir in (Get-ChildItem $srcPlugins -Directory)) {
     $name = $dir.Name
+    if ($script:BetaOnly -and ($script:BetaOnly -notcontains $name)) { continue }
     $dst  = Join-Path $outPlugins $name
     foreach ($file in @("$name.ini", 'lang.ini')) {
         $from = Join-Path $dir.FullName $file
@@ -371,7 +400,26 @@ foreach ($dir in (Get-ChildItem $srcPlugins -Directory)) {
 # Remove-Item fails to bind under PowerShell 7 ("the input object cannot
 # be bound to any parameters"), which left the files in place and made a
 # successful build report a failure at its last step.
-Get-ChildItem $outPlugins -Recurse -Include *.lib, *.exp -ErrorAction SilentlyContinue |
-    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+# -Beta / -Release: the game's plugins\ has to match what is released, so
+# every plugin folder outside the set is moved aside - never deleted - into
+# <gamedir>\plugins_off\<stamp>\. A plain build puts them back in place.
+$offDir = $null
+if ($script:BetaOnly) {
+    $offDir = Join-Path $Gamedir ('plugins_off\' + (Get-Date -Format 'yyMMdd_HHmmss'))
+    foreach ($dir in (Get-ChildItem $outPlugins -Directory)) {
+        if ($script:BetaOnly -contains $dir.Name) { continue }
+        New-Item -ItemType Directory -Force -Path $offDir | Out-Null
+        Move-Item -LiteralPath $dir.FullName -Destination $offDir -Force
+        Write-Host "moved out of plugins\: $($dir.Name) -> $offDir"
+    }
+    Write-Host "beta plugin set deployed: $($script:BetaOnly -join ', ')"
+}
+
+$cleanDirs = @($outPlugins)
+if ($offDir -and (Test-Path $offDir)) { $cleanDirs += $offDir }
+foreach ($d in $cleanDirs) {
+    Get-ChildItem $d -Recurse -Include *.lib, *.exp -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+}
 
 Write-Host 'build complete'

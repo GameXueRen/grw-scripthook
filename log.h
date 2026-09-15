@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 
 static FILE *g_logFile = NULL;
 
@@ -25,9 +26,23 @@ static int LogPath(char *buf, size_t n, const char *name) {
     return 1;
 }
 
+/* A release build keeps only the two logs a player can be asked for: the
+ * loader's own and the crash report. Every module-level diagnostic is
+ * compiled out, which is also what stops the framework from creating a
+ * dozen empty files at startup. */
+#ifdef SH_RELEASE
+static int LogWanted(const char *name) {
+    return strcmp(name, "scripthook.log") == 0 ||
+           strcmp(name, "scripthook_crash.log") == 0;
+}
+#else
+static int LogWanted(const char *name) { (void)name; return 1; }
+#endif
+
 /* Opens <gamedir>\logs\<name> for writing. */
 static void LogInit(const char *name) {
     char path[MAX_PATH];
+    if (!LogWanted(name)) return;
     if (LogPath(path, sizeof(path), name))
         g_logFile = fopen(path, "w");
 }
