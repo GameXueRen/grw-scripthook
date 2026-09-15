@@ -2648,6 +2648,17 @@ SH_API int      ShBlockKey(int vk, int on);
 /** Every key but the escapes hidden, focus uses this. */
 SH_API int      ShCaptureKeys(int on);
 
+/** Is the game's own window the one in front? Any window of this
+ *  process counts, so windowed and borderless fullscreen both answer
+ *  yes, and a backgrounded game answers no.
+ *
+ *  Ask this before acting on a key read with GetAsyncKeyState: that
+ *  reads the PHYSICAL key, so without the check a hotkey fires on a
+ *  press meant for whichever window the player switched to. One
+ *  GetForegroundWindow, answered uncached - a stale "yes" is the one
+ *  case this exists to prevent. */
+SH_API int      ShGameFocused(void);
+
 /** Queue full press/release taps of a virtual key into the game's
  *  DirectInput keyboard reports.  The phases advance in real time
  *  (60 ms per phase), so the engine sees a human-length press. */

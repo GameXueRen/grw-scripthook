@@ -453,17 +453,6 @@ static void ResetKeys(void) {
     HoldReset();
 }
 
-/* True while the game window has the focus. Any window of this
- * process counts, which covers both windowed and borderless
- * fullscreen; a backgrounded game reports the window in front. */
-static int WindowFocused(void) {
-    DWORD pid = 0;
-    HWND fg = GetForegroundWindow();
-    if (!fg) return 0;
-    GetWindowThreadProcessId(fg, &pid);
-    return pid == GetCurrentProcessId();
-}
-
 /* Selection scrolls with the cursor, so a long menu shows a
  * window of rows rather than running off the screen. The window is
  * counted in VISIBLE rows and not in raw ones, so hidden rows take no
@@ -949,7 +938,7 @@ static DWORD WINAPI MenuThread(LPVOID p) {
 
         /* Background window: the menu must not react to keys.
          * Forget held keys too, so nothing fires on refocus. */
-        if (!WindowFocused()) {
+        if (!ShGameFocused()) {
             ResetKeys();
             continue;
         }

@@ -40,22 +40,36 @@ static int Escapes(int vk) {
 static volatile int g_capture;
 static int Install(void);
 
-/* Our window is the foreground one. While the game is in the
- * background it must see no keys at all, like any unfocused app:
- * the machine's keyboard belongs to whatever window is active.
- * The game polls hundreds of keys per frame through here, so the
- * foreground lookup is cached for 50ms - focus changes are rare
- * and 50ms of stale "focused" only delays a suppression by one
- * poll burst. */
-static int GameFocused(void) {
+/* Is the game's own window the one in front? Any window of this process
+ * counts, which covers windowed and borderless fullscreen alike; a
+ * backgrounded game reports the window in front instead.
+ *
+ * Exported because a plugin that polls a hotkey with GetAsyncKeyState
+ * reads the PHYSICAL key: without asking this first, a press meant for
+ * whichever window the player switched to still fires the plugin's action
+ * on the game sitting behind it. Answered uncached - one
+ * GetForegroundWindow - because a stale "yes" is the one case this exists
+ * to prevent.
+ */
+SH_API int ShGameFocused(void) {
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+
+    if (!fg) return 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId() ? 1 : 0;
+}
+
+/* Our own poll stub runs hundreds of times a frame, so the answer it
+ * works from is cached for 50ms: focus changes are rare, and 50ms of
+ * stale "focused" only delays a suppression by one poll burst. */
+static int FocusedCached(void) {
     static DWORD lastAt = 0;
     static DWORD lastAns = 0;
     DWORD now = GetTickCount();
+
     if (!lastAt || (int)(now - lastAt) >= 50) {
-        HWND fg = GetForegroundWindow();
-        DWORD pid = 0;
-        if (fg) GetWindowThreadProcessId(fg, &pid);
-        lastAns = (pid == GetCurrentProcessId()) ? 1 : 0;
+        lastAns = (DWORD)ShGameFocused();
         lastAt = now ? now : 1;
     }
     return (int)lastAns;
@@ -69,7 +83,7 @@ static int Suppressed(int vk) {
     /* Deactivated game: hand back nothing. This sits above the
      * escape list on purpose - pausing and alt-tabbing are OS
      * actions that never needed the game to receive the keys. */
-    if (!GameFocused()) return 1;
+    if (!FocusedCached()) return 1;
     /* An explicitly blocked key wins over the escape list, so
      * a mod menu can claim ESC while it is open. Escapes still
      * pass when nothing claims them, so pause and alt-tab

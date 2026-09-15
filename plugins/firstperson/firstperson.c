@@ -213,6 +213,10 @@ typedef int (*MenuSetValue_t)(uint32_t, const char *, int);
 typedef int (*MenuStatus_t)(uint32_t, const char *);
 typedef int (*MenuStatusF_t)(uint32_t, const char *, ...);
 typedef int (*MenuIsOpen_t)(void);
+/* Is the game window the one in front? Optional: a dinput8 without it
+ * leaves the flip hotkey unarmed (see HotkeyThread), because the key is
+ * read with GetAsyncKeyState and that reports the PHYSICAL key. */
+typedef int (*GameFocused_t)(void);
 typedef int (*MenuHint_t)(uint32_t, const char *);
 typedef int (*LogPath_t)(const char *, char *, int);
 
@@ -256,6 +260,7 @@ static ToastEx_t    g_toastEx;
 static ToastSet_t   g_toastSet;
 static HandoverClear_t g_handoverClear;
 static MenuIsOpen_t g_menuIsOpen;
+static GameFocused_t g_gameFocused;
 static MenuSetValue_t g_menuSetValue;
 static MenuStatus_t g_status;
 static MenuStatusF_t g_statusF;
@@ -1054,9 +1059,16 @@ static DWORD WINAPI HotkeyThread(LPVOID p) {
 
     while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         Sleep(30);
-        /* Playing state, not in the ScriptHook menu. The game's
-         * own pause screens keep playing true. */
-        if (g_hotKey > 0 && Playing() &&
+        /* Playing, the game window in front, and not in the ScriptHook
+         * menu. The game's own pause screens keep playing true, and so
+         * does a game left in the background - which is why the window
+         * has to be the one in front: the key is read with
+         * GetAsyncKeyState, so it reports the PHYSICAL key, and a flip
+         * caused by a press meant for whatever window the player switched
+         * to would land on this game behind it. Without the framework
+         * call there is no way to ask, so the hotkey stays unarmed rather
+         * than armed blind. */
+        if (g_hotKey > 0 && Playing() && g_gameFocused && g_gameFocused() &&
             (!g_menuIsOpen || !g_menuIsOpen())) {
             down = (GetAsyncKeyState(g_hotVk[g_hotKey]) &
                     0x8000) != 0;
@@ -1275,6 +1287,7 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_setBlur = GetProcAddress(m, "ShSetCameraBlur");
     *(FARPROC *)&g_allowed = GetProcAddress(m, "ShPluginAllowed");
     *(FARPROC *)&g_menuIsOpen = GetProcAddress(m, "ShMenuIsOpen");
+    *(FARPROC *)&g_gameFocused = GetProcAddress(m, "ShGameFocused");
     *(FARPROC *)&g_menuSetValue =
         GetProcAddress(m, "ShMenuSetValue");
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
@@ -1349,6 +1362,14 @@ static DWORD WINAPI BindThread(LPVOID p) {
     if (g_extras && g_fpxExtras) g_fpxExtras((uint32_t)g_extras);
     Diag("bind: fpx=%d miss=%03x extras=%d", g_fpxUp,
          g_fpxMissing ? (unsigned)g_fpxMissing() : 0u, g_extras);
+    if (g_hotKey > 0 && !g_gameFocused) {
+        /* A flip key is set and this dinput8 cannot say whether the game
+         * window is in front. Armed blind it would fire on a key pressed
+         * in whatever window is in front, so it stays off - and says so,
+         * rather than looking broken. */
+        g_diagOn = 1;
+        Diag("hotkey off: this dinput8 has no ShGameFocused");
+    }
     FpText();
     g_menu = menuCreate("@fp.page");
     menuToggle(g_menu, "@fp.enabled", 0, OnToggle, NULL);
