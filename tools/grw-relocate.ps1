@@ -26,7 +26,7 @@ folder, old is the pre-update backup. Override either with -OldExe/-NewExe.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('info', 'dump', 'calls', 'jumps', 'reloc', 'reloccall', 'find', 'ptr', 'thunk', 'rtti', 'class', 'fn', 'fnx', 'batch')]
+    [ValidateSet('info', 'dump', 'calls', 'jumps', 'reloc', 'reloccall', 'find', 'ptr', 'thunk', 'rtti', 'class', 'fn', 'fnx', 'batch', 'check')]
     [string]$Cmd,
 
     # RVA in hex, with or without 0x, for -Cmd dump/calls/ptr.
@@ -290,7 +290,12 @@ public class Scan {
             int sp = line.IndexOfAny(new char[] { ' ', '\t' });
             if (sp <= 0) continue;
             string label = line.Substring(0, sp).Trim();
-            string hex = line.Substring(sp).Trim();
+            string rest = line.Substring(sp).Trim();
+            // The address is the second token and nothing else: the list
+            // carries trailing notes ("(also entity.c ...)") on the entries
+            // that exist in more than one file.
+            int sp2 = rest.IndexOfAny(new char[] { ' ', '\t' });
+            string hex = sp2 > 0 ? rest.Substring(0, sp2) : rest;
             long rva;
             try { rva = Convert.ToInt64(hex.StartsWith("0x") ? hex.Substring(2) : hex, 16); }
             catch { res.Add(label + " : bad address '" + hex + "'"); continue; }
@@ -320,6 +325,13 @@ public class Scan {
             string tag = start ? "" : "  (not a body start)";
             if (best == "")
                 res.Add(string.Format("{0,-18} {1,-10} -> no body match{2}", label, rva.ToString("X"), tag));
+            else if (!start)
+                // An interior site, or data: .pdata only bounds the body it
+                // sits in, so the answer is the neighbourhood and not an
+                // address. Printing a score here read as precision the tool
+                // does not have, which is worse than saying so.
+                res.Add(string.Format("{0,-18} {1,-10} -> near {2,-10} (neighbourhood only){3}",
+                                      label, rva.ToString("X"), best, tag));
             else
                 res.Add(string.Format("{0,-18} {1,-10} -> {2,-10} ({3}% idx{4:+0;-0;0}){5}",
                                       label, rva.ToString("X"), best, bestPct, bestIdx, tag));
@@ -688,8 +700,85 @@ switch ($Cmd) {
         $lines = Get-Content -LiteralPath $Pattern
         $old = [PeFile]::Load($OldExe)
         $new = [PeFile]::Load($NewExe)
-        $res = [Scan]::Batch($old, $new, [string[]]$lines, 60, 64)
+        # 192 bytes of body, not 64: the UI and scene helpers are small
+        # siblings whose first lines look alike, and a short window scores
+        # one of them as a match for another.
+        $res = [Scan]::Batch($old, $new, [string[]]$lines, 60, 192)
         $res | ForEach-Object { $_ }
+    }
+
+    # The sweep, then the comparison that makes it a checklist: for every
+    # entry the tool maps precisely - a body start - read what the sources
+    # carry for that label right now and line the two up. A copy that
+    # disagrees is a constant that was never re-pinned, which is the worklist
+    # for the next update; agreement is the confirmation that a re-pin landed.
+    #
+    # EVERY definition is read, not the first: the anchors that exist in more
+    # than one file are the ones that go wrong, because re-pinning one copy
+    # leaves the other walking from the old address. A label with one copy
+    # that agrees and one that does not is exactly that story, and the line
+    # says so.
+    #
+    # Entries whose old address was an interior site or data are skipped:
+    # .pdata bounds the body they sit in, not the address, so there is
+    # nothing to compare - those need a content anchor.
+    'check' {
+        if (-not $Pattern) { throw '-Pattern is the path of the list file' }
+        $srcRoot = Split-Path -Parent $PSScriptRoot
+        $lines = Get-Content -LiteralPath $Pattern
+        $old = [PeFile]::Load($OldExe)
+        $new = [PeFile]::Load($NewExe)
+
+        $defs = @{}
+        Get-ChildItem -LiteralPath $srcRoot -Recurse -File -Include *.c, *.h |
+            Where-Object { $_.FullName -notmatch '\\third_party\\' } |
+            Select-String -Pattern '^\s*#define\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$' |
+            ForEach-Object {
+                $n = $_.Matches[0].Groups[1].Value
+                $v = $_.Matches[0].Groups[2].Value
+                if ($v -match '0x([0-9A-Fa-f]+)') {
+                    if (-not $defs.ContainsKey($n)) {
+                        $defs[$n] = New-Object System.Collections.ArrayList
+                    }
+                    [void]$defs[$n].Add(@{
+                        File  = (Split-Path -Leaf $_.Path)
+                        Line  = $_.LineNumber
+                        Value = [Convert]::ToInt64($Matches[1], 16)
+                    })
+                }
+            }
+
+        $agree = 0; $stale = 0; $unmapped = 0; $skipped = 0
+        foreach ($r in [Scan]::Batch($old, $new, [string[]]$lines, 60, 192)) {
+            if ($r -notmatch '^(\S+)\s+[0-9A-F]+\s+->') { continue }
+            $label = $Matches[1]
+            if ($r -match 'not a body start') { $skipped++; continue }
+            if ($r -match '-> no body match') {
+                $unmapped++
+                "no map        $label"
+                continue
+            }
+            if ($r -notmatch '->\s+([0-9A-F]+)\s+\((\d+)%') { continue }
+            $mapped = [Convert]::ToInt64($Matches[1], 16)
+            $score = $Matches[2]
+            if (-not $defs.ContainsKey($label)) {
+                $unmapped++
+                "no define     $label  (tool $($mapped.ToString('X')) at $score%)"
+                continue
+            }
+            $copies = $defs[$label]
+            $right = @($copies | Where-Object { $_.Value -eq $mapped }).Count
+            if ($right -eq $copies.Count) { $agree++; continue }
+            foreach ($c in ($copies | Where-Object { $_.Value -ne $mapped })) {
+                $stale++
+                $note = if ($right -gt 0) { "   (another copy already agrees)" } `
+                        else { "" }
+                "STALE?  {0,-16} {1}:{2} holds {3:X}, the tool maps it to {4:X} at {5}%{6}" -f `
+                    $label, $c.File, $c.Line, $c.Value, $mapped, $score, $note
+            }
+        }
+        ""
+        "agree $agree, stale $stale, unmapped $unmapped, skipped (interior or data) $skipped"
     }
 
     # The same lookup, but scored by the function body: .pdata gets the
@@ -709,9 +798,12 @@ switch ($Cmd) {
         $s = [Scan]::NameOfVtable($pe, $rva)
         if (-not $s) { "no RTTI behind $('{0:X}' -f $rva) ($($pe.SecOf($rva)))"; break }
         $p = $s.Split('|')
-        "vtable {0:X} ({1})" -f $rva, $pe.SecOf($rva)
-        "  name {0}" -f $p[0]
-        "  td   {0}    col {1}" -f $p[1], $p[2]
+        # Spelled out rather than through -f: an Int64 reaches that format
+        # operator as a string often enough that the address came out in
+        # decimal, which reads as a different address entirely.
+        "vtable " + [Convert]::ToString([int64]$rva, 16) + " (" + $pe.SecOf($rva) + ")"
+        "  name " + $p[0]
+        "  td   " + $p[1] + "    col " + $p[2]
     }
 
     # Where a class's vtable is, looked up by its mangled name.
