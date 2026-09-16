@@ -100,6 +100,11 @@
 #define PART_FLAG    0x54        /* what the original read per part    */
 #define PART_BIT     0x80        /* ... and the bit it counted         */
 #define EPSILON      0.0025f     /* the original's compare slack       */
+/* How long a clean ACTIVE reading keeps the factor applied after the vote
+ * says otherwise. The engine's per-part flag is not steady while the camo
+ * shimmers - see the note in ReadCamoState - and a factor that is released
+ * between two flickers of the flag is a factor nobody can feel. */
+#define CAMO_HOLD_MS 2000
 
 /* The nine steps by index: no 1.0x, because the switch is what turns the
  * plugin off, and no 0.0x, because a hard zero is the trainer's stealth
@@ -234,23 +239,85 @@ typedef struct {
     int failed;   /* parts ShReadBytes could not read                  */
 } CamoVote;
 
+/* The vote above is the original's, unchanged. What follows is the fix
+ * for the field report of 2026-09-17: "0.1x and 0.5x both feel like
+ * nothing, enemies still spot me instantly at range".
+ *
+ * That session's log is the whole explanation. The parts never disagree -
+ * there is not one mixed or "state unavailable" line in it - but the vote
+ * flips cleanly between Active and Inactive about once a second, all
+ * session long. A vote that alternates that fast hands the multiplier to
+ * the engine for roughly half a second at a time, which is the same as
+ * never applying it: by the time the detection term has been scaled down,
+ * the next reading has put it back.
+ *
+ * So an Active reading is latched: the factor stays applied for
+ * CAMO_HOLD_MS, and only a clean Inactive that outlives that window turns
+ * it off again - one reading cannot undo what another just decided. A
+ * reading that cannot be made holds the decision that stands, rather than
+ * releasing the factor on evidence that does not exist; the old path fell
+ * straight to 1.0x there, a second way the effect could vanish mid-crouch.
+ *
+ * The latch only ever extends how long the factor is applied, never how
+ * strong it is, so the menu's promise ("crouch to trigger, then this
+ * multiplier") still holds - it just holds still long enough to be felt.
+ * Every change of the latched state is logged with the raw parts behind
+ * it, so the next session can read exactly what the engine said and when.
+ *
+ * Outside a round the latch is bypassed on purpose: leaving a factor on
+ * the player while standing in the front end is not something a "crouch
+ * to trigger" switch may do. */
+static int LatchCamoState(int raw, const CamoVote *vote) {
+    static int      held = CAMO_UNKNOWN;
+    static uint32_t activeAt = 0;
+    static int      lastRaw = -1;
+    uint32_t now = GetTickCount();
+    int was = held;
+
+    if (raw == CAMO_ACTIVE) {
+        held = CAMO_ACTIVE;
+        activeAt = now;
+    } else if (raw == CAMO_INACTIVE) {
+        if (held != CAMO_ACTIVE || now - activeAt > CAMO_HOLD_MS)
+            held = CAMO_INACTIVE;
+    } else if (held == CAMO_UNKNOWN) {
+        held = CAMO_UNKNOWN;
+    }
+
+    if (raw != lastRaw || held != was) {
+        Log("vote: %d part(s), %d flagged, %d clear, %d unreadable -> "
+            "%s (latched %s)", vote->parts, vote->flagged, vote->clear,
+            vote->failed,
+            raw == CAMO_ACTIVE ? "active" :
+            raw == CAMO_INACTIVE ? "inactive" : "unknown",
+            held == CAMO_ACTIVE ? "active" :
+            held == CAMO_INACTIVE ? "inactive" : "unknown");
+        lastRaw = raw;
+    }
+    return held;
+}
+
 static int ReadCamoState(CamoVote *vote) {
     ShPlayer pl;
     uint64_t nodes[PART_LIMIT];
     int n, i, failed = 0, flagged = 0, clear = 0;
+    int raw;
 
     memset(vote, 0, sizeof(*vote));
 
-    /* Not in play: front end, loading, map.  Stop here - the player and
-     * its parts are not to be touched outside a round. */
+    /* Not in play: front end, loading, map.  Nothing is read and nothing
+     * is held - see the note on LatchCamoState for why this one case must
+     * release the factor rather than remember it. */
     if (!ShIsInGame()) return CAMO_UNKNOWN;
 
     memset(&pl, 0, sizeof(pl));
-    if (!ShGetPlayer(&pl) || !pl.entity) return CAMO_UNKNOWN;
+    if (!ShGetPlayer(&pl) || !pl.entity)
+        return LatchCamoState(CAMO_UNKNOWN, vote);
 
     memset(nodes, 0, sizeof(nodes));
     n = ShGetEntityNodes(pl.entity, nodes, PART_LIMIT);
-    if (n < 1 || n > PART_LIMIT) return CAMO_UNKNOWN;
+    if (n < 1 || n > PART_LIMIT)
+        return LatchCamoState(CAMO_UNKNOWN, vote);
 
     for (i = 0; i < n; i++) {
         uint16_t v = 0;
@@ -267,10 +334,12 @@ static int ReadCamoState(CamoVote *vote) {
     vote->clear   = clear;
     vote->failed  = failed;
 
-    if (failed)       return CAMO_UNKNOWN;   /* a part we could not read  */
-    if (flagged == n) return CAMO_INACTIVE;  /* every part flagged        */
-    if (clear == n)   return CAMO_ACTIVE;    /* every part clear          */
-    return CAMO_UNKNOWN;                     /* the parts disagree        */
+    if (failed)            raw = CAMO_UNKNOWN;   /* a part we could not read */
+    else if (flagged == n) raw = CAMO_INACTIVE;  /* every part flagged   */
+    else if (clear == n)   raw = CAMO_ACTIVE;    /* every part clear     */
+    else                   raw = CAMO_UNKNOWN;   /* the parts disagree   */
+
+    return LatchCamoState(raw, vote);
 }
 
 /* ---- apply + status -------------------------------------------------
