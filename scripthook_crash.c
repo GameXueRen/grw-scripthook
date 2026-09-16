@@ -21,6 +21,12 @@ extern void ShSetError(int err);
 #define CRASH_SEEN_MAX 16
 #define CRASH_STACK_N  24
 #define CRASH_FILE     "scripthook_crash.log"
+/* This is the one log that is appended across sessions rather than reopened
+ * per session, so it is the one that would grow without bound on a player's
+ * disk. Past this size it starts a new file; the note it writes first says
+ * so and carries the build. A session writes at most 24 reports of 4 KB, so
+ * this holds several sessions of history. */
+#define CRASH_FILE_MAX (512 * 1024)
 
 /* Resolved once at startup: the report has to work from an
  * exception handler, where building a path is too much. */
@@ -48,17 +54,38 @@ static int      g_haveFirst = 0;
  * what makes it usable from an exception handler. */
 extern void ShFileOwn(int on);
 
+static const char g_trimNote[] =
+    "\n=== the crash log reached its size limit; older entries were "
+    "dropped ===\n"
+    "=== GRW ScriptHook " SH_VERSION ", built " __DATE__ " " __TIME__ "\n";
+
 static void Emit(const char *text, int len) {
+    const char *path = g_crashPath[0] ? g_crashPath : CRASH_FILE;
+    LARGE_INTEGER size;
     HANDLE f;
     DWORD wrote = 0;
 
     ShFileOwn(1);
-    f = CreateFileA(g_crashPath[0] ? g_crashPath : CRASH_FILE,
-                    FILE_APPEND_DATA, FILE_SHARE_READ,
+    f = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ,
                     NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) {
         ShFileOwn(0);
         return;
+    }
+    /* A report must not be the thing that fills the disk. Start a new file
+     * instead, and let the header be written again, so it carries the base
+     * address of the process crashing now rather than of some old one. */
+    size.QuadPart = 0;
+    if (GetFileSizeEx(f, &size) && size.QuadPart > CRASH_FILE_MAX) {
+        CloseHandle(f);
+        f = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (f == INVALID_HANDLE_VALUE) {
+            ShFileOwn(0);
+            return;
+        }
+        WriteFile(f, g_trimNote, (DWORD)(sizeof(g_trimNote) - 1), &wrote, NULL);
+        g_header = 0;
     }
     WriteFile(f, text, (DWORD)len, &wrote, NULL);
     CloseHandle(f);
@@ -94,8 +121,8 @@ static int Header(char *dst, int cap) {
     if (g_header) return 0;
     g_header = 1;
     return snprintf(dst, cap,
-                    "\n=== GRW ScriptHook, built %s %s, base %016llX\n",
-                    __DATE__, __TIME__,
+                    "\n=== GRW ScriptHook %s, built %s %s, base %016llX\n",
+                    SH_VERSION, __DATE__, __TIME__,
                     (unsigned long long)ShImageBase());
 }
 
