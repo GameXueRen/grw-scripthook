@@ -11,9 +11,10 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
 /* mov [rax+0x180], ecx   rax is the camera manager. */
-#define FOV_SITE  SH_IMG(0x7E889A2)
+#define FOV_SITE  SH_IMG(0x81E0C22)
 #define FOV_LEN   6
 
 /* Engine values under 0.5 rad are zoom optics at work:
@@ -98,18 +99,30 @@ static int Patch(void) {
 static int Install(void) {
     if (g_hooked) return 1;
     if (!ShReadableAddr(FOV_SITE, FOV_LEN)) {
+        LogFirst("scripthook_fov.log", "fov site %llX is not readable",
+                 (unsigned long long)FOV_SITE);
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;
     }
     memcpy(g_orig, (const void *)(uintptr_t)FOV_SITE, FOV_LEN);
 
     /* Refuse anything but the store we expect, so a build
-     * we do not know is left alone.
+     * we do not know is left alone. This is the one failure the module
+     * cannot report any other way: the caller sees SH_ERR_NO_CANDIDATE and
+     * nothing says which site it was or what is there now.
      */
     if (g_orig[0] != 0x89 || g_orig[1] != 0x88) {
+        LogFirst("scripthook_fov.log",
+                 "fov site %llX holds %02X %02X %02X %02X %02X %02X, wanted "
+                 "89 88 80 01 00 00 - stale constant?",
+                 (unsigned long long)FOV_SITE, g_orig[0], g_orig[1],
+                 g_orig[2], g_orig[3], g_orig[4], g_orig[5]);
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;
     }
+    LogFirst("scripthook_fov.log",
+             "fov site %llX matched (89 88 80 01 00 00)",
+             (unsigned long long)FOV_SITE);
     if (!BuildStub() || !Patch()) {
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;

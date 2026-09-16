@@ -12,6 +12,7 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
 /* hknpBodyManager::allocateBody. Its rcx is the manager,
  * and the manager is hknpWorld + 0x18.
@@ -104,11 +105,28 @@ static int Install(void) {
     DWORD old;
 
     if (g_hooked) return 1;
-    if (!ShReadableAddr(HK_ALLOC_BODY, HK_ALLOC_LEN)) return 0;
-    memcpy(g_orig, at, HK_ALLOC_LEN);
-    if (g_orig[0] != 0x48 || g_orig[1] != 0x89 || g_orig[2] != 0x5C)
+    if (!ShReadableAddr(HK_ALLOC_BODY, HK_ALLOC_LEN)) {
+        LogFirst("scripthook_havok.log", "havok body %llX is not readable",
+                 (unsigned long long)HK_ALLOC_BODY);
         return 0;
-    if (!BuildStub()) return 0;
+    }
+    memcpy(g_orig, at, HK_ALLOC_LEN);
+    /* This module sets no error of its own on the way out, so without a
+     * line here a stale constant is a body that is quietly never hooked. */
+    if (g_orig[0] != 0x48 || g_orig[1] != 0x89 || g_orig[2] != 0x5C) {
+        LogFirst("scripthook_havok.log",
+                 "havok body %llX holds %02X %02X %02X, wanted 48 89 5C - "
+                 "stale constant?",
+                 (unsigned long long)HK_ALLOC_BODY, g_orig[0], g_orig[1],
+                 g_orig[2]);
+        return 0;
+    }
+    if (!BuildStub()) {
+        LogFirst("scripthook_havok.log", "havok stub could not be built");
+        return 0;
+    }
+    LogFirst("scripthook_havok.log", "havok body %llX hooked",
+             (unsigned long long)HK_ALLOC_BODY);
 
     rel = (int64_t)(uintptr_t)g_stub - ((int64_t)HK_ALLOC_BODY + 5);
     if (rel > 0x7FFFFFFFLL || rel < -0x7FFFFFFFLL) return 0;
@@ -146,7 +164,7 @@ SH_API uint64_t ShHavokWorld(void) {
 
 static int IsEntity(uint64_t e) {
     if (e < 0x10000ULL || (e & 7)) return 0;
-    return ShReadQ(e) == SH_VT_ENTITY;
+    return ShReadQ(e) == ShEntityVtable();
 }
 
 typedef struct { uint64_t ent; uint32_t id; } ShPair;

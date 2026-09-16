@@ -8,9 +8,10 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
 /* mulss xmm8, xmm9, the awareness scale in the detector. */
-#define VIS_SITE  SH_IMG(0x14393508)
+#define VIS_SITE  SH_IMG(0x13BEAC48)
 #define VIS_LEN   5
 
 extern void ShSetError(int err);
@@ -77,17 +78,28 @@ static int Install(void) {
 
     if (g_hooked) return 1;
     if (!ShReadableAddr(VIS_SITE, VIS_LEN)) {
+        LogFirst("scripthook_stealth.log", "stealth site %llX is not readable",
+                 (unsigned long long)VIS_SITE);
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;
     }
     memcpy(cur, (const void *)(uintptr_t)VIS_SITE, VIS_LEN);
 
-    /* Refuse a build whose instruction we do not know. */
+    /* Refuse a build whose instruction we do not know - and say what is
+     * there, because the caller only ever sees SH_ERR_NO_CANDIDATE. */
     if (cur[0] != 0xF3 || cur[1] != 0x45 || cur[2] != 0x0F ||
         cur[3] != 0x59 || cur[4] != 0xC1) {
+        LogFirst("scripthook_stealth.log",
+                 "stealth site %llX holds %02X %02X %02X %02X %02X, wanted "
+                 "F3 45 0F 59 C1 - stale constant?",
+                 (unsigned long long)VIS_SITE, cur[0], cur[1], cur[2],
+                 cur[3], cur[4]);
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;
     }
+    LogFirst("scripthook_stealth.log",
+             "stealth site %llX matched (F3 45 0F 59 C1)",
+             (unsigned long long)VIS_SITE);
     if (!BuildStub() || !Patch()) {
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;

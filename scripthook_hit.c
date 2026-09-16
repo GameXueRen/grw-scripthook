@@ -10,12 +10,13 @@
 #include "scripthook.h"
 #include "scripthook_tick.h"
 #include "image.h"
+#include "log.h"
 
 /* Inside FUN_154D38550, after its casts, where MOV RCX,RDI
  * has just put the projectile in RCX.
  */
 #define HIT_SITE      SH_IMG(0x14D387E3)
-#define HIT_ORIG_CALL SH_IMG(0x29B4970)
+#define HIT_ORIG_CALL SH_IMG(0x2B241F0)
 
 #define PROJ_LIST     0xA60
 #define PROJ_COUNT    0xA6A
@@ -87,7 +88,7 @@ static int WantsHit(const ShHit *hit, int flags) {
 
 static int IsEntity(uint64_t p) {
     if (!p || (p & 7) || !ShReadableAddr(p, 0x140)) return 0;
-    return ShReadQ(p) == VT_ENTITY;
+    return ShReadQ(p) == ShEntityVtable();
 }
 
 static uint64_t ResolveOwner(uint64_t proj) {
@@ -487,8 +488,21 @@ SH_API int ShHitHookInstall(void) {
 
     if (g_hitStub) return 1;
     if (!ShReadableAddr(fn, n)) {
+        LogFirst("scripthook_hit.log", "hit site %llX is not readable",
+                 (unsigned long long)fn);
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
+    }
+    /* This site is a call the patch reissues by hand and there is no byte
+     * check to catch a move, so the line records what is there this session:
+     * compared against the previous run's, it is what says the constant
+     * still points at the same call. */
+    {
+        uint8_t b[4];
+        memcpy(b, (const void *)(uintptr_t)fn, sizeof(b));
+        LogFirst("scripthook_hit.log",
+                 "hit site %llX holds %02X %02X %02X %02X",
+                 (unsigned long long)fn, b[0], b[1], b[2], b[3]);
     }
     s = (uint8_t *)ShAllocNear(fn);
     if (!s) { ShSetError(SH_ERR_HOOK_FAILED); return 0; }

@@ -11,8 +11,9 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
-#define BLUR_MATCH  SH_IMG(0x14E7625C)
+#define BLUR_MATCH  SH_IMG(0x1485806C)
 #define BLUR_IMM    5
 #define BLUR_LEN    16
 
@@ -50,9 +51,17 @@ SH_API int ShSetCameraBlur(int on) {
     DWORD old;
 
     if (!BlurSiteOk()) {
+        uint8_t held = 0;
+        if (ShReadableAddr(BLUR_MATCH, BLUR_LEN))
+            held = *(const uint8_t *)(uintptr_t)(BLUR_MATCH + BLUR_IMM);
+        LogFirst("scripthook_blur.log",
+                 "blur site %llX holds %02X at the immediate, wanted 00 or "
+                 "01 - stale constant?", (unsigned long long)BLUR_MATCH, held);
         ShSetError(SH_ERR_NO_CANDIDATE);
         return 0;
     }
+    LogFirst("scripthook_blur.log", "blur site %llX matched",
+             (unsigned long long)BLUR_MATCH);
     if (*b == want) { ShSetError(SH_OK); return 1; }
 
     if (!VirtualProtect(b, 1, PAGE_EXECUTE_READWRITE, &old)) {

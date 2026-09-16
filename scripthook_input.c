@@ -8,9 +8,10 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
-#define IAT_ASYNCKEY   SH_IMG(0x1880FBB0)
-#define IAT_CURSORPOS  SH_IMG(0x1880FBC0)
+#define IAT_ASYNCKEY   SH_IMG(0x182B2B90)
+#define IAT_CURSORPOS  SH_IMG(0x182B2BA0)
 
 extern void ShSetError(int err);
 extern int ShReadableAddr(uint64_t addr, size_t len);
@@ -157,15 +158,33 @@ static int Redirect(uint64_t slot, void *stub, void **outOrig) {
 }
 
 static int Install(void) {
+    uint64_t cur = 0;
+
     if (g_hooked) return 1;
-    if (!Redirect(IAT_ASYNCKEY, (void *)KeyStub,
-                  (void **)&g_realKey))
+    /* Both slots are pinned RVAs into the import table. After an update
+     * that moves it, Redirect refuses and every caller sees only
+     * SH_ERR_NO_CANDIDATE: say which slot and what was in it, once. */
+    if (!Redirect(IAT_ASYNCKEY, (void *)KeyStub, (void **)&g_realKey)) {
+        if (ShReadableAddr(IAT_ASYNCKEY, 8))
+            memcpy(&cur, (const void *)(uintptr_t)IAT_ASYNCKEY, 8);
+        LogFirst("scripthook_input.log",
+                 "input slot %llX is %llX - import table moved?",
+                 (unsigned long long)IAT_ASYNCKEY, (unsigned long long)cur);
         return 0;
-    if (!Redirect(IAT_CURSORPOS, (void *)PosStub,
-                  (void **)&g_realPos)) {
+    }
+    if (!Redirect(IAT_CURSORPOS, (void *)PosStub, (void **)&g_realPos)) {
+        if (ShReadableAddr(IAT_CURSORPOS, 8))
+            memcpy(&cur, (const void *)(uintptr_t)IAT_CURSORPOS, 8);
+        LogFirst("scripthook_input.log",
+                 "input slot %llX is %llX - import table moved?",
+                 (unsigned long long)IAT_CURSORPOS, (unsigned long long)cur);
         return 0;
     }
     g_hooked = 1;
+    LogFirst("scripthook_input.log",
+             "input hooked: keys at %llX, cursor at %llX",
+             (unsigned long long)IAT_ASYNCKEY,
+             (unsigned long long)IAT_CURSORPOS);
     return 1;
 }
 

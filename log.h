@@ -76,3 +76,28 @@ static void Log(const char *fmt, ...) {
     Logv(fmt, ap);
     va_end(ap);
 }
+
+/* The first thing a module has to say, once per session: the site it just
+ * validated, or the read that came back empty. Static like the rest of this
+ * header, so a translation unit keeps its own handle and its own flag, and
+ * the call can sit on a per-call path without turning a 250 ms poll into a
+ * flood.
+ *
+ * It exists because a constant that went stale does not fail loudly on its
+ * own: the module refuses, the caller sees a generic error, and finding out
+ * why costs a round trip through the game. One line in logs\ is the whole
+ * difference. A module with something to install calls it at the install
+ * decision point, in both branches, so the log says which way it went.
+ */
+static void LogFirst(const char *logName, const char *fmt, ...) {
+    static LONG once;
+    va_list ap;
+    char line[300];
+
+    if (InterlockedExchange(&once, 1)) return;
+    LogInit(logName);
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    Log(line);
+}
