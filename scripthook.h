@@ -30,6 +30,12 @@ extern "C" {
 
 #define SH_API_VERSION 1
 
+/** The build's own version, in one place. The loader's start up line, the
+ *  crash report header and the README all carry this same string, so a bug
+ *  report names the build it came from without anyone having to ask. Bump
+ *  it here and nowhere else. */
+#define SH_VERSION "1.0.0-beta1"
+
 #ifdef SH_BUILD
 #define SH_API __declspec(dllexport)
 #else

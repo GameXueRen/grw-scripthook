@@ -272,7 +272,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         if (!IsGRW()) return TRUE;
         LogInit("scripthook.log");
-        Log("GRW ScriptHook loader v0.1");
+        Log("GRW ScriptHook " SH_VERSION);
         Log("built " __DATE__ " " __TIME__);
         /* Armed first, so a crash during our own start up
          * is reported too.
@@ -324,8 +324,13 @@ SH_PROXY_EXPORT HRESULT WINAPI DirectInput8Create(
     return hr;
 }
 
+/* Never ours to answer. Forwarding this to the real dinput8 asks it about a
+ * module it does not know exists, and if it says S_OK the host is free to
+ * unload us - while the corefix detours, the dinput vtable patches and three
+ * threads that never exit all still live in this image. The next input or
+ * file call would be a jump into unmapped memory. This module's lifetime is
+ * the game's lifetime, so the answer is always "still in use". */
 SH_PROXY_EXPORT HRESULT WINAPI DllCanUnloadNow(void) {
-    if (p_DllCanUnloadNow) return p_DllCanUnloadNow();
     return S_FALSE;
 }
 
