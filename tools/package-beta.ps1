@@ -19,6 +19,7 @@
 .EXAMPLE
   pwsh ./tools/package-beta.ps1
   pwsh ./tools/package-beta.ps1 -Zip
+  pwsh ./tools/package-beta.ps1 -TestKit -WithMods -Zip
   pwsh ./tools/package-beta.ps1 -From 'D:\GRW' -OutDir 'D:\dist' -Zip
 #>
 [CmdletBinding()]
@@ -38,11 +39,28 @@ param(
     ),
 
     # Also produce a .zip beside the tree.
-    [switch]$Zip
+    [switch]$Zip,
+
+    # Add the test plan and the internal audit to the tree, for a machine
+    # that is being used to test rather than to play. The archive is named
+    # -testkit.zip so it cannot be confused with the one a player gets: the
+    # audit names crash causes, open questions and the fixes that are not in
+    # yet, and is not for players.
+    [switch]$TestKit,
+
+    # Copy the game folder's mods\ tree in as well. It is the player's own
+    # content, never part of a release, and only meaningful next to a test
+    # kit for the Forge loader: that feature has nothing to load without it.
+    [switch]$WithMods
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+
+# The Markdown-to-text converter, for the .txt copy that goes out beside every
+# packaged document. Dot-sourced rather than shelled out: the file's parameter
+# block binds nothing this way, so only its functions come in.
+. (Join-Path $PSScriptRoot 'md-to-txt.ps1')
 
 if (-not $From) {
     $candidate = Join-Path (Join-Path $root '..\..') "Tom Clancy's Ghost Recon Wildlands"
@@ -89,6 +107,21 @@ function Copy-One([string]$rel, [string]$label) {
     Write-Host ("  + " + $rel)
 }
 
+# Every packaged document goes out twice - as .md, which is what this
+# repository reads, and as .txt beside it, which is what somebody on another
+# machine can open by double-clicking. Both are made here from the one source,
+# so neither can go stale.
+function Write-DocTxt([string]$mdPath) {
+    $txtPath = [System.IO.Path]::ChangeExtension($mdPath, '.txt')
+    $text = Convert-MarkdownToText ([System.IO.File]::ReadAllText($mdPath, [System.Text.Encoding]::UTF8))
+    # UTF-8 *with* a BOM here, unlike every other text file in this project:
+    # this copy exists for a human, and a legacy Notepad reads a BOM-less
+    # UTF-8 file as ANSI - every Chinese character would come out as mojibake.
+    [System.IO.File]::WriteAllText($txtPath, $text, (New-Object System.Text.UTF8Encoding($true)))
+    $script:bytes += [System.IO.FileInfo]::new($txtPath).Length
+    Write-Host ("  + {0}  (plain text)" -f $txtPath.Substring($dst.Length + 1))
+}
+
 # ---- the whitelist ---------------------------------------------------------
 
 Copy-One 'dinput8.dll'    'the loader'
@@ -100,16 +133,76 @@ foreach ($p in $Plugins) {
     Copy-One "plugins\$p" "plugin"
 }
 
-# Repo-side files: the reference language file and the licences. lang.ini in
-# the game folder is the player's own and is never shipped.
-foreach ($rel in @('lang.example.ini', 'LICENSE')) {
+# Repo-side files: the reference language file, the licences and the README.
+# lang.ini in the game folder is the player's own and is never shipped.
+# README.md goes in because the package is handed to somebody on a machine
+# that has never seen this project: it carries the install steps, the menu
+# key, where the logs are and how to uninstall.
+foreach ($rel in @('lang.example.ini', 'LICENSE', 'README.md')) {
     $src = Join-Path $root $rel
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $dst $rel) -Force
         $bytes += (Get-Item $src).Length
         Write-Host "  + $rel"
+        # The README ships twice: it is the one document a player is meant to
+        # open, and a machine with no editor bound to .md is exactly the kind
+        # of machine this package is handed to.
+        if ($rel -like '*.md') { Write-DocTxt (Join-Path $dst $rel) }
     } else {
         $missing += "$rel  (repo file)"
+    }
+}
+
+# The Forge loader's content, when asked for. It is not part of a release -
+# it belongs to whoever put it in the game folder - but a tester who has to
+# exercise the loader needs a payload to load, and it has to be the payload
+# this build was proved against. Left byte for byte as found: the loader
+# matches it against the archives, so touching it would change the test.
+if ($WithMods) {
+    if (Test-Path (Join-Path $From 'mods')) {
+        Copy-One 'mods' 'forge mods (test content)'
+    } else {
+        $missing += "mods\  (asked for with -WithMods, but the game folder has none)"
+    }
+}
+
+# ---- the shipped ini decides what loads ------------------------------------
+
+# The copy in a game folder was written by whatever was there before it: it
+# listed plugins that are not in this package (a -Beta build moves those
+# aside, so the folders are gone), which makes the framework log a line about
+# a missing .asi for every one of them and makes a tester report a fault that
+# is not one. The [plugins] section is rewritten from the set this package
+# actually carries; every other section is left exactly as found.
+$iniPath = [System.IO.Path]::Combine($dst, 'scripthook.ini')
+if ([System.IO.File]::Exists($iniPath)) {
+    $lines = [System.IO.File]::ReadAllLines($iniPath)
+    $out = New-Object 'System.Collections.Generic.List[string]'
+    $dropped = 0
+    $inPlugins = $false
+    $wrotePlugins = $false
+
+    foreach ($line in $lines) {
+        $t = $line.Trim()
+        if ($t.StartsWith('[')) {
+            if ($inPlugins) { $inPlugins = $false }
+            if ($t -ieq '[plugins]') {
+                $inPlugins = $true
+                $wrotePlugins = $true
+                $out.Add('[plugins]')
+                $out.Add("; the $($Plugins.Count) plugins this package ships - one line each")
+                foreach ($p in $Plugins) { $out.Add("$p=1") }
+                continue
+            }
+        }
+        if ($inPlugins) { $dropped++; continue }
+        $out.Add($line)
+    }
+
+    if ($wrotePlugins) {
+        [System.IO.File]::WriteAllLines($iniPath, $out)
+        Write-Host "  = [plugins] rewritten for the shipped set" `
+                   -ForegroundColor DarkGray
     }
 }
 
@@ -147,9 +240,31 @@ $noticePath = Join-Path $dst 'THIRD-PARTY-NOTICES.txt'
 $bytes += (Get-Item $noticePath).Length
 Write-Host "  + THIRD-PARTY-NOTICES.txt  (generated from third_party\*\LICENSE.txt)"
 
+# ---- the test kit -----------------------------------------------------------
+
+if ($TestKit) {
+    $docsDst = [System.IO.Path]::Combine($dst, 'docs')
+    [System.IO.Directory]::CreateDirectory($docsDst) | Out-Null
+    foreach ($doc in @('beta-test-plan.md', 'beta-audit-first-public-beta.md')) {
+        $src = [System.IO.Path]::Combine($root, 'docs', $doc)
+        if (-not [System.IO.File]::Exists($src)) {
+            $missing += "docs\$doc  (repo file)"
+            continue
+        }
+        $copied = [System.IO.Path]::Combine($docsDst, $doc)
+        [System.IO.File]::Copy($src, $copied, $true)
+        $bytes += [System.IO.FileInfo]::new($src).Length
+        Write-Host "  + docs\$doc"
+        Write-DocTxt $copied
+    }
+    Write-Host "  ! test kit: the audit is included - not for players" `
+               -ForegroundColor Yellow
+}
+
 # ---- what was left behind --------------------------------------------------
 
 $allowed = @('plugins')
+if ($WithMods) { $allowed += 'mods' }
 $skipped = Get-ChildItem $From -Force |
     Where-Object { $_.Name -notin @('dinput8.dll', 'scripthook.ini') -and
                    $_.Name -notin $allowed } |
@@ -191,7 +306,8 @@ if ($Zip) {
     # .NET is used throughout for the same reason: it has no wrapper layer.
     try {
         Write-Host "writing archive"
-        $archive = [System.IO.Path]::Combine($OutDir, ($name + '.zip'))
+        $suffix = if ($TestKit) { '-testkit' } else { '' }
+        $archive = [System.IO.Path]::Combine($OutDir, ($name + $suffix + '.zip'))
         Write-Host "  path   $archive"
         if ([System.IO.File]::Exists($archive)) {
             [System.IO.File]::Delete($archive)

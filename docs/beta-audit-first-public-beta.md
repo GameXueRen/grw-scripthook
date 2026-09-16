@@ -372,6 +372,23 @@ static void LogInit(const char *name) {
 
 **一条工具链动作**（不是代码缺陷）：4.4-40 的 `docs/text-cn-review.ini` 缺 `[TimeWeatherControl]`/`[ammo_capacity]` 段 —— 该文件由 `docs/export-text-review.ps1` **生成**，手改会被下次导出覆盖，应当在下次翻译评审前重跑该脚本。
 
+### 第四批：换机测试前的准备（同日晚）
+
+| 项 | 位置 | 处理 |
+| --- | --- | --- |
+| **产物依赖 VC++ 可再发行组件** | `build_msvc.ps1` 的 `$c` 与 `$cpp` | 加 `/MT`。原先走默认 `/MD`，`dinput8.dll` 与 8 个插件都依赖 `VCRUNTIME140.dll` / `MSVCP140.dll` —— 它们**不是 Windows 自带**（`ucrtbase.dll` 才是）—— 而干净机器上缺了它们的表现是 `LoadLibrary` 失败：游戏能开、菜单没有、**日志一个字都没有**（DLL 根本没运行）。静态链接后已验证三个产物对 `VCRUNTIME140` / `MSVCP140` / `api-ms-win-crt` 的名称全部为 False。跨模块堆也已核查：`free()` 的调用点全是各模块自己 `malloc` 的指针 |
+| 包内 `scripthook.ini` 启用了未随包的插件 | `tools/package-beta.ps1` + 游戏目录的 ini | 打包脚本按实际随包集合**重写** `[plugins]` 段（原先沿用的是游戏目录那份，里面还有 `LastRites_dlcfix=1` / `NPCSpawner=1`，会让框架在干净机器上记两条 `no X.asi, skipping`）；游戏目录的 ini 同步清成 8 行并去掉 `@lr.page` |
+| 包内没有说明文件 | `tools/package-beta.ps1` | `README.md` 随包：安装、菜单键、日志位置、卸载步骤都在里面 |
+| 日志目录不可写时完全无声 | `log.h` + `scripthook_crash.c` | `logs\` 建不出或写不了时，日志落到**游戏目录**（崩溃日志同）并在首行写明原因。此前是一整场无日志、且没有任何地方说为什么 —— 换机时这类环境（Program Files、只读盘、扫描器占用）恰恰最常见 |
+
+**换机测试前的三项非代码准备**（给测试者）：
+
+1. 那台机器的**游戏版本必须与本机一致** —— 框架里所有常量都是按这份 `GRW.exe` 钉的。判据现成：`logs\scripthook.log` 的健康日志出现 `MISMATCH` / `is not readable` / `holds ... wanted ...` 即为版本不符。
+2. **杀软先给游戏目录加白名单** —— `dinput8.dll` 是代理 DLL 且做 hook，被隔离的概率不低，而它的现象与「运行库缺失」完全一样（游戏能开、mod 全无）。本批 `/MT` 之后运行库这条已排除，**剩下的就只剩杀软这一条**。
+3. **别在联机模式带插件跑**（单机没问题；插件已声明幽灵战 / 雇佣兵黑名单）。
+
+**分辨率与 DPI 无需准备**：`scripthook_ovl.cpp` 的 `MaybeRescale` 按 backbuffer 高度自动缩放并记一行 `ui scale … (res WxH)`，`[Settings] MenuScale` 可手动微调；UI 走 backbuffer 像素，系统 DPI 不影响。
+
 ### 仍未处理
 
 - 4.4-23 `spawner` 把「前方 6 m」加到东向：**需要你确认设计意图**（是要正前方，还是刻意的侧向落点）。
