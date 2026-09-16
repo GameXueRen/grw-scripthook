@@ -813,7 +813,8 @@ typedef struct {
     uint64_t ent;
     ShVec3   pos;
     float    yaw, pitch, roll;
-    volatile LONG ready;
+    volatile LONG claim;      /* a producer is filling this slot   */
+    volatile LONG ready;      /* the slot holds a complete transform */
 } ShXForm;
 
 static ShXForm g_xq[XQ_MAX];
@@ -826,16 +827,19 @@ SH_API int ShQueueTransform(uint64_t entity, const ShVec3 *pos,
     for (i = 0; i < XQ_MAX; i++) {
         /* Two producers can eye the same empty slot; the CAS makes
          * one of them the owner so a transform is never lost. */
-        if (InterlockedCompareExchange(&g_xq[i].ready, 1, 0))
+        if (InterlockedCompareExchange(&g_xq[i].claim, 1, 0))
             continue;
         g_xq[i].ent = entity;
         g_xq[i].pos = *pos;
         g_xq[i].yaw = yaw;
         g_xq[i].pitch = pitch;
         g_xq[i].roll = roll;
-        /* Published last, so the pump never sees a half
-         * filled slot.
-         */
+        /* Published last, and this time it is: the claim above is what
+         * keeps a second producer out, `ready` is what tells the pump the
+         * fields may be read. The CAS used to set `ready` itself, before a
+         * single field was written, so the pump could read a half filled
+         * slot - a zero entity (the placement fails) or the previous
+         * transform with this one's angles. */
         InterlockedExchange(&g_xq[i].ready, 1);
         g_lastError = SH_OK;
         return 1;
@@ -851,7 +855,10 @@ void ShTransformPump(void) {
         if (!g_xq[i].ready) continue;
         ShPlaceEntityRot(g_xq[i].ent, &g_xq[i].pos, g_xq[i].yaw,
                          g_xq[i].pitch, g_xq[i].roll);
-        g_xq[i].ready = 0;
+        /* Empty it before letting a producer back in, in that order: while
+         * the claim is held, no one can refill the slot under this read. */
+        InterlockedExchange(&g_xq[i].ready, 0);
+        InterlockedExchange(&g_xq[i].claim, 0);
     }
 }
 
