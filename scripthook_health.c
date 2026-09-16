@@ -61,8 +61,11 @@ static int CompValid(uint64_t comp, uint64_t owner) {
 /* The engine's own lookup. It binary searches the
  * entity's component array, so nothing is scanned.
  */
-#define SH_GET_COMPONENT   SH_IMG(0xC3900C0)
-#define SH_HEALTH_DESC     SH_IMG(0x499FCB0)
+/* SH_GET_COMPONENT and SH_HEALTH_DESC used to sit here, both unused: the
+ * component walk in this file does the lookup itself. Removed rather than
+ * re-pinned - a pinned address nothing calls is a stale address waiting to
+ * be believed.
+ */
 
 typedef uint64_t (__attribute__((ms_abi)) *GetComponent_t)(uint64_t,
                                                            uint64_t);

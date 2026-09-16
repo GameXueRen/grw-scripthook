@@ -13,20 +13,20 @@
 /* *(global) is the manager handle. +0x18 is the base, +0x10
  * off that is the type-0 container holding the trie root.
  */
-#define RES_GLOBAL   SH_IMG(0x4B98DF0)
+#define RES_GLOBAL   SH_IMG(0x4B98E80)
 #define OFF_MGRBASE  0x18
 #define OFF_CONT0    0x10
 
 /* The leaf packs a count byte, a key-pointer array at +8,
  * then a value array whose word offset is table[count].
  */
-#define VALOFF_TBL   SH_IMG(0x3AA1D79)
+#define VALOFF_TBL   SH_IMG(0x3AA1D09)
 #define OFF_DEF_SPEC 0x08
 
 /* Skill points are a PLAIN int, not a protected one: the
  * global holds a pointer, the value sits at +0x1C.
  */
-#define SKILL_GLOBAL SH_IMG(0x4B98F10)
+#define SKILL_GLOBAL SH_IMG(0x4B98FA0)
 #define OFF_SKILL    0x1C
 
 extern int ShReadableAddr(uint64_t addr, size_t len);

@@ -82,9 +82,10 @@ static int WantsHit(const ShHit *hit, int flags) {
  * the same shape used everywhere else.
  */
 /* Verified live: every Entity carries this vtable. Without
- * the check, junk handles pass as entities.
+ * the check, junk handles pass as entities. The value itself is asked
+ * for through ShEntityVtable(), which learns it live - a second pinned
+ * copy here only meant a second place to forget on an update.
  */
-#define VT_ENTITY SH_IMG(0x39C6FC8)
 
 static int IsEntity(uint64_t p) {
     if (!p || (p & 7) || !ShReadableAddr(p, 0x140)) return 0;

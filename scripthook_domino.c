@@ -39,8 +39,9 @@ extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern int ShRequireInGame(void);
 extern void ShSetError(int err);
 
-/* Same test the API uses: an entity is its vtable. */
-#define SH_VT_ENTITY SH_IMG(0x39C6FC8)
+/* Same test the API uses: an entity is its vtable, and the value comes
+ * from ShEntityVtable() rather than a pinned copy of its own.
+ */
 
 static int IsEntity(uint64_t obj) {
     return obj && ShReadQ(obj) == ShEntityVtable();

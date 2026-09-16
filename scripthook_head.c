@@ -10,7 +10,7 @@
 #include "scripthook.h"
 #include "image.h"
 
-#define SKEL_VT      SH_IMG(0x3ACBBD8)
+#define SKEL_VT      SH_IMG(0x3ACBB58)
 #define BONE_LOOKUP  SH_IMG(0xB506270)
 
 /* Bones resolve from a name hash. The Head hash and the

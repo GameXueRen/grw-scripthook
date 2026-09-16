@@ -11,9 +11,9 @@
 #include "log.h"
 
 /* Static anchors, verified in FINDINGS.md */
-#define SH_PLAYER_GLOBAL   SH_IMG(0x4BC33E0)
+#define SH_PLAYER_GLOBAL   SH_IMG(0x4BC3470)
 #define SH_VT_ENTITY       SH_IMG(0x39C6DF8)
-#define SH_VT_SKELETON     SH_IMG(0x3ACBBD8)
+#define SH_VT_SKELETON     SH_IMG(0x3ACBB58)
 
 /* Object layout */
 #define OFF_ENT_NODE       0x18
