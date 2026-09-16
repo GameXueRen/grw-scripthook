@@ -169,9 +169,17 @@ static DWORD          g_started;    /* when the first rule went in     */
  * that rule would stay in the layer for the rest of the session. The
  * section is recursive, so the nested take inside GroupRules is fine. */
 static CRITICAL_SECTION g_lock;
+/* DllMain's unload branch can run before InitThread has initialised the
+ * section - a process that exits a moment after the plugin loads - and
+ * taking an uninitialised CRITICAL_SECTION is undefined behaviour. The flag
+ * makes that path lock-free instead, which is safe because at that point
+ * nothing has been registered yet, so the release it wants to do finds no
+ * rule to give back and changes nothing. The section stays recursive on
+ * purpose: GroupRules takes it while its callers already hold it. */
+static volatile LONG g_lockReady;
 
-static void SkipLock(void)   { EnterCriticalSection(&g_lock); }
-static void SkipUnlock(void) { LeaveCriticalSection(&g_lock); }
+static void SkipLock(void)   { if (g_lockReady) EnterCriticalSection(&g_lock); }
+static void SkipUnlock(void) { if (g_lockReady) LeaveCriticalSection(&g_lock); }
 
 /* The menu, and the one framework call the status line needs. Bound by
  * name in BuildMenu; declared up here because the release thread updates
@@ -625,6 +633,7 @@ static DWORD WINAPI InitThread(LPVOID p) {
 
     (void)p;
     InitializeCriticalSection(&g_lock);
+    InterlockedExchange(&g_lockReady, 1);
     OpenLog();
     SkipLog("--- skipintro plugin, hiding through the framework's layer ---");
     ResolveIniPath();
@@ -683,7 +692,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         /* A rule's callbacks live in this module, so an unload with rules
          * still in the layer is a jump into unmapped memory the next time
          * the game opens a file. Given back here because there is no thread
-         * of ours left that could. */
+         * of ours left that could. This is the one place the plugin calls
+         * the framework from DllMain, and it is deliberate: leaving the
+         * rules behind would be worse than the loader-lock risk, and the
+         * process is on its way out either way. */
         if (!Released()) ReleaseAll("unloading");
     }
     return TRUE;
