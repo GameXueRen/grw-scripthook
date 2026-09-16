@@ -35,6 +35,13 @@
  * being explained. */
 #define TICK_SLACK 30
 
+/* 32-bit milliseconds throughout, on purpose, and wrap-safe by
+ * construction: every value here comes from the same counter, and ShTickReport
+ * compares them as unsigned differences (now - ping), which is exactly what
+ * survives the 48.9-day rollover. Widening to GetTickCount64 would mean
+ * widening this struct, the report's `now` and the Present hook that
+ * supplies it, in exchange for nothing the subtraction does not already
+ * give. */
 typedef struct {
     const char   *name;
     DWORD         period;   /* what a healthy iteration keeps, ms */

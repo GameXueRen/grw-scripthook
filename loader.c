@@ -295,6 +295,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
             HANDLE h = CreateThread(NULL, 0, LoaderThread, NULL, 0, NULL);
 
             if (h) CloseHandle(h);   /* never waited on: prompt close */
+            else
+                /* Nothing else can explain a session that came up with no
+                 * plugins, no config and no hooks: the thread that reads
+                 * them never started. */
+                Log("loader: could not start the load thread - nothing will "
+                    "be loaded this session");
         }
     } else if (reason == DLL_PROCESS_DETACH) {
         /* Handed back, not left to the OS: the pump event is the one kernel

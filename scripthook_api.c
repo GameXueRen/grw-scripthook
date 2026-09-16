@@ -174,9 +174,18 @@ int ShReadFast(uint64_t addr, void *out, size_t len) {
         memcpy(out, (const void *)(uintptr_t)addr, len);
         return 1;
     }
-    return ReadProcessMemory(GetCurrentProcess(),
-                             (const void *)(uintptr_t)addr,
-                             out, len, NULL) ? 1 : 0;
+    {
+        SIZE_T got = 0;
+
+        /* The byte count is not optional here: ReadProcessMemory reports
+         * success for a partial read, and the tail of the caller's buffer
+         * would then be whatever was in it before - a scan would compare
+         * against stale bytes and call it data. */
+        if (!ReadProcessMemory(GetCurrentProcess(),
+                               (const void *)(uintptr_t)addr, out, len, &got))
+            return 0;
+        return got == len ? 1 : 0;
+    }
 }
 
 static uint64_t ShQ(uint64_t addr) {

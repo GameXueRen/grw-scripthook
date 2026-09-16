@@ -10,7 +10,7 @@ Usage:
   pwsh ./build_msvc.ps1
   pwsh ./build_msvc.ps1 -Gamedir "D:\Games\GRW"
   pwsh ./build_msvc.ps1 -Clean
-  pwsh ./build_msvc.ps1 -Beta        # public beta: only the nine shipped plugins
+  pwsh ./build_msvc.ps1 -Beta        # public beta: only the eight shipped plugins
   pwsh ./build_msvc.ps1 -Release     # -Beta plus diagnostics compiled out
 #>
 [CmdletBinding()]

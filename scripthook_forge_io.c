@@ -718,27 +718,46 @@ void ShForgeIoStartup(void) {
 
     Log("forge io installing");
 
-    /* Where a .forge handle came from: the open, watched. */
-    memset(&d, 0, sizeof(d));
-    d.group  = SH_FILE_OPEN;
-    d.action = SH_FILE_DECIDE;          /* no before: watch, never answer */
-    d.after  = ForgeOpenAfter;
-    if (!ShFileRuleAdd(&d)) Log("  open rule        REFUSED");
+    /* All three rules or none.
+     *
+     * An open rule without the read rule builds overlays that are never
+     * patched; a read rule without the completion path leaves the
+     * asynchronous half hanging; and the layer keeps its hooks up for as
+     * long as any rule is live, so a partial set is also a cost with
+     * nothing to show for it. Register all three, and undo the ones that
+     * went in if any is refused. */
+    {
+        ShFileRule *rules[3];
+        int i, j;
 
-    /* The reads themselves. */
-    memset(&d, 0, sizeof(d));
-    d.group  = SH_FILE_READ;
-    d.action = SH_FILE_DECIDE;
-    d.after  = ForgeReadAfter;
-    if (!ShFileRuleAdd(&d)) Log("  read rule        REFUSED");
+        memset(&d, 0, sizeof(d));       /* where a .forge handle came from */
+        d.group  = SH_FILE_OPEN;
+        d.action = SH_FILE_DECIDE;      /* no before: watch, never answer */
+        d.after  = ForgeOpenAfter;
+        rules[0] = ShFileRuleAdd(&d);
 
-    /* And the completion path, which is what closes the asynchronous
-     * half: close, the results, and the waits. */
-    memset(&d, 0, sizeof(d));
-    d.group  = SH_FILE_WAIT;
-    d.action = SH_FILE_DECIDE;
-    d.after  = ForgeWaitAfter;
-    if (!ShFileRuleAdd(&d)) Log("  completion rule  REFUSED");
+        memset(&d, 0, sizeof(d));       /* the reads themselves */
+        d.group  = SH_FILE_READ;
+        d.action = SH_FILE_DECIDE;
+        d.after  = ForgeReadAfter;
+        rules[1] = ShFileRuleAdd(&d);
+
+        memset(&d, 0, sizeof(d));       /* close, results and waits: what
+                                         * closes the asynchronous half */
+        d.group  = SH_FILE_WAIT;
+        d.action = SH_FILE_DECIDE;
+        d.after  = ForgeWaitAfter;
+        rules[2] = ShFileRuleAdd(&d);
+
+        for (i = 0; i < 3 && rules[i]; i++)
+            ;
+        if (i < 3) {
+            for (j = 0; j < 3; j++)
+                if (rules[j]) ShFileRuleDel(rules[j]);
+            Log("forge io: a rule was refused - the file layer stays off");
+            return;
+        }
+    }
 
     Log("forge io installed (SetFilePointerEx=%p GetFinalPathNameByHandleW=%p)",
         (void *)p_SetFilePointerEx, (void *)p_FinalPath);

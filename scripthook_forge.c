@@ -918,6 +918,14 @@ void ShForgeStartup(void) {
     }
 
     g_ovl = (ShForgeOverlay **)calloc(OVL_MAX, sizeof(void *));
+    if (!g_ovl) {
+        /* Every path that registers an overlay writes into this table, and
+         * the only thing standing between it and a null write is the dry
+         * run flag. */
+        Log("forge mod loader: no memory for %d overlay slots - dry run "
+            "instead", OVL_MAX);
+        g_dryRun = 1;
+    }
 
     Log("forge mod loader: enabled=%d dry_run=%d strict=%d report_copies=%d "
         "apply_all_copies=%d ledger=%d", g_enabled, g_dryRun, g_strict,

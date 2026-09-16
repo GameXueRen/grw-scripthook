@@ -87,7 +87,22 @@ static void Emit(const char *text, int len) {
         WriteFile(f, g_trimNote, (DWORD)(sizeof(g_trimNote) - 1), &wrote, NULL);
         g_header = 0;
     }
-    WriteFile(f, text, (DWORD)len, &wrote, NULL);
+    if (!WriteFile(f, text, (DWORD)len, &wrote, NULL) ||
+        wrote != (DWORD)len) {
+        /* A full disk or a locked logs\ file is exactly when the report
+         * matters most, so it gets one fallback beside the working
+         * directory before this gives up - this runs in a handler and
+         * cannot do more than that. */
+        CloseHandle(f);
+        f = CreateFileA(CRASH_FILE, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (f != INVALID_HANDLE_VALUE) {
+            WriteFile(f, text, (DWORD)len, &wrote, NULL);
+            CloseHandle(f);
+        }
+        ShFileOwn(0);
+        return;
+    }
     CloseHandle(f);
     ShFileOwn(0);
 }
@@ -404,7 +419,14 @@ static LONG CALLBACK CrashVehReport(EXCEPTION_POINTERS *ep) {
 void ShCrashStartup(void) {
     /* All logs live in <gamedir>\logs; resolve the path once
      * so the crash handler itself stays minimal. */
-    LogPath(g_crashPath, sizeof(g_crashPath), CRASH_FILE);
+    if (!LogPath(g_crashPath, sizeof(g_crashPath), CRASH_FILE)) {
+        /* A relative name lands wherever the game's working directory
+         * happens to be, and the report is then looked for in the wrong
+         * place and called missing. The loader's log is open by now. */
+        g_crashPath[0] = 0;
+        Log("crash: logs\\%s could not be resolved - reports fall back to "
+            "the working directory", CRASH_FILE);
+    }
     SetUnhandledExceptionFilter(CrashUef);
     if (!g_vehReport)
         g_vehReport = AddVectoredExceptionHandler(1, CrashVehReport);

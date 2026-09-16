@@ -32,13 +32,17 @@ static int g_nDev;
  * every bound key, so the answers are cached: DIK codes are fixed
  * for a keyboard layout's lifetime. */
 static int g_dikVk[256];
-static int g_dikVkReady = 0;
+/* Published, not merely assigned: the game polls keys from more than one
+ * thread, and a plain flag lets one of them read the table while the other
+ * is still filling it - a half-built map answers wrong for the keys it has
+ * not reached yet. The store below is the release. */
+static volatile LONG g_dikVkReady = 0;
 
 static int DikToVk(DWORD dik) {
     DWORD d;
     UINT vk;
     if (dik >= 256) return 0;
-    if (!g_dikVkReady) {
+    if (!InterlockedCompareExchange(&g_dikVkReady, 0, 0)) {
         for (d = 0; d < 256; d++) {
             switch (d) {
             case 0xC8: g_dikVk[d] = VK_UP;      continue;
@@ -66,7 +70,7 @@ static int DikToVk(DWORD dik) {
                 vk = MapVirtualKeyA(d, MAPVK_VSC_TO_VK_EX);
             g_dikVk[d] = (int)vk;
         }
-        g_dikVkReady = 1;
+        InterlockedExchange(&g_dikVkReady, 1);
     }
     return g_dikVk[dik];
 }
