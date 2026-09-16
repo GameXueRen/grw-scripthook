@@ -15,20 +15,25 @@
  * memory. Everything that changes the world goes through the framework, in
  * the plugin's own thread, and is handed back when it should not apply.
  *
- * Behaviour, from the reverse:
+ * Behaviour:
  *   - the clock rate is the setting's value straight through: a session
- *     with DaySpeed=2.0 read back ShGetTimeSpeed() == 2.000, no scaling;
- *   - day runs 7:00-18:00 on day_speed and night 20:00-5:00 on
- *     night_speed. The two twilights interpolate between them, which is
- *     what the old plugin's constant table is: 5.0 5.5 6.5 7.0 and
- *     18.0 18.5 19.5 20.0 with a 0.5 factor between them;
+ *     with day_speed=2.0 reads back ShGetTimeSpeed() == 2.000, no scaling;
+ *   - the day is cut into four windows - dawn 05:00-07:00, day 07:00-18:00,
+ *     dusk 18:00-20:00, night 20:00-05:00 - and each runs on its own rate,
+ *     switched at the boundary. The old plugin instead interpolated the two
+ *     twilights between day and night off a constant table (5.0 5.5 6.5
+ *     7.0 / 18.0 18.5 19.5 20.0 and a 0.5 factor); that ramp is why a
+ *     change used to look like it crept into effect hour by hour, and it is
+ *     gone. The four windows are a table, and the window a row covers is
+ *     written on the row;
  *   - weather changes go through ShSetWeatherBlend (a transition, not a
  *     cut), and "Default" is ShReleaseWeather - hand it back;
  *   - its tick was 500 ms in two places and 250 ms in one; this one is
- *     250 ms, which covers both the readout and the twilight edges;
+ *     250 ms, which covers the readout and the phase boundaries;
  *   - the status line is a readout, not a setting: HH:MM, the four phases
- *     with the one in force bracketed, and the rate read back from the
- *     game rather than the value this plugin last asked for;
+ *     in clock order with the one in force bracketed, and two rates - what
+ *     the clock is doing read back from the game, and what the phase in
+ *     force is set to. They differ only while a send is being refused;
  *   - outside a game nothing is written and the status line says so.
  *
  * Config, this plugin's own ini (plugins\TimeWeatherControl\TimeWeatherControl.ini):
@@ -38,13 +43,16 @@
  *     weather=default      default|sunny|light_clouds|heavy_clouds|fog|
  *                          light_rain|heavy_rain
  *     day_speed=1.00
+ *     dusk_speed=1.00
  *     night_speed=1.00
+ *     dawn_speed=1.00
  *     hour=12
  *     minute=0
  *
- * The keys are this plugin's own - the old plugin's two speed lines are
- * [DynamicTimeWeather] DaySpeed / NightSpeed and are NOT read here, so a
- * migration is a hand edit of two lines.
+ * The keys are this plugin's own. day_speed and night_speed carry the names
+ * the old plugin used for [DynamicTimeWeather] DaySpeed / NightSpeed, so an
+ * existing ini keeps its two values; dusk_speed and dawn_speed are new and
+ * default to 1.00.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -60,9 +68,28 @@
 
 /* ---- state ------------------------------------------------------------ */
 
-static volatile LONG g_enabled    = 1;
-static volatile LONG g_daySpeed   = 1;      /* x100, so Interlocked fits */
-static volatile LONG g_nightSpeed = 1;
+static volatile LONG g_enabled = 1;
+/* One rate per phase, x100 so Interlocked fits, indexed the way PhaseOf
+ * numbers them: 0 day, 1 dusk, 2 night, 3 dawn. */
+static volatile LONG g_speed[4] = { 100, 100, 100, 100 };
+
+/* The four windows in the order the clock meets them - dawn, day, dusk,
+ * night - which is the order the menu lists them in and the order the
+ * status line reads. PhaseOf numbers them differently (0 day, 1 dusk,
+ * 2 night, 3 dawn) because that is the schedule's own order; this array is
+ * the bridge, and every player-facing list goes through it so the two
+ * orders cannot drift apart. */
+static const int g_phaseOrder[4] = { 3, 0, 1, 2 };
+
+/* Phase-indexed: the ini key each rate is stored under. */
+static const char *g_speedKey[4] = { "day_speed", "dusk_speed",
+                                     "night_speed", "dawn_speed" };
+
+/* Menu order, entry for entry with g_phaseOrder: the row label for each
+ * window. Long form, because the window is what the row is about - the
+ * status line uses the short @tw.p.* names instead. */
+static const char *g_speedId[4] = { "@tw.dawn", "@tw.day",
+                                    "@tw.dusk", "@tw.night" };
 static volatile LONG g_weather;             /* index into g_weatherOpts  */
 static volatile LONG g_hour       = 12;
 static volatile LONG g_minute;
@@ -86,15 +113,17 @@ static volatile LONG g_sentWeather = -1;    /* -1 = nothing sent        */
 static const ShText kEn[] = {
     { "@tw.page",     "Time & Weather" },
     { "@tw.enabled",  "Enable" },
-    { "@tw.status",   "%s   %s   Rate %.2f" },
+    { "@tw.status",   "%s   %s   Rate %.2f / set %.2f" },
     { "@tw.on",       "On" },
     { "@tw.off",      "Off" },
     { "@tw.weather",  "Weather" },
     { "@tw.hour",     "Hour (24h)" },
     { "@tw.minute",   "Minute" },
     { "@tw.apply",    "Apply the set time" },
-    { "@tw.day",      "Day Speed" },
-    { "@tw.night",    "Night Speed" },
+    { "@tw.dawn",     "Dawn Speed (05:00-07:00)" },
+    { "@tw.day",      "Day Speed (07:00-18:00)" },
+    { "@tw.dusk",     "Dusk Speed (18:00-20:00)" },
+    { "@tw.night",    "Night Speed (20:00-05:00)" },
     { "@tw.w.default", "Default" },
     { "@tw.w.sunny",  "Sunny" },
     { "@tw.w.lclouds", "Light Clouds" },
@@ -114,22 +143,23 @@ static const ShText kEn[] = {
     { "@tw.p.night",  "Night" },
     { "@tw.p.dawn",   "Dawn" },
     { "@tw.hint",
-      "Day 07:00-18:00 / night 20:00-05:00\n"
       "Hour and minute take effect only on Enter over \"Apply the set time\"" }
 };
 
 static const ShText kZh[] = {
     { "@tw.page",     "时间 & 天气控制" },
     { "@tw.enabled",  "启用" },
-    { "@tw.status",   "%s   %s   时间流速：%.2f" },
+    { "@tw.status",   "%s   %s   时间流速：%.2f（设定 %.2f）" },
     { "@tw.on",       "开" },
     { "@tw.off",      "关" },
     { "@tw.weather",  "天气" },
     { "@tw.hour",     "小时（24 小时制）" },
     { "@tw.minute",   "分钟" },
     { "@tw.apply",    "应用当前设置的时间" },
-    { "@tw.day",      "白天时间流逝速度" },
-    { "@tw.night",    "夜晚时间流逝速度" },
+    { "@tw.dawn",     "黎明时间流逝速度（05:00-07:00）" },
+    { "@tw.day",      "白天时间流逝速度（07:00-18:00）" },
+    { "@tw.dusk",     "黄昏时间流逝速度（18:00-20:00）" },
+    { "@tw.night",    "夜晚时间流逝速度（20:00-05:00）" },
     { "@tw.w.default", "默认动态" },
     { "@tw.w.sunny",  "晴天" },
     { "@tw.w.lclouds", "阴云" },
@@ -145,7 +175,6 @@ static const ShText kZh[] = {
     { "@tw.p.night",  "夜晚" },
     { "@tw.p.dawn",   "黎明" },
     { "@tw.hint",
-      "白天 07:00-18:00 / 夜晚 20:00-05:00\n"
       "小时、分钟设置后，需回车“应用当前设置的时间”生效" }
 };
 
@@ -295,60 +324,51 @@ static void LoadConfig(void) {
 
     if (!g_iniPath[0]) return;
     InterlockedExchange(&g_enabled, IniInt("enabled", 1, 0, 1));
-    InterlockedExchange(&g_daySpeed, IniSpeed("day_speed", 100));
-    InterlockedExchange(&g_nightSpeed, IniSpeed("night_speed", 100));
+    for (i = 0; i < 4; i++)
+        InterlockedExchange(&g_speed[i], IniSpeed(g_speedKey[i], 100));
     InterlockedExchange(&g_hour, IniInt("hour", 12, 0, 23));
     InterlockedExchange(&g_minute, IniInt("minute", 0, 0, 59));
     IniStr("weather", "default", w, sizeof(w));
     i = WeatherFromIni(w);
     InterlockedExchange(&g_weather, i);
-    TwLog("ini: enabled=%ld day=%ld night=%ld weather=%s hour=%ld minute=%ld",
-          (long)g_enabled, (long)g_daySpeed, (long)g_nightSpeed, w,
-          (long)g_hour, (long)g_minute);
+    TwLog("ini: enabled=%ld day=%ld dusk=%ld night=%ld dawn=%ld weather=%s"
+          " hour=%ld minute=%ld",
+          (long)g_enabled, (long)g_speed[0], (long)g_speed[1],
+          (long)g_speed[2], (long)g_speed[3], w, (long)g_hour,
+          (long)g_minute);
 }
 
 static void SaveConfig(void) {
     char buf[32];
+    int i;
     LONG w = InterlockedCompareExchange(&g_weather, 0, 0);
 
     if (!g_iniPath[0]) return;
     snprintf(buf, sizeof(buf), "%d", (int)InterlockedCompareExchange(
                  &g_enabled, 0, 0));
     WritePrivateProfileStringA("TimeWeather", "enabled", buf, g_iniPath);
-    snprintf(buf, sizeof(buf), "%.2f",
-             (double)InterlockedCompareExchange(&g_daySpeed, 0, 0) / 100.0);
-    WritePrivateProfileStringA("TimeWeather", "day_speed", buf, g_iniPath);
-    snprintf(buf, sizeof(buf), "%.2f",
-             (double)InterlockedCompareExchange(&g_nightSpeed, 0, 0) / 100.0);
-    WritePrivateProfileStringA("TimeWeather", "night_speed", buf, g_iniPath);
+    for (i = 0; i < 4; i++) {
+        snprintf(buf, sizeof(buf), "%.2f",
+                 (double)InterlockedCompareExchange(&g_speed[i], 0, 0)
+                     / 100.0);
+        WritePrivateProfileStringA("TimeWeather", g_speedKey[i], buf,
+                                   g_iniPath);
+    }
     WritePrivateProfileStringA("TimeWeather", "weather",
                                g_weatherIni[(w >= 0 && w < NWEATHER) ? w : 0],
                                g_iniPath);
 }
 
 /* ---- the schedule ------------------------------------------------------
- * Day is 07:00-18:00, night is 20:00-05:00, and 05:00-07:00 / 18:00-20:00
- * blend. The old plugin's constants are exactly those windows, so this is
- * the same curve, written as a fraction of "how much day is in force".
+ * Four windows, each on its own rate with nothing between them: a setting
+ * takes effect at the boundary. The edges are the old plugin's own (its
+ * constant table carries exactly these); what is gone is the interpolation
+ * it put across them - that ramp is why a change used to arrive slowly.
+ *
+ * 0 day, 1 dusk, 2 night, 3 dawn - the order PhaseOf returns, the order
+ * g_speed is indexed in, and the order g_speedKey names. The player sees
+ * them in clock order instead; g_phaseOrder is the bridge.
  */
-static float DayFactor(float h) {
-    if (h >= 7.0f && h <= 18.0f) return 1.0f;
-    if (h >= 5.0f && h < 7.0f)  return (h - 5.0f) / 2.0f;
-    if (h > 18.0f && h <= 20.0f) return (20.0f - h) / 2.0f;
-    return 0.0f;
-}
-
-static float WantRate(float hours) {
-    float day = (float)InterlockedCompareExchange(&g_daySpeed, 0, 0) / 100.0f;
-    float night = (float)InterlockedCompareExchange(&g_nightSpeed, 0, 0) / 100.0f;
-    float f = DayFactor(hours);
-
-    return night + (day - night) * f;
-}
-
-/* Which of the four the clock is inside - the same windows DayFactor
- * blends across, named the way the hint names them:
- * 0 day, 1 dusk, 2 night, 3 dawn. */
 static int PhaseOf(float h) {
     if (h >= 7.0f && h <= 18.0f) return 0;
     if (h > 18.0f && h <= 20.0f) return 1;
@@ -356,12 +376,20 @@ static int PhaseOf(float h) {
     return 2;
 }
 
+/* The phase in force is the whole answer now: no fraction, no blending. */
+static float WantRate(float hours) {
+    return (float)InterlockedCompareExchange(&g_speed[PhaseOf(hours)], 0, 0)
+               / 100.0f;
+}
+
 /* The four names as one line, the one in force bracketed. The status line
  * is drawn in a single colour, so bracketing is the only way to mark one;
  * the names come from the text layer, so a lang.ini row can rename them. */
 static void PhaseText(float h, char *out, size_t cap) {
-    static const char *ids[4] = { "@tw.p.day", "@tw.p.dusk",
-                                  "@tw.p.night", "@tw.p.dawn" };
+    /* Entry for entry with g_phaseOrder: short names, in the same clock
+     * order the menu lists the windows in. */
+    static const char *ids[4] = { "@tw.p.dawn", "@tw.p.day",
+                                  "@tw.p.dusk", "@tw.p.night" };
     size_t used = 0;
     int act = PhaseOf(h), i;
 
@@ -369,7 +397,7 @@ static void PhaseText(float h, char *out, size_t cap) {
     out[0] = 0;
     for (i = 0; i < 4 && used + 1 < cap; i++) {
         const char *nm = ShLangText(TW_OWNER, ids[i]);
-        int on = (i == act);
+        int on = (g_phaseOrder[i] == act);
         int w = snprintf(out + used, cap - used, "%s%s%s%s",
                          i ? " " : "", on ? "[" : "", nm, on ? "]" : "");
 
@@ -401,11 +429,15 @@ static void RefreshStatus(float hours, float rate, int inGame, int allowed) {
     m = (int)((hours - (float)h) * 60.0f); if (m > 59) m = 59; if (m < 0) m = 0;
     snprintf(clock, sizeof(clock), "%02d:%02d", h, m);
     PhaseText(hours, phases, sizeof(phases));
-    /* The number shown is what the clock is doing, not what this plugin
-     * last asked for: when a send is refused the intent was never in
-     * force, and the readback is the honest answer. */
+    /* Two numbers, because they answer two questions: what the clock is
+     * doing (read back from the game, so a refused send shows as the
+     * difference between them) and what the phase in force is set to. With
+     * the windows cut rather than blended the two agree as soon as a send
+     * lands, which is what makes a refusal visible instead of looking like
+     * a slow ramp. */
     if (ShGetTimeSpeed(&live)) shown = live;
-    ShMenuStatusF(g_menu, "@tw.status", clock, phases, (double)shown);
+    ShMenuStatusF(g_menu, "@tw.status", clock, phases, (double)shown,
+                  (double)rate);
 }
 
 /* The speed rows are lists, not number rows. A number row's value reaches
@@ -443,22 +475,19 @@ static void OnEnabled(uint32_t menu, uint32_t item, int value, void *user) {
     TwLog("menu: enabled=%d", value);
 }
 
-static void OnDay(uint32_t menu, uint32_t item, int value, void *user) {
-    (void)menu; (void)item; (void)user;
-    if (value < 0 || value >= SPEED_STEPS) return;
-    InterlockedExchange(&g_daySpeed, (LONG)value * 25);
-    InterlockedExchange(&g_sentRate, -1);
-    SaveConfig();
-    TwLog("menu: day_speed=%d.%02d", (value * 25) / 100, (value * 25) % 100);
-}
+/* One callback for all four rows: the phase travels in the row's user
+ * pointer, so a window is a table entry rather than a function. */
+static void OnSpeed(uint32_t menu, uint32_t item, int value, void *user) {
+    int phase = (int)(intptr_t)user;
 
-static void OnNight(uint32_t menu, uint32_t item, int value, void *user) {
-    (void)menu; (void)item; (void)user;
+    (void)menu; (void)item;
+    if (phase < 0 || phase > 3) return;
     if (value < 0 || value >= SPEED_STEPS) return;
-    InterlockedExchange(&g_nightSpeed, (LONG)value * 25);
+    InterlockedExchange(&g_speed[phase], (LONG)value * 25);
     InterlockedExchange(&g_sentRate, -1);
     SaveConfig();
-    TwLog("menu: night_speed=%d.%02d", (value * 25) / 100, (value * 25) % 100);
+    TwLog("menu: %s=%d.%02d", g_speedKey[phase],
+          (value * 25) / 100, (value * 25) % 100);
 }
 
 static void OnWeather(uint32_t menu, uint32_t item, int value, void *user) {
@@ -501,9 +530,8 @@ static void OnApply(uint32_t menu, uint32_t item, int value, void *user) {
 }
 
 static void BuildMenu(void) {
-    LONG day = InterlockedCompareExchange(&g_daySpeed, 0, 0);
-    LONG night = InterlockedCompareExchange(&g_nightSpeed, 0, 0);
     LONG w = InterlockedCompareExchange(&g_weather, 0, 0);
+    int i;
 
     TwText();
     BuildClockOpts();
@@ -528,10 +556,16 @@ static void BuildMenu(void) {
     /* The speed rows: 0.00 to 10.00 in 0.25 steps, 1.00 being the game's
      * own rate. Lists, so left/right cycles like every other row. */
     BuildSpeedOpts();
-    ShMenuList(g_menu, "@tw.day", g_speedOpts, SPEED_STEPS,
-               SpeedIndex(day), OnDay, NULL);
-    ShMenuList(g_menu, "@tw.night", g_speedOpts, SPEED_STEPS,
-               SpeedIndex(night), OnNight, NULL);
+    /* Rows in the order the clock meets the windows, each driving the phase
+     * it names: g_speedId and g_phaseOrder line up entry for entry, so the
+     * label a player reads and the rate behind it cannot come apart. */
+    for (i = 0; i < 4; i++) {
+        int ph = g_phaseOrder[i];
+
+        ShMenuList(g_menu, g_speedId[i], g_speedOpts, SPEED_STEPS,
+                   SpeedIndex(InterlockedCompareExchange(&g_speed[ph], 0, 0)),
+                   OnSpeed, (void *)(intptr_t)ph);
+    }
     ShMenuHint(g_menu, "@tw.hint");
     TwLog("menu created");
 }
@@ -602,9 +636,9 @@ static DWORD WINAPI TickThread(LPVOID p) {
                 if (sent != want) {
                     if (ShSetTimeSpeed(rate)) {
                         InterlockedExchange(&g_sentRate, want);
-                        TwLog("rate %.2f at %.2f h (day %ld night %ld)",
+                        TwLog("rate %.2f at %.2f h (%s)",
                               (double)rate, (double)hours,
-                              (long)g_daySpeed / 100, (long)g_nightSpeed / 100);
+                              g_speedKey[PhaseOf(hours)]);
                     }
                 }
             }
@@ -685,8 +719,9 @@ static DWORD WINAPI InitThread(LPVOID p) {
 
         if (h) CloseHandle(h);   /* never waited on */
     }
-    TwLog("ready: enabled=%ld day=%ld night=%ld weather=%s",
-          (long)g_enabled, (long)g_daySpeed / 100, (long)g_nightSpeed / 100,
+    TwLog("ready: enabled=%ld day=%ld dusk=%ld night=%ld dawn=%ld weather=%s",
+          (long)g_enabled, (long)g_speed[0] / 100, (long)g_speed[1] / 100,
+          (long)g_speed[2] / 100, (long)g_speed[3] / 100,
           g_weatherIni[InterlockedCompareExchange(&g_weather, 0, 0)]);
     RefreshStatus(0.0f, 0.0f, 0, 1);
     return 0;
