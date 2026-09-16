@@ -75,7 +75,7 @@ static const ShText kZh[] = {
     { "@ac.mult",  "弹药容量倍率" },
     { "@ac.note",  "修改后需到弹药箱补给后生效。" },
     { "@ac.err.build", "不支持的游戏版本" },
-    { "@ac.err.hook",  "Hook校验失败" },
+    { "@ac.err.hook",  "挂钩校验失败" },
     { "@ac.err.save",  "配置保存失败" }
 };
 
@@ -193,7 +193,10 @@ static int Apply(int index) {
                                                        : "@ac.err.build";
 
         AcLog("scale refused: index %d, order %d -> %s", index, err, line);
-        ShMenuStatus(g_menu, line);
+        /* BuildMenu may have failed and left this at 0; a status line
+         * against an unknown page is a no-op the framework refuses, so it
+         * is only worth calling when there is a page. */
+        if (g_menu) ShMenuStatus(g_menu, line);
         return 0;
     }
     AcLog("scale index %d = %d/%d (active=%d)", index, g_num[index],
@@ -277,17 +280,20 @@ static DWORD WINAPI InitThread(LPVOID p) {
     AcLog("--- ammo_capacity plugin ---");
     ResolveIniPath();
     LoadIni();
-    BuildMenu();
 
     /* The one mode rule this plugin has: a capacity multiplier is not
-     * something a PvP match wants. Declared so the framework takes the page
-     * out of the menu there and ShPluginAllowed turns false. */
+     * something a PvP match wants. Declared before the page is built, so a
+     * session that starts in a blocked mode never has the page up even for
+     * the moment between the two calls - the framework hides it by polling,
+     * and this removes the window. */
     if (!ShPluginBlacklist(SH_MODE_BLACKLIST_GHOST_WAR |
                            SH_MODE_BLACKLIST_MERCENARIES))
         AcLog("blacklist: declaration refused (error %d)", ShLastError());
     if (!ShPluginOnBlocked(OnBlocked, NULL))
         AcLog("blacklist: ShPluginOnBlocked refused (error %d)",
               ShLastError());
+
+    BuildMenu();
 
     /* Vanilla costs nothing: the framework installs its hook on the first
      * call that asks for something else, so a session left at 1.00x runs

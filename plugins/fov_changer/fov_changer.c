@@ -216,9 +216,15 @@ static DWORD WINAPI InitThread(LPVOID p) {
     /* A view override is not something a PvP match wants; saying it out
      * loud is what makes the release in the tick deliberate rather than an
      * accident of the default. */
-    ShPluginBlacklist(SH_MODE_BLACKLIST_GHOST_WAR |
-                      SH_MODE_BLACKLIST_MERCENARIES);
-    ShPluginOnBlocked(OnBlocked, NULL);
+    /* Both calls are checked, and the status line is how this plugin has
+     * always reported a refusal (it keeps no log of its own). A refused
+     * blacklist means OnBlocked never runs, and that callback is the one
+     * thing that gives the FOV back when a PvP match starts. */
+    if (!ShPluginBlacklist(SH_MODE_BLACKLIST_GHOST_WAR |
+                           SH_MODE_BLACKLIST_MERCENARIES))
+        ShMenuStatus(g_menu, "fov: blacklist declaration refused");
+    if (!ShPluginOnBlocked(OnBlocked, NULL))
+        ShMenuStatus(g_menu, "fov: on-blocked registration refused");
     {
         HANDLE h = CreateThread(NULL, 0, TickThread, NULL, 0, NULL);
 

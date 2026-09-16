@@ -919,7 +919,12 @@ static DWORD WINAPI InitThread(LPVOID p) {
         Log("the blacklist declaration was refused");
 
     if (!Bind()) {
+        /* The drawer was registered above and Bind is what would ever drive
+         * it, so take it back out rather than leave a registration with
+         * nothing behind it - the menu below does the same on its own
+         * failures. */
         Log("the game state reader is missing: the box stays off");
+        ShDrawDel(DRAW_NAME);
         return 0;
     }
     BuildMenu();

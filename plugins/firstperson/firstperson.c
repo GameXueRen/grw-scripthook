@@ -359,13 +359,24 @@ static const char *g_hotName[HOTKEYS] = {
 };
 static volatile int g_hotKey = 0;   /* index into g_hotVk, 0 = off */
 
-/* Diagnostic log: firstperson.log beside the game log folder.
- * Written from the tick thread only, on state changes, so a
- * view that will not come back leaves a trace of what the
- * plugin saw instead of a guess. */
+/* Diagnostic log: firstperson.log beside the game log folder. Written from
+ * the tick thread and from the two that only react to a key or a bind, so
+ * three threads share these statics - which is why the first open below is
+ * guarded by an exchange: two of them entering together opened the file
+ * twice and leaked the handle the first one had just made. */
 static FILE *g_diag = NULL;
 static char  g_diagPath[MAX_PATH];
 static int   g_diagOn = 0;      /* [Settings] diag, default off */
+static volatile LONG g_diagMade;
+
+/* Set by the slider rows, written by the tick thread - see SaveIni. Declared
+ * here because the tick loop reaches it long before SaveIni is defined. */
+static volatile LONG g_iniDirty;
+static void SaveIniSoon(void);
+
+/* Resolves one of this plugin's own text IDs, defined with the status
+ * helpers below. */
+static const char *SetText(const char *id);
 
 static void Diag(const char *fmt, ...) {
     char buf[256];
@@ -378,6 +389,9 @@ static void Diag(const char *fmt, ...) {
      * from. */
     if (!g_diagOn) return;
     if (!g_diagPath[0]) {
+        /* One thread resolves and opens it; the others drop this line
+         * rather than race for the same two statics. */
+        if (InterlockedExchange(&g_diagMade, 1)) return;
         if (g_logPath &&
             g_logPath("firstperson.log", g_diagPath,
                       sizeof(g_diagPath))) {
@@ -633,7 +647,7 @@ static void OnCatSlide(uint32_t menu, uint32_t item, int value,
     else if (axis == 1) g_catF[set] = (float)value;
     else if (axis == 2) g_catU[set] = (float)value;
     else return;
-    SaveIni();
+    SaveIniSoon();
     /* Only while we already own it, or dragging a slider would
      * take the camera back during a screen - and only for the
      * set actually in force, so tuning a helicopter seat does
@@ -655,7 +669,7 @@ static void OnPresetSlide(uint32_t menu, uint32_t item, int value,
     else if (axis == 1) g_preF[set] = (float)value;
     else if (axis == 2) g_preU[set] = (float)value;
     else return;
-    SaveIni();
+    SaveIniSoon();
     if (g_on && g_held && g_presetSel == set) PushCamera();
 }
 
@@ -712,26 +726,26 @@ static int EngineView(void) {
  */
 static void SayStatus(const char *tmpl, const char *set,
                       float r, float f, float u) {
-    char line[160];
-
     if (g_statusF) {
         g_statusF(g_menu, tmpl, set, r, f, u);
         return;
     }
-    snprintf(line, sizeof(line), tmpl, set, r, f, u);
-    g_status(g_menu, line);
+    /* No ShMenuStatusF to format with. The argument is a KEY, not a format
+     * string: snprintf with "@fp.status.on" printed the key itself and
+     * dropped all four values, and any "%" a translation happened to carry
+     * would have read the argument list as whatever it said. Show the key's
+     * own text instead; a framework with ShMenuStatusF formats it properly. */
+    g_status(g_menu, SetText(tmpl));
 }
 
 static void SayStatusWhy(const char *tmpl, const char *why,
                          const char *set, float r, float f, float u) {
-    char line[160];
-
     if (g_statusF) {
         g_statusF(g_menu, tmpl, why, set, r, f, u);
         return;
     }
-    snprintf(line, sizeof(line), tmpl, why, set, r, f, u);
-    g_status(g_menu, line);
+    /* Same reason: the key is not a template. */
+    g_status(g_menu, SetText(tmpl));
 }
 
 #define STATUS_OFF     "@fp.status.off"
@@ -944,6 +958,8 @@ static DWORD WINAPI TickThread(LPVOID p) {
             menuHeldAt = 0;
             menuStuckSaid = 0;
         }
+
+        if (InterlockedExchange(&g_iniDirty, 0)) SaveIni();
 
         if (nowMs - lastBeat >= 1000) {
             lastBeat = nowMs;
@@ -1210,6 +1226,13 @@ static void LoadIni(void) {
     if (g_hotKey < 0 || g_hotKey >= HOTKEYS) g_hotKey = 0;
 }
 
+/* A slider row fires on every change, and SaveIni is about thirty-six
+ * WritePrivateProfileString calls - each a read-modify-write of the whole
+ * file. Dragging one produced that per tick. The sliders mark the file
+ * dirty instead and the tick thread, which is already running, writes it
+ * once the burst is over. */
+static void SaveIniSoon(void) { InterlockedExchange(&g_iniDirty, 1); }
+
 /* Write the current settings back to <name>.ini. "Enabled" is
  * a live state, not a setting, so it is deliberately not saved
  * and always starts off. */
@@ -1366,12 +1389,27 @@ static DWORD WINAPI BindThread(LPVOID p) {
         /* A flip key is set and this dinput8 cannot say whether the game
          * window is in front. Armed blind it would fire on a key pressed
          * in whatever window is in front, so it stays off - and says so,
-         * rather than looking broken. */
+         * rather than looking broken.
+         *
+         * One line, and the switch goes back where it was: turning diag on
+         * for it armed the per-second beat for the rest of the session,
+         * which is exactly what the switch defaults to off to avoid. */
+        int was = g_diagOn;
+
         g_diagOn = 1;
         Diag("hotkey off: this dinput8 has no ShGameFocused");
+        g_diagOn = was;
     }
     FpText();
     g_menu = menuCreate("@fp.page");
+    if (!g_menu) {
+        /* The row registrations below become no-ops against page 0 - the
+         * framework refuses an unknown menu rather than misbehaving - so
+         * this is a missing page, not a broken plugin: first person itself
+         * needs none of it. Worth the one line, since the view works and
+         * the menu is simply absent. */
+        Diag("menu: ShMenuCreate refused the page - no rows this session");
+    }
     menuToggle(g_menu, "@fp.enabled", 0, OnToggle, NULL);
     /* One row picks the flip key: None (=off), =, F2 or F3.
      * The row's label is the English lookup key, translated by

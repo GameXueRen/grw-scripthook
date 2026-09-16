@@ -6,6 +6,9 @@
  * thread rather than from DllMain. */
 #include <windows.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
 
 #include "scripthook.h"
 
@@ -23,6 +26,40 @@ typedef int (*MenuAction_t)(uint32_t, const char *, ShMenuFn, void *);
 typedef int (*MenuStatus_t)(uint32_t, const char *);
 typedef int (*MenuStatusF_t)(uint32_t, const char *, ...);
 typedef int (*MenuHint_t)(uint32_t, const char *);
+
+/* This plugin had no log at all, which made the one failure it can have -
+ * an export this dinput8 does not carry - look like a submenu that simply
+ * never appeared. One file, opened on first use, with the same directory
+ * rule the other plugins use. */
+static FILE *g_log;
+
+static void SpLog(const char *fmt, ...) {
+    char path[MAX_PATH];
+    char *s;
+    va_list ap;
+    SYSTEMTIME st;
+
+    if (!g_log) {
+        if (!GetModuleFileNameA(NULL, path, MAX_PATH)) return;
+        s = strrchr(path, '\\');
+        if (!s) return;
+        s[1] = 0;
+        if (strlen(path) + 5 < sizeof(path)) strcat(path, "logs");
+        CreateDirectoryA(path, NULL);
+        if (strlen(path) + 13 < sizeof(path)) strcat(path, "\\spawner.log");
+        else return;
+        g_log = fopen(path, "w");
+    }
+    if (!g_log) return;
+    GetLocalTime(&st);
+    va_start(ap, fmt);
+    fprintf(g_log, "[%02u:%02u:%02u.%03u] ",
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    vfprintf(g_log, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_log);
+    fflush(g_log);
+}
 
 static Count_t      g_count;
 static At_t         g_at;
@@ -130,16 +167,27 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
     *(FARPROC *)&g_statusF = GetProcAddress(m, "ShMenuStatusF");
     *(FARPROC *)&g_hint = GetProcAddress(m, "ShMenuHint");
-    if (!g_count || !g_at || !g_spawn || !g_playerPos) return 1;
-    if (!menuCreate || !menuAction || !g_status || !g_statusF ||
-        !g_hint)
+    if (!g_count || !g_at || !g_spawn || !g_playerPos ||
+        !menuCreate || !menuAction || !g_status || !g_statusF || !g_hint) {
+        /* Each of these is one GetProcAddress: a framework that does not
+         * carry it means no submenu, and until now nothing said so. */
+        SpLog("bind failed: count=%p at=%p spawn=%p playerPos=%p "
+              "menuCreate=%p menuAction=%p status=%p statusF=%p hint=%p",
+              (void *)g_count, (void *)g_at, (void *)g_spawn,
+              (void *)g_playerPos, (void *)menuCreate, (void *)menuAction,
+              (void *)g_status, (void *)g_statusF, (void *)g_hint);
         return 1;
+    }
 
     /* The catalogue is static, so every vehicle becomes a
      * row once and the API scrolls them.
      */
     TextInit();
     g_menu = menuCreate("@sp.page");
+    if (!g_menu) {
+        SpLog("ShMenuCreate refused the page - no submenu this session");
+        return 1;
+    }
     g_hint(g_menu, "@sp.hint");
     n = g_count();
     for (i = 0; i < n; i++) {

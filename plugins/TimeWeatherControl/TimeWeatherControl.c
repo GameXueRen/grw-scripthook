@@ -338,6 +338,14 @@ static void LoadConfig(void) {
           (long)g_minute);
 }
 
+/* Menu rows fire on every change and SaveConfig is a read-modify-write of
+ * the whole file per call, so holding a stepper produced one per tick. The
+ * callbacks mark the file dirty instead and the tick thread, which is
+ * already running, writes it once the burst is over. */
+static volatile LONG g_iniDirty;
+
+static void SaveConfigSoon(void) { InterlockedExchange(&g_iniDirty, 1); }
+
 static void SaveConfig(void) {
     char buf[32];
     int i;
@@ -471,7 +479,7 @@ static void OnEnabled(uint32_t menu, uint32_t item, int value, void *user) {
     InterlockedExchange(&g_enabled, value ? 1 : 0);
     InterlockedExchange(&g_sentRate, -1);
     InterlockedExchange(&g_sentWeather, -1);
-    SaveConfig();
+    SaveConfigSoon();
     TwLog("menu: enabled=%d", value);
 }
 
@@ -485,7 +493,7 @@ static void OnSpeed(uint32_t menu, uint32_t item, int value, void *user) {
     if (value < 0 || value >= SPEED_STEPS) return;
     InterlockedExchange(&g_speed[phase], (LONG)value * 25);
     InterlockedExchange(&g_sentRate, -1);
-    SaveConfig();
+    SaveConfigSoon();
     TwLog("menu: %s=%d.%02d", g_speedKey[phase],
           (value * 25) / 100, (value * 25) % 100);
 }
@@ -495,20 +503,20 @@ static void OnWeather(uint32_t menu, uint32_t item, int value, void *user) {
     if (value < 0 || value >= NWEATHER) return;
     InterlockedExchange(&g_weather, value);
     InterlockedExchange(&g_sentWeather, -1);
-    SaveConfig();
+    SaveConfigSoon();
     TwLog("menu: weather=%s", g_weatherIni[value]);
 }
 
 static void OnHour(uint32_t menu, uint32_t item, int value, void *user) {
     (void)menu; (void)item; (void)user;
     InterlockedExchange(&g_hour, (LONG)value);
-    SaveConfig();
+    SaveConfigSoon();
 }
 
 static void OnMinute(uint32_t menu, uint32_t item, int value, void *user) {
     (void)menu; (void)item; (void)user;
     InterlockedExchange(&g_minute, (LONG)value);
-    SaveConfig();
+    SaveConfigSoon();
 }
 
 static void OnApply(uint32_t menu, uint32_t item, int value, void *user) {
@@ -590,6 +598,8 @@ static DWORD WINAPI TickThread(LPVOID p) {
         int inGame, allowed;
 
         Sleep(250);
+        /* Whatever the menu marked dirty lands here, once per burst. */
+        if (InterlockedExchange(&g_iniDirty, 0)) SaveConfig();
         inGame = ShIsInGame();
         allowed = inGame && ShPluginAllowed();
 

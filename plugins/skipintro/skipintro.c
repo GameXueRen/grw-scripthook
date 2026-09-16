@@ -536,14 +536,19 @@ static void LoadConfig(void) {
 
 static void SaveIni(void) {
     char buf[8];
+    int ok;
 
     if (!g_iniPath[0]) return;
     snprintf(buf, sizeof(buf), "%d", WantLaunch());
-    WritePrivateProfileStringA("Settings", "skip_launch_videos", buf,
-                               g_iniPath);
+    ok = WritePrivateProfileStringA("Settings", "skip_launch_videos", buf,
+                                    g_iniPath) != 0;
     snprintf(buf, sizeof(buf), "%d", WantLegal());
-    WritePrivateProfileStringA("Settings", "skip_legal_videos", buf,
-                               g_iniPath);
+    ok = WritePrivateProfileStringA("Settings", "skip_legal_videos", buf,
+                                    g_iniPath) != 0 && ok;
+    /* A read-only or locked ini would otherwise swallow the switch in
+     * silence: the menu says on, the next launch says off. */
+    if (!ok)
+        SkipLog("settings could not be written to %s", g_iniPath);
 }
 
 /* ---- menu callbacks ------------------------------------------------------ */

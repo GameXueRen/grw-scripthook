@@ -328,7 +328,10 @@ static void Pump(int state) {
         }
     }
 
-    ShGetVisibility(&shown);   /* what is actually in force */
+    /* The multiplier actually in force, when the framework can say. On a
+     * failed query `shown` would keep its initial 1.0 and the status line
+     * would report a number nothing had set. */
+    if (!ShGetVisibility(&shown)) shown = lastShown;
 
     forced = (int)InterlockedExchange(&g_force, 0);
     changed = forced || on != lastOn || state != lastState ||
@@ -431,8 +434,13 @@ static void BuildMenu(void) {
         Log("ShMenuCreate failed, error %d", ShLastError());
         return;
     }
-    ShMenuToggle(g_menu, "@camo.enabled", OnNow(),
-                 OnToggle, NULL);
+    if (!ShMenuToggle(g_menu, "@camo.enabled", OnNow(),
+                      OnToggle, NULL)) {
+        Log("ShMenuToggle failed, error %d", ShLastError());
+        ShMenuDestroy(g_menu);
+        g_menu = 0;
+        return;
+    }
     if (!ShMenuList(g_menu, "@camo.step", kStepName, STEP_COUNT,
                     StepNow(), OnStep, NULL)) {
         Log("ShMenuList failed, error %d", ShLastError());
