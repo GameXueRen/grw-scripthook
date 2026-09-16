@@ -55,12 +55,19 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 # The plugin set the first public beta ships. Everything else is built by a
 # plain run, and left out of a -Beta / -Release one.
 #
-# LastRites_dlcfix is out as of the 2026-09 game update: the update fixed
-# what it worked around, so the shipped set is one hook smaller. Its source
-# and its build entry stay in the tree for a plain build.
+# Two are out of the shipped set, both deliberately, and both keep their
+# source and their build entry in the tree for a plain build:
+#
+#   LastRites_dlcfix  the 2026-09 game update fixed what it worked around,
+#                     so the shipped set is one hook smaller.
+#   NPCSpawner        it spawns working NPCs, but they do not engage, and a
+#                     menu whose feature is half there is worse than no menu.
+#                     The spawn path itself is settled and measured - see
+#                     docs/npcspawner-reverse.md, section eleven, for what is
+#                     live, what the second crash taught, and the next step.
 $betaSet = @(
     'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat',
-    'TimeWeatherControl', 'OpticalCamo', 'ammo_capacity', 'NPCSpawner'
+    'TimeWeatherControl', 'OpticalCamo', 'ammo_capacity'
 )
 $script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
 $releaseBuild     = [bool]$Release
