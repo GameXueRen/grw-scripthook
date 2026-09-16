@@ -974,6 +974,28 @@ static DWORD WINAPI TickThread(LPVOID p) {
                  g_activeR, g_activeF, g_activeU);
         }
 
+        /* Every change of the engine's aim gate, as it happens, with the
+         * rest of the frame's state around it. The field report of
+         * 2026-09-17 says the aim transition stops happening after a
+         * while - "the scope snaps in with no animation" - and the once a
+         * second beat above samples too slowly to tell a gate that stops
+         * moving from one that moves and is ignored. An edge line is what
+         * separates those two, and the head visibility travels with it
+         * because an aim is what hands the head over and back. */
+        {
+            static int lastAds = -1;
+
+            if (ads != lastAds) {
+                Diag("ads: %d -> %d (play=%d on=%d held=%d menu=%d "
+                     "drone=%d headok=%d bow=%d age=%u ctx=%d)",
+                     lastAds, ads, playing, g_on, g_held, menu, drone,
+                     g_fpxHeadOk ? g_fpxHeadOk() : -1,
+                     g_fpxBow ? g_fpxBow() : -1,
+                     g_fpxAge ? g_fpxAge() : 0u, ctx);
+                lastAds = ads;
+            }
+        }
+
         /* The ride probe answers a question about the model, not
          * about the view, so it runs whether first person is on
          * or off - the point is to see what the engine calls the
