@@ -11,8 +11,8 @@
 #include "log.h"
 
 /* Static anchors, verified in FINDINGS.md */
-#define SH_PLAYER_GLOBAL   SH_IMG(0x4BC3358)
-#define SH_VT_ENTITY       SH_IMG(0x39C6FC8)
+#define SH_PLAYER_GLOBAL   SH_IMG(0x4BC33E0)
+#define SH_VT_ENTITY       SH_IMG(0x39C6DF8)
 #define SH_VT_SKELETON     SH_IMG(0x3ACBBD8)
 
 /* Object layout */
@@ -233,8 +233,31 @@ static int ShVec(uint64_t addr, ShVec3 *out) {
     return ShReadMem(addr, out, 12);
 }
 
+/* The entity vtable, learned rather than assumed. A game update moves it,
+ * and every test in the framework compares against it - so a stale value
+ * does not fail loudly, it makes the player unresolvable and every entity
+ * check answer no. The static path hands us the player entity itself,
+ * which is the one place the answer can be read without already knowing
+ * it, so ShPlayerFromStatic teaches it here and every test after that
+ * compares against the live value.
+ */
+static volatile uint64_t g_entityVt;
+
+static void ShLearnEntityVt(uint64_t ent) {
+    uint64_t vt;
+
+    if (g_entityVt) return;
+    vt = ShQ(ent);
+    if (!vt || !ShInImage(vt)) return;   /* a vtable is the engine's own */
+    g_entityVt = vt;
+    ApiLog("entity vtable learned: %p (the constant said %p)",
+           (void *)(uintptr_t)vt, (void *)(uintptr_t)SH_VT_ENTITY);
+}
+
 static int ShIsEntity(uint64_t obj) {
-    return obj && ShQ(obj) == SH_VT_ENTITY;
+    if (!obj) return 0;
+    if (g_entityVt) return ShQ(obj) == g_entityVt;
+    return ShQ(obj) == SH_VT_ENTITY;
 }
 
 static int ShIsSkeleton(uint64_t obj) {
@@ -391,8 +414,8 @@ static int ShNear(const ShVec3 *a, const ShVec3 *b, float tol) {
 /* The engine's own accessor, FUN_140D43530 and the two
  * calls after it. No scanning. See FINDINGS.md.
  */
-#define SH_PLAYER_MGR    SH_IMG(0x4BB6438)
-#define SH_SLOT_INDEX    SH_IMG(0x4D84E98)
+#define SH_PLAYER_MGR    SH_IMG(0x4BB64B8)
+#define SH_SLOT_INDEX    SH_IMG(0x4D84F18)
 #define OFF_MGR_OBJ      0x98
 #define OFF_OBJ_TABLE    0xD10
 #define OFF_TABLE_SLOTS  0x08
@@ -417,7 +440,20 @@ static uint64_t ShPlayerFromStatic(void) {
     if (idx > 64) return 0;
 
     root = ShQ(slots + (uint64_t)idx * 8);
-    return ShIsEntity(root) ? root : 0;
+    if (!root || (root & 7) || !ShReadable(root, 8)) return 0;
+    if (!ShIsEntity(root)) {
+        /* The slot table is the framework's own anchor and it is not a
+         * vtable test, so this is where the live vtable can be read. */
+        ShLearnEntityVt(root);
+        if (!ShIsEntity(root)) return 0;
+    }
+    return root;
+}
+
+/* The live entity vtable, or the pinned constant until it is known. Other
+ * modules hold their own copy of that constant; this is the one to ask. */
+SH_API uint64_t ShEntityVtable(void) {
+    return g_entityVt ? g_entityVt : SH_VT_ENTITY;
 }
 
 /* Match entities against the mirrored position, then
@@ -628,7 +664,7 @@ SH_API int ShGetVersion(void) {
 /* Engine set transform: flags the entity dirty and
  * propagates to children, so it moves vehicles too.
  */
-#define SH_SET_TRANSFORM   SH_IMG(0xC6BDE10)
+#define SH_SET_TRANSFORM   SH_IMG(0xC46B7B0)
 
 typedef void (__attribute__((ms_abi)) *SetTransform_t)(uint64_t,
                                                        void *, char);

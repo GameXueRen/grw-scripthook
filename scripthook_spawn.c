@@ -12,15 +12,15 @@
 #include "log.h"
 
 /* RVAs, so this survives a relocated image. */
-#define RVA_MGR_GETTER   0x916DC40
-#define RVA_SPAWN        0x916D5E0
-#define RVA_COMMIT       0x916E590
+#define RVA_MGR_GETTER   0x990BAB0
+#define RVA_SPAWN        0x990B0B0
+#define RVA_COMMIT       0x990CA70
 
 /* A vehicle is named by a masked handle: the kind hash
  * below, with the vehicle id in the high dword.
  */
 #define VEH_KIND_HASH    0x8F2CBBBAu
-#define SPEC_VTABLE      SH_IMG(0x394A1E0)
+#define SPEC_VTABLE      SH_IMG(0x394A060)
 #define SPEC_HANDLE_OFF  0x28
 #define COMMIT_MODE      7
 #define SPAWN_MODE       1
@@ -31,6 +31,94 @@ extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern void ShSetError(int err);
 extern int ShRequireInGame(void);
 extern int ShGetPlayer(ShPlayer *out);
+
+/* The spec vtable, learned rather than assumed - the same reason the entity
+ * vtable is learned. A game update moves it, and a stale value does not fail
+ * loudly: every spec check simply answers no and the vehicle list stays
+ * empty. The scan is the trustworthy source of the live value, because the
+ * handle it searches for is the framework's own number and not a vtable
+ * test. Two different handles have to agree before it is believed, which a
+ * chance collision cannot do - and until it is settled nothing is accepted,
+ * so a build that still matches the constant behaves exactly as before.
+ */
+static volatile uint64_t g_specVt;
+
+/* Which of the eight words before a sighting is the object's vtable slot,
+ * and which vtable that is. The pinned constant answers both on a build
+ * that has not moved. When it has, the walk still finds every spec object
+ * (the handle is the framework's own number, not a vtable test) but it also
+ * finds the copies of that handle in other objects, and copies of the same
+ * class agree with each other on the same wrong answer - which is exactly
+ * what a two-vote rule cannot tell from the truth. So every offset is tried
+ * on every sighting and the pair the walk agrees on most often wins: sixty
+ * five spec objects outvote a handful of copies, and no guessing is left.
+ */
+#define PROBE_OFFS   8      /* 0x00 .. 0x38, eight bytes apart   */
+#define PROBE_SLOTS  12
+#define PROBE_MIN    6      /* votes a pair needs to be believed */
+#define HIT_MAX      4096
+
+typedef struct { uint64_t at; uint32_t veh; } SpecHit;
+typedef struct {
+    uint64_t vt;
+    int      off;
+    int      votes;
+    uint64_t lastH;
+    int      handles;
+} SpecProbeSlot;
+
+static SpecHit      g_hits[HIT_MAX];
+static volatile LONG g_hitsN;
+static SpecProbeSlot g_probe[PROBE_SLOTS];
+static volatile LONG g_specOff = SPEC_HANDLE_OFF;
+
+/* How many times the scan met one of the handles it looks for. Reported
+ * with the result, because zero says the handle hash itself moved - a
+ * different problem from a vtable that no longer matches. */
+static volatile LONG g_scanHits;
+
+static uint64_t SpecVt(void) {
+    return g_specVt ? g_specVt : SPEC_VTABLE;
+}
+
+/* One sighting of a wanted handle, at the address it was read from.
+ * Called with g_specLock held. */
+static void SpecProbe(uint64_t at, uint32_t veh) {
+    int o;
+
+    if (g_hitsN < HIT_MAX) {
+        LONG n = InterlockedIncrement(&g_hitsN) - 1;
+        if (n < HIT_MAX) {
+            g_hits[n].at = at;
+            g_hits[n].veh = veh;
+        }
+    }
+    if (g_specVt) return;
+
+    for (o = 0; o < PROBE_OFFS; o++) {
+        int off = o * 8;
+        uint64_t base = at - (uint64_t)off;
+        uint64_t vt = ShReadQ(base);
+        int i, free = -1;
+
+        if (!vt || !ShInImage(vt)) continue;
+        for (i = 0; i < PROBE_SLOTS; i++) {
+            if (g_probe[i].vt == vt && g_probe[i].off == off) break;
+            if (free < 0 && !g_probe[i].vt) free = i;
+        }
+        if (i == PROBE_SLOTS) {
+            if (free < 0) continue;             /* table full: ignore   */
+            i = free;
+            g_probe[i].vt = vt;
+            g_probe[i].off = off;
+        }
+        g_probe[i].votes++;
+        if (g_probe[i].lastH != at) {
+            g_probe[i].handles++;
+            g_probe[i].lastH = at;
+        }
+    }
+}
 
 typedef uint64_t (__attribute__((ms_abi)) *MgrGet_t)(void);
 typedef uint64_t (__attribute__((ms_abi)) *Spawn_t)(uint64_t, int,
@@ -213,6 +301,53 @@ static int ChunkRead(uint8_t *dst, const void *src, size_t n) {
 #endif
 }
 
+/* After the walk: settle the pair the sightings agreed on, and resolve the
+ * ones that were seen before it was settled - they are all in g_hits. */
+static void SettleSpecVt(void) {
+    int i, best = -1;
+
+    for (i = 0; i < PROBE_SLOTS; i++)
+        if (g_probe[i].vt &&
+            (best < 0 || g_probe[i].votes > g_probe[best].votes))
+            best = i;
+    if (best >= 0 && !g_specVt && g_probe[best].votes >= PROBE_MIN) {
+        g_specVt = g_probe[best].vt;
+        g_specOff = g_probe[best].off;
+        Log("spawn: spec vtable learned: %p (the constant said %p), "
+            "handle offset -0x%X, %d sighting(s)",
+            (void *)(uintptr_t)g_specVt, (void *)(uintptr_t)SPEC_VTABLE,
+            (unsigned)g_specOff, g_probe[best].votes);
+    }
+    /* The pairs that also cleared the bar, so a miss can be diagnosed
+     * from the log instead of from another build. */
+    for (i = 0; i < PROBE_SLOTS; i++)
+        if (g_probe[i].vt && g_probe[i].votes >= PROBE_MIN)
+            Log("spawn: probe off=0x%X vt=%p votes=%d where=%d",
+                (unsigned)g_probe[i].off, (void *)(uintptr_t)g_probe[i].vt,
+                g_probe[i].votes, g_probe[i].handles);
+}
+
+/* Re-check every sighting with the settled pair: this is what picks up the
+ * objects the walk went past before the pair was known. g_specLock held. */
+static void SpecResolveHits(void) {
+    LONG n = g_hitsN, h;
+    int w;
+
+    if (n > HIT_MAX) n = HIT_MAX;
+    for (h = 0; h < n && g_scanLeft > 0; h++) {
+        uint64_t base = g_hits[h].at - (uint64_t)g_specOff;
+
+        if (ShReadQ(base) != SpecVt()) continue;
+        for (w = 0; w < g_scanLeft; w++)
+            if (g_scanIdx[w] == (int)g_hits[h].veh) break;
+        if (w >= g_scanLeft) continue;
+        g_specCache[g_scanIdx[w]] = base;
+        g_scanWants[w] = g_scanWants[g_scanLeft - 1];
+        g_scanIdx[w] = g_scanIdx[g_scanLeft - 1];
+        g_scanLeft--;
+    }
+}
+
 static DWORD WINAPI ScanWorker(LPVOID p) {
     ScanSeg *seg = (ScanSeg *)p;
     uint8_t *scan = (uint8_t *)seg->lo;
@@ -260,13 +395,17 @@ static DWORD WINAPI ScanWorker(LPVOID p) {
                     return 0;
                 }
                 for (w = 0; w < g_scanLeft; w++) {
+                    uint64_t at;
+
                     if (v != g_scanWants[w]) continue;
+                    InterlockedIncrement(&g_scanHits);
+                    at = (uint64_t)(uintptr_t)((uint8_t *)mbi.BaseAddress
+                                               + o + k);
+                    SpecProbe(at, (uint32_t)g_scanIdx[w]);
                     {
-                        uint64_t base =
-                            (uint64_t)(uintptr_t)((uint8_t *)mbi.BaseAddress
-                                                  + o + k)
-                            - SPEC_HANDLE_OFF;
-                        if (ShReadQ(base) == SPEC_VTABLE) {
+                        uint64_t base = at - (uint64_t)g_specOff;
+
+                        if (ShReadQ(base) == SpecVt()) {
                             g_specCache[g_scanIdx[w]] = base;
                             g_scanWants[w] = g_scanWants[g_scanLeft - 1];
                             g_scanIdx[w] = g_scanIdx[g_scanLeft - 1];
@@ -301,7 +440,7 @@ static void FindAllSpecs(void) {
     /* Collect what is still unresolved. */
     remaining = 0;
     for (i = 0; i < VEHICLE_COUNT; i++) {
-        if (g_specCache[i] && ShReadQ(g_specCache[i]) == SPEC_VTABLE)
+        if (g_specCache[i] && ShReadQ(g_specCache[i]) == SpecVt())
             continue;
         g_scanWants[remaining] = ((uint64_t)g_vehicles[i].id << 32)
                                | VEH_KIND_HASH;
@@ -315,6 +454,9 @@ static void FindAllSpecs(void) {
         return;
     }
     g_scanLeft = remaining;
+    InterlockedExchange(&g_scanHits, 0);
+    InterlockedExchange(&g_hitsN, 0);
+    memset(g_probe, 0, sizeof g_probe);
     LeaveCriticalSection(&g_specLock);
 
     /* Split the address space into worker ranges. */
@@ -340,12 +482,15 @@ static void FindAllSpecs(void) {
             }
     }
 
+    SettleSpecVt();
     EnterCriticalSection(&g_specLock);
+    SpecResolveHits();
     remaining = g_scanLeft;
     for (i = 0; i < VEHICLE_COUNT; i++) g_specTried[i] = 1;
     LeaveCriticalSection(&g_specLock);
     InterlockedExchange(&g_scanBusy, 0);
-    Log("spawn: spec scan done, %d unresolved", remaining);
+    Log("spawn: spec scan done, %d unresolved (handle matches: %d)",
+        remaining, (int)g_scanHits);
 }
 
 static uint64_t SpecFor(uint32_t vehicleId) {
@@ -354,14 +499,14 @@ static uint64_t SpecFor(uint32_t vehicleId) {
     for (i = 0; i < VEHICLE_COUNT; i++) {
         if (g_vehicles[i].id != vehicleId) continue;
         if (g_specCache[i] &&
-            ShReadQ(g_specCache[i]) == SPEC_VTABLE)
+            ShReadQ(g_specCache[i]) == SpecVt())
             return g_specCache[i];
         if (!g_specTried[i]) need = 1;
         break;
     }
     if (need) FindAllSpecs();
     if (g_specCache[i] &&
-        ShReadQ(g_specCache[i]) == SPEC_VTABLE)
+        ShReadQ(g_specCache[i]) == SpecVt())
         return g_specCache[i];
     return 0;
 }
@@ -398,6 +543,23 @@ const void *ShSpawnBuildMatrix(const ShVec3 *pos) {
     return slot;
 }
 
+/* The opening bytes of the three engine calls the spawn path makes, as they
+ * were when the addresses were pinned. See the guard in the pump. */
+static const uint8_t getterSig[3]   = { 0x48, 0x8B, 0x05 };
+static const uint8_t prologueSig[9] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24
+};
+
+static int CallShapeOk(uint64_t rva, const uint8_t *want, int n) {
+    uint8_t got[16];
+    uint64_t at = ImgAddr(rva);
+
+    if (n < 1 || n > (int)sizeof got) return 0;
+    if (!ShReadableAddr(at, (size_t)n)) return 0;
+    memcpy(got, (const void *)(uintptr_t)at, (size_t)n);
+    return memcmp(got, want, (size_t)n) == 0;
+}
+
 /* Runs on the game thread, queued by ShSpawnVehicle. The pump
  * takes the newest pending request under the lock and records
  * the request sequence it consumed; a caller waits for its own
@@ -431,18 +593,35 @@ void ShSpawnPump(void) {
         return;
     }
 
-    mgr = ((MgrGet_t)ImgAddr(RVA_MGR_GETTER))();
-    if (mgr) {
-        spawner = ((Spawn_t)ImgAddr(RVA_SPAWN))(spec, SPAWN_MODE,
-                                                mtx);
-        /* The commit is required, or nothing ever appears. */
-        if (spawner)
-            ((Commit_t)ImgAddr(RVA_COMMIT))(mgr, COMMIT_MODE,
-                                            spawner);
-        Log("pump: seq=%u spawner=%llx", my,
-            (unsigned long long)spawner);
+    /* The three calls below reach engine code the framework has no symbol
+     * for, so a stale address is a jump into whatever happens to live
+     * there. Each is checked for the shape it had when it was pinned: a
+     * getter that loads a global and returns, and two functions that open
+     * by spilling rbx and rsi. A refusal is then a logged no-op, which is
+     * the difference between a broken spawner and a broken game. */
+    if (CallShapeOk(RVA_MGR_GETTER, getterSig, 3) &&
+        CallShapeOk(RVA_SPAWN, prologueSig, 9) &&
+        CallShapeOk(RVA_COMMIT, prologueSig, 9))
+    {
+        mgr = ((MgrGet_t)ImgAddr(RVA_MGR_GETTER))();
+        if (mgr) {
+            spawner = ((Spawn_t)ImgAddr(RVA_SPAWN))(spec, SPAWN_MODE,
+                                                    mtx);
+            /* The commit is required, or nothing ever appears. */
+            if (spawner)
+                ((Commit_t)ImgAddr(RVA_COMMIT))(mgr, COMMIT_MODE,
+                                                spawner);
+            Log("pump: seq=%u spawner=%llx", my,
+                (unsigned long long)spawner);
+        } else {
+            Log("pump: seq=%u no manager", my);
+        }
     } else {
-        Log("pump: seq=%u no manager", my);
+        Log("pump: seq=%u the engine calls do not have the pinned shape "
+            "(%llX %llX %llX) - nothing was called", my,
+            (unsigned long long)ImgAddr(RVA_MGR_GETTER),
+            (unsigned long long)ImgAddr(RVA_SPAWN),
+            (unsigned long long)ImgAddr(RVA_COMMIT));
     }
     g_doneSeq = my;
 }
@@ -481,10 +660,22 @@ uint64_t ShSpawnVehicle(uint32_t vehicleId, const ShVec3 *pos) {
 
     EnsureLocks();
     spec = SpecFor(vehicleId);
-    if (!spec) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
+    if (!spec) {
+        /* Said out loud: without this line a refusal here looks exactly
+         * like a request that never arrived. */
+        Log("spawn: vehicle %u has no spec - nothing to spawn from",
+            (unsigned)vehicleId);
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
 
     mtx = ShSpawnBuildMatrix(pos);
-    if (!mtx) { ShSetError(SH_ERR_NO_ROOT); return 0; }
+    if (!mtx) {
+        Log("spawn: vehicle %u has no player matrix (player unresolved?)",
+            (unsigned)vehicleId);
+        ShSetError(SH_ERR_NO_ROOT);
+        return 0;
+    }
 
     EnterCriticalSection(&g_pendLock);
     g_pendSpec = spec;
@@ -521,9 +712,16 @@ uint64_t ShSpawnVehicle(uint32_t vehicleId, const ShVec3 *pos) {
         if (!ent) Sleep(20);
     }
     if (!ent) {
+        ShEntity probe[4];
+        int listed = ShFindEntities(SH_KIND_VEHICLE, 120.0f, 0, probe, 4);
+
+        /* The count separates the two ways this can miss: an empty world
+         * list is a broken anchor, a populated one that is not near the
+         * asked position is a vehicle that landed somewhere else. */
         ShSetError(SH_ERR_NO_CANDIDATE);
-        Log("spawn: id=%x seq=%u committed, entity not seen in %d ms",
-            vehicleId, mySeq, waited * 20);
+        Log("spawn: id=%x seq=%u committed, entity not seen in %d ms "
+            "(%d vehicle(s) in the world list)",
+            vehicleId, mySeq, waited * 20, listed);
     } else {
         Log("spawn: id=%x seq=%u entity=%llx after %d ms",
             vehicleId, mySeq, (unsigned long long)ent, waited * 20);

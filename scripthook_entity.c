@@ -9,10 +9,15 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
-/* RVAs, so this survives a relocated image. */
-#define RVA_PLAYER_MGR   0x4BB6438
-#define RVA_VT_ENTITY    0x39C6FC8
+/* RVAs, so this survives a relocated image. The manager is the same anchor
+ * the API resolves the player through, and it has to carry the same value
+ * here: the world entity list is walked from it, so a stale copy does not
+ * fail loudly, it makes every search come back empty. The entity vtable is
+ * asked for through ShEntityVtable() instead of being pinned again here.
+ */
+#define RVA_PLAYER_MGR   0x4BB64B8
 
 #define OFF_MGR_WORLD    0x98
 #define OFF_WORLD_LIST   0xBA0
@@ -928,17 +933,45 @@ static int WorldList(uint64_t *outList, uint32_t *outCount) {
     uint64_t mgr, world, lst;
     uint16_t n = 0;
 
+    /* Every step can come back empty after an update, and the caller only
+     * ever sees SH_ERR_NO_GLOBAL. The first one to fail says where it
+     * stopped - once, because this sits on a polling path. */
     mgr = ShReadQ(ImgAddr(RVA_PLAYER_MGR));
-    if (!mgr) return 0;
-    world = ShReadQ(mgr + OFF_MGR_WORLD);
-    if (!world) return 0;
-    lst = ShReadQ(world + OFF_WORLD_LIST);
-    if (!lst || !ShReadableAddr(world + OFF_WORLD_COUNT, 2))
+    if (!mgr) {
+        LogFirst("scripthook_entity.log",
+                 "entity: the player manager is empty (rva %llX)",
+                 (unsigned long long)RVA_PLAYER_MGR);
         return 0;
+    }
+    world = ShReadQ(mgr + OFF_MGR_WORLD);
+    if (!world) {
+        LogFirst("scripthook_entity.log",
+                 "entity: player manager %llX has no world at +%X",
+                 (unsigned long long)mgr, (unsigned)OFF_MGR_WORLD);
+        return 0;
+    }
+    lst = ShReadQ(world + OFF_WORLD_LIST);
+    if (!lst || !ShReadableAddr(world + OFF_WORLD_COUNT, 2)) {
+        LogFirst("scripthook_entity.log",
+                 "entity: world %llX has no entity list (%llX)",
+                 (unsigned long long)world, (unsigned long long)lst);
+        return 0;
+    }
     memcpy(&n, (void *)(uintptr_t)(world + OFF_WORLD_COUNT), 2);
-    if (!n || n > 4096) return 0;
+    if (!n || n > 4096) {
+        LogFirst("scripthook_entity.log",
+                 "entity: world %llX holds %u entities",
+                 (unsigned long long)world, (unsigned)n);
+        return 0;
+    }
     *outList = lst;
     *outCount = n;
+    /* The other half of the same line: on a session where the chain holds,
+     * this is what says how many entities it held, which is the number the
+     * next run's log gets compared against. */
+    LogFirst("scripthook_entity.log",
+             "entity: world list %llX holds %u entries",
+             (unsigned long long)lst, (unsigned)n);
     return 1;
 }
 
@@ -957,7 +990,7 @@ SH_API int ShFindEntities(int kind, float radius, uint32_t flags,
     }
     if (!ShGetPlayerPosition(&me)) return 0;
     if (radius <= 0.0f) radius = 1e9f;
-    vtEnt = ImgAddr(RVA_VT_ENTITY);
+    vtEnt = ShEntityVtable();
 
     for (i = 0; i < cnt && n < max; i++) {
         uint64_t e = ShReadQ(lst + (uint64_t)i * 8);

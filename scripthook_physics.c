@@ -8,11 +8,12 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 #include <math.h>
 
 /* Verified entry points, see GROUND_QUERY.md */
-#define RAY_HOOK_SITE   SH_IMG(0x169B7630)
-#define CAST_RAY_FN     SH_IMG(0xFBE88D0)
+#define RAY_HOOK_SITE   SH_IMG(0x163F18D0)
+#define CAST_RAY_FN     SH_IMG(0xFBB3580)
 
 /* The engine's own 0x4000 mask rejects every hit in this
  * world, so query permissively and filter by distance.
@@ -521,8 +522,28 @@ static int InstallHook(void) {
         0x41,0x5B, 0x41,0x5A, 0x41,0x59, 0x41,0x58, 0x5A, 0x59, 0x58
     };
 
+    /* The opening of the function, with no operand in it. Without this the
+     * site is patched blindly, and a stale one does not fail: it rewrites
+     * the first five bytes of whatever lives at the old address. That is a
+     * hook on the wrong function at best - the pump then runs when that
+     * function runs, if ever - and a live corruption at worst. */
+    static const uint8_t sig[20] = {
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10,
+        0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20
+    };
+    static int logInited;
+
+    if (!logInited) { logInited = 1; LogInit("scripthook_physics.log"); }
     if (g_stub) return 1;
-    if (!ShReadableAddr(fn, n)) return 0;
+    if (!ShReadableAddr(fn, (size_t)sizeof sig)) {
+        Log("ray hook: %llX is not readable", (unsigned long long)fn);
+        return 0;
+    }
+    if (memcmp((const void *)(uintptr_t)fn, sig, sizeof sig) != 0) {
+        Log("ray hook: %llX does not open like the pinned site - not patched "
+            "(the pump and every ray would never run)", (unsigned long long)fn);
+        return 0;
+    }
 
     s = (uint8_t *)ShAllocNear(fn);
     if (!s) return 0;
@@ -556,6 +577,9 @@ static int InstallHook(void) {
 
     g_stub = s;
     g_site = fn;
+    Log("ray hook: %llX hooked - the pump, the ground queries and every "
+        "queued engine call run from this callback",
+        (unsigned long long)fn);
     return 1;
 }
 

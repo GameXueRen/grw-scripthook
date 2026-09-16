@@ -439,6 +439,12 @@ SH_API int  ShGetVersion(void);
  *  the vehicle; the entity stays the soldier.
  */
 SH_API int  ShGetPlayer(ShPlayer *out);
+/** The live entity vtable. A game update moves it, and a stale value
+ *  makes every entity test silently answer no - so the framework learns
+ *  it from the player entity and this is where the rest of the code asks.
+ *  Before it is known the pinned constant is answered.
+ */
+SH_API uint64_t ShEntityVtable(void);
 /** The soldier's own position, from its matrix. Use this
  *  for anything placed in the world. */
 SH_API int  ShGetPlayerPosition(ShVec3 *out);
