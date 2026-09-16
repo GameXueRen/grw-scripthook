@@ -1,119 +1,167 @@
 # Old engine addresses, by the name the framework source uses.
 #
-# A constant that was re-pinned after the September update has its old
-# address from the commit before that; one that was never re-pinned still
-# carries its old address in the source. This list is the input to
+# This is the checklist for the next game patch. Every constant the framework
+# pins is here with the address it carried BEFORE the update it survived, so
+# the next update can be mapped the same way it was last time:
+#
 #   pwsh tools/grw-relocate.ps1 -Cmd batch -Pattern tools/rva-list.txt
-# which maps each one to the new build by .pdata neighbourhood and function
-# body bytes. Keep it up to date: it is the checklist for the next patch.
 #
-# data (a global, not code)      - needs a content anchor, not this tool
+# The tool reads the first hex token after each name, so that one is always
+# the OLD address; everything after it is a note for a human.
 #
-# Anchors that exist in more than one file are the ones to grep for by
-# value, not by name: RVA_PLAYER_MGR lived in api.c and entity.c, only one
-# of them was re-pinned, and the world entity list walked from the stale
-# copy - which no log said, it just made every entity search empty.
-SH_PLAYER_MGR       4BB64B8   (also entity.c RVA_PLAYER_MGR, spawn uses the API)
-SH_PLAYER_GLOBAL    4BC33E0
-SH_SLOT_INDEX       4D84F18   (also state.c SH_INPUT_ROOT)
-GAMEFLOW_HOLDER     4B879F8
-SH_VT_ENTITY        39C6DF8   (learned live; see ShEntityVtable)
-# function                       - the tool answers directly
-# interior (a site inside a body) - the tool says "not a body start"
+# Read the answer by the kind of entry:
+#
+#   function  a .pdata body: the tool answers with an address and a body
+#             match percentage. 90%+ with a single candidate is a pin.
+#   interior  a site INSIDE a body (a byte pattern the running code matches,
+#             like the blur and fov sites). The tool can only say "near X".
+#             Pin those by comparing the bytes around the site, not by
+#             trusting its number.
+#   thunk     a bare E9 jmp: -Cmd thunk or -Cmd jumps answers, not batch.
+#   data      a global. The tool CANNOT answer ("neighbourhood only" is
+#             noise, and several unrelated slots all report the same one).
+#             Two methods do work:
+#               * decode the engine's own call sites: a mov rcx,[rip+disp32]
+#                 right before the call gives (next insn + disp32). Two
+#                 independent call sites must agree, and decoding the OLD
+#                 build the same way must give the old value in this list.
+#                 That cross-check is what makes it trustworthy.
+#               * compare structure across builds when the engine reads the
+#                 data rather than calling code: a vtable's entries in order,
+#                 or a descriptor's tail bytes.
+#
+# The "how" column is the point of this file, and so is saying when there is
+# none. A constant that was never confirmed in game says so: that is the most
+# useful line here, because it is the one that breaks silently next time.
+#
+# The rule this file exists for: a stale constant does not fail loudly. It
+# calls the wrong code or reads the wrong slot, and the symptom surfaces in a
+# plugin nobody connects to it. RVA_PLAYER_MGR lived in api.c and entity.c,
+# only one copy was re-pinned, and every entity search went silently empty.
+# Anchors that exist in more than one file are the ones to grep for by value,
+# not by name.
 
-# --- functions and thunks ------------------------------------------------
-# the spawn path itself (never re-pinned: these are called, so a stale one
-# does not fail loudly, it calls the wrong code)
-RVA_MGR_GETTER      990BAB0
-RVA_SPAWN           990B0B0
-RVA_COMMIT          990CA70
-RVA_KIND            83B1390
-RVA_POOL_FIND       DF4EE30
-RVA_SPEC_OF         A604700
-RVA_RETIRE          921A2F0
-SH_SET_TRANSFORM    C6BDE10
-BLUR_MATCH          14E7625C
-CAM_THUNK           13781B0
-CAM_IMPL            D7C0610
-FOV_SITE            7E889A2
-BONE_LOOKUP         B435680
-SH_APPLY_DAMAGE     27CBEA0
-SH_GET_COMPONENT    C5D2BE0
-HIT_ORIG_CALL       29B4970
-CAST_RAY_FN         FBE88D0
-VIS_SITE            14393508
-OBJ_FACTORY         E0E0C70
-HK_ALLOC_BODY       16990140
-HIT_SITE            14D387E3
-RAY_HOOK_SITE       163F18D0
-FLOW_METHODS        483B650
-RES_GLOBAL          4B98DF0
-SKILL_GLOBAL        4B98F10
-VALOFF_TBL          3AA1D79
-SH_HEALTH_DESC      499FCB0
-WX_RECORD           4495E90
-CTW_OP_DESC         49E2AF0
-CTW_DATA_DESC       49E2A50
-CTW_START           2827B50
-G_POOL              4D78D00
-G_DEVICE            4D5B058
-G_UIMGR             4D58560
+# --- functions, thunks and interior sites ---------------------------------
+# pinned for the 2026-09 build: old -> new
 
-# --- the native UI and scene calls (OpticalCamo reads UI text) -----------
-F_ALLOC_CTX         E064390
-F_ALLOC             60ACBF0
-F_CONT_CTOR         32F5E70
-F_ATTACH            32F4D00
-F_DIRTY             17408BA0
-F_LINST_CTOR        336F0B0
-F_LABEL_CREATE      336F7F0
-F_LABEL_APPLY       336F7B0
-F_LABEL_TEXT        3336E30
-F_LABEL_SIZE        3336EE0
-F_LABEL_UPDATE      17490300
-F_LABEL_REGIST      33359F0
-F_IINST_CTOR        336E7F0
-F_IMAGE_CREATE      336EC80
-F_IMAGE_APPLY       336EC30
-F_WIDGET_COLOUR     32F3DD0
-F_LABEL_FIXW        33366A0
-F_LABEL_FIXH        3337140
-F_TEX_CTOR          DC4D920
-F_TEX_CREATE        DCC7280
-F_TEX_MAP           DC79B00
-F_TEX_PUSH          14FEEB0
-F_IMG_UV0           32FDDD0
-F_IMG_UV1           32FDF70
-F_SCENE_CTOR        32EEC50
-F_SCENE_DTOR        32EECD0
-F_SCENE_TICK        173FA610
-F_SCENE_FLIP        173FA280
-F_SCENE_RENDER      173F8C60
-F_SCENE_RESIZE      173F8400
-F_SCENE_SETCTX      173F9930
-F_SCENE_SETRES      173F9160
-F_FREE              F93CA90
-F_LOCK              36206D0
-F_UNLOCK            3287730
-RENDER_THUNK        32EEFB0
+RVA_MGR_GETTER      916DC40   -> 990BAB0    bodies identical (mov rax,[rip+..];ret)
+RVA_SPAWN           916D5E0   -> 990B0B0    body 91%
+RVA_COMMIT          916E590   -> 990CA70    body 96%
+RVA_KIND            83B1390   -> 89372E0    32 bytes identical; live (catalogue 527)
+RVA_POOL_FIND       DF4EE30   -> E2E0780    body 100%
+RVA_SPEC_OF         A604700   -> A9C3F80    body 81%, single candidate; live (undo)
+RVA_RETIRE          921A2F0   -> 99FDBB0    only .pdata candidate (80%); live (undo)
+RVA_COLLECT         C41D6C0   -> C1F5BA0    identical bar one call operand; live
+RVA_SET_CATEGORY    A62A8A0   -> A9E51B0    setter body unique in both builds
+RVA_SET_174         A62B3B0   -> A9E63B0    mov [rcx+174],edx;ret unique in both
+RVA_POP_REGISTER    85B7240   -> 8AE8EA0    32 bytes identical; live
+SH_SET_TRANSFORM    C6BDE10   -> C46B7B0    body 85%
+CAM_THUNK           13781B0   -> 13796D0    thunk; live (firstperson)
+CAM_IMPL            D7C0610   -> D67FFA0    body 100%
+OBJ_FACTORY         E0E0C70   -> E536F10    body 90%; live (time and weather)
+CAST_RAY_FN         FBE88D0   -> FBB3580    body 100%; live (ground probe)
+HK_ALLOC_BODY       16990140  -> 163CA8C0   body 100%; never exercised in game
+BLUR_MATCH          14E7625C  -> 1485806C   interior; live (blur site matched)
+VIS_SITE            14393508  -> 13BEAC48   interior; bytes confirmed, not used yet
+FOV_SITE            7E889A2   -> 81E0C22    interior; bytes confirmed, not used yet
+FLOW_METHODS        483B650   -> 483B920    matched off the engine call sites; live (ok)
 
-# --- vtables (compare only; see the notes in the tool) -------------------
-SPEC_VTABLE         394A1E0
-NPC_SPEC_VTABLE     394A660
-VT_ENTITY           39C6FC8
-SKEL_VT             3ACBBD8
-CTRL_VT             3BCB3B8
-ENV_VTABLE          39D20B8
-HYBRID_VTABLE       3B5ADD8
-VT_GAME_RESOLVER    3A05AA0
-VT_LABEL            3CF89D0
-VT_CONTAINER        3CF09C0
-VT_CONT_PRIV        3CF09F8
-VT_IMAGE            3CF1660
-VT_LABEL_INST       3D052C8
-VT_IMAGE_INST       3D04EA0
-RB_VT_BASE          3AD55D8
-RB_VT_VEHICLE       3AD7020
-RB_VT_C             39E7620
-RB_VT_D             38C88B0
-RB_VT_E             39979C8
+# pinned for the 2026-09 build, the whole UI and scene block (body 84-100%)
+F_ALLOC_CTX         E064390   -> E4094B0
+F_ALLOC             60ACBF0   -> 674F1A0
+F_CONT_CTOR         32F5E70   -> 32F5310
+F_DIRTY             17408BA0  -> 16BAFD60
+F_LINST_CTOR        336F0B0   -> 336E440
+F_LABEL_CREATE      336F7F0   -> 336EB60
+F_LABEL_UPDATE      17490300  -> 16C30910
+F_LABEL_REGIST      33359F0   -> 3334E20
+F_IINST_CTOR        336E7F0   -> 336DB60
+F_IMAGE_CREATE      336EC80   -> 336E010
+F_LABEL_FIXW        33366A0   -> 3335AD0
+F_LABEL_FIXH        3337140   -> 3336570
+F_TEX_CTOR          DC4D920   -> DF5C480
+F_TEX_CREATE        DCC7280   -> E04F670
+F_TEX_MAP           DC79B00   -> DF7FEB0
+F_SCENE_CTOR        32EEC50   -> 32EE140
+F_SCENE_DTOR        32EECD0   -> 32EE1C0
+F_SCENE_TICK        173FA610  -> 16B9A730
+F_SCENE_FLIP        173FA280  -> 16B99DC0
+F_SCENE_RENDER      173F8C60  -> 16B9B8C0
+F_SCENE_RESIZE      173F8400  -> 16B99570
+
+# --- still on the old build: candidates are from the tool, verify by bytes -
+# These were NOT re-pinned. The UI and menu paths work in game, so the ones
+# on that hot path are fine in practice; the rest are only exercised by
+# features nobody has used since the update. Verify before relying on them.
+
+F_SCENE_SETCTX      173F9930  -> 16B96E30   tool; siblings were re-pinned, this one was not
+F_SCENE_SETRES      173F9160  -> 16B96E30   tool (same answer as SETCTX, so one is wrong)
+F_TEX_PUSH          14FEEB0   -> 14E7FB0    tool (body 70%); never exercised
+F_FREE              F93CA90   -> FA4E730    tool (body 21% - suspect); never exercised
+F_LOCK              36206D0   -> 361F720    tool; never exercised
+F_UNLOCK            3287730                 tool: no body match at all
+F_ATTACH            32F4D00                 unchanged since the old build; interior
+F_LABEL_APPLY       336F7B0                 unchanged since the old build; interior
+F_LABEL_TEXT        3336E30                 unchanged since the old build; interior
+F_LABEL_SIZE        3336EE0                 unchanged since the old build; interior
+F_IMAGE_APPLY       336EC30                 unchanged since the old build; interior
+F_WIDGET_COLOUR     32F3DD0                 unchanged since the old build; interior
+F_IMG_UV0           32FDDD0                 unchanged since the old build; interior
+F_IMG_UV1           32FDF70                 unchanged since the old build; interior
+RENDER_THUNK        32EEFB0                 unchanged since the old build; thunk
+BONE_LOOKUP         B435680                 tool says B505BB0, source has B506270 - verify
+SH_APPLY_DAMAGE     27CBEA0   -> 261D1A0    tool says 27CA7F0 - far from the source, verify
+HIT_ORIG_CALL       29B4970                 tool: no body match; never exercised
+HIT_SITE            14D387E3                NEVER RE-PINNED - tool suggests ~14703EFF
+RAY_HOOK_SITE       163F18D0                unchanged, yet the ground query works in game
+
+# --- data: a global, not code --------------------------------------------
+# old -> new, and how it was pinned. "unverified" means exactly that.
+
+SH_PLAYER_MGR       4BB64B8   -> 4BC33C8    +0x90 with its neighbours (api.c; entity.c uses the API)
+SH_PLAYER_GLOBAL    4BC33E0   -> 4BC3470    +0x90; live (player reads work)
+SH_SLOT_INDEX       4D84F18                also state.c SH_INPUT_ROOT; live (keys and cursor)
+GAMEFLOW_HOLDER     4B879F8                unchanged; live (game state reads work)
+RES_GLOBAL          4B98DF0   -> 4B98E80    sweep; unverified
+SKILL_GLOBAL        4B98F10   -> 4B98FA0    sweep; unverified
+VALOFF_TBL          3AA1D79   -> 3AA1D09    sweep; unverified
+SH_HEALTH_DESC      499FCB0                name not in the sources - tidy or drop
+WX_RECORD           4495E90   -> 4495EB0    byte-for-byte 0xC0; live (weather)
+CTW_OP_DESC         49E2AF0   -> 49E2B70    fingerprint unique; live (time)
+CTW_DATA_DESC       49E2A50   -> 49E2AD0    fingerprint unique; live (time)
+CTW_START           2827B50   -> 13D122D0   was a jmp thunk; live (time)
+G_POOL              4D78D00                unchanged; live (scene objects work)
+G_DEVICE            4D5B058                unchanged; live (rendering works)
+G_UIMGR             4D58560                unchanged; live (menus work)
+SH_GET_COMPONENT    C5D2BE0   -> C3900C0    body 100%; name not in the sources - tidy
+RVA_REGISTRY        4BC17F8   -> 4BC1878    decoded off two engine call sites; live (527)
+RVA_ARCH_DESC       42C2560   -> 42C2570    shared id and 16 tail bytes identical; live
+RVA_POOL            4D89000                never verified; the spawn path no longer uses it
+RVA_POPMGR          4B98F18                wrong even before the update - retired
+RVA_CONTEXT         4B90208                unverified; reads a pointer, tolerated when zero
+RVA_NULL_BLOCK      4D88FE8                unverified; only a comparison
+# the population manager is looked up at run time instead, from the three
+# slots the engine itself passes to its register function:
+#   4BACFA8 / 4B957A8 / 4B99BA8, each taken only after a shape check
+#   (all three now read empty in the campaign, so registration is skipped)
+
+# --- vtables (compare entries in order; see the notes above) --------------
+SPEC_VTABLE         394A1E0   -> 394A060    learned live, then confirmed by entry shift
+NPC_SPEC_VTABLE     394A660   -> 394A4E0    entries match the sibling table's shift; live
+VT_ENTITY           39C6FC8                learned live, see ShEntityVtable
+SKEL_VT             3ACBBD8   -> 3ACBB58    entries in order; live (head hidden)
+CTRL_VT             3BCB3B8                unchanged; unverified, no symptom
+ENV_VTABLE          39D20B8   -> 39D1F78    learned live, then confirmed by entry shape
+HYBRID_VTABLE       3B5ADD8   -> 3B5AC88    sweep; unverified (dev plugins only)
+VT_GAME_RESOLVER    3A05AA0                unchanged; live (UI resolves class names)
+VT_LABEL            3CF89D0                unchanged; live (menu text draws)
+VT_CONTAINER        3CF09C0                unchanged; live (menus lay out)
+VT_CONT_PRIV        3CF09F8                unchanged; live
+VT_IMAGE            3CF1660                unchanged; live
+VT_LABEL_INST       3D052C8                unchanged; live
+VT_IMAGE_INST       3D04EA0                unchanged; live
+RB_VT_BASE          3AD55D8                unchanged; unverified (havok plugins only)
+RB_VT_VEHICLE       3AD7020                unchanged; unverified
+RB_VT_C             39E7620                unchanged; unverified
+RB_VT_D             38C88B0                unchanged; unverified
+RB_VT_E             39979C8                unchanged; unverified
