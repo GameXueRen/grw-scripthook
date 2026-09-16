@@ -633,6 +633,7 @@ static void ForgeWaitAfter(ShFileCall *c, void *user) {
 
     if (_stricmp(c->api, "CloseHandle") == 0) {
         unsigned slot = SlotOf(c->handle);
+        int i;
 
         if (g_cacheH[slot] == c->handle) {
             g_cacheH[slot] = NULL;
@@ -641,6 +642,20 @@ static void ForgeWaitAfter(ShFileCall *c, void *user) {
         if (g_pathH[slot] == c->handle) {
             g_pathH[slot] = NULL;
             g_pathP[slot][0] = 0;
+        }
+        /* The pending ledger has to forget it as well. A read that is still
+         * in flight when its handle closes - the engine cancelling I/O -
+         * leaves an entry naming an OVERLAPPED the caller may already have
+         * freed, and PendingSweep dereferences exactly that pointer. Losing
+         * the entry costs a patch that no longer has a reader. */
+        if (g_lockReady) {
+            EnterCriticalSection(&g_lock);
+            for (i = 0; i < PENDING_MAX; i++)
+                if (g_pending[i].ov != NULL && g_pending[i].h == c->handle) {
+                    g_pending[i].ov = NULL;
+                    InterlockedDecrement(&g_pendingCount);
+                }
+            LeaveCriticalSection(&g_lock);
         }
         return;
     }
