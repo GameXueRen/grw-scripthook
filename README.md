@@ -1,4 +1,4 @@
-# GRW ScriptHook 魔改版（Beta1.0）
+# GRW ScriptHook 魔改版（1.0.0-beta1）
 
 《幽灵行动：荒野》（Ghost Recon Wildlands）的
 ScriptHookV 同类框架。以 `dinput8.dll` 代理形式随游戏加载，暴露
@@ -112,6 +112,61 @@ Tom Clancy's Ghost Recon Wildlands/
 ├── mods/              Forge Mod Loader 的 mod 目录（可选，见下）
 └── plugins/           插件目录（每个插件一个子文件夹）
 ```
+
+---
+
+## 版本与日志策略
+
+- 版本串在 `scripthook.h` 的 `SH_VERSION` **单点定义**，启动时写进 `logs\scripthook.log`
+  第一行，崩溃报告头部也带同一串 —— 反馈问题时不必再问「装的是哪一版」。
+- **公测版（`-Beta`）保留全量诊断日志**：`logs\` 下会生成各模块的日志文件，每次启动重建
+  （覆盖上一次）。报告问题时请连同 `logs\` 一起提供。
+- 唯一例外是 `logs\scripthook_crash.log`：它**跨会话追加**，所以带大小上限（512 KB），
+  超过后自动开新文件并在开头留一行说明，不会在玩家磁盘上无限增长。
+- 正式发布版用 `-Release` 构建：`SH_RELEASE` 会把模块日志收敛到 `scripthook.log` 与
+  `scripthook_crash.log` 两个文件。
+
+---
+
+## 卸载
+
+1. 关闭游戏。
+2. 删除游戏根目录下的 `dinput8.dll`、`scripthook.ini` 与 `plugins\` 目录。
+3. 以下目录按需处理：
+   - `logs\` —— 运行日志，可直接删除；
+   - `mods\` —— Forge Mod Loader 的 mod，属于你自己的内容，与框架无关；
+   - `plugins_off\<时间戳>\` —— 只有跑过 `-Beta` / `-Release` 构建才会有，里面是被移出
+     公测集的插件（**是移走不是删除**），确认不需要后整目录删除即可。
+4. 删完即可正常启动游戏，行为与未装本框架时一致。
+
+> 特别注意：`GhostNoWipe` 会拦截魅影档的删除。若装过它，请**先在其菜单或
+> `plugins\GhostNoWipe\GhostNoWipe.ini` 里关闭开关**，再删除插件目录。
+
+---
+
+## 回滚到上一版
+
+构建脚本支持覆盖前备份，**默认关闭**：
+
+```powershell
+pwsh ./build_msvc.ps1 -Beta -BackupDir 'F:\GRW-backup'
+```
+
+它会把当前的 `dinput8.dll`、`scripthook.ini` 与 `plugins\` 复制到
+`<BackupDir>\<yyMMdd_HHmmss>\`。回滚时把该目录里的内容拷回游戏根目录覆盖即可。
+未指定 `-BackupDir` 时不会备份，**升级前请自行保留一份上一版**。
+
+---
+
+## 打包公测版
+
+```powershell
+pwsh ./tools/package-beta.ps1 -Zip
+```
+
+只按**白名单**取件（`dinput8.dll`、`scripthook.ini`、`lang.example.ini`、`plugins\` 下公测
+8 个插件、`LICENSE` 与自动生成的 `THIRD-PARTY-NOTICES.txt`），其余一律跳过并列出 ——
+游戏目录里还有 `plugins_off\`、`logs\`、`mods\` 这些**绝不能进包**的东西。
 
 ---
 
