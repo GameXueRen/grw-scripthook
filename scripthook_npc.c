@@ -61,16 +61,24 @@
  * shows through MGR_GETTER. ARCH_DESC keeps the shape it has in the old
  * build (its +0x20 tail is byte for byte the same) at +0x10.
  *
- * POOL / POPMGR / CONTEXT / NULL_BLOCK have no anchor in the image to
- * decode, and each is now either unused or reached only through a shape
- * check: the spawn path no longer needs the pool (the catalogue already
- * hands back each archetype's own block) or the pinned POPMGR slot (the
- * population manager comes from the engine's own three call sites, and is
- * used only if it looks like an engine object). It was the stale POPMGR
- * that crashed the game. */
+ * POOL / CONTEXT / NULL_BLOCK have no anchor in the image to decode, and
+ * each is now either unused or read only. The population manager does have
+ * one: it is the argument of the register call, which the engine loads from
+ * a slot at five separate sites - four of them agree on it, and that is what
+ * POP_MGR below is. It is still taken only if it looks like an engine
+ * object, because that call has crashed the game twice. */
 #define RVA_POOL         0x4D89000
-#define RVA_POPMGR       0x4B98F18
-#define RVA_CONTEXT      0x4B90208
+/* The population manager, decoded off the engine's own register calls rather
+ * than guessed - see PopManager(). */
+#define RVA_POP_MGR      0x4B98FA8
+/* Retired: 4B98F98 was pinned as "the context the spawn takes camp and job
+ * from" off the one site in the image that reads +0x1B4 and +0x1B8 out of a
+ * loaded slot. The pin is probably right and the meaning was wrong: the two
+ * values that slot holds in the campaign are float bit patterns (0.4f and
+ * 5.0f). Writing them into the spec's +0x2D0 - a 64 bit pointer field the
+ * engine fills itself - is what crashed the game. Nothing reads it now; the
+ * address is kept so the next round does not re-derive it. */
+#define RVA_CONTEXT      0x4B98F98
 #define RVA_REGISTRY     0x4BC1878
 #define RVA_ARCH_DESC    0x42C2570
 #define RVA_NULL_BLOCK   0x4D88FE8
@@ -246,34 +254,63 @@ static uint64_t ArchetypeBlock(uint64_t id) {
     return 0;
 }
 
-/* The population manager, for the one call the framework has to make with
- * an argument of its own: the engine's three call sites to the register
- * function each load it from a different global. Decoding those three
- * (each is a mov rcx,[rip+disp32] right before the call) gives the slots
- * below; which of them belongs to the mode in play is not knowable from
- * outside, so each is taken only if it looks like an engine object - a
- * readable pointer whose first word is a vtable in the image - and the one
- * that answers is the one used.
+/* The population manager, for the one call the framework has to make with an
+ * argument of its own.
  *
- * This is the call that crashed the game: a stale slot produced a pointer
- * that was not a manager, and the register function wrote through it. */
-static const uint64_t g_popSlots[3] = { 0x4BACFA8, 0x4B957A8, 0x4B99BA8 };
-
+ * It is decoded, not guessed. The engine calls the register function from
+ * five places and every one of them loads the argument from a global right
+ * before the call:
+ *
+ *   48 8B 0D <disp32>   mov rcx,[rip+disp32]    the manager slot
+ *   48 89 C2            mov rdx,rax             the spec
+ *   E8 <rel32>          call register
+ *
+ * Decoding that disp32 at each of the five sites in the current build:
+ *
+ *   775B74D -> 4B98FA8    9202385 -> 4B98FA8    9EAB00D -> 4B98FA8
+ *   13053BBB -> 4B98FA8   718E325 -> 4B9A7A8   (same block, another mode)
+ *
+ * Four independent sites agree, which no lookalike can do, so that is the
+ * slot - and it is 0x10 past the retired context slot above, in the same
+ * block, which is where the whole family sits.
+ *
+ * The five values that used to sit here came from an earlier decode and not
+ * one of them was the manager: in the campaign the slot in play read empty,
+ * so the registration was skipped on every spawn and the completion line
+ * said NOT registered each time.
+ *
+ * This is the call that has crashed the game twice - once with a stale slot
+ * from before the decode, once after the check below had been relaxed to
+ * "readable" on the belief that a slot the engine fills must hold a manager.
+ * Readable is not the same as correct; the vtable test is what does the
+ * work, and it stays. */
 static uint64_t PopManager(void) {
-    size_t i;
+    uint64_t p = ShReadQ(ImgAddr(RVA_POP_MGR));
 
-    for (i = 0; i < 3; i++) {
-        uint64_t p = ShReadQ(ImgAddr(g_popSlots[i]));
+    /* An engine object: readable, and its first word is a vtable in the
+     * image. */
+    if (p && ShReadableAddr(p, 0x40) && ShInImage(ShReadQ(p)))
+        return p;                     /* logged by the caller, with the spec */
 
-        if (p && ShReadableAddr(p, 0x40) && ShInImage(ShReadQ(p)))
-            return p;                 /* logged by the caller, with the spec */
+    /* Worth a line, because the two ways this fails lead opposite ways: an
+     * empty slot says the address above is wrong and has to move, while a
+     * slot holding something that is not an engine object says the address
+     * is right and the cast is wrong. Once per session. */
+    {
+        static volatile LONG said;
+
+        if (InterlockedExchange(&said, 1) == 0) {
+            if (!g_logFile) LogInit("scripthook_npc.log");
+            Log("npc: population slot %llX holds %llX, no manager there",
+                (unsigned long long)ImgAddr(RVA_POP_MGR),
+                (unsigned long long)p);
+        }
     }
     return 0;
 }
 
 static void SpawnOnGameThread(uint64_t id, const void *mtx) {
-    uint64_t mgr, arch, archBlk, csBlk, cs, spec, old, ctx, pop;
-    uint32_t camp = 0xFFFFFFFFu, job = 0xFFFFFFFFu;
+    uint64_t mgr, arch, archBlk, csBlk, cs, spec, old, pop;
 
     g_pendErr = SH_ERR_NO_CANDIDATE;
     archBlk = ArchetypeBlock(id);
@@ -315,14 +352,21 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
 
     ((SetI_t)ImgAddr(RVA_SET_174))(spec, 0);
 
-    ctx = ShReadQ(ImgAddr(RVA_CONTEXT));
-    if (ctx && ShReadableAddr(ctx + 0x1B4, 8)) {
-        camp = *(volatile uint32_t *)(uintptr_t)(ctx + 0x1B4);
-        job  = *(volatile uint32_t *)(uintptr_t)(ctx + 0x1B8);
-    }
-    *(volatile uint32_t *)(uintptr_t)(spec + 0x2D0) = camp;
-    *(volatile uint32_t *)(uintptr_t)(spec + 0x2D4) = job;
-
+    /* The context is read for the log only, and deliberately not copied into
+     * the spec.
+     *
+     * Those two fields used to be written to spec+0x2D0 and +0x2D4 as two 32
+     * bit ids, on the reading that the context's camp and job belong there.
+     * The engine says otherwise: both places in the image that write those
+     * offsets store a 64 bit pointer - 48 89 91 D0 02 00 00, mov
+     * [rcx+0x2D0], rdx - so the spec was being handed two float bit patterns
+     * where it wanted a pointer, and the register function walked one of
+     * them into a fault. The engine fills those fields itself as the spawn
+     * settles, so they are left alone here.
+     *
+     * RVA_CONTEXT is not read here any more either: the values that slot
+     * holds in the campaign are float bit patterns, so the camp/job reading
+     * of those fields was wrong and the numbers were only noise. */
     pop = PopManager();
     if (pop) ((Reg_t)ImgAddr(RVA_POP_REGISTER))(pop, spec);
     else NpcWhy("no usable population manager; registration skipped", 0,
@@ -331,19 +375,17 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
     ((Commit_t)ImgAddr(RVA_COMMIT))(mgr, COMMIT_MODE, spec);
     g_pendSpec = spec;
     g_pendErr = 0;
-    /* The data slots this path reads, in one line. They cannot be checked
-     * offline - no rip-relative reference to them survives in the image to
-     * match - so a session is what says which slot still holds what. */
-    /* Written per spawn, not once: whether the population registration went
-     * through is the one thing this line has to say, and the catalogue line
-     * already holds the module's once-only flag. log.h keeps its handle per
+    /* Written per spawn, not once: which data slot answered, and whether the
+     * population registration went through, are what a session has to say -
+     * none of these slots can be checked offline. The catalogue line already
+     * holds the module's once-only flag, and log.h keeps its handle per
      * translation unit, so the file is opened only if the catalogue has not
-     * opened it already - reopening would truncate what was written. */
+     * opened it already (reopening would truncate what was written). */
     if (!g_logFile) LogInit("scripthook_npc.log");
-    Log("npc: spawn id %llX -> spec %llX (mgr %llX pop %llX ctx %llX, %s)",
+    Log("npc: spawn id %llX -> spec %llX (mgr %llX pop %llX), %s",
         (unsigned long long)id, (unsigned long long)spec,
         (unsigned long long)mgr, (unsigned long long)pop,
-        (unsigned long long)ctx, pop ? "registered" : "NOT registered");
+        pop ? "registered" : "NOT registered");
 }
 
 /* ---- despawn ---- */
