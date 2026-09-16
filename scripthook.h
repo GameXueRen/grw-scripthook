@@ -753,12 +753,14 @@ enum ShNpcFacing {
 #define SH_NPC_SPAWN_JOBS 4
 
 /** Lay a formation out, and only that: no engine call, no lane
- *  to the game thread. The centre goes `distance` metres from
- *  origin along yaw, every point is rotated by the same yaw, and
- *  z is origin's own (a batch is not ground probed, matching the
- *  original). Writes up to max points, and at most
- *  SH_NPC_SPAWN_MAX. Returns how many were written, 0 on a bad
- *  argument. yaw is radians, world axes, x east y north z up. */
+ *  to the game thread, and z is origin's own. The planning stays
+ *  pure on purpose - a caller that wants the points as they are
+ *  can have them - but ShNpcSpawnFormation does not spawn blind:
+ *  each point is put on the ground with ShGroundHeightFrom first,
+ *  so a batch stands on the terrain instead of at the player's own
+ *  height. Writes up to max points, and at most SH_NPC_SPAWN_MAX.
+ *  Returns how many were written, 0 on a bad argument. yaw is
+ *  radians, world axes, x east y north z up. */
 SH_API int ShNpcPlanFormation(int formation, int count, float distance,
                               const ShVec3 *origin, float yaw,
                               ShVec3 *out, int max);

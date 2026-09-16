@@ -80,6 +80,10 @@
 #define SPAWN_MODE       1
 #define NPC_CATEGORY     3
 #define NPC_MAX          1024
+/* How far above the probed surface a formation point is placed. Small on
+ * purpose: the NPC materialises and settles on its own, and all the lift
+ * has to do is keep the replacement from starting inside the ground. */
+#define NPC_GROUND_LIFT  0.5f
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
@@ -788,10 +792,31 @@ static int SpawnBatch(const ShNpcSpawnRequest *req, uint64_t *out,
     for (i = 0; i < n; i++) {
         uint64_t e;
         int st;
+        float gz;
 
         st = ShGetGameState();
         if (st == SH_STATE_LOADING || st == SH_STATE_RELOADING) break;
         if (cancel && *cancel) break;
+
+        /* Put the point on the ground first.
+         *
+         * The planner leaves z at the origin's own, mirroring the original
+         * plugin, and that is what buries NPCs: a formation is metres across,
+         * so on a slope its far points sit above or below the surface the
+         * player is standing on. The probe is the engine's own ray, hinted
+         * with the planned height so it finds the surface there - a bridge
+         * deck if the player is under one - and a sweep from altitude is
+         * tried when the hint misses, which is what a point over a drop
+         * needs. A point with no ground under it is not spawned: better a
+         * batch of four that stand than five with one under the terrain.
+         */
+        if (!ShGroundHeightFrom(pos[i].x, pos[i].y, pos[i].z, &gz) &&
+            !ShGroundHeight(pos[i].x, pos[i].y, &gz)) {
+            NpcWhy("no ground under a formation point; it was skipped",
+                   (uint64_t)(unsigned)i, (uint64_t)(unsigned)n);
+            continue;
+        }
+        pos[i].z = gz + NPC_GROUND_LIFT;
 
         e = ShSpawnNpc(req->id, &pos[i]);
         if (!e) continue;
