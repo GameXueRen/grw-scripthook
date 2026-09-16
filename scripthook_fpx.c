@@ -37,48 +37,48 @@
 
 /* call GRW.exe+188BA20: the capture site. This is where the
  * argument we reuse comes from. */
-#define S_ARGS      SH_IMG(0x9A51930)
-#define S_ARGS_FN   SH_IMG(0x188BA20)
+#define S_ARGS      SH_IMG(0xA074190)
+#define S_ARGS_FN   SH_IMG(0x188CE00)
 
 /* The menu counter at +0x56C, pushed from three places. The
  * table tracks it because a menu renders the body too, and a
  * hidden head in a menu is a headless loadout screen. */
-#define S_MENU1     SH_IMG(0x12710681)   /* inc [rdi+56C] */
-#define S_MENU2     SH_IMG(0x126FFCD5)   /* dec [rbx+56C] */
-#define S_MENU3     SH_IMG(0x126FC16C)   /* dec [rbx+56C] */
+#define S_MENU1     SH_IMG(0x120ADE51)   /* inc [rdi+56C] */
+#define S_MENU2     SH_IMG(0x1209EA35)   /* dec [rbx+56C] */
+#define S_MENU3     SH_IMG(0x1209C0CC)   /* dec [rbx+56C] */
 
 /* mov [rdi+181A],bl: 1 while the tactical drone flies. */
-#define S_DRONE     SH_IMG(0x1153DF45)
+#define S_DRONE     SH_IMG(0x113A0875)
 
 /* call GRW.exe+2A25600 on entering and leaving aim down
  * sight. The dl the engine passes is the ADS state. */
-#define S_ADS_OUT   SH_IMG(0x14E18C63)
-#define S_ADS_IN    SH_IMG(0x14E18C79)
+#define S_ADS_OUT   SH_IMG(0x147FF653)
+#define S_ADS_IN    SH_IMG(0x147FF669)
 
 /* call GRW.exe+2A183E0: carries the body position, which the
  * table keeps to vet the head reading against. */
-#define S_BODY      SH_IMG(0x14EB425A)
-#define S_BODY_FN   SH_IMG(0x2A183E0)
+#define S_BODY      SH_IMG(0x14897FBA)
+#define S_BODY_FN   SH_IMG(0x2A185A0)
 
 /* movzx eax,[rax+58] / add rsp,20: body visibility, taken so
  * the body can be told to stay visible. */
-#define S_VIS       SH_IMG(0x14EBAB15)
+#define S_VIS       SH_IMG(0x1489A365)
 
 /* jne: refuses a shoulder swap while aiming. Nopped so the
  * swap always answers. */
-#define S_SHOULDER  SH_IMG(0x140B101B)
+#define S_SHOULDER  SH_IMG(0x13A1255B)
 
 /* mov byte [r13+58],01: hides the body when it is pushed
  * against a wall. Nopped so the body stays. */
-#define S_WALL      SH_IMG(0x14F1EA9A)
+#define S_WALL      SH_IMG(0x149C3E7A)
 
 /* The two engine calls the whole thing rests on. */
-#define FN_HEAD     SH_IMG(0x188BA20)
-#define FN_VIS      SH_IMG(0x2A25600)
+#define FN_HEAD     SH_IMG(0x188CE00)
+#define FN_VIS      SH_IMG(0x2A257C0)
 
 /* Head of the chain that names the head for the visibility
  * call. Read once per attempt, not once per frame. */
-#define HEAD_ROOT   SH_IMG(0x4B905B8)
+#define HEAD_ROOT   SH_IMG(0x4B90638)
 
 /* How far the head reading may sit from the body before it is
  * treated as a stale transform. The table compares against
@@ -388,6 +388,14 @@ static int InstallArgs(void) {
             k += snprintf(hex + k, sizeof(hex) - k, " %02X", s[j]);
         Log("args stub@%03d:%s", i, hex);
     }
+
+    /* What the site calls, before trusting it. After a game update this is
+     * the check that fails, and the two addresses in the log say whether
+     * the site moved or the function it calls did. */
+    Log("args site: call -> %llX, want %llX %s",
+        (unsigned long long)SiteTarget(S_ARGS),
+        (unsigned long long)S_ARGS_FN,
+        SiteTarget(S_ARGS) == S_ARGS_FN ? "ok" : "MISMATCH");
 
     if (!PatchCall(S_ARGS, S_ARGS_FN, s)) return 0;
 
