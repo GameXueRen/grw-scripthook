@@ -362,6 +362,7 @@ static void LogInit(const char *name) {
 | 4.3-21 `ShBlockKey` 重扫 255 项 | `scripthook_input.c` | 改为计数维护；菜单开/关时连调 7 次不再各扫一遍 |
 | 4.3-19 `ShFindEntities` 半径 0 | `scripthook_entity.c` | **刻意不改行为**：把 0 收窄成有限半径会改变今天调用它的插件语义。改为就地说明代价与「近处请传半径」 |
 | 4.3-22 tick 时钟混用 | `scripthook_tick.c` | **审查后确认无需修改**：该模块整体是 32 位毫秒且用无符号差值比较，本身抗回绕；已写注释说明，避免被「顺手改成 64 位」破坏 |
+| 4.4-33 随包 ini 注释过时 | `plugins/TimeWeatherControl/TimeWeatherControl.ini` | 注释仍在描述**已删除的渐变混合**且只列两把速度键；改为四窗口说明并补齐 `dusk_speed`/`dawn_speed` |
 
 **刻意留作后续的三条**（都属于 UI/HUD 层的结构性改动，值得单独一轮并在游戏内验证，而不是顺手改）：
 
