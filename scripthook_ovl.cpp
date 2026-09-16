@@ -2133,14 +2133,32 @@ static bool InstallSwapChainHooks()
     wc.lpfnWndProc = DefWindowProcW;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = kClass;
+    /* Step by step, because this is the one part of start up that has to
+     * run while the game is doing the same thing. The field report of
+     * 2026-09-17 has a fresh install crashing 0.35 s after the window was
+     * found, and this function is everything that runs in between - a log
+     * that stops mid-way names the step that died, and the silent returns
+     * this used to have could not. */
+    OvlLog("overlay: probe device - d3d11=%llx dxgi=%llx ntdll=%llx",
+           (unsigned long long)(uintptr_t)GetModuleHandleA("d3d11.dll"),
+           (unsigned long long)(uintptr_t)GetModuleHandleA("dxgi.dll"),
+           (unsigned long long)(uintptr_t)GetModuleHandleA("ntdll.dll"));
     if (!RegisterClassExW(&wc))
         if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        {
+            OvlLog("overlay: RegisterClassExW failed (%lu)", GetLastError());
             return false;
+        }
 
     HWND dummy = CreateWindowExW(0, kClass, L"SHOvlDummy", WS_OVERLAPPED,
                                  0, 0, 64, 64, nullptr, nullptr, wc.hInstance, nullptr);
     if (!dummy)
+    {
+        OvlLog("overlay: CreateWindowExW failed (%lu)", GetLastError());
         return false;
+    }
+    OvlLog("overlay: probe window %llx, creating the device",
+           (unsigned long long)(uintptr_t)dummy);
 
     DXGI_SWAP_CHAIN_DESC sd = {};
     sd.BufferCount = 1;
@@ -2164,6 +2182,8 @@ static bool InstallSwapChainHooks()
             nullptr, 0, D3D11_SDK_VERSION, &sd, &swap, &dev, nullptr, &ctx);
     if (FAILED(hr) || !swap)
     {
+        OvlLog("overlay: D3D11CreateDeviceAndSwapChain failed (%08lX), no overlay",
+               (unsigned long)hr);
         if (swap) swap->Release();
         DestroyWindow(dummy);
         return false;
@@ -2244,6 +2264,12 @@ static HWND FindGameWindow()
 // ---------------------------------------------------------------------------
 // init thread
 // ---------------------------------------------------------------------------
+/* How long the game gets the machine to itself before the overlay creates
+ * its own D3D11 device. The window appearing means the game's renderer is
+ * starting up this instant, and on a fresh install that is the one moment
+ * the two device creations can race - see the note in InitThread. */
+static const DWORD kSettleMs = 2000;
+
 static DWORD WINAPI InitThread(LPVOID)
 {
     // Wait for a real render window. The game may show a small
@@ -2268,9 +2294,42 @@ static DWORD WINAPI InitThread(LPVOID)
     }
     if (g_hwnd)
     {
+        /* Let the game settle. The window has just appeared, which means
+         * the game's own renderer is creating its D3D11 device at this
+         * very moment - and a fresh install is exactly when that work is
+         * at its heaviest (no shader cache, first run of the config). Two
+         * device creations racing inside the driver is not a race this
+         * side can win, and the one reported crash happened 0.35 s after
+         * the line above. Nothing here is worth a crash to have sooner:
+         * the overlay only draws once Present is hooked, and two seconds
+         * of a game that is still loading is two seconds nobody sees. */
+        Sleep(kSettleMs);
+        OvlLog("init thread: settled %lu ms, installing the overlay",
+               (unsigned long)kSettleMs);
         g_origWndProc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC,
                                                    (LONG_PTR)SubWndProc);
-        InstallSwapChainHooks();
+        OvlLog("init thread: subclass %s (previous proc %llx)",
+               g_origWndProc ? "installed" : "NOT installed",
+               (unsigned long long)(uintptr_t)g_origWndProc);
+        /* Retried, because a refusal here is almost always the timing
+         * above rather than a permanent state: the device is not there
+         * yet, the driver is still busy. Three tries a second apart, and
+         * then a line that says the overlay is off rather than a silence
+         * that looks like a hang. */
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (InstallSwapChainHooks())
+                return 0;
+            OvlLog("overlay: hook install failed (attempt %d of 3), "
+                   "retrying in 1s", attempt + 1);
+            Sleep(1000);
+        }
+        OvlLog("overlay: disabled - the swap chain hooks could not be "
+               "installed; the game runs untouched and F4 does nothing");
+    }
+    else
+    {
+        OvlLog("overlay: no game window found in 60 tries, disabled");
     }
     return 0;
 }
