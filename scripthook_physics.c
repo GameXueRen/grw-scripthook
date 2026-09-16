@@ -26,6 +26,13 @@
 /* How long to wait for the hook to see a live cast. */
 #define CTX_WAIT_MS     3000
 
+/* How long one ground probe waits for the game thread to service it. Two
+ * frames is plenty: the callback runs inside the engine's own cast, so a
+ * probe that has not been picked up in half a second was never going to be
+ * (a caller on the game thread cannot be serviced at all, which is the case
+ * this bounds). */
+#define PROBE_WAIT_MS   500
+
 /* Hintless sweep, proven working at 1400 down 900. */
 #define SWEEP_TOP       1400.0f
 #define SWEEP_ABOVE     300.0f
@@ -48,6 +55,21 @@ static volatile LONG g_done = 0;
 static volatile int  g_busy = 0;
 static volatile float g_hitZ = 0.0f;
 static volatile int   g_hitOk = 0;
+
+/* Signalled by the ray callback on the game thread, waited on by whoever
+ * asked for a probe. The flags above stay the authority - this only decides
+ * how soon the waiter learns they changed, which polling cannot do well:
+ * Sleep(1) is a request the scheduler rounds up to its own tick, so the old
+ * 3000-count loop could block its caller for the better part of a minute
+ * rather than the three seconds it read as. */
+static HANDLE g_probeEv;
+static volatile LONG g_probeEvMade;
+
+static HANDLE ProbeEvent(void) {
+    if (!g_probeEv && InterlockedCompareExchange(&g_probeEvMade, 1, 0) == 0)
+        g_probeEv = CreateEventA(NULL, FALSE, FALSE, NULL);
+    return g_probeEv;
+}
 
 /* Written by the hook on the game thread and polled by
  * callers, so the compiler must reload them each spin.
@@ -453,6 +475,7 @@ static void FinishPrevious(void) {
 static void __attribute__((ms_abi))
 RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
     g_ctx = rcx;
+    if (g_probeEv) SetEvent(g_probeEv);
     FinishPrevious();
     RecordRay(rdx, r8);
 
@@ -506,6 +529,7 @@ RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
     }
     g_done = 1;
     g_busy = 0;
+    if (g_probeEv) SetEvent(g_probeEv);
 }
 
 static int InstallHook(void) {
@@ -587,7 +611,8 @@ static int InstallHook(void) {
  * shared by every plugin in the process.
  */
 static int EnsurePhysics(void) {
-    int spins = 0;
+    HANDLE ev;
+    ULONGLONG deadline;
 
     if (g_stub && WorldValid()) return 1;
     /* Stale after a level change, so resolve again. */
@@ -596,11 +621,15 @@ static int EnsurePhysics(void) {
     if (!InstallHook()) return ShFailPhys(SH_ERR_HOOK_FAILED);
 
     /* Wait for the hook to see one live cast, rather than
-     * handing the first caller a mystery failure.
-     */
-    while (!g_ctx && spins < CTX_WAIT_MS) {
-        Sleep(1);
-        spins++;
+     * handing the first caller a mystery failure. Through the event the
+     * callback signals, so it returns the moment a cast lands instead of
+     * paying a scheduler tick for it - and the deadline is what the old
+     * spin count only looked like. */
+    ev = ProbeEvent();
+    deadline = GetTickCount64() + CTX_WAIT_MS;
+    while (!g_ctx && GetTickCount64() < deadline) {
+        if (ev) WaitForSingleObject(ev, 1);
+        else Sleep(1);
     }
     if (!g_ctx) return ShFailPhys(SH_ERR_NO_PHYSICS);
 
@@ -681,7 +710,8 @@ static int InStreamRange(float x, float y) {
 /* Cast down from startZ for `span` metres. */
 static int ProbeDown(float x, float y, float startZ, float span,
                      float *outZ) {
-    int spins = 0;
+    HANDLE ev;
+    ULONGLONG deadline;
 
     g_org[0] = x; g_org[1] = y; g_org[2] = startZ; g_org[3] = 0.0f;
     g_dir[0] = 0.0f; g_dir[1] = 0.0f;
@@ -690,9 +720,11 @@ static int ProbeDown(float x, float y, float startZ, float span,
     g_hitOk = 0;
     g_done = 0;
     g_req = 1;
-    while (!g_done && spins < 3000) {
-        Sleep(1);
-        spins++;
+    ev = ProbeEvent();
+    deadline = GetTickCount64() + PROBE_WAIT_MS;
+    while (!g_done && GetTickCount64() < deadline) {
+        if (ev) WaitForSingleObject(ev, 1);
+        else Sleep(1);
     }
     if (!g_done || !g_hitOk) return 0;
     *outZ = g_hitZ;
