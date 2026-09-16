@@ -13,12 +13,13 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
 /* The projection selector. It takes the camera in RCX and
  * runs every frame, which is what makes it hookable.
  */
-#define CAM_THUNK   SH_IMG(0x13781B0)
-#define CAM_IMPL    SH_IMG(0xD7C0610)
+#define CAM_THUNK   SH_IMG(0x13796D0)
+#define CAM_IMPL    SH_IMG(0xD67FFA0)
 
 /* Verified live: +0x2B0 is vertical fov in radians, planes
  * beside it. +0x2BC is an ASPECT multiplier, which the
@@ -41,9 +42,9 @@
 /* The camera manager, one frame ahead of the camera build.
  * The behaviour's transform lands here first, so an override
  * placed here reaches culling and the matrices together. */
-#define MGR_SITE    SH_IMG(0x7E888FE)
+#define MGR_SITE    SH_IMG(0x81E0B7E)
 #define MGR_LEN     5
-#define MGR_NEXT    SH_IMG(0x10D8890)
+#define MGR_NEXT    SH_IMG(0x10D8E20)
 
 /* Verified live in gameplay: the mode at +0x6C reads 3, so
  * consumers take the position from +0x170 while the render
@@ -483,11 +484,31 @@ static int MgrInstall(void) {
     DWORD old;
 
     if (g_mgrHooked) return 1;
-    if (!ShReadableAddr(MGR_SITE, MGR_LEN)) return 0;
-    if (at[0] != 0xE8) return 0;
+    /* The failure that says nothing is the dangerous one: a manager site
+     * left over from an older build refuses the hook, the camera call
+     * then reports a success it does not have, and first person reads as
+     * a feature that simply does not work. Put the two addresses in the
+     * log instead - together they say which half moved. */
+    if (!ShReadableAddr(MGR_SITE, MGR_LEN)) {
+        Log("manager site: %llX is not readable - the eye has no frame",
+            (unsigned long long)MGR_SITE);
+        return 0;
+    }
+    if (at[0] != 0xE8) {
+        Log("manager site: %llX starts with %02X, not E8 - it moved",
+            (unsigned long long)MGR_SITE, (unsigned)at[0]);
+        return 0;
+    }
     if ((uint64_t)((int64_t)MGR_SITE + MGR_LEN
                    + *(int32_t *)(at + 1)) != MGR_NEXT)
+    {
+        Log("manager site: %llX calls %llX, not %llX - one of them moved",
+            (unsigned long long)MGR_SITE,
+            (unsigned long long)((int64_t)MGR_SITE + MGR_LEN
+                                 + *(int32_t *)(at + 1)),
+            (unsigned long long)MGR_NEXT);
         return 0;
+    }
     if (!BuildMgrStub()) return 0;
 
     rel = (int64_t)(uintptr_t)g_mgrStub - ((int64_t)MGR_SITE + 5);
@@ -498,6 +519,8 @@ static int MgrInstall(void) {
     VirtualProtect(at, MGR_LEN, old, &old);
     FlushInstructionCache(GetCurrentProcess(), at, MGR_LEN);
     g_mgrHooked = 1;
+    Log("manager site: %llX hooked, calls on to %llX",
+        (unsigned long long)MGR_SITE, (unsigned long long)MGR_NEXT);
     return 1;
 }
 
@@ -546,27 +569,50 @@ SH_API int ShCameraHookInstall(void) {
     uint8_t *t = (uint8_t *)(uintptr_t)CAM_THUNK;
     int64_t cur, rel;
     DWORD old;
+    static int logInited;
 
-    if (g_camStub) return 1;
+    if (!logInited) { logInited = 1; LogInit("scripthook_camera.log"); }
+
+    if (g_camStub) {
+        /* The thunk is ours; the manager site is the half a build we do
+         * not know can refuse, and once g_camStub is set every later call
+         * used to answer 1 regardless - a camera reported as working that
+         * never reaches the engine. Retry the site instead. */
+        if (!g_mgrHooked && !MgrInstall()) {
+            ShSetError(SH_ERR_HOOK_FAILED);
+            return 0;
+        }
+        return 1;
+    }
     if (!ShReadableAddr(CAM_THUNK, 5)) {
+        Log("camera thunk: %llX is not readable",
+            (unsigned long long)CAM_THUNK);
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
     }
     if (t[0] != 0xE9) {
+        Log("camera thunk: %llX starts with %02X, not E9 - it moved",
+            (unsigned long long)CAM_THUNK, (unsigned)t[0]);
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
     }
     cur = (int64_t)CAM_THUNK + 5 + *(int32_t *)(t + 1);
     if ((uint64_t)cur != CAM_IMPL) {
+        Log("camera thunk: %llX jmps to %llX, not %llX - one moved",
+            (unsigned long long)CAM_THUNK, (unsigned long long)cur,
+            (unsigned long long)CAM_IMPL);
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
     }
     if (!BuildStub()) {
+        Log("camera thunk: no stub near %llX",
+            (unsigned long long)CAM_THUNK);
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
     }
-
     if (!PatchThunk()) {
+        Log("camera thunk: the patch at %llX did not take",
+            (unsigned long long)CAM_THUNK);
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
     }
@@ -578,6 +624,9 @@ SH_API int ShCameraHookInstall(void) {
      * is a separate question: a build without them keeps the
      * placement it has always had. */
     ShFp2Install();
+    Log("camera: thunk %llX hooked (calls on to %llX), manager site %llX hooked",
+        (unsigned long long)CAM_THUNK, (unsigned long long)CAM_IMPL,
+        (unsigned long long)MGR_SITE);
     (void)rel;
     (void)old;
     ShSetError(SH_OK);
