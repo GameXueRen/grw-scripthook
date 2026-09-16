@@ -120,12 +120,19 @@ SH_API int ShLogPath(const char *name, char *buf, int size) {
 /** plugins\<name>\<name>.ini, the config file that belongs
  *  beside the plugin of the same name. */
 SH_API int ShPluginIniPath(const char *plugin, char *buf, int size) {
+    int n;
+
     if (!plugin || !buf || size <= 0) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
-    if (snprintf(buf, size, "%splugins\\%s\\%s.ini",
-                 GameDir(), plugin, plugin) < 0) {
+    /* A cut path is not a path. snprintf only reports failure with a
+     * negative return, so a long install directory used to hand back a
+     * truncated name, and the plugin silently read a file nobody had
+     * written. */
+    n = snprintf(buf, size, "%splugins\\%s\\%s.ini",
+                 GameDir(), plugin, plugin);
+    if (n < 0 || n >= size) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
@@ -136,12 +143,15 @@ SH_API int ShPluginIniPath(const char *plugin, char *buf, int size) {
 /** plugins\<name>\lang.ini, the text file beside the plugin. Read by
  *  the framework for that plugin's menus; see @ref lang. */
 SH_API int ShPluginLangPath(const char *plugin, char *buf, int size) {
+    int n;
+
     if (!plugin || !buf || size <= 0) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
-    if (snprintf(buf, size, "%splugins\\%s\\lang.ini",
-                 GameDir(), plugin) < 0) {
+    n = snprintf(buf, size, "%splugins\\%s\\lang.ini",
+                 GameDir(), plugin);
+    if (n < 0 || n >= size) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
@@ -217,19 +227,33 @@ static void WriteDefaultConfig(const char *path) {
  * # and ; comments, quoted values, trailing comments are
  * stripped only when separated by whitespace. */
 
+/* Declared up here because the parser reports a cut line through it. */
+static void TextLog(const char *fmt, ...);
+
 /* Advance over one physical line, NUL-terminating it in place.
  * Returns 0 at end of text. */
 static int NextLine(const char **p, char *line, size_t cap) {
     size_t i = 0;
     const char *q = *p;
+    int cut = 0;
 
     if (!*q) return 0;
-    while (*q && *q != '\n' && *q != '\r' && i < cap - 1)
-        line[i++] = *q++;
+    while (*q && *q != '\n' && *q != '\r') {
+        if (i < cap - 1) line[i++] = *q;
+        else cut = 1;               /* the rest of this line is dropped */
+        q++;
+    }
     line[i] = 0;
     if (*q == '\r') q++;
     if (*q == '\n') q++;
     *p = q;
+    /* The whole line is consumed even when it did not fit. Stopping at the
+     * buffer and leaving the pointer in the middle of the line turned the
+     * remainder into a line of its own, which the parser then read as a
+     * fresh key=value - a long comment or a long translation became a
+     * setting nobody wrote. */
+    if (cut)
+        TextLog("a line longer than %u chars was cut", (unsigned)cap);
     return 1;
 }
 
@@ -496,12 +520,19 @@ static int LangEq(const char *a, const char *b) {
     return *a == 0 && *b == 0;
 }
 
-/* A section name that names a language rather than a settings group:
- * a bare primary subtag ("en", "zh") or a tag with a region subtag
- * ("zh-CN", "en_US"). A longer bare word is a settings section -
- * "loader", "forgemod", "playmode" - and must never be read as a
- * language: that mistake drops the section's rows from the config, and
- * it is silent, so the rule stays narrow on purpose. */
+/* A section name that names a language rather than a settings group: a tag
+ * with a region or script subtag ("zh-CN", "en_US").
+ *
+ * A bare two or three letter name used to count as well - "en", "zh" - and
+ * that is how "[ui]", "[mod]", "[npc]" and every other short name a plugin
+ * is entitled to use had all of their rows dropped from the config without
+ * a word. A bare name is a settings section now. The cost is the other
+ * direction: a leftover "[zh]" block in scripthook.ini is read as settings
+ * instead of being dropped, and that is the harmless way to fail - a
+ * meaningless row costs nothing, a missing one costs a setting.
+ *
+ * A longer bare word is a settings section too ("loader", "forgemod",
+ * "playmode"), as it always was. */
 static int IsLangCodeLike(const char *sec) {
     const char *p = sec;
     int n = 0;
@@ -511,7 +542,7 @@ static int IsLangCodeLike(const char *sec) {
         p++;
         n++;
     }
-    if (!*p) return n >= 2 && n <= 3;       /* "en", "zh", not "loader" */
+    if (!*p) return 0;                      /* bare name: a settings section */
     if (n < 2 || n > 8) return 0;
     if (*p != '-' && *p != '_') return 0;
     p++;
@@ -950,13 +981,68 @@ static void LangMissOnce(const char *key) {
 
 /* ---- lookup ----------------------------------------------------- */
 
+/* ---- translation cache ------------------------------------------
+ *
+ * A menu is translated on every capture - every frame while it is open - and
+ * one lookup walks a row table and a baseline table of up to 2048 entries
+ * each, with a case-insensitive compare per entry, under the text lock. A
+ * page of twelve rows therefore costs a few hundred string compares per
+ * frame to produce an answer that only changes when the language does.
+ *
+ * The key is (owner, key), both copied so a caller's buffer going away
+ * cannot leave a dangling pointer behind; anything longer than LCA_KEY is
+ * looked up every time instead (a whole hint is a legal key). The value is
+ * the pointer the lookup returned, which stays valid until the tables are
+ * rebuilt - and the generation makes every entry from before a language
+ * switch unusable rather than merely unlikely to be read. All of it is
+ * touched under the text lock, the one ShLangText already holds. */
+#define LCA_SLOTS 256
+#define LCA_OWNER 48
+#define LCA_KEY   128
+
+typedef struct {
+    uint32_t    gen;
+    uint32_t    hash;
+    char        owner[LCA_OWNER];
+    char        key[LCA_KEY];
+    const char *text;
+} LangCache;
+
+static LangCache g_lc[LCA_SLOTS];
+static uint32_t  g_lcGen = 1;
+
+static uint32_t LcHash(const char *owner, const char *key) {
+    uint32_t h = 2166136261u;
+
+    for (; owner && *owner; owner++) h = (h ^ (unsigned char)*owner) * 16777619u;
+    h = (h ^ 0x7Cu) * 16777619u;
+    for (; key && *key; key++) h = (h ^ (unsigned char)*key) * 16777619u;
+    return h;
+}
+
 /** Translate one key for one owner (NULL or "" = framework text). */
 SH_API const char *ShLangText(const char *owner, const char *key) {
     const char *v = NULL;
+    LangCache *slot = NULL;
+    uint32_t h = 0;
+    int cacheable;
 
     if (!key) return "";
     LoadConfig();
     TextLock();
+    cacheable = (!owner || strlen(owner) < LCA_OWNER) &&
+                strlen(key) < LCA_KEY;
+    if (cacheable) {
+        h = LcHash(owner, key);
+        slot = &g_lc[h % LCA_SLOTS];
+        if (slot->gen == g_lcGen && slot->hash == h &&
+            strcmp(slot->owner, owner ? owner : "") == 0 &&
+            strcmp(slot->key, key) == 0) {
+            v = slot->text;
+            TextUnlock();
+            return v;
+        }
+    }
     if (EnsureRows()) {
         LoadLang(owner);
         v = RowFind(owner, key);
@@ -967,6 +1053,13 @@ SH_API const char *ShLangText(const char *owner, const char *key) {
     if (!v) {
         v = Readable(key);              /* never empty, never a failure */
         if (key[0] == '@') LangMissOnce(key);
+    }
+    if (cacheable) {
+        slot->gen = g_lcGen;
+        slot->hash = h;
+        CopyN(slot->owner, sizeof(slot->owner), owner ? owner : "");
+        CopyN(slot->key, sizeof(slot->key), key);
+        slot->text = v;
     }
     TextUnlock();
     return v;
@@ -1015,6 +1108,8 @@ SH_API int ShLangSet(const char *code) {
     g_fwLoaded = 0;
     g_nDisp = 0;                /* [LanguageNames] is a file's to give */
     g_rowsDropped = 0;
+    /* Every remembered translation belongs to the language being left. */
+    g_lcGen++;
     TextUnlock();
 
     ShMenuStatusResetAll();
@@ -1831,6 +1926,16 @@ static void LoadConfig(void) {
          * ShConfigGet* / ShLang call re-read the file and appended the
          * same rows to the entry table again. */
         g_configReady = 1;
+    } else {
+        /* No file, and no second one either: a read-only folder, or the
+         * file held open by something else. The flag goes up anyway, because
+         * leaving it down meant every later ShConfigGet* ran this function
+         * again - and each attempt wrote the default file first
+         * (WriteDefaultConfig opens with "w"), so a session that could not
+         * read its configuration also rewrote it on every query. The
+         * defaults hold until the next launch. */
+        TextLog("scripthook.ini unreadable: defaults for this session");
+        g_configReady = 1;
     }
     LeaveCriticalSection(&g_cfgLock);
 }
@@ -1878,7 +1983,10 @@ SH_API int ShConfigGetInt(const char *section, const char *key,
         ShSetError(SH_OK);
         return def;
     }
-    r = strtol(v, &end, 0);
+    /* Base 10, not 0: a value written with a leading zero - "cpu_cores=08",
+     * which is what a hand-edited file grows - was read as octal, stopped at
+     * the 8 and came back 0. The setting looked applied and was not. */
+    r = strtol(v, &end, 10);
     if (end == v) { ShSetError(SH_OK); return def; }
     ShSetError(SH_OK);
     return (int)r;
@@ -1953,7 +2061,19 @@ static void SetEntry(const char *section, const char *key,
             return;
         }
     }
-    if (g_nentries >= ENTRIES_MAX) return;
+    if (g_nentries >= ENTRIES_MAX) {
+        /* The value is on disk by now, so this session would keep reading
+         * the old one back while the file says otherwise. Say so once
+         * instead of letting the two disagree in silence. */
+        static int said;
+
+        if (!said) {
+            said = 1;
+            TextLog("config table full at %d entries: '%s' is on disk but "
+                    "not in memory", ENTRIES_MAX, key);
+        }
+        return;
+    }
     e = &g_entries[g_nentries++];
     strncpy(e->section, section, sizeof(e->section) - 1);
     e->section[sizeof(e->section) - 1] = 0;
@@ -1965,8 +2085,9 @@ static void SetEntry(const char *section, const char *key,
 
 /* Path of the main scripthook.ini. */
 static int IniPath(char *buf, int size) {
-    if (snprintf(buf, size, "%sscripthook.ini", GameDir()) < 0)
-        return 0;
+    int n = snprintf(buf, size, "%sscripthook.ini", GameDir());
+
+    if (n < 0 || n >= size) return 0;
     return 1;
 }
 
