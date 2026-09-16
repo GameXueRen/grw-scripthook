@@ -170,32 +170,47 @@ static int IsEntity(uint64_t e) {
 
 typedef struct { uint64_t ent; uint32_t id; } ShPair;
 
-static ShPair   g_map[MAP_MAX];
+static ShPair   g_map[MAP_MAX];     /* published: read under the lock  */
+static ShPair   g_build[MAP_MAX];   /* built outside it                */
+static int      g_buildN = 0;
 static int      g_mapN = 0;
 static uint64_t g_mapAt = 0;
 static int      g_lastBodies = 0, g_lastRb = 0;
+
+/* Whichever thread first finds the table stale rebuilds it, and the velocity
+ * API may be called from any plugin thread at the same time. Rebuilding in
+ * place reset g_mapN to zero while another thread was walking the table.
+ *
+ * The rebuild itself runs outside the lock, into the second table, and only
+ * publishing takes it: the rebuild calls into the engine (entity kinds, root
+ * walks) and holding a lock across that invites a lock order nobody has
+ * written down. Readers take the lock shared, so they do not serialise
+ * against each other - only against a publish. */
+static SRWLOCK g_mapLock = SRWLOCK_INIT;
 
 extern int ShWalkToRoot(uint64_t entity, uint64_t *out);
 
 /* An entity owns several bodies: a car has a collision
  * proxy whose motion is never stepped and a chassis whose
- * motion is. Both are kept and both get written. */
+ * motion is. Both are kept and both get written.
+ *
+ * No duplicate check, and none is needed: the two passes cannot produce the
+ * same pair. The first adds the owner's own entity with an id, the second
+ * skips anything whose root is that same entity, and an id comes up once in
+ * the loop. The scan that used to be here was O(n^2) over a table of
+ * thousands of bodies and could never find anything. */
 static void MapAdd(uint64_t ent, uint32_t id) {
-    int i;
-
-    if (!ent || g_mapN >= MAP_MAX) return;
-    for (i = 0; i < g_mapN; i++)
-        if (g_map[i].ent == ent && g_map[i].id == id) return;
-    g_map[g_mapN].ent = ent;
-    g_map[g_mapN].id = id;
-    g_mapN++;
+    if (!ent || g_buildN >= MAP_MAX) return;
+    g_build[g_buildN].ent = ent;
+    g_build[g_buildN].id = id;
+    g_buildN++;
 }
 
 static int RebuildMap(void) {
     uint64_t world = ShHavokWorld(), bodies;
     uint32_t high = 0, id;
 
-    g_mapN = 0;
+    g_buildN = 0;
     g_lastBodies = 0;
     g_lastRb = 0;
     if (!world) return 0;
@@ -204,7 +219,7 @@ static int RebuildMap(void) {
     if (!ShReadMem(world + 0x18 + MGR_HIGH_ID, &high, 4)) return 0;
     if (!high || high > 4000000u) return 0;
 
-    for (id = 0; id <= high && g_mapN < MAP_MAX; id++) {
+    for (id = 0; id <= high && g_buildN < MAP_MAX; id++) {
         uint64_t body = bodies + (uint64_t)id * BODY_STRIDE;
         uint64_t rb, ent;
         uint32_t self = 0;
@@ -228,7 +243,7 @@ static int RebuildMap(void) {
     /* Roots fill gaps in a second pass. Walking from a
      * seated player lands on the car, so mixing this in
      * would shadow the car's own body. */
-    for (id = 0; id <= high && g_mapN < MAP_MAX; id++) {
+    for (id = 0; id <= high && g_buildN < MAP_MAX; id++) {
         uint64_t body = bodies + (uint64_t)id * BODY_STRIDE;
         uint64_t rb, ent, root = 0;
         uint32_t self = 0;
@@ -248,31 +263,43 @@ static int RebuildMap(void) {
             continue;
         MapAdd(root, id);
     }
+    /* Publish: table and counts move together, so a reader sees either the
+     * whole old table or the whole new one. A build that failed early left
+     * the previous one in place and usable, which in-place rebuilding could
+     * not promise. */
+    AcquireSRWLockExclusive(&g_mapLock);
+    memcpy(g_map, g_build, (size_t)g_buildN * sizeof(g_map[0]));
+    g_mapN = g_buildN;
     g_mapAt = GetTickCount64();
+    ReleaseSRWLockExclusive(&g_mapLock);
     return g_mapN;
 }
 
 /** The entity's Havok body id, 0 if it has none. */
 SH_API uint32_t ShGetBodyId(uint64_t entity) {
-    uint64_t now = GetTickCount64();
-    int i;
+    int i, found = 0;
+    uint32_t id = 0;
 
     if (!entity) { ShSetError(SH_ERR_BAD_ARG); return 0; }
-    if (!g_mapN || now - g_mapAt > MAP_AGE_MS) RebuildMap();
+    if (!g_mapN || GetTickCount64() - g_mapAt > MAP_AGE_MS) RebuildMap();
+
+    AcquireSRWLockShared(&g_mapLock);
     for (i = 0; i < g_mapN; i++)
         if (g_map[i].ent == entity) {
-            ShSetError(SH_OK);
-            return g_map[i].id;
+            id = g_map[i].id;
+            found = 1;
+            break;
         }
-    /* A miss may just mean the table was stale, so it is
-     * rebuilt once before reporting failure.
-     */
-    RebuildMap();
-    for (i = 0; i < g_mapN; i++)
-        if (g_map[i].ent == entity) {
-            ShSetError(SH_OK);
-            return g_map[i].id;
-        }
+    ReleaseSRWLockShared(&g_mapLock);
+
+    if (found) {
+        ShSetError(SH_OK);
+        return id;
+    }
+    /* A miss used to rebuild the table a second time, unconditionally: two
+     * more passes over every body id for a table that was fresh a moment
+     * ago. The age check above is what staleness means - if the table is
+     * current, "no" is the answer. */
     ShSetError(SH_ERR_NO_CANDIDATE);
     return 0;
 }
@@ -349,6 +376,7 @@ static int ApplyMotion(uint64_t entity, const ShVec3 *v, int off,
         return 0;
     }
     ShGetBodyId(entity);
+    AcquireSRWLockShared(&g_mapLock);
     for (i = 0; i < g_mapN; i++) {
         uint64_t m;
         ShVec3 w = *v;
@@ -366,6 +394,7 @@ static int ApplyMotion(uint64_t entity, const ShVec3 *v, int off,
         }
         if (WriteAt(m, off, &w)) hit++;
     }
+    ReleaseSRWLockShared(&g_mapLock);
     ShSetError(hit ? SH_OK : SH_ERR_NO_CANDIDATE);
     return hit ? 1 : 0;
 }
@@ -375,16 +404,19 @@ static int ReadMotion(uint64_t entity, ShVec3 *out, int off) {
 
     if (!entity || !out) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     ShGetBodyId(entity);
+    AcquireSRWLockShared(&g_mapLock);
     for (i = 0; i < g_mapN; i++) {
         uint64_t m;
 
         if (g_map[i].ent != entity) continue;
         m = MotionOf(g_map[i].id);
         if (m && ShReadMem(m + off, out, 12)) {
+            ReleaseSRWLockShared(&g_mapLock);
             ShSetError(SH_OK);
             return 1;
         }
     }
+    ReleaseSRWLockShared(&g_mapLock);
     ShSetError(SH_ERR_NO_CANDIDATE);
     return 0;
 }
