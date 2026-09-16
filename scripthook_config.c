@@ -992,20 +992,33 @@ static void LangMissOnce(const char *key) {
  * The key is (owner, key), both copied so a caller's buffer going away
  * cannot leave a dangling pointer behind; anything longer than LCA_KEY is
  * looked up every time instead (a whole hint is a legal key). The value is
- * the pointer the lookup returned, which stays valid until the tables are
- * rebuilt - and the generation makes every entry from before a language
- * switch unusable rather than merely unlikely to be read. All of it is
- * touched under the text lock, the one ShLangText already holds. */
+ * a copy, not the pointer the lookup returned: the miss path answers with
+ * Readable(), which by design hands out four rotating buffers, so a slot
+ * that remembered only the pointer was left reading whatever another key
+ * had rotated in since - see the field report of 2026-09-17 below. The
+ * generation makes every entry from before a language switch unusable
+ * rather than merely unlikely to be read. All of it is touched under the
+ * text lock, the one ShLangText already holds. */
 #define LCA_SLOTS 256
 #define LCA_OWNER 48
 #define LCA_KEY   128
+/* The slot owns its text. This is the fix for the field report of
+ * 2026-09-17: on the plugin switches page every label is a sentence a
+ * caller already translated, so every one of them misses, and the miss
+ * path's four rotating buffers meant eight slots ended up pointing into
+ * the same four - which is why several rows read "fov_changer(延展视野范围)"
+ * at once, others came out empty, the time and weather page showed "< 9 >"
+ * on every row (the last thing rotated in), and the language row could
+ * read as a page name. A cached key can be a whole hint literal, so the
+ * copy is a key long and then some. */
+#define LCA_TEXT  160
 
 typedef struct {
     uint32_t    gen;
     uint32_t    hash;
     char        owner[LCA_OWNER];
     char        key[LCA_KEY];
-    const char *text;
+    char        text[LCA_TEXT];     /* ours: copied from the lookup */
 } LangCache;
 
 static LangCache g_lc[LCA_SLOTS];
@@ -1059,7 +1072,11 @@ SH_API const char *ShLangText(const char *owner, const char *key) {
         slot->hash = h;
         CopyN(slot->owner, sizeof(slot->owner), owner ? owner : "");
         CopyN(slot->key, sizeof(slot->key), key);
-        slot->text = v;
+        /* Copied, and the copy is what goes back to the caller: v may be
+         * pointing into Readable()'s rotating buffers, which the next
+         * lookup of a different key has already moved on from. */
+        CopyN(slot->text, sizeof(slot->text), v);
+        v = slot->text;
     }
     TextUnlock();
     return v;
