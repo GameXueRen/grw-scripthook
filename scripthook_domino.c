@@ -43,7 +43,7 @@ extern void ShSetError(int err);
 #define SH_VT_ENTITY SH_IMG(0x39C6FC8)
 
 static int IsEntity(uint64_t obj) {
-    return obj && ShReadQ(obj) == SH_VT_ENTITY;
+    return obj && ShReadQ(obj) == ShEntityVtable();
 }
 
 typedef uint64_t (__attribute__((ms_abi)) *Get0_t)(void);

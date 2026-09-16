@@ -14,7 +14,7 @@
 /* FUN_146E02C00 returns *(DAT_144B87978 + 0x20), the
  * GR_GameFlow machine. Current state is machine+0x260.
  */
-#define GAMEFLOW_HOLDER SH_IMG(0x4B87978)
+#define GAMEFLOW_HOLDER SH_IMG(0x4B879F8)
 #define OFF_HOLDER_FLOW 0x020
 #define OFF_STATE_OWNER 0x018
 #define OFF_CURSTATE    0x260
@@ -238,7 +238,7 @@ SH_API int ShGetGameStateName(char *buf, int len) {
  * shared with the slot index lookup. dispatcher + 0x9C0 is
  * the int32 active context. Wine maps the dispatcher high,
  * so read through the direct VirtualQuery path. */
-#define SH_INPUT_ROOT SH_IMG(0x4D84E98)
+#define SH_INPUT_ROOT SH_IMG(0x4D84F18)
 
 SH_API int ShInputContext(void) {
     uint64_t root, disp;

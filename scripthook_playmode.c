@@ -33,9 +33,9 @@
  * class's own method names match no method table entry at all. Its
  * address came from the other side - scanning the image for what
  * references its own log line ("[mGameModeManager][IsMaster=%d]
- * SetCurrentGameMode(%u, %u)" at rva 0x391E158), then asking the
+ * SetCurrentGameMode(%u, %u)" at rva 0x391E078), then asking the
  * exception directory (.pdata) for the enclosing function, which is
- * 0x93B5240. That same check runs live before the hook is armed: if the
+ * 0x9BA0140. That same check runs live before the hook is armed: if the
  * bytes there do not reference that line, this is not the build the
  * address came from and nothing is hooked.
  *
@@ -86,10 +86,10 @@
 
 /* GameModeManager::SetCurrentGameMode and ::CreateGameMode, and the log
  * line inside each that is used as proof of identity. */
-#define GM_SITE_RVA    0x93B5240u
-#define GM_PROOF_RVA   0x391E158u
-#define CM_SITE_RVA    0x93AD9D8u
-#define CM_PROOF_RVA   0x391E0D0u
+#define GM_SITE_RVA    0x9BA0140u
+#define GM_PROOF_RVA   0x391E078u
+#define CM_SITE_RVA    0x9B985E8u
+#define CM_PROOF_RVA   0x391DFF0u
 /* How far into a function the proof of identity is looked for. It has
  * to cover SetCurrentGameMode's (a reference at +0x25) and
  * CreateGameMode's, which is much further in at +0x92 - a window of 0x80

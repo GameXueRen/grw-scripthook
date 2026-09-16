@@ -32,7 +32,7 @@
 
 /* The thunk the old plugin validates against: it scans for a call site's
  * E8 rel32, resolves the target, and requires it to be base + 0x614CB0. */
-#define CAP_RVA   0x614CB0ULL
+#define CAP_RVA   0x616180ULL
 #define CAP_MAX   0xFFFFu
 #define SCALE_ONE 0x00010001L
 

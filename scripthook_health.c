@@ -20,7 +20,7 @@
 /* The engine's own inner damage function, so a kill runs
  * the real death path instead of a health poke. Verified
  * live: gcall 1427CBEA0 <comp> 1E 1 0 took 100 to 70. */
-#define SH_APPLY_DAMAGE  SH_IMG(0x27CBEA0)
+#define SH_APPLY_DAMAGE  SH_IMG(0x261D1A0)
 
 extern int ShQueueCall(uint64_t fn, uint64_t a0, uint64_t a1,
                        uint64_t a2, uint64_t a3);
@@ -61,7 +61,7 @@ static int CompValid(uint64_t comp, uint64_t owner) {
 /* The engine's own lookup. It binary searches the
  * entity's component array, so nothing is scanned.
  */
-#define SH_GET_COMPONENT   SH_IMG(0xC5D2BE0)
+#define SH_GET_COMPONENT   SH_IMG(0xC3900C0)
 #define SH_HEALTH_DESC     SH_IMG(0x499FCB0)
 
 typedef uint64_t (__attribute__((ms_abi)) *GetComponent_t)(uint64_t,
