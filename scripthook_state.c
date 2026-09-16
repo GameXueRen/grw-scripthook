@@ -42,6 +42,7 @@
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
 extern void ShSetError(int err);
+extern void ShReflectNoteFlow(uint64_t machine);
 extern int ShInPauseMenu(void);
 extern void ShPhysicsOnEnterPlaying(void);
 extern void ShCameraOnEnterPlaying(void);
@@ -80,6 +81,11 @@ static uint64_t ReadQ(uint64_t addr) {
     return v;
 }
 
+/* Set once, when the flow machine has been found and reported. Interlocked
+ * because ShGetStateMachine is called from the state watch thread and from
+ * every plugin thread that asks for the game state. */
+static volatile LONG g_flowNoted;
+
 uint64_t ShGetStateMachine(void) {
     uint64_t holder, m;
 
@@ -89,6 +95,15 @@ uint64_t ShGetStateMachine(void) {
     if (!Readable(holder + OFF_HOLDER_FLOW, 8)) return 0;
     m = ReadQ(holder + OFF_HOLDER_FLOW);
     if (!Sane(m)) return 0;
+
+    /* The machine's method table at +8 is pinned in reflect.c, behind a
+     * check that only runs if something asks for the flow - and nothing
+     * that ships does. So the machine reports itself: once, the first time
+     * there is one to read, the value it holds and whether it is still the
+     * pinned one. This runs from the state watch thread, so it costs one
+     * interlocked exchange per call and one log line per session. */
+    if (InterlockedCompareExchange(&g_flowNoted, 1, 0) == 0)
+        ShReflectNoteFlow(m);
     return m;
 }
 

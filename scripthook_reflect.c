@@ -9,6 +9,7 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
 #define OFF_METHODS     0x08
 #define ENTRY_SIZE      0x20
@@ -23,8 +24,17 @@
 #define OFF_FLOW_OBJS   0x1D8
 #define FLOW_OBJ_COUNT  17
 #define OFF_FLOW_HYBRID 0x30
-#define FLOW_METHODS    SH_IMG(0x483B650)
-#define HYBRID_VTABLE   SH_IMG(0x3B5ADD8)
+/* The game flow's method table, re-pinned after the 2026-09 update by
+ * matching the class's own entries. The signature every reflected class
+ * opens with is no help here - it occurs 8498 times in the old image - but
+ * the nine (hash, index) pairs this class carries are, and every table
+ * holding them was listed in both builds: 413 in each, in the same order,
+ * so the old table's position in that list (107) names the new one. What
+ * comes back has those same nine pairs in the same order and the same
+ * indices, with only the function pointers changed:
+ *   old 483B650 -> new 483B920. */
+#define FLOW_METHODS    SH_IMG(0x483B920)
+#define HYBRID_VTABLE   SH_IMG(0x3B5AC88)
 
 #define CALL_WAIT_MS    2000
 
@@ -194,10 +204,28 @@ SH_API int ShSceneExit(uint64_t obj) {
     return ShReflectCall(obj, SH_HASH_EXIT, 0, 0, 0, NULL);
 }
 
+/* Called by the state module the first time it finds a machine.
+ *
+ * This is the only consumer of FLOW_METHODS, and the gate below is reached
+ * from ShGameFlow - which nothing in the shipped plugin set calls, so a
+ * stale pin refuses in silence and the address needed to re-pin it never
+ * reaches a log. state.c reads the machine every 100 ms and reports off it
+ * once, so the verdict and the value arrive whether or not anyone asks. */
+void ShReflectNoteFlow(uint64_t m) {
+    uint64_t held = m ? ReadQ(m + OFF_METHODS) : 0;
+
+    LogFirst("scripthook_reflect.log",
+             "flow: state machine %llX holds %llX at +%X, pinned %llX %s",
+             (unsigned long long)m, (unsigned long long)held,
+             (unsigned)OFF_METHODS, (unsigned long long)FLOW_METHODS,
+             held == FLOW_METHODS ? "ok" : "MISMATCH");
+}
+
 SH_API uint64_t ShGameFlow(void) {
     uint64_t m = ShGetStateMachine();
+    uint64_t held = m ? ReadQ(m + OFF_METHODS) : 0;
 
-    if (!m || ReadQ(m + OFF_METHODS) != FLOW_METHODS) {
+    if (!m || held != FLOW_METHODS) {
         ShSetError(SH_ERR_NO_GLOBAL);
         return 0;
     }
