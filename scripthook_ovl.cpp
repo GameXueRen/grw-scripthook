@@ -1808,10 +1808,12 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
         uint32_t calls = ShFileCallCount();
         int gap = (int)(now - lastPresent);
 
-        /* This frame's share of the interception layer, added up until a
-         * hitch is written, so the number in the line covers the window
-         * and not the session. One exchange a frame. */
-        decideUs += ShDecideTake();
+        /* This frame's share of the interception layer. Taken once a frame
+         * and read straight out: the take here returns what the layer spent
+         * since the previous Present, which is the frame whose length the
+         * gap reports - the same span the file count covers, so the two
+         * numbers can be read against each other. */
+        decideUs = ShDecideTake();
 
         if (g_ready && lastPresent && gap > 100 &&
             (gap < 3000 || (int)(now - lastStall) > 10000))
@@ -1835,7 +1837,6 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                    ShMenuIsOpen() ? 1 : 0, ShDrawWantFrame() ? 1 : 0,
                    (unsigned)(calls - lastCalls), decideUs, g_oursUs,
                    threads);
-            decideUs = 0;
         }
         lastCalls = calls;
         lastPresent = now;
