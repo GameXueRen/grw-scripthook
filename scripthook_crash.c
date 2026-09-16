@@ -420,12 +420,18 @@ void ShCrashStartup(void) {
     /* All logs live in <gamedir>\logs; resolve the path once
      * so the crash handler itself stays minimal. */
     if (!LogPath(g_crashPath, sizeof(g_crashPath), CRASH_FILE)) {
-        /* A relative name lands wherever the game's working directory
-         * happens to be, and the report is then looked for in the wrong
-         * place and called missing. The loader's log is open by now. */
+        /* The same fallback the other logs take, for the same reason: the
+         * game folder is the one directory whose availability is not in
+         * question. A relative name would land in whatever the working
+         * directory happens to be, and the report is then looked for in the
+         * wrong place and called missing. */
         g_crashPath[0] = 0;
-        Log("crash: logs\\%s could not be resolved - reports fall back to "
-            "the working directory", CRASH_FILE);
+        if (LogFallbackPath(g_crashPath, sizeof(g_crashPath), CRASH_FILE))
+            Log("crash: logs\\%s is not writable - reports go beside the "
+                "game executable", CRASH_FILE);
+        else
+            Log("crash: nowhere writable for %s - reports would be lost",
+                CRASH_FILE);
     }
     SetUnhandledExceptionFilter(CrashUef);
     if (!g_vehReport)

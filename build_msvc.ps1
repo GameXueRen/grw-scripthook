@@ -134,8 +134,15 @@ $tmp     = Join-Path $env:TEMP 'grw_msvc_build'
 New-Item -ItemType Directory -Force -Path $tmp, $outPlugins | Out-Null
 
 # Shared flags for every compile unit.
+## /MT, not the /MD default: this is a proxy DLL injected into somebody
+## else's process on somebody else's machine, and /MD makes every artifact
+## depend on the Visual C++ runtime DLLs being installed there. They are not
+## part of Windows - the universal CRT is, MSVCP140 and VCRUNTIME140 are not
+## - and a machine without them fails at LoadLibrary, which looks like "the
+## mod does nothing at all" with no log, because the DLL never ran. Static
+## linking removes the question; the cost is size.
 $c = @(
-    '/nologo', '/O2', '/W3', '/LD', '/std:c17', '/utf-8',
+    '/nologo', '/O2', '/W3', '/LD', '/MT', '/std:c17', '/utf-8',
     "/I$root",
     '/D_CRT_SECURE_NO_WARNINGS',
     "/Fo$tmp\"
@@ -211,7 +218,7 @@ $fwSources = @(
 
 # ---- menu overlay: Dear ImGui + the D3D11 overlay (C++) ----
 $cpp = @(
-    '/nologo', '/O2', '/W3', '/c', '/std:c++17', '/utf-8',
+    '/nologo', '/O2', '/W3', '/c', '/MT', '/std:c++17', '/utf-8',
     '/D_CRT_SECURE_NO_WARNINGS', '/DSH_BUILD=1',
     "/I$root", "/I$Imgui", "/I$Imgui\backends",
     "/Fo$tmp\"

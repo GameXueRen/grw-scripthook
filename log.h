@@ -49,6 +49,20 @@ static void LogClose(void) {
     }
 }
 
+/* "<gamedir>\<name>": where a log goes when logs\ cannot be created or
+ * written. The game folder is where the DLL already lives, so it is the one
+ * place whose availability is not in question. */
+static int LogFallbackPath(char *buf, size_t n, const char *name) {
+    char dir[MAX_PATH];
+    char *slash;
+
+    if (!GetModuleFileNameA(NULL, dir, MAX_PATH)) return 0;
+    slash = strrchr(dir, '\\');
+    if (slash) slash[1] = 0;
+    else dir[0] = 0;
+    return snprintf(buf, n, "%s%s", dir, name) >= 0;
+}
+
 /* Opens <gamedir>\logs\<name> for writing.
  *
  * Idempotent for the name already open. The handle is per translation unit,
@@ -57,7 +71,13 @@ static void LogClose(void) {
  * scripthook_npc.c works around that by hand today, which is the shape of a
  * bug that has not been hit yet rather than one that cannot be. A call for a
  * different name closes the old file first - the only case where dropping
- * the earlier one is what was asked for. */
+ * the earlier one is what was asked for.
+ *
+ * If logs\ cannot be created - an install under Program Files, a read-only
+ * drive, a scanner holding the folder - the file goes to the game folder
+ * instead and says so in its first line. Before this, that failure was
+ * completely silent: a session with no logs and nothing anywhere saying why,
+ * which is the hardest kind of report to act on. */
 static void LogInit(const char *name) {
     char path[MAX_PATH];
     FILE *f;
@@ -67,7 +87,13 @@ static void LogInit(const char *name) {
     if (g_logFile) LogClose();
     if (!LogPath(path, sizeof(path), name)) return;
     f = fopen(path, "w");
-    if (!f) return;
+    if (!f) {
+        if (!LogFallbackPath(path, sizeof(path), name)) return;
+        f = fopen(path, "w");
+        if (!f) return;
+        fprintf(f, "[note] logs\\ could not be written to; this file is "
+                   "beside the game executable instead\n");
+    }
     g_logFile = f;
     strncpy(g_logName, name, sizeof(g_logName) - 1);
     g_logName[sizeof(g_logName) - 1] = 0;
