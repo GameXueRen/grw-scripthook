@@ -1,0 +1,119 @@
+# Old engine addresses, by the name the framework source uses.
+#
+# A constant that was re-pinned after the September update has its old
+# address from the commit before that; one that was never re-pinned still
+# carries its old address in the source. This list is the input to
+#   pwsh tools/grw-relocate.ps1 -Cmd batch -Pattern tools/rva-list.txt
+# which maps each one to the new build by .pdata neighbourhood and function
+# body bytes. Keep it up to date: it is the checklist for the next patch.
+#
+# data (a global, not code)      - needs a content anchor, not this tool
+#
+# Anchors that exist in more than one file are the ones to grep for by
+# value, not by name: RVA_PLAYER_MGR lived in api.c and entity.c, only one
+# of them was re-pinned, and the world entity list walked from the stale
+# copy - which no log said, it just made every entity search empty.
+SH_PLAYER_MGR       4BB64B8   (also entity.c RVA_PLAYER_MGR, spawn uses the API)
+SH_PLAYER_GLOBAL    4BC33E0
+SH_SLOT_INDEX       4D84F18   (also state.c SH_INPUT_ROOT)
+GAMEFLOW_HOLDER     4B879F8
+SH_VT_ENTITY        39C6DF8   (learned live; see ShEntityVtable)
+# function                       - the tool answers directly
+# interior (a site inside a body) - the tool says "not a body start"
+
+# --- functions and thunks ------------------------------------------------
+# the spawn path itself (never re-pinned: these are called, so a stale one
+# does not fail loudly, it calls the wrong code)
+RVA_MGR_GETTER      990BAB0
+RVA_SPAWN           990B0B0
+RVA_COMMIT          990CA70
+RVA_KIND            83B1390
+RVA_POOL_FIND       DF4EE30
+RVA_SPEC_OF         A604700
+RVA_RETIRE          921A2F0
+SH_SET_TRANSFORM    C6BDE10
+BLUR_MATCH          14E7625C
+CAM_THUNK           13781B0
+CAM_IMPL            D7C0610
+FOV_SITE            7E889A2
+BONE_LOOKUP         B435680
+SH_APPLY_DAMAGE     27CBEA0
+SH_GET_COMPONENT    C5D2BE0
+HIT_ORIG_CALL       29B4970
+CAST_RAY_FN         FBE88D0
+VIS_SITE            14393508
+OBJ_FACTORY         E0E0C70
+HK_ALLOC_BODY       16990140
+HIT_SITE            14D387E3
+RAY_HOOK_SITE       163F18D0
+FLOW_METHODS        483B650
+RES_GLOBAL          4B98DF0
+SKILL_GLOBAL        4B98F10
+VALOFF_TBL          3AA1D79
+SH_HEALTH_DESC      499FCB0
+WX_RECORD           4495E90
+CTW_OP_DESC         49E2AF0
+CTW_DATA_DESC       49E2A50
+CTW_START           2827B50
+G_POOL              4D78D00
+G_DEVICE            4D5B058
+G_UIMGR             4D58560
+
+# --- the native UI and scene calls (OpticalCamo reads UI text) -----------
+F_ALLOC_CTX         E064390
+F_ALLOC             60ACBF0
+F_CONT_CTOR         32F5E70
+F_ATTACH            32F4D00
+F_DIRTY             17408BA0
+F_LINST_CTOR        336F0B0
+F_LABEL_CREATE      336F7F0
+F_LABEL_APPLY       336F7B0
+F_LABEL_TEXT        3336E30
+F_LABEL_SIZE        3336EE0
+F_LABEL_UPDATE      17490300
+F_LABEL_REGIST      33359F0
+F_IINST_CTOR        336E7F0
+F_IMAGE_CREATE      336EC80
+F_IMAGE_APPLY       336EC30
+F_WIDGET_COLOUR     32F3DD0
+F_LABEL_FIXW        33366A0
+F_LABEL_FIXH        3337140
+F_TEX_CTOR          DC4D920
+F_TEX_CREATE        DCC7280
+F_TEX_MAP           DC79B00
+F_TEX_PUSH          14FEEB0
+F_IMG_UV0           32FDDD0
+F_IMG_UV1           32FDF70
+F_SCENE_CTOR        32EEC50
+F_SCENE_DTOR        32EECD0
+F_SCENE_TICK        173FA610
+F_SCENE_FLIP        173FA280
+F_SCENE_RENDER      173F8C60
+F_SCENE_RESIZE      173F8400
+F_SCENE_SETCTX      173F9930
+F_SCENE_SETRES      173F9160
+F_FREE              F93CA90
+F_LOCK              36206D0
+F_UNLOCK            3287730
+RENDER_THUNK        32EEFB0
+
+# --- vtables (compare only; see the notes in the tool) -------------------
+SPEC_VTABLE         394A1E0
+NPC_SPEC_VTABLE     394A660
+VT_ENTITY           39C6FC8
+SKEL_VT             3ACBBD8
+CTRL_VT             3BCB3B8
+ENV_VTABLE          39D20B8
+HYBRID_VTABLE       3B5ADD8
+VT_GAME_RESOLVER    3A05AA0
+VT_LABEL            3CF89D0
+VT_CONTAINER        3CF09C0
+VT_CONT_PRIV        3CF09F8
+VT_IMAGE            3CF1660
+VT_LABEL_INST       3D052C8
+VT_IMAGE_INST       3D04EA0
+RB_VT_BASE          3AD55D8
+RB_VT_VEHICLE       3AD7020
+RB_VT_C             39E7620
+RB_VT_D             38C88B0
+RB_VT_E             39979C8
