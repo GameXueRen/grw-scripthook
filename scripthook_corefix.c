@@ -1575,6 +1575,13 @@ static void LogProcessTree(void)
     char path[MAX_PATH] = "";
 
     GetModuleFileNameA(NULL, path, MAX_PATH);
+    /* Base name only. The log goes into bug reports, and an install under
+     * C:\Users\<name>\ would put the player's account name in it. */
+    {
+        char *s = strrchr(path, '\\');
+
+        if (s) memmove(path, s + 1, strlen(s));
+    }
 
     snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) {

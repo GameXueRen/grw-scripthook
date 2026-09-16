@@ -152,25 +152,32 @@ static int EnsureView(HudView *v, float x, float y, float w, float h) {
 }
 
 /* One slot: create or update its plate and lines. */
-static void SyncSlot(int idx, float x, float y) {
+static void SyncSlot(int idx, float x, float y,
+                     char lines[][HUD_LINE], int n, int widest) {
     HudSlot s;
     HudView *v = &g_view[idx];
-    char lines[HUD_LINES][HUD_LINE];
-    int n, widest, i;
+    int i;
     float w, h;
 
     HudLock();
     s = g_slots[idx];
     HudUnlock();
 
-    n = SplitLines(s.text, lines, &widest);
     w = (float)widest * CHAR_W + 2 * PAD;
     if (w < MIN_W) w = MIN_W;
     if (w > MAX_W) w = MAX_W;
     h = (float)n * LINE_H + 2 * PAD;
 
     if (!EnsureView(v, x, y, w, h)) {
-        Log("slot %d: no plate at %.0f,%.0f", idx, x, y);
+        /* SyncAll runs on every HUD revision change, so a UI that will not
+         * come up wrote this line - and flushed the file - on every one of
+         * them. Once is all a diagnosis needs. */
+        static int said;
+
+        if (!said) {
+            said = 1;
+            Log("slot %d: no plate at %.0f,%.0f", idx, x, y);
+        }
         return;
     }
     if (v->x != x || v->y != y) {
@@ -196,29 +203,6 @@ static void SyncSlot(int idx, float x, float y) {
     v->lines = n;
     v->colour = s.colour;
     if (!v->visible) { ShUiShow(v->panel, 1); v->visible = 1; }
-}
-
-/* Slot height, for stacking before the slot is built. */
-static float SlotHeight(int idx) {
-    char lines[HUD_LINES][HUD_LINE];
-    int widest, n;
-    HudLock();
-    n = SplitLines(g_slots[idx].text, lines, &widest);
-    HudUnlock();
-    return (float)n * LINE_H + 2 * PAD;
-}
-
-static float SlotWidth(int idx) {
-    char lines[HUD_LINES][HUD_LINE];
-    int widest;
-    float w;
-    HudLock();
-    SplitLines(g_slots[idx].text, lines, &widest);
-    HudUnlock();
-    w = (float)widest * CHAR_W + 2 * PAD;
-    if (w < MIN_W) w = MIN_W;
-    if (w > MAX_W) w = MAX_W;
-    return w;
 }
 
 /* Lay every corner out and push whatever changed. */
@@ -247,12 +231,25 @@ static void SyncAll(void) {
         y = centred ? MARGIN + TOAST_OFF_Y
                     : (top ? MARGIN : sh - MARGIN);
         for (i = 0; i < n; i++) {
-            float h = SlotHeight(list[i]);
-            float w = SlotWidth(list[i]);
-            float x = centred ? (sw - w) * 0.5f
-                              : (left ? MARGIN : sw - MARGIN - w);
+            char lines[HUD_LINES][HUD_LINE];
+            int nl, widest;
+            float h, w, x;
+
+            /* Split once here and hand the lines down. SlotHeight and
+             * SlotWidth each split the same text again, and SyncSlot split
+             * it a third time - three passes and three lock round trips per
+             * slot per refresh, for one answer. */
+            HudLock();
+            nl = SplitLines(g_slots[list[i]].text, lines, &widest);
+            HudUnlock();
+            h = (float)nl * LINE_H + 2 * PAD;
+            w = (float)widest * CHAR_W + 2 * PAD;
+            if (w < MIN_W) w = MIN_W;
+            if (w > MAX_W) w = MAX_W;
+            x = centred ? (sw - w) * 0.5f
+                        : (left ? MARGIN : sw - MARGIN - w);
             if (!top) y -= h;
-            SyncSlot(list[i], x, y);
+            SyncSlot(list[i], x, y, lines, nl, widest);
             active[list[i]] = 1;
             y += top ? h + GAP : -GAP;
         }

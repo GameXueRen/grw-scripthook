@@ -989,6 +989,13 @@ SH_API int ShFindEntities(int kind, float radius, uint32_t flags,
         return 0;
     }
     if (!ShGetPlayerPosition(&me)) return 0;
+    /* radius <= 0 means "no limit", and that is deliberately left alone: a
+     * plugin that passes 0 today is asking for the whole list, and quietly
+     * narrowing it to the streamed radius would change what its code does.
+     * The cost is real and worth knowing - the list runs to SH_FIND_MAX
+     * entries and every one of them costs a handle read, a VirtualQuery and
+     * a vtable compare - so a caller that only wants what is near the
+     * player should pass a radius. See the note at the top of this file. */
     if (radius <= 0.0f) radius = 1e9f;
     vtEnt = ShEntityVtable();
 

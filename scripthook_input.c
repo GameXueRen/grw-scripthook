@@ -28,6 +28,9 @@ static POINT g_frozen;
 static volatile int g_haveFrozen = 0;
 static volatile uint8_t g_keyBlock[256];
 static volatile int g_anyKeyBlock = 0;
+/* How many entries of the table above are set, so the predicate does not
+ * have to walk all 255 of them to answer "is any key hidden". */
+static volatile LONG g_keyBlockN = 0;
 
 /* Never swallowed, so a player can always pause, alt tab
  * or reach the menu whatever a mod is doing.
@@ -208,11 +211,17 @@ SH_API uint32_t ShBlockedInput(void) {
 
 /* one key hidden from the game, for UI that consumed it */
 SH_API int ShBlockKey(int vk, int on) {
-    int i, any = 0;
+    int want = on ? 1 : 0;
     if (vk <= 0 || vk >= 256) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (on && !Install()) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
-    g_keyBlock[vk] = on ? 1 : 0;
-    for (i = 1; i < 256; i++) if (g_keyBlock[i]) any = 1;
-    g_anyKeyBlock = any;
+    if (g_keyBlock[vk] == want) { ShSetError(SH_OK); return 1; }
+    g_keyBlock[vk] = want;
+    /* Counted, not rescanned: the menu hides seven keys in a row when it
+     * opens, and every one of those calls walked all 255 entries to answer
+     * a question the previous call had already answered. */
+    if (want) InterlockedIncrement(&g_keyBlockN);
+    else      InterlockedDecrement(&g_keyBlockN);
+    g_anyKeyBlock = g_keyBlockN > 0;
+    ShSetError(SH_OK);
     return 1;
 }
