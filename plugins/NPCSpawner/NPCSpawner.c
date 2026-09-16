@@ -465,6 +465,12 @@ static void OnSpawnSelected(uint32_t menu, uint32_t item, int value,
     LeaveCriticalSection(&g_trackLock);
 
     if (alive + g_countN[g_countIdx] > SPAWN_LIMIT) {
+        /* A refusal here is a status line and nothing else, so the log would
+         * not say who refused. Every way this callback can stop before the
+         * worker is started writes one line: which step, with the numbers
+         * that step was looking at. */
+        Log("npcspawner: at the limit, %d alive + %d asked (max %d)",
+            alive, g_countN[g_countIdx], SPAWN_LIMIT);
         if (pMenuStatusF)
             pMenuStatusF(g_menu, "@np.st.limit", alive, REPORT_LIMIT);
         ReleaseBusy();
@@ -473,6 +479,8 @@ static void OnSpawnSelected(uint32_t menu, uint32_t item, int value,
 
     idx = GroupScan(g_group, &count, &id);
     if (count <= 0 || idx < 0 || !id) {
+        Log("npcspawner: no pick in group %d (count=%d idx=%d id=%llx)",
+            g_group, count, idx, (unsigned long long)id);
         SetStatus(count <= 0 ? "@np.st.noentries" : "@np.st.nosel");
         ReleaseBusy();
         return;
@@ -480,6 +488,7 @@ static void OnSpawnSelected(uint32_t menu, uint32_t item, int value,
 
     r = (ShNpcSpawnRequest *)malloc(sizeof(*r));
     if (!r) {
+        Log("npcspawner: no memory for the request");
         SetStatus("@np.st.spawnreq");
         ReleaseBusy();
         return;

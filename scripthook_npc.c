@@ -9,30 +9,72 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
-/* RVAs, so this survives a relocated image. */
-#define RVA_MGR_GETTER   0x916DC40
-#define RVA_SPAWN        0x916D5E0
-#define RVA_COMMIT       0x916E590
-#define RVA_SET_CATEGORY 0xA62A8A0
-#define RVA_SET_174      0xA62B3B0
-#define RVA_POP_REGISTER 0x85B7240
-#define RVA_COLLECT      0xC41D6C0
-#define RVA_KIND         0x83B1390
-#define RVA_POOL_FIND    0xDF4EE30
+/* RVAs, so this survives a relocated image. Re-pinned for the 2026-09 build
+ * one at a time - the whole block except the last three was still the
+ * previous build's, which is why NPC spawning stopped working while vehicle
+ * spawning did not (its own block was re-pinned and is live verified).
+ *
+ * How each one was pinned, so the next update can be done the same way:
+ *   MGR_GETTER  the old and new bodies are the same eight bytes,
+ *               mov rax,[rip+..]; ret - and spawn.c, which uses the same
+ *               manager and works in game, carries the same address
+ *   SPAWN       spawn.c carries the same address (0x990B0B0)
+ *   COMMIT      spawn.c carries the same address; body 96% by .pdata match
+ *   SET_CATEGORY byte search for the setter's own body: unique in both
+ *   SET_174     byte search for mov [rcx+0x174],edx;ret: unique in both
+ *   POP_REGISTER 32 bytes identical to the old body
+ *   COLLECT     identical to the old body except the rel32 of one call
+ *   RETIRE      no call site to vote with and no unique body shape; the only
+ *               .pdata candidate at 80%. Its failure is logged, not silent.
+ *   KIND / POOL_FIND / SPEC_OF / NPC_SPEC_VTABLE were re-pinned earlier and
+ *               checked against the old build then.
+ *
+ * The data globals below (POOL, POPMGR, CONTEXT, REGISTRY, ARCH_DESC,
+ * NULL_BLOCK) have no rip-relative reference in the old image to map, so
+ * they cannot be checked offline: the module now prints what it reads from
+ * each one and a session says whether they are still the right slots.
+ */
+#define RVA_MGR_GETTER   0x990BAB0
+#define RVA_SPAWN        0x990B0B0
+#define RVA_COMMIT       0x990CA70
+#define RVA_SET_CATEGORY 0xA9E51B0
+#define RVA_SET_174      0xA9E63B0
+#define RVA_POP_REGISTER 0x8AE8EA0
+#define RVA_COLLECT      0xC1F5BA0
+#define RVA_KIND         0x89372E0
+#define RVA_POOL_FIND    0xE2E0780
 
 /* Despawn, from the Domino UnspawnFromEntity node: the
  * entity's spawning spec, then retire it. Verified live. */
-#define RVA_SPEC_OF      0xA604700
-#define RVA_RETIRE       0x921A2F0
+#define RVA_SPEC_OF      0xA9C3F80
+#define RVA_RETIRE       0x99FDBB0
 
+/* The two bootstrap slots, re-pinned off the engine's own call path:
+ * every place the engine feeds the catalogue collector loads the registry
+ * from one rip relative slot, and two of them, in different functions,
+ * decode to the same address (0x3FC4F0 + disp and 0x235B541 + disp both
+ * land on 4BC1878). The same decode on the old build lands exactly on the
+ * value this constant used to carry, 4BC17F8, so the slot moved by the
+ * +0x80 this data family moved by - the same shift the spawn manager slot
+ * shows through MGR_GETTER. ARCH_DESC keeps the shape it has in the old
+ * build (its +0x20 tail is byte for byte the same) at +0x10.
+ *
+ * POOL / POPMGR / CONTEXT / NULL_BLOCK have no anchor in the image to
+ * decode, and each is now either unused or reached only through a shape
+ * check: the spawn path no longer needs the pool (the catalogue already
+ * hands back each archetype's own block) or the pinned POPMGR slot (the
+ * population manager comes from the engine's own three call sites, and is
+ * used only if it looks like an engine object). It was the stale POPMGR
+ * that crashed the game. */
 #define RVA_POOL         0x4D89000
 #define RVA_POPMGR       0x4B98F18
 #define RVA_CONTEXT      0x4B90208
-#define RVA_REGISTRY     0x4BC17F8
-#define RVA_ARCH_DESC    0x42C2560
+#define RVA_REGISTRY     0x4BC1878
+#define RVA_ARCH_DESC    0x42C2570
 #define RVA_NULL_BLOCK   0x4D88FE8
-#define NPC_SPEC_VTABLE  SH_IMG(0x394A660)
+#define NPC_SPEC_VTABLE  SH_IMG(0x394A4E0)
 
 #define COMMIT_MODE      7
 #define SPAWN_MODE       1
@@ -75,6 +117,12 @@ static uint64_t BlockObj(uint64_t blk) {
 /* ---- catalogue, read on the game thread once ---- */
 
 static ShNpcArchetype g_npcs[NPC_MAX];
+/* The catalogue's archetype blocks, kept beside the public {id, kind}. The
+ * scan that produced an id already holds that archetype's own block, so a
+ * spawn can be made from here - which is what takes the pool lookup out of
+ * the spawn path entirely. The public struct is {id, kind} and stays that
+ * way; this is the module's own copy. */
+static uint64_t g_npcBlk[NPC_MAX];
 static int g_npcCount = 0;
 static volatile int g_listWanted = 0;
 static volatile int g_listDone = 0;
@@ -89,28 +137,51 @@ typedef struct {
     uint8_t  spare[0x38];
 } ArchList;
 
+/* This module had no log at all, and every way it can fail is silent: the
+ * catalogue comes back empty, or a spawn returns early, and the caller only
+ * sees one generic error. That is how "cannot summon" reached the game
+ * without naming the step. One line, first outcome wins: the addresses in it
+ * are what re-pins a data slot that moved, which cannot be done offline -
+ * these globals have no rip-relative reference in the old image to match. */
+static void NpcWhy(const char *why, uint64_t a, uint64_t b) {
+    LogFirst("scripthook_npc.log", "npc: %s (%llX %llX)", why,
+             (unsigned long long)a, (unsigned long long)b);
+}
+
 static void ListOnGameThread(void) {
     ArchList hdr;
     uint64_t reg = ShReadQ(ImgAddr(RVA_REGISTRY));
     int i, n = 0;
 
     memset(&hdr, 0, sizeof(hdr));
-    if (!reg) return;
+    if (!reg) {
+        NpcWhy("registry slot holds nothing", ImgAddr(RVA_REGISTRY), 0);
+        return;
+    }
     ((Collect_t)ImgAddr(RVA_COLLECT))(reg, ImgAddr(RVA_ARCH_DESC), &hdr);
     if (!hdr.ptr || hdr.cnt > 0x4000 ||
-        !ShReadableAddr(hdr.ptr, (size_t)hdr.cnt * 8))
+        !ShReadableAddr(hdr.ptr, (size_t)hdr.cnt * 8)) {
+        NpcWhy("collector gave no list", hdr.ptr, hdr.cnt);
         return;
+    }
     for (i = 0; i < hdr.cnt && n < NPC_MAX; i++) {
         uint64_t blk = ShReadQ(hdr.ptr + (uint64_t)i * 8);
         uint64_t obj = BlockObj(blk);
         if (!obj) continue;
         g_npcs[n].id = ShReadQ(blk + 0x10);
         g_npcs[n].kind = ((Kind_t)ImgAddr(RVA_KIND))(obj);
+        g_npcBlk[n] = blk;
         n++;
     }
     /* The collector's array stays with the engine's pool;
      * a few KB once per session. */
     g_npcCount = n;
+    /* What the scan made of it: a count of zero with entries collected is a
+     * different fault from an empty collector, and the two want different
+     * constants re-pinned. */
+    LogFirst("scripthook_npc.log",
+             "npc: catalogue %d of %u collected (registry %llX)",
+             n, (unsigned)hdr.cnt, (unsigned long long)reg);
 }
 
 /* ---- one spawn, on the game thread ---- */
@@ -156,11 +227,44 @@ static volatile uint64_t g_pendSpec = 0;
 static volatile int g_pendDone = 0;
 static volatile int g_pendErr = 0;
 
+/* The archetype's own block, out of the catalogue.
+ *
+ * This used to go through the engine's pool - POOL + 0x100 and then the
+ * pool's find - two more pinned slots that cannot be checked offline, on
+ * the path that has to work before anything else can. The scan that
+ * produced the id already held the block, so the lookup is local now: same
+ * answer, no bootstrap slots, and a miss says so. */
 static uint64_t ArchetypeBlock(uint64_t id) {
-    uint64_t map = ShReadQ(ImgAddr(RVA_POOL) + 0x100), cell;
-    if (!map) return 0;
-    cell = ((PoolFind_t)ImgAddr(RVA_POOL_FIND))(map, id, 0);
-    return cell ? ShReadQ(cell) : 0;
+    int i;
+
+    for (i = 0; i < g_npcCount; i++)
+        if (g_npcs[i].id == id) return g_npcBlk[i];
+    return 0;
+}
+
+/* The population manager, for the one call the framework has to make with
+ * an argument of its own: the engine's three call sites to the register
+ * function each load it from a different global. Decoding those three
+ * (each is a mov rcx,[rip+disp32] right before the call) gives the slots
+ * below; which of them belongs to the mode in play is not knowable from
+ * outside, so each is taken only if it looks like an engine object - a
+ * readable pointer whose first word is a vtable in the image - and the one
+ * that answers is the one used.
+ *
+ * This is the call that crashed the game: a stale slot produced a pointer
+ * that was not a manager, and the register function wrote through it. */
+static const uint64_t g_popSlots[3] = { 0x4BACFA8, 0x4B957A8, 0x4B99BA8 };
+
+static uint64_t PopManager(void) {
+    size_t i;
+
+    for (i = 0; i < 3; i++) {
+        uint64_t p = ShReadQ(ImgAddr(g_popSlots[i]));
+
+        if (p && ShReadableAddr(p, 0x40) && ShInImage(ShReadQ(p)))
+            return p;                 /* logged by the caller, with the spec */
+    }
+    return 0;
 }
 
 static void SpawnOnGameThread(uint64_t id, const void *mtx) {
@@ -170,15 +274,31 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
     g_pendErr = SH_ERR_NO_CANDIDATE;
     archBlk = ArchetypeBlock(id);
     arch = BlockObj(archBlk);
-    if (!arch) return;
+    if (!arch) {
+        /* The id came out of the catalogue, so a miss here means the scan
+         * and the request disagree; the count says how much catalogue there
+         * was to disagree with. */
+        NpcWhy("no archetype block for the id", id, (uint64_t)g_npcCount);
+        return;
+    }
     csBlk = ShReadQ(arch + 0x48);
     cs = BlockObj(csBlk);
-    if (!cs) return;
+    if (!cs) { NpcWhy("archetype has no spec block", arch, csBlk); return; }
     mgr = ((MgrGet_t)ImgAddr(RVA_MGR_GETTER))();
-    if (!mgr) return;
+    if (!mgr || !ShReadableAddr(mgr, 0x40)) {
+        NpcWhy("no usable spawn manager", ImgAddr(RVA_MGR_GETTER), mgr);
+        return;
+    }
 
     spec = ((Spawn_t)ImgAddr(RVA_SPAWN))(cs, SPAWN_MODE, mtx);
-    if (!spec) return;
+    if (!spec) { NpcWhy("spawn() gave back nothing", cs, SPAWN_MODE); return; }
+    /* Everything below writes through this pointer, so it is checked as a
+     * spec before any of it: a stale SPAWN would otherwise have us write
+     * 0x2D8 bytes into whatever it returned. */
+    if (!ShReadableAddr(spec, 0x2D8) || ShReadQ(spec) != NPC_SPEC_VTABLE) {
+        NpcWhy("spawn() did not give back a spec", spec, NPC_SPEC_VTABLE);
+        return;
+    }
 
     ((SetI_t)ImgAddr(RVA_SET_CATEGORY))(spec, NPC_CATEGORY);
 
@@ -199,12 +319,27 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
     *(volatile uint32_t *)(uintptr_t)(spec + 0x2D0) = camp;
     *(volatile uint32_t *)(uintptr_t)(spec + 0x2D4) = job;
 
-    pop = ShReadQ(ImgAddr(RVA_POPMGR));
+    pop = PopManager();
     if (pop) ((Reg_t)ImgAddr(RVA_POP_REGISTER))(pop, spec);
+    else NpcWhy("no usable population manager; registration skipped", 0,
+                ImgAddr(RVA_POP_REGISTER));
 
     ((Commit_t)ImgAddr(RVA_COMMIT))(mgr, COMMIT_MODE, spec);
     g_pendSpec = spec;
     g_pendErr = 0;
+    /* The data slots this path reads, in one line. They cannot be checked
+     * offline - no rip-relative reference to them survives in the image to
+     * match - so a session is what says which slot still holds what. */
+    /* Written per spawn, not once: whether the population registration went
+     * through is the one thing this line has to say, and the catalogue line
+     * already holds the module's once-only flag. log.h keeps its handle per
+     * translation unit, so the file is opened only if the catalogue has not
+     * opened it already - reopening would truncate what was written. */
+    if (!g_logFile) LogInit("scripthook_npc.log");
+    Log("npc: spawn id %llX -> spec %llX (mgr %llX pop %llX ctx %llX, %s)",
+        (unsigned long long)id, (unsigned long long)spec,
+        (unsigned long long)mgr, (unsigned long long)pop,
+        (unsigned long long)ctx, pop ? "registered" : "NOT registered");
 }
 
 /* ---- despawn ---- */
@@ -221,8 +356,11 @@ static void DespawnOnGameThread(uint64_t entity) {
 
     g_killOk = 0;
     spec = ((SpecOf_t)ImgAddr(RVA_SPEC_OF))(entity);
-    if (!spec) return;
-    if (!ShReadableAddr(spec, 0x180)) return;
+    if (!spec) { NpcWhy("no spec for the entity to unspawn", entity, 0); return; }
+    if (!ShReadableAddr(spec, 0x180)) {
+        NpcWhy("spec is not readable", spec, ImgAddr(RVA_SPEC_OF));
+        return;
+    }
     ((Retire_t)ImgAddr(RVA_RETIRE))(spec);
     g_killOk = 1;
 }
