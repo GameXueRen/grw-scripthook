@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <math.h>
 
 #include "scripthook.h"
 
@@ -72,6 +73,20 @@ static MenuHint_t   g_hint;
 static uint32_t g_menu = 0;
 static volatile int g_spawned = 0;
 
+/* Where the vehicle lands: AHEAD metres the way the player is facing, not
+ * AHEAD metres east. It used to be pos.x += AHEAD whatever direction that
+ * was, so facing north put the vehicle out to your right - raised in the
+ * audit as the one thing in the spawner that looked like a slip, and
+ * settled on 2026-09-17: it should follow the facing.
+ *
+ * ShGetCamera answers with the pose matrix, and its forward row is the
+ * direction the player is looking - the same vector in first and third
+ * person, and the same one the aim uses. Optional at bind time: a dinput8
+ * that does not carry it falls back to the old side offset rather than
+ * dropping the vehicle on the player's head. */
+typedef int (*Camera_t)(ShCamera *);
+static Camera_t g_camera;
+
 /* Runs on the menu thread with the API's lock dropped, so a
  * plain API call here is exactly what the ABI expects.
  */
@@ -80,6 +95,7 @@ static void OnSpawn(uint32_t menu, uint32_t item, int value,
     const Vehicle *v = (const Vehicle *)user;
     ShVec3 pos;
     uint64_t ent;
+    int aimed = 0;
 
     (void)item; (void)value;
     if (!v) return;
@@ -87,7 +103,27 @@ static void OnSpawn(uint32_t menu, uint32_t item, int value,
         g_status(menu, "@sp.noplayer");
         return;
     }
-    pos.x += AHEAD;
+    /* Horizontal only: the forward row tilts with the view, and a vehicle
+     * placed along a look down at the ground would go underground. The
+     * lift below is what raises it. */
+    if (g_camera) {
+        ShCamera cam;
+
+        memset(&cam, 0, sizeof(cam));
+        if (g_camera(&cam)) {
+            float fx = cam.forward.x, fy = cam.forward.y;
+            float len = fx * fx + fy * fy;
+
+            if (len > 1e-6f) {
+                float k = AHEAD / (float)sqrt((double)len);
+
+                pos.x += fx * k;
+                pos.y += fy * k;
+                aimed = 1;
+            }
+        }
+    }
+    if (!aimed) pos.x += AHEAD;      /* no camera to ask: the old offset */
     pos.z += LIFT;
 
     g_status(menu, "@sp.spawning");
@@ -162,6 +198,9 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_spawn = GetProcAddress(m, "ShSpawnVehicle");
     *(FARPROC *)&g_playerPos = GetProcAddress(m,
                                               "ShGetPlayerPosition");
+    /* Optional: the facing the vehicle is placed along. Absent means the
+     * old east offset, which is a worse landing but not a failure. */
+    *(FARPROC *)&g_camera = GetProcAddress(m, "ShGetCamera");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");

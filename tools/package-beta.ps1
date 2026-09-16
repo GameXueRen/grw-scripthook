@@ -19,7 +19,7 @@
 .EXAMPLE
   pwsh ./tools/package-beta.ps1
   pwsh ./tools/package-beta.ps1 -Zip
-  pwsh ./tools/package-beta.ps1 -TestKit -WithMods -Zip
+  pwsh ./tools/package-beta.ps1 -TestKit -Zip
   pwsh ./tools/package-beta.ps1 -From 'D:\GRW' -OutDir 'D:\dist' -Zip
 #>
 [CmdletBinding()]
@@ -46,12 +46,7 @@ param(
     # -testkit.zip so it cannot be confused with the one a player gets: the
     # audit names crash causes, open questions and the fixes that are not in
     # yet, and is not for players.
-    [switch]$TestKit,
-
-    # Copy the game folder's mods\ tree in as well. It is the player's own
-    # content, never part of a release, and only meaningful next to a test
-    # kit for the Forge loader: that feature has nothing to load without it.
-    [switch]$WithMods
+    [switch]$TestKit
 )
 
 $ErrorActionPreference = 'Stop'
@@ -153,17 +148,16 @@ foreach ($rel in @('lang.example.ini', 'LICENSE', 'README.md')) {
     }
 }
 
-# The Forge loader's content, when asked for. It is not part of a release -
-# it belongs to whoever put it in the game folder - but a tester who has to
-# exercise the loader needs a payload to load, and it has to be the payload
-# this build was proved against. Left byte for byte as found: the loader
-# matches it against the archives, so touching it would change the test.
-if ($WithMods) {
-    if (Test-Path (Join-Path $From 'mods')) {
-        Copy-One 'mods' 'forge mods (test content)'
-    } else {
-        $missing += "mods\  (asked for with -WithMods, but the game folder has none)"
-    }
+# The Forge loader's content goes in every package, by decision of
+# 2026-09-17: the loader is shipped with a payload it was proved against, so
+# a player who turns [forgemod] on has something to see rather than an empty
+# folder to wonder about. Copied byte for byte - the loader matches it
+# against the archives, so touching it would change what it does - and the
+# feature stays off in the ini unless this is a test kit (see below).
+if (Test-Path (Join-Path $From 'mods')) {
+    Copy-One 'mods' 'forge mods'
+} else {
+    $missing += "mods\  (not in the game folder: build one, or copy it in)"
 }
 
 # ---- the shipped ini decides what loads ------------------------------------
@@ -175,17 +169,26 @@ if ($WithMods) {
 # is not one. The [plugins] section is rewritten from the set this package
 # actually carries; every other section is left exactly as found.
 $iniPath = [System.IO.Path]::Combine($dst, 'scripthook.ini')
+# The Forge loader is off in a package that goes to players and on in a test
+# kit, where serving mods is the thing being tested - the decision of
+# 2026-09-17. Either way the section is written here, so the value in the
+# package never depends on what the machine it was packed on happened to
+# have in its own ini.
+$forgeOn = if ($TestKit) { 1 } else { 0 }
 if ([System.IO.File]::Exists($iniPath)) {
     $lines = [System.IO.File]::ReadAllLines($iniPath)
     $out = New-Object 'System.Collections.Generic.List[string]'
     $dropped = 0
     $inPlugins = $false
     $wrotePlugins = $false
+    $inForge = $false
+    $wroteForge = $false
 
     foreach ($line in $lines) {
         $t = $line.Trim()
         if ($t.StartsWith('[')) {
             if ($inPlugins) { $inPlugins = $false }
+            if ($inForge) { $inForge = $false }
             if ($t -ieq '[plugins]') {
                 $inPlugins = $true
                 $wrotePlugins = $true
@@ -194,14 +197,28 @@ if ([System.IO.File]::Exists($iniPath)) {
                 foreach ($p in $Plugins) { $out.Add("$p=1") }
                 continue
             }
+            if ($t -ieq '[forgemod]') {
+                $inForge = $true
+                $wroteForge = $true
+                $out.Add('[forgemod]')
+                $out.Add("; 1 serves mods\\ over the archives; the folder ships with this package")
+                $out.Add("enabled=$forgeOn")
+                continue
+            }
         }
         if ($inPlugins) { $dropped++; continue }
+        if ($inForge) { continue }        # the old enabled= line goes
         $out.Add($line)
     }
+    if (-not $wroteForge) {
+        $out.Add('')
+        $out.Add('[forgemod]')
+        $out.Add("enabled=$forgeOn")
+    }
 
-    if ($wrotePlugins) {
+    if ($wrotePlugins -or $wroteForge) {
         [System.IO.File]::WriteAllLines($iniPath, $out)
-        Write-Host "  = [plugins] rewritten for the shipped set" `
+        Write-Host ("  = [plugins] and [forgemod] enabled={0} rewritten" -f $forgeOn) `
                    -ForegroundColor DarkGray
     }
 }
@@ -263,8 +280,7 @@ if ($TestKit) {
 
 # ---- what was left behind --------------------------------------------------
 
-$allowed = @('plugins')
-if ($WithMods) { $allowed += 'mods' }
+$allowed = @('plugins', 'mods')
 $skipped = Get-ChildItem $From -Force |
     Where-Object { $_.Name -notin @('dinput8.dll', 'scripthook.ini') -and
                    $_.Name -notin $allowed } |

@@ -23,7 +23,7 @@
 dinput8.dll                  加载器（代理 dinput8）
 scripthook.ini               框架配置（已按本包 8 个插件写好 [plugins]；[forgemod] enabled=1 跟随开发机）
 plugins\                     8 个插件，每个一个子文件夹
-mods\                        Forge 侧载的测试资源（★ 本测试套件带；玩家版不带）
+mods\                        Forge 侧载的模组内容（**两个包都带**；玩家版里 [forgemod] 默认 0，即默认关闭）
 lang.example.ini             语言覆盖层参考模板（放着不用管）
 LICENSE · THIRD-PARTY-NOTICES.txt
 README.md                    框架功能与用法说明（同目录另有 README.txt 纯文本版）
