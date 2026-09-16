@@ -111,7 +111,7 @@ static volatile LONG g_sentWeather = -1;    /* -1 = nothing sent        */
  * rows (enabled, the blocked line) are the only additions.
  */
 static const ShText kEn[] = {
-    { "@tw.page",     "Time & Weather" },
+    { "@tw.page",     "Weather & Real-time Time Control" },
     { "@tw.enabled",  "Enable" },
     { "@tw.status",   "%s   %s   Rate %.2f / set %.2f" },
     { "@tw.on",       "On" },
@@ -147,7 +147,7 @@ static const ShText kEn[] = {
 };
 
 static const ShText kZh[] = {
-    { "@tw.page",     "时间 & 天气控制" },
+    { "@tw.page",     "天气 & 时间实时控制" },
     { "@tw.enabled",  "启用" },
     { "@tw.status",   "%s   %s   时间流速：%.2f（设定 %.2f）" },
     { "@tw.on",       "开" },

@@ -34,9 +34,8 @@
 static const ShText kEnUS[] = {
     /* menu furniture */
     { "@menu.root.hint",
-      "F4 toggle menu, Enter select, ESC back\n"
-      "\xE2\x86\x91 \xE2\x86\x93 or W/S select, "
-      "\xE2\x86\x90 \xE2\x86\x92 or A/D adjust" },
+      "F4 toggles the menu, Enter confirms, ESC back; "
+      "\xE2\x86\x91 \xE2\x86\x93 select, \xE2\x86\x90 \xE2\x86\x92 adjust" },
     { "@menu.on",             "on" },
     { "@menu.off",            "off" },
     { "@menu.footer.pos",     "%d / %d" },
@@ -48,8 +47,7 @@ static const ShText kEnUS[] = {
     { "@settings.cpu",        "CPU scheduling" },
     { "@settings.language",   "Menu language" },
     { "@settings.hint",
-      "Plugin switches take effect on the next launch; the language "
-      "applies at once." },
+      "Plugin switches and CPU scheduling take effect on the next start." },
     { "@settings.order",      "Menu order" },
     { "@settings.order.hint",
       "Left / right moves the highlighted page one place.\n"
@@ -78,15 +76,15 @@ static const ShText kEnUS[] = {
 
     /* lines and hints those pages carry */
     { "@settings.saved",      "Saved. Restart to apply." },
-    { "@settings.restart",    "These changes take effect after a game restart." },
+    { "@settings.restart",    "Plugin switch changes take effect on the next start." },
     { "@settings.plugins.note",
       "No [plugins] line means off. Switch it on here; deleting "
       "scripthook.ini resets every plugin to off." },
     { "@menu.offnow",         "Off now" },
     { "@cpu.now",             "Now: %s - cores %s - priority %s" },
     { "@cpu.hint",
-      "Processor set and priority for each start up stage - changes need "
-      "a restart." },
+      "Processor set and priority for each start up stage; changes take "
+      "effect on the next start." },
     { "@cpu.hint.ecore.na",   "E-cores off: not applicable on this CPU." },
     { "@cpu.hint.ecore.none", "E-cores off: this CPU has no E-cores." },
     { "@cpu.hint.ecore.failed", "E-cores off: detection failed." },
@@ -168,7 +166,7 @@ static const ShText kEnUS[] = {
 
 static const ShText kZhCN[] = {
     { "@menu.root.hint",
-      "F4 开关菜单，回车选择，ESC 返回；↑ ↓ 或 W/S 选择，← → 或 A/D 调整" },
+      "F4 开关菜单，Enter 确认，ESC 返回；↑ ↓ 上下选择，← → 左右调整" },
     { "@menu.on",             "开" },
     { "@menu.off",            "关" },
     { "@menu.footer.pos",     "第 %d / %d 行" },
@@ -179,7 +177,7 @@ static const ShText kZhCN[] = {
     { "@settings.cpu",        "CPU 调度" },
     { "@settings.language",   "菜单语言" },
     { "@settings.hint",
-      "插件开关改变需下次启动生效；其他立即生效。" },
+      "插件开关、CPU调度改变需下次启动生效。" },
     { "@settings.order",      "菜单排序" },
     { "@settings.order.hint",
       "改变菜单显示顺序。← → 把当前行上移 / 下移。" },
@@ -197,14 +195,14 @@ static const ShText kZhCN[] = {
       "%d 个 mod：%d 已生效，%d 被拒绝或覆盖" },
 
     { "@settings.saved",      "已保存。重启后生效。" },
-    { "@settings.restart",    "这些改动需重启游戏才生效。" },
+    { "@settings.restart",    "插件开关改变需下次启动生效。" },
     { "@settings.plugins.note",
       "没有 [plugins] 行即为关闭。在这里打开；删除 scripthook.ini 会把所有"
       "插件重置为关闭。" },
     { "@menu.offnow",         "当前不可用" },
     { "@cpu.now",             "当前：%s - 核心 %s - 优先级 %s" },
     { "@cpu.hint",
-      "设定每个启动阶段的处理器集合与优先级，改动需重启。" },
+      "设定每个启动阶段的处理器集合与优先级，改变需下次启动生效。" },
     { "@cpu.hint.ecore.na",   "关闭能效核：本 CPU 不适用。" },
     { "@cpu.hint.ecore.none", "关闭能效核：本 CPU 没有能效核。" },
     { "@cpu.hint.ecore.failed", "关闭能效核：检测失败。" },

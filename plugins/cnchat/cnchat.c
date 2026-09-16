@@ -845,7 +845,7 @@ static const ShText kEn[] = {
     { "@chat.cand",      "Candidate window" },
     { "@chat.cand.self", "Self-drawn" },
     { "@chat.cand.ime",  "IME native" },
-    { "@chat.hint",      "Restart to apply." }
+    { "@chat.hint",      "Switch changes take effect on the next start." }
 };
 
 static const ShText kZh[] = {
@@ -855,7 +855,7 @@ static const ShText kZh[] = {
     { "@chat.cand",      "候选词窗口" },
     { "@chat.cand.self", "自绘候选词窗口" },
     { "@chat.cand.ime",  "输入法候选词窗口" },
-    { "@chat.hint",      "启用、禁用需重启后生效。" }
+    { "@chat.hint",      "启用开关改变需下次启动生效。" }
 };
 
 static void ChatText(void) {

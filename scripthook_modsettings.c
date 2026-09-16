@@ -639,10 +639,14 @@ static void SetPluginHint(void) {
     char notice[96], text[384];
     int n;
 
+    /* One line, by decision of 2026-09-17: the switches page says when its
+     * changes land and nothing else. The [plugins] explanation used to be
+     * a second line here; it is the row label and the page's own rows that
+     * carry what a switch does, and the note is still in the table for any
+     * page that wants it. The blacklist notice stays - that one is not an
+     * explanation, it is which plugins the mode in play has taken away. */
     ShPluginBlacklistNotice(notice, sizeof(notice));
-    n = snprintf(text, sizeof(text), "%s\n%s",
-                 ShLang("@settings.restart"),
-                 ShLang("@settings.plugins.note"));
+    n = snprintf(text, sizeof(text), "%s", ShLang("@settings.restart"));
     if (notice[0] && n > 0 && (size_t)n + 2 < sizeof(text))
         snprintf(text + n, sizeof(text) - (size_t)n, "\n%s", notice);
     ShMenuHint(g_pluginMenu, text);

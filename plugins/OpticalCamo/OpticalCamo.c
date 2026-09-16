@@ -472,7 +472,10 @@ static const ShText kEn[] = {
     { "@camo.status.off",       "Off | %.3fx" },
     { "@camo.status.active",    "Active | %.3fx" },
     { "@camo.status.inactive",  "Inactive | %.3fx" },
-    { "@camo.status.unknown",   "State unavailable" }
+    { "@camo.status.unknown",   "State unavailable" },
+    { "@camo.hint",
+      "Wear the optical camo backpack, Future Soldier or John Kozak set; the "
+      "effect applies while crouching triggers it." }
 };
 
 static const ShText kZh[] = {
@@ -482,7 +485,9 @@ static const ShText kZh[] = {
     { "@camo.status.off",       "关闭 | %.3fx" },
     { "@camo.status.active",    "激活 | %.3fx" },
     { "@camo.status.inactive",  "未激活 | %.3fx" },
-    { "@camo.status.unknown",   "状态不可用" }
+    { "@camo.status.unknown",   "状态不可用" },
+    { "@camo.hint",
+      "装备光学迷彩背包/未来战士/约翰•科扎克套装，蹲下触发特效时生效。" }
 };
 
 static void CamoText(void) {
@@ -503,6 +508,7 @@ static void BuildMenu(void) {
         Log("ShMenuCreate failed, error %d", ShLastError());
         return;
     }
+    ShMenuHint(g_menu, "@camo.hint");
     if (!ShMenuToggle(g_menu, "@camo.enabled", OnNow(),
                       OnToggle, NULL)) {
         Log("ShMenuToggle failed, error %d", ShLastError());

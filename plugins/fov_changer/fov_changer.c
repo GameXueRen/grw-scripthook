@@ -84,7 +84,10 @@ static const ShText kEn[] = {
     { "@fov.reset",      "Back to the game default" },
     { "@fov.status.on",  "%.0f deg, game default %.0f" },
     { "@fov.status.off", "off, game is %.0f deg" },
-    { "@fov.notready",   "the camera is not ready" }
+    { "@fov.notready",   "the camera is not ready" },
+    { "@fov.hint",
+      "Widens the first and third person camera fov; the aiming camera is "
+      "not touched." }
 };
 
 static const ShText kZh[] = {
@@ -94,7 +97,9 @@ static const ShText kZh[] = {
     { "@fov.reset",      "恢复游戏默认视野范围" },
     { "@fov.status.on",  "当前视野范围 %.0f 度，游戏默认 %.0f" },
     { "@fov.status.off", "已关闭，当前视野范围 %.0f 度" },
-    { "@fov.notready",   "游戏视野尚未就绪" }
+    { "@fov.notready",   "游戏视野尚未就绪" },
+    { "@fov.hint",
+      "延展第一/第三人称镜头的视野范围，不影响瞄准模式的镜头视野范围。" }
 };
 
 static void FovText(void) {
@@ -211,6 +216,7 @@ static DWORD WINAPI InitThread(LPVOID p) {
     ShMenuToggle(g_menu, "@fov.override", 0, OnToggle, NULL);
     ShMenuNumber(g_menu, "@fov.vertical", g_deg, DEG_MIN, DEG_MAX,
                  DEG_STEP, OnFov, NULL);
+    ShMenuHint(g_menu, "@fov.hint");
     ShMenuAction(g_menu, "@fov.reset", OnReset, NULL);
     Report();
     /* A view override is not something a PvP match wants; saying it out

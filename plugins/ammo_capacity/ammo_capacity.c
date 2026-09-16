@@ -62,8 +62,9 @@ static uint32_t      g_menu;
  * word, because they say exactly what went wrong.
  */
 static const ShText kEn[] = {
-    { "@ac.page",  "Ammo Capacity" },
-    { "@ac.mult",  "Capacity Multiplier" },
+    { "@ac.page",  "Ammo Limit" },
+    { "@ac.mult",  "Ammo Limit Multiplier" },
+    { "@ac.hint",  "Raises or lowers the ammo limit every weapon carries." },
     { "@ac.note",  "Changes apply after visiting an ammo crate." },
     { "@ac.err.build", "Unsupported game build" },
     { "@ac.err.hook",  "Hook validation failed" },
@@ -71,8 +72,9 @@ static const ShText kEn[] = {
 };
 
 static const ShText kZh[] = {
-    { "@ac.page",  "弹药容量" },
-    { "@ac.mult",  "弹药容量倍率" },
+    { "@ac.page",  "弹药上限" },
+    { "@ac.mult",  "弹药上限倍率" },
+    { "@ac.hint",  "增加或减少所有武器可携带的弹药数量上限。" },
     { "@ac.note",  "修改后需到弹药箱补给后生效。" },
     { "@ac.err.build", "不支持的游戏版本" },
     { "@ac.err.hook",  "挂钩校验失败" },
@@ -231,7 +233,7 @@ static void BuildMenu(void) {
     if (!g_menu) { AcLog("ShMenuCreate failed"); return; }
     if (idx < 0 || idx >= NVALS) idx = VANILLA;
     ShMenuList(g_menu, "@ac.mult", g_labels, NVALS, (int)idx, OnPick, NULL);
-    ShMenuHint(g_menu, "@ac.note");
+    ShMenuHint(g_menu, "@ac.hint");
     ShMenuStatus(g_menu, "@ac.note");
     AcLog("menu created (index %ld)", (long)idx);
 }

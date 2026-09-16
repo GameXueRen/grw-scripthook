@@ -131,8 +131,8 @@ static const ShText kEn[] = {
     { "@fp.status.away",
       "on, view taken by the engine (%s) [%s %+.0f %+.0f %+.0f]" },
     { "@fp.hint",
-      "If the head is not hidden by itself, switch first person off "
-      "and on again." }
+      "If the head is not hidden by itself, aim with the right mouse "
+      "button or switch first person off and on again." }
 };
 
 static const ShText kZh[] = {
@@ -166,7 +166,7 @@ static const ShText kZh[] = {
     { "@fp.status.away",
       "已开启，视角由引擎接管（%s）[%s %+.0f %+.0f %+.0f]" },
     { "@fp.hint",
-      "头部若未自动隐藏，请重新切换第一人称解决" }
+      "头部若未自动隐藏，请按右键瞄准或重新切换解决。" }
 };
 
 /* Late binding, like everything else in this plugin: the entry points
@@ -592,7 +592,7 @@ static void SetFp(int on) {
          * on the rare frame that call cannot name the head, the
          * player's own toggle is what sets it right again. Say
          * so up front rather than leave it to be discovered. */
-        Say(SAY_FP_ON, "第一人称已开启（头部若未隐藏请重切一次）",
+        Say(SAY_FP_ON, "第一人称已开启（头部若未隐藏，请按右键瞄准或重切一次）",
             SAY_RGB_DONE, SH_TOAST_MS_DEFAULT);
     } else {
         InterlockedExchange(&g_on, 0);

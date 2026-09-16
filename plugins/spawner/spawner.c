@@ -148,8 +148,8 @@ typedef int (*LangDeclare_t)(const char *owner, const char *lang,
 static LangDeclare_t pLangDeclare;
 
 static const TextRow kEn[] = {
-    { "@sp.page",     "Vehicles" },
-    { "@sp.hint",     "Note: the first summon may take a moment." },
+    { "@sp.page",     "Vehicle dispatch" },
+    { "@sp.hint",     "The first dispatch may take a moment." },
     { "@sp.noplayer", "no player position" },
     { "@sp.spawning", "spawning..." },
     { "@sp.spawned",  "spawned, %d this session" },
@@ -157,8 +157,8 @@ static const TextRow kEn[] = {
 };
 
 static const TextRow kZh[] = {
-    { "@sp.page",     "载具" },
-    { "@sp.hint",     "提示：首次召唤可能需要一点时间。" },
+    { "@sp.page",     "载具派遣" },
+    { "@sp.hint",     "首次载具派遣可能需要一点时间。" },
     { "@sp.noplayer", "无法获取玩家位置" },
     { "@sp.spawning", "正在生成……" },
     { "@sp.spawned",  "已生成，本次会话共 %d 辆" },
