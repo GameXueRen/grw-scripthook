@@ -138,12 +138,25 @@ RVA_REGISTRY        4BC17F8   -> 4BC1878    decoded off two engine call sites; l
 RVA_ARCH_DESC       42C2560   -> 42C2570    shared id and 16 tail bytes identical; live
 RVA_POOL            4D89000                never verified; the spawn path no longer uses it
 RVA_POPMGR          4B98F18                wrong even before the update - retired
-RVA_CONTEXT         4B90208                unverified; reads a pointer, tolerated when zero
+RVA_CONTEXT         4B98F08   -> 4B98F98    decode was right, meaning was wrong: the slot holds float
+#                                             bit patterns, so "camp/job" was never those fields.
+#                                             Retired; nothing reads it.
+RVA_POP_MGR         (none)    -> 4B98FA8    the population manager: four of the register call's five
+#                                             sites (775B74D, 9202385, 9EAB00D, 13053BBB) load this
+#                                             slot with mov rcx,[rip+disp32]; the fifth (718E325)
+#                                             loads 4B9A7A8, same block, another mode
+# spec+0x2D0 is a 64 bit field the engine writes with a pointer, so nothing
+# is written there any more: it was handed the context's two 32 bit values
+# and the register function walked one of them into a fault. The context is
+# read for the log only.
 RVA_NULL_BLOCK      4D88FE8                unverified; only a comparison
-# the population manager is looked up at run time instead, from the three
-# slots the engine itself passes to its register function:
-#   4BACFA8 / 4B957A8 / 4B99BA8, each taken only after a shape check
-#   (all three now read empty in the campaign, so registration is skipped)
+# the population manager is looked up at run time instead, from all five
+# slots the engine itself passes to its register function (decoded the same
+# way, each against its own old build value):
+#   4B99318 -> 4BACFA8    4B98718 -> 4B957A8    4BA7F20 -> 4B99BA8
+#   4B98918 -> 4BBE3A8    4B2E418 -> 4B8D7A8
+# Each is taken only after a shape check. All five read empty in the
+# campaign today, so registration is skipped and the log says so.
 
 # --- vtables (compare entries in order; see the notes above) --------------
 SPEC_VTABLE         394A1E0   -> 394A060    learned live, then confirmed by entry shift
