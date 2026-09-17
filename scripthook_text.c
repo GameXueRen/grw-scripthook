@@ -148,27 +148,6 @@ static const ShText kEnUS[] = {
     { "@cpu.stage.window",    "window" },
     { "@cpu.stage.play",      "play" },
 
-    /* the translation report */
-    { "@settings.diag",       "Translation report" },
-    { "@settings.diag.hint",
-      "File text this build still wants.\n"
-      "Still in English - the row's value is\n"
-      "English text; translate it in place.\n"
-      "No text at all: keys only the build has.\n"
-      "Export writes them all to\n"
-      "lang\\<code>.missing.ini, ready to fill in.\n"
-      "A plugin without source is translated this\n"
-      "way too: its English literal is the key." },
-    { "@settings.diag.export", "Write lang\\<code>.missing.ini" },
-    { "@diag.english",        "Still in English:" },
-    { "@diag.missing",        "No text at all:" },
-    { "@diag.orphan",         "Not declared (\"@\" keys):" },
-    { "@diag.dup",            "Repeated rows:" },
-    { "@diag.dropped",        "Dropped (table full):" },
-    { "@diag.framework",      "(framework)" },
-    { "@diag.exported",       "%d row(s) written to %s" },
-    { "@diag.exportfail",     "Export failed - see logs\\scripthook_text.log" },
-
     /* the languages this build ships, named in their own language, so
      * the picker reads with no lang.ini present (a [LanguageNames] row
      * in a file overrides these) */
@@ -260,21 +239,6 @@ static const ShText kZhCN[] = {
     { "@cpu.stage.boot",      "启动Logo窗口" },
     { "@cpu.stage.window",    "主窗口加载" },
     { "@cpu.stage.play",      "游戏中" },
-
-    { "@settings.diag",       "译文诊断" },
-    { "@settings.diag.hint",
-      "文件还欠这个版本哪些文本。\n仍是英文：该行的值还是英文，就地改值即可。\n完全没有文本：只有内部才有的key。"
-      "\n导出会把它们写到\nlang\\<语言>.missing.ini，填好即可用。\n没有源码的插件也走这条路："
-      "它的英文原文就是键。" },
-    { "@settings.diag.export", "导出到 lang\\<语言>.missing.ini" },
-    { "@diag.english",        "仍是英文：" },
-    { "@diag.missing",        "完全没有文本：" },
-    { "@diag.orphan",         "内部未声明的 “@” 键：" },
-    { "@diag.dup",            "重复行：" },
-    { "@diag.dropped",        "超限丢弃：" },
-    { "@diag.framework",      "（框架）" },
-    { "@diag.exported",       "已写入 %d 行：%s" },
-    { "@diag.exportfail",     "导出失败，详见 logs\\scripthook_text.log" },
 
     { "@lang.name.zh-CN",     "简体中文" },
     { "@lang.name.en-US",     "English" }

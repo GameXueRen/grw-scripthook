@@ -1171,27 +1171,6 @@ int ShTextFormatV(char *dst, size_t cap, const char *en, const char *tr,
  *  translation falls back to. */
 const char *ShTextEnUS(const char *owner, const char *key);
 
-/** Internal: one row of the translation report. */
-typedef struct ShLangMissRow {
-    char owner[48];     /**< "" = the framework */
-    char key[192];      /**< the key, as the baseline declares it */
-    char en[192];       /**< the text to translate from */
-} ShLangMissRow;
-
-/** Internal: what the active language is still missing - keys the
- *  baseline has only in English, and rows whose value is still plain
- *  ASCII, which is a file that carries the English line back. Fills up
- *  to `max` rows (missing keys first) and sets the counts it is given;
- *  a NULL count is not asked for. Returns the rows written. */
-int ShLangDiag(ShLangMissRow *out, int max, int *missing, int *english,
-               int *orphan, int *dup, int *dropped);
-
-/** Internal: write <gamedir>\lang\<code>.missing.ini - every missing
- *  row, with the English text above it as a comment - and return the
- *  row count, or -1 when it could not be written. `path`, when given,
- *  receives the file that was written. */
-int ShLangSkeleton(char *path, int cap);
-
 /** @} */
 /** @defgroup draw Plugin drawing
  *  A plugin's own window inside the game's overlay, drawn by the

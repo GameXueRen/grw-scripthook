@@ -1270,6 +1270,8 @@ s[10] = 0  →  剩下 "第一人" + 孤立的首字节 E7
 
 **提示文案改为多行短句**（`@settings.diag.hint`、`@settings.order.hint`、`@forge.hint`）：原来一行两三百字符，面板不换行，右侧直接被切。**约定：提示按字面 `\n` 分行，一行别超过约 28 个汉字 / 55 个 ASCII 字符**——渲染层不自动折行。
 
+> **2026-09-17：这一页整页删掉了（含它下面的内部接口）**。反馈原话是「这是之前用来测试遗留的」——`设置 → 译文诊断` 从菜单里移除，跟着一起走的还有 `ShLangDiag`、`ShLangSkeleton`、`ShLangMissRow`（`RowShadowed`、`TextIsAscii`、`MissFill`、`DIAG_MAX` 是它们的私有件）与 11 个文案键（`@settings.diag`、`@settings.diag.hint`、`@settings.diag.export`、`@diag.english/missing/orphan/dup/dropped/framework/exported/exportfail`）。判据是：那两个接口在头文件里标的就是 **Internal**（不带 `SH_API`、不导出），唯一调用方只有这一页，删完不留不可达代码。**翻译校对的实际通路不受影响**：`docs\export-text-review.ps1` → `docs\text-cn-review.ini` 读的是源码基线表，从不依赖这两个接口。要找回任意一半：`git log -S "ShLangDiag"`（本次删除的提交是它的最后一次出现）。
+
 ### 9.12 插件源码改 ID：第 ② 组（同日）
 
 §7.4 的"三件小事"首次落地。②组 4 个静态直连插件里，三个改完（`cnchat` 原先没有 `lang.ini`、中文需新写，留到下一批）：
