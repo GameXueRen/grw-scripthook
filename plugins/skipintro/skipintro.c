@@ -617,6 +617,28 @@ static void BuildMenu(HMODULE m) {
 
 /* ---- startup ------------------------------------------------------------- */
 
+/* This plugin's log is its own diagnostics, and the level's job here is
+ * only to be able to turn all of it off: the file is written at every
+ * level except none, unlike the framework's module logs, which need info.
+ * The line that matters most in a plugin's log is usually the one about
+ * something not working - exactly the line a quiet session would drop.
+ * Bound on first use and optional - a framework that does not carry
+ * ShLogLevel leaves the log ungated, which is what this did before. */
+static int LogWanted(void) {
+    typedef int (*LevelFn)(void);
+    static LevelFn fn;
+    static int tried;
+
+    if (!tried) {
+        HMODULE di;
+
+        tried = 1;
+        di = GetModuleHandleA("dinput8.dll");
+        if (di) *(FARPROC *)&fn = GetProcAddress(di, "ShLogLevel");
+    }
+    return !fn || fn() > SH_LOG_NONE;
+}
+
 static void OpenLog(void) {
     char path[MAX_PATH];
 
@@ -626,6 +648,7 @@ static void OpenLog(void) {
      * folder was long enough that the file name no longer fitted, the last
      * branch dropped the file beside GRW.exe instead: one plugin's log in the
      * game folder, and missing from the logs\ a player is asked to send. */
+    if (!LogWanted()) return;
     if (!ShLogPath("skipintro.log", path, sizeof(path))) return;
     /* "w", not "a": the framework's own logs are per session, and a
      * diagnostic that only ever grows is a file that grows on the player's

@@ -945,8 +945,11 @@ static void BuildMenu(void) {
 static DWORD WINAPI InitThread(LPVOID p) {
     (void)p;
 
-    /* log.h: this translation unit gets its own file and its own Log. */
-    LogInit("cnchat.log");
+    /* log.h: this translation unit gets its own file and its own Log.
+     * Always, not LogInit: a plugin's own log is written at every level
+     * except none, so a session that went quiet still keeps the line
+     * about what this plugin could not do. */
+    LogInitAlways("cnchat.log");
     Log("--- chinese chat box ---");
 
     ResolveIniPath();

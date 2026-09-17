@@ -619,7 +619,10 @@ static DWORD WINAPI PollThread(LPVOID arg) {
 static DWORD WINAPI InitThread(LPVOID arg) {
     (void)arg;
 
-    LogInit("OpticalCamo.log");
+    /* Always, not LogInit: a plugin's own log is written at every level
+     * except none, so the line about what did not work survives a quiet
+     * session. */
+    LogInitAlways("OpticalCamo.log");
     Log("--- optical camo ---");
     Log("built " __DATE__ " " __TIME__);
 

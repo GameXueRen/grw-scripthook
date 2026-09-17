@@ -2788,6 +2788,29 @@ SH_API int  ShConfigGetBool(const char *section, const char *key,
 SH_API int  ShConfigGetStr(const char *section, const char *key,
                            const char *def, char *out, int size);
 
+/** What ShLogLevel() answers with. The same numbers log.h uses for the
+ *  framework's own lines; a plugin with a log of its own reads them from
+ *  here rather than including log.h. */
+#define SH_LOG_NONE   0
+#define SH_LOG_ERR    1
+#define SH_LOG_WARN   2
+#define SH_LOG_INFO   3
+#define SH_LOG_DBG    4
+
+/** The [Settings] LogLevel in force, as one of the SH_LOG_* values:
+ *  0 none, 1 error, 2 warn, 3 info, 4 debug. Parsed once and
+ *  kept, so editing the ini takes effect on the next launch. Every
+ *  module - and every plugin that logs - asks this one function, which
+ *  is what keeps a session's logs\ folder telling one story.
+ *
+ *  The files that follow the level are the framework's own module logs:
+ *  those exist at SH_LOG_INFO and SH_LOG_DBG, and not below. The two the
+ *  support flow asks for - the loader's log and the crash report - are
+ *  written whatever it says, and a plugin's own log is written at every
+ *  level except SH_LOG_NONE, so a plugin that failed is still on record
+ *  in an otherwise quiet session. */
+SH_API int  ShLogLevel(void);
+
 /** Write a value back to scripthook.ini. The on-disk file is
  *  updated in place (comments and other sections preserved) and
  *  the in-memory copy is refreshed, so later ShConfigGet*

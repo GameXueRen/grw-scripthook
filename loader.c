@@ -221,6 +221,12 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     (void)p;
     ShConfigInit();
     Log("config loaded from scripthook.ini");
+    /* One line saying how much this session's logs\ holds, so a folder
+     * with only two files in it explains itself. */
+    LogAlways("log level: %s - %s", LogLevelName(ShLogLevel()),
+              ShLogLevel() >= LOG_INFO
+                  ? "every module logs"
+                  : "module logs off, plugin logs on");
     /* Watch state before plugins, so the world is resolved by the time any
      * of them ask. Here rather than in DllMain, where creating a thread
      * can deadlock against the loader lock. */
@@ -272,8 +278,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         if (!IsGRW()) return TRUE;
         LogInit("scripthook.log");
-        Log("GRW ScriptHook " SH_VERSION);
-        Log("built " __DATE__ " " __TIME__);
+        /* The two lines a report is always asked for, so they are written
+         * whatever [Settings] LogLevel says - including none. */
+        LogAlways("GRW ScriptHook " SH_VERSION);
+        LogAlways("built " __DATE__ " " __TIME__);
         /* Armed first, so a crash during our own start up
          * is reported too.
          */

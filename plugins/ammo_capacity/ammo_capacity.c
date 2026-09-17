@@ -240,6 +240,28 @@ static void BuildMenu(void) {
 
 /* ---- startup ---------------------------------------------------------- */
 
+/* This plugin's log is its own diagnostics, and the level's job here is
+ * only to be able to turn all of it off: the file is written at every
+ * level except none, unlike the framework's module logs, which need info.
+ * The line that matters most in a plugin's log is usually the one about
+ * something not working - exactly the line a quiet session would drop.
+ * Bound on first use and optional - a framework that does not carry
+ * ShLogLevel leaves the log ungated, which is what this did before. */
+static int LogWanted(void) {
+    typedef int (*LevelFn)(void);
+    static LevelFn fn;
+    static int tried;
+
+    if (!tried) {
+        HMODULE di;
+
+        tried = 1;
+        di = GetModuleHandleA("dinput8.dll");
+        if (di) *(FARPROC *)&fn = GetProcAddress(di, "ShLogLevel");
+    }
+    return !fn || fn() > SH_LOG_NONE;
+}
+
 static void OpenLog(void) {
     char path[MAX_PATH];
     char *slash;
@@ -248,6 +270,7 @@ static void OpenLog(void) {
     slash = strrchr(path, '\\');
     if (!slash) return;
     slash[1] = 0;
+    if (!LogWanted()) return;
     if (strlen(path) + 24 >= sizeof(path)) return;
     strcat(path, "logs");
     CreateDirectoryA(path, NULL);

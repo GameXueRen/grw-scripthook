@@ -175,6 +175,13 @@ $iniPath = [System.IO.Path]::Combine($dst, 'scripthook.ini')
 # package never depends on what the machine it was packed on happened to
 # have in its own ini.
 $forgeOn = if ($TestKit) { 1 } else { 0 }
+# The one [Settings] key this script owns, and only in a test kit: the test
+# plan asks a tester for logs by name, so the kit carries LogLevel=debug and
+# does not care what the machine it was packed on had. A player package
+# states nothing here, which leaves the build's own default in force - a
+# release build logs at warn, so logs\ holds the loader's own log and the
+# crash report and nothing else.
+$logLevel = if ($TestKit) { 'debug' } else { $null }
 if ([System.IO.File]::Exists($iniPath)) {
     $lines = [System.IO.File]::ReadAllLines($iniPath)
     $out = New-Object 'System.Collections.Generic.List[string]'
@@ -183,12 +190,15 @@ if ([System.IO.File]::Exists($iniPath)) {
     $wrotePlugins = $false
     $inForge = $false
     $wroteForge = $false
+    $inSettings = $false
+    $wroteSettings = $false
 
     foreach ($line in $lines) {
         $t = $line.Trim()
         if ($t.StartsWith('[')) {
             if ($inPlugins) { $inPlugins = $false }
             if ($inForge) { $inForge = $false }
+            if ($inSettings) { $inSettings = $false }
             if ($t -ieq '[plugins]') {
                 $inPlugins = $true
                 $wrotePlugins = $true
@@ -205,8 +215,28 @@ if ([System.IO.File]::Exists($iniPath)) {
                 $out.Add("enabled=$forgeOn")
                 continue
             }
+            if ($t -ieq '[settings]') {
+                $inSettings = $true
+                $wroteSettings = $true
+                if ($logLevel) {
+                    $out.Add('[Settings]')
+                    $out.Add("; a test kit logs at debug: the test plan asks for the module logs by name")
+                    $out.Add("LogLevel=$logLevel")
+                    continue
+                }
+                # A player package writes nothing here; its other keys
+                # (Language, Languages, MenuScale*) are kept below.
+            }
         }
         if ($inPlugins) { $dropped++; continue }
+        # [Settings] keeps everything it was found with except a LogLevel
+        # line: this script owns that one, and what it owns is written at
+        # the section head above.
+        if ($inSettings) {
+            if ($t -match '^LogLevel\s*=') { $dropped++; continue }
+            $out.Add($line)
+            continue
+        }
         # [forgemod] keeps everything else it was found with. dry_run, strict,
         # report_copies, probe and log_reads are the operator's settings and
         # this script has no business dropping them - it owns one line in that
@@ -234,11 +264,18 @@ if ([System.IO.File]::Exists($iniPath)) {
         $out.Add('[forgemod]')
         $out.Add("enabled=$forgeOn")
     }
+    if (-not $wroteSettings -and $logLevel) {
+        $out.Add('')
+        $out.Add('[Settings]')
+        $out.Add("; a test kit logs at debug: the test plan asks for the module logs by name")
+        $out.Add("LogLevel=$logLevel")
+    }
 
     # Written whatever it was found as: both sections are the package's to
     # state, and there is no case left in which neither has to change.
     [System.IO.File]::WriteAllLines($iniPath, $out)
-    Write-Host ("  = [plugins] and [forgemod] enabled={0} rewritten" -f $forgeOn) `
+    Write-Host ("  = [plugins], [forgemod] enabled={0}, LogLevel={1} rewritten" -f `
+                $forgeOn, $(if ($logLevel) { $logLevel } else { '(build default)' })) `
                -ForegroundColor DarkGray
 }
 

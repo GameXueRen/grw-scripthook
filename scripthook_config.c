@@ -214,7 +214,12 @@ static const char *DEFAULT_CONFIG =
     "\n"
     "[Settings]\n"
     "Language=zh-CN\n"
-    "Languages=zh-CN,en-US\n";
+    "Languages=zh-CN,en-US\n"
+    "; LogLevel: none/error/warn/info/debug. Left out, a working build logs\n"
+    "; at info (every module's log) and a release build at warn (the\n"
+    "; framework's module logs off; scripthook.log, the crash report and\n"
+    "; the plugins' own logs are still written). Uncomment to change.\n"
+    ";LogLevel=info\n";
 static void WriteDefaultConfig(const char *path) {
     FILE *f = fopen(path, "w");
     if (f) {
@@ -1967,6 +1972,41 @@ SH_API int ShConfigGetStr(const char *section, const char *key,
     ShUtf8Trim(out);
     ShSetError(SH_OK);
     return 1;
+}
+
+/* "debug" -> LOG_DBG and friends. An unknown word keeps def and says so,
+ * because a typo in a log switch must not quietly mean "info". */
+static int LogLevelFromName(const char *s, int def) {
+    if (!_stricmp(s, "none"))  return LOG_NONE;
+    if (!_stricmp(s, "error")) return LOG_ERR;
+    if (!_stricmp(s, "warn"))  return LOG_WARN;
+    if (!_stricmp(s, "info"))  return LOG_INFO;
+    if (!_stricmp(s, "debug")) return LOG_DBG;
+    TextLog("LogLevel \"%s\" is not none/error/warn/info/debug - keeping "
+            "\"%s\"", s, LogLevelName(def));
+    return def;
+}
+
+/** [Settings] LogLevel, parsed here and nowhere else. Every translation
+ *  unit asks through the DLL (see log.h), so a plugin's own log obeys
+ *  the same setting as the framework's. */
+SH_API int ShLogLevel(void) {
+    static int level = -1;
+    static int busy;
+    char buf[24];
+
+    if (level >= 0) return level;
+    /* The first ask can arrive from inside the config's own first read:
+     * that read logs, opening a log asks for the level. Answer with the
+     * build's default then instead of recursing. */
+    if (busy) return LOG_DEFAULT;
+    busy = 1;
+    level = LOG_DEFAULT;
+    if (ShConfigGetStr("Settings", "LogLevel", "", buf, sizeof(buf)) &&
+        buf[0])
+        level = LogLevelFromName(buf, level);
+    busy = 0;
+    return level;
 }
 
 /* ---- write-back ---------------------------------------------- */
