@@ -63,7 +63,7 @@ C ABI，并按 ASI 插件约定加载 `plugins\` 下的 `.asi` 插件。
 | CPU 核心调度（Logo / 窗口加载 / 游戏中三阶段分档 + 最大核心数上限 + 游玩阶段四档优先级 + 加载阶段「效率模式」开关，**本机不支持时退化为「低」优先级**；进入游戏中自动还原、只还原自己开的那份；档位与阶段状态已作为公共 API 导出，见 [`docs/cpu-scheduling.md`](docs/cpu-scheduling.md)） | 已实现，待大规模验证 |
 | 「最后的仪式」闪退修复（LastRites_dlcfix：单开关，条目 3718 写死） | 已完成，已验证 |
 | 魅影模式不删档（GhostNoWipe：单开关，写入守卫 + 拦改名 + 状态提示条） | 已完成，已验证 |
-| 会话模式识别（`ShSelectedPlayMode`：战役 / 幽灵模式 / 雇佣兵 / 游击战 / Ghost War；判据是 `CreateGameMode` 拿到的**模式对象**（`38DC7F0` 战役[含 Narco Road、Fallen Ghosts] / `38DCD80` 幽灵模式 / `38DD178` 雇佣兵 / `38DCF80` 游击战 / `3908D98` Ghost War），`SetCurrentGameMode` 的参数只作为证据一并记日志 —— 实测同一模式内容可能带 0 或 2，不能当判据；未知对象写日志并返回 NONE，不猜；另有 `ShIsGhostWarMode` / `ShIsGhostMode` / `ShIsMercenariesMode` / `ShIsGuerrillaMode` 与 `ShPlayModeFingerprint`） | 已完成，五种模式 + 两个 DLC 战役均已实测确认 |
+| 会话模式识别（`ShSelectedPlayMode`：战役 / 幽灵模式 / 雇佣兵 / 游击战 / Ghost War；判据是 `CreateGameMode` 拿到的**模式对象**（`38DC7F0` 战役[含 Narco Road、Fallen Ghosts] / `38DCD80` 幽灵模式 / `38DD178` 雇佣兵 / `38DCF80` 游击战 / `3908D98` Ghost War；描述实际指向条目往前 `0x90` 的那一格 —— 2026-09-17 两次同距实测，两种写法都接受），`SetCurrentGameMode` 的参数只作为证据一并记日志 —— 实测同一模式内容可能带 0 或 2，不能当判据；未知对象写日志并返回 NONE，不猜；另有 `ShIsGhostWarMode` / `ShIsGhostMode` / `ShIsMercenariesMode` / `ShIsGuerrillaMode` 与 `ShPlayModeFingerprint`） | 已完成，五种模式 + 两个 DLC 战役均已实测确认 |
 | 插件模式黑名单 API（源码声明 + 菜单隐藏 + 状态通知 + 设置页提示；**未声明插件默认禁 Ghost War 与雇佣兵**，声明"无"才全部放行；条件只有五种模式 —— 曾有"主菜单"一档，实测其判据锁存（退回主菜单后不再成立），**已按实测移除**；协作式，框架不接管插件自带钩子） | 已完成，游戏内已验证 |
 | Forge Mod Loader | 游戏资源侧载热替换（mods\ 目录，免解包免重打包、不改原版、不写盘） | 已完成，机制已验证 |
 | 插件自绘 UI 公共 API（`@defgroup draw`：每帧回调 + C ABI 绘图原语 + 输入框；框架管外观/焦点/输入法会话与字符收集，插件管自己的缓冲与热键/提交；示例插件 `draw_sample`） | 已实现，见 [`docs/ui-drawing.md`](docs/ui-drawing.md) |
