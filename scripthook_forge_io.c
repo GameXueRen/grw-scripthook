@@ -754,12 +754,12 @@ void ShForgeIoStartup(void) {
         if (i < 3) {
             for (j = 0; j < 3; j++)
                 if (rules[j]) ShFileRuleDel(rules[j]);
-            Log("forge io: a rule was refused - the file layer stays off");
+            LogAlways("forge io: a rule was refused - the file layer stays off");
             return;
         }
     }
 
-    Log("forge io installed (SetFilePointerEx=%p GetFinalPathNameByHandleW=%p)",
+    LogAlways("forge io installed (SetFilePointerEx=%p GetFinalPathNameByHandleW=%p)",
         (void *)p_SetFilePointerEx, (void *)p_FinalPath);
 }
 

@@ -9,6 +9,11 @@ static char  g_logName[MAX_PATH];
 /* 1 while this translation unit's open file is its plugin's own log,
  * which the level does not filter line by line - see LogInitAlways. */
 static int   g_logAlways = 0;
+/* 1 while this unit has no log of its own at this level and its open file is
+ * the session's floor instead (logs\scripthook.log, appended). See LogFloor
+ * and the note on the fallback in LogInitMode: only its LOG_ALWAYS lines are
+ * written, so a quiet level keeps the milestones and drops the chatter. */
+static int   g_logFloor = 0;
 
 /* Build "<gamedir>\logs\<name>", creating the logs directory
  * on first use. The game is free to change the working
@@ -38,6 +43,17 @@ static int LogPath(char *buf, size_t n, const char *name) {
  * crash report - are there whatever the level is. Those two are the
  * floor, so even "none" leaves a session somebody can be asked about.
  *
+ * The floor is also *where a module's milestones go* when the level drops
+ * its own file. Every module keeps a handful of LOG_ALWAYS lines - the ones
+ * that say which step of start up happened (see LogFloor below), and at a
+ * quiet level they are appended to logs\scripthook.log instead of being
+ * dropped along with the rest of that module's file. That is the change the
+ * first public beta's support flow asked for: the field report of
+ * 2026-09-17 arrived with the version, the plugin count, the overlay's
+ * install route and the loader's own failures all silent, because every one
+ * of them was a LOG_INFO line in a file the level had removed, and "did not
+ * get there" could not be told apart from "never logged".
+ *
  * A plugin's own log is the exception, and a plugin asks for it with
  * LogInitAlways(): it is written at every level except none. Its lines
  * carry no levels of their own, its file is small, and the line that
@@ -56,8 +72,11 @@ static int LogPath(char *buf, size_t n, const char *name) {
 #define LOG_WARN    2
 #define LOG_INFO    3
 #define LOG_DBG     4
-/* Written whatever the level is: the loader's own start up lines, which
- * are the one thing a report is always asked for. */
+/* Written whatever the level is. Two kinds of line carry it: the loader's
+ * own start up lines, and each module's start up milestones - the build, the
+ * plugin count, whether the overlay came up and by which route, whether the
+ * game's exe answered the site checks. At info and debug a module's own file
+ * carries them; at warn and below the floor in logs\scripthook.log does. */
 #define LOG_ALWAYS  9
 
 /* A release build starts quieter than a working one: warn keeps the two
@@ -127,6 +146,7 @@ static void LogClose(void) {
         g_logName[0] = 0;
     }
     g_logAlways = 0;
+    g_logFloor = 0;
 }
 
 /* "<gamedir>\<name>": where a log goes when logs\ cannot be created or
@@ -179,11 +199,52 @@ static void LogKeepPrevious(const char *path) {
     MoveFileExA(path, prev, MOVEFILE_REPLACE_EXISTING);
 }
 
+static FILE *LogOpen(const char *name, const char *path) {
+    /* scripthook.log has more than one writer, and they do not share a file
+     * pointer: the loader owns this handle, and every module whose own log
+     * the level dropped appends to the same file (the floor branch of
+     * LogInitMode, one handle per translation unit).
+     *
+     * "w" leaves this handle writing at its own tracked offset, so the next
+     * line written here lands on top of whatever a floor writer appended in
+     * between. The session of 2026-09-17 23:51 has that scar: the overlay's
+     * "factory capture installed (...)" line survives in logs\scripthook.log
+     * as nothing but its tail, "d while it is up", one line later - and it
+     * was the line that said which capture route the overlay had taken.
+     *
+     * So: truncate with "w", then write with "a" like every other writer,
+     * which is the one mode where the OS itself puts each write at the end
+     * of the file whatever the other handles are doing. */
+    FILE *trunc;
+
+    if (strcmp(name, "scripthook.log") != 0) return fopen(path, "w");
+    trunc = fopen(path, "w");
+    if (trunc) fclose(trunc);
+    return fopen(path, "a");
+}
+
 static void LogInitMode(const char *name, int always) {
     char path[MAX_PATH];
     FILE *f;
 
-    if (!LogWanted(name, always)) return;
+    if (!LogWanted(name, always)) {
+        /* The level dropped this unit's own log. Its LOG_ALWAYS lines are the
+         * milestones a report is read for, so they keep somewhere to go: the
+         * session's floor file, appended - the loader owns its own handle on
+         * the same name, and fopen shares. A plugin (always) is left alone:
+         * its own file exists at every level but none, so for it this branch
+         * only ever means "none", which means nothing is written. */
+        if (always) return;
+        if (g_logFile) return;          /* already routed */
+        if (!LogPath(path, sizeof(path), "scripthook.log")) return;
+        f = fopen(path, "a");
+        if (!f) return;
+        g_logFile = f;
+        g_logFloor = 1;
+        strncpy(g_logName, "scripthook.log", sizeof(g_logName) - 1);
+        g_logName[sizeof(g_logName) - 1] = 0;
+        return;
+    }
     if (g_logFile && strcmp(g_logName, name) == 0) return;
     if (g_logFile) LogClose();
     if (!LogPath(path, sizeof(path), name)) return;
@@ -192,10 +253,10 @@ static void LogInitMode(const char *name, int always) {
      * overwritten, so restarting the game no longer throws the record of
      * the run that just ended away. */
     if (strcmp(name, "scripthook.log") == 0) LogKeepPrevious(path);
-    f = fopen(path, "w");
+    f = LogOpen(name, path);
     if (!f) {
         if (!LogFallbackPath(path, sizeof(path), name)) return;
-        f = fopen(path, "w");
+        f = LogOpen(name, path);
         if (!f) return;
         fprintf(f, "[note] logs\\ could not be written to; this file is "
                    "beside the game executable instead\n");
@@ -217,21 +278,52 @@ static void LogInitAlways(const char *name) { LogInitMode(name, 1); }
 
 /* The shared printer: every line carries a local timestamp,
  * so the different logs in the logs directory can be lined
- * up against each other. Modules with a wrapper of their own (draw,
- * corefix, api, config, the overlay) call this directly and have no
- * per-line level; their file is gated as a whole by LogWanted, which is
- * the axis those lines are about. */
-static void Logv(const char *fmt, va_list ap) {
+ * up against each other. */
+static void LogWrite(const char *fmt, va_list ap) {
     SYSTEMTIME st;
 
     if (!g_logFile) return;
     GetLocalTime(&st);
+    if (g_logFloor) {
+        /* This unit has no log of its own at this level: it is sharing the
+         * session's scripthook.log with the loader and with every other
+         * module in the same position, each through its own handle. One
+         * write per line, then, or two units' lines interleave in the middle
+         * of each other. */
+        char line[1024];
+        int  n = snprintf(line, sizeof(line),
+                          "[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
+                          st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
+                          st.wSecond, st.wMilliseconds);
+
+        if (n < 0) n = 0;
+        if (n < (int)sizeof(line) - 1) {
+            int m = vsnprintf(line + n, sizeof(line) - (size_t)n - 1, fmt, ap);
+            if (m > 0) n += m;
+        }
+        if (n > (int)sizeof(line) - 2) n = (int)sizeof(line) - 2;
+        if (line[n - 1] != '\n') { line[n] = '\n'; line[n + 1] = 0; }
+        fwrite(line, 1, strlen(line), g_logFile);
+        fflush(g_logFile);
+        return;
+    }
     fprintf(g_logFile, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
             st.wYear, st.wMonth, st.wDay,
             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
     vfprintf(g_logFile, fmt, ap);
     fputc('\n', g_logFile);
     fflush(g_logFile);
+}
+
+/* The raw entry point, for the modules that have a wrapper of their own
+ * (draw, corefix, api, config, the overlay): their lines carry no level,
+ * because their file is gated as a whole by LogWanted. At a quiet level that
+ * file is not there and this unit writes into the floor instead - where an
+ * untagged line is exactly the chatter the floor is not for. So nothing is
+ * written, and the unit's milestones arrive through LogAt(LOG_ALWAYS). */
+static void Logv(const char *fmt, va_list ap) {
+    if (g_logFloor) return;
+    LogWrite(fmt, ap);
 }
 
 /* One line at one level; the level is what [Settings] LogLevel filters
@@ -242,10 +334,15 @@ static void LogAt(int level, const char *fmt, ...) {
 
     if (!g_logFile) return;
     /* A plugin's own log is not filtered line by line - see LogInitAlways.
-     * Every other file here belongs to a module and follows the level. */
-    if (!g_logAlways && !LogLevelOn(level)) return;
+     * Every other file here belongs to a module and follows the level - and
+     * a unit that is on the floor keeps only its milestones. */
+    if (g_logFloor) {
+        if (level != LOG_ALWAYS) return;
+    } else if (!g_logAlways && !LogLevelOn(level)) {
+        return;
+    }
     va_start(ap, fmt);
-    Logv(fmt, ap);
+    LogWrite(fmt, ap);
     va_end(ap);
 }
 
@@ -262,6 +359,17 @@ static void LogAt(int level, const char *fmt, ...) {
  * game. One line in logs\ is the difference. A module with something to
  * install calls it at the install decision point, in both branches, so the
  * log says which way it went.
+ *
+ * Where that one line goes depends on the level: into the module's own file
+ * at info and debug, and into logs\scripthook.log - as a milestone, at
+ * LOG_ALWAYS - when the level has dropped that file. It has to: a released
+ * package runs at warn, and this is the line that tells "the site did not
+ * match this game build" apart from "the module never got that far". Every
+ * one of these modules (entity, havok, stealth, input, fov, blur, hit, npc,
+ * reflect) refuses on a stale constant, and with the line filtered out, a
+ * player's report could not say which module refused or that any had.
+ * Nine files' worth of these lines is nothing next to not being able to
+ * read the report; the call sites are once-per-site by construction.
  */
 static void LogFirstNow(const char *logName, const char *fmt, ...) {
     va_list ap;
@@ -273,7 +381,7 @@ static void LogFirstNow(const char *logName, const char *fmt, ...) {
     va_end(ap);
     /* Through LogAt with the text as an argument: the line is data here,
      * and a '%' in it must not be read as a conversion. */
-    LogAt(LOG_INFO, "%s", line);
+    LogAt(g_logFloor ? LOG_ALWAYS : LOG_INFO, "%s", line);
 }
 
 /* Once per CALL SITE, not once per translation unit.

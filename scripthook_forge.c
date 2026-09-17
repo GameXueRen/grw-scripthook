@@ -922,17 +922,17 @@ void ShForgeStartup(void) {
         /* Every path that registers an overlay writes into this table, and
          * the only thing standing between it and a null write is the dry
          * run flag. */
-        Log("forge mod loader: no memory for %d overlay slots - dry run "
+        LogAlways("forge mod loader: no memory for %d overlay slots - dry run "
             "instead", OVL_MAX);
         g_dryRun = 1;
     }
 
-    Log("forge mod loader: enabled=%d dry_run=%d strict=%d report_copies=%d "
+    LogAlways("forge mod loader: enabled=%d dry_run=%d strict=%d report_copies=%d "
         "apply_all_copies=%d ledger=%d", g_enabled, g_dryRun, g_strict,
         g_reportCopies, g_applyAll, g_ledger);
 
     ScanArchives();
-    Log("find: %d archive(s)", g_narch);
+    LogAlways("find: %d archive(s)", g_narch);
 
     if (!g_enabled) {
         snprintf(g_status, sizeof(g_status),
@@ -961,7 +961,7 @@ void ShForgeStartup(void) {
         snprintf(g_status, sizeof(g_status),
                  "Forge Mod Loader: %d mod(s), %d applied, %d rejected",
                  g_nmods, applied, bad);
-        Log("mods: %s", g_status);
+        LogAlways("mods: %s", g_status);
         /* The ledger needs the I/O layer even when nothing is served; a
          * dry run is handled inside it, by dropping the overlay rather
          * than the resolve. */

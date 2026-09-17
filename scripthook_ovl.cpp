@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <dxgi1_2.h>    // IDXGIFactory2, for the swapchain capture
 #include <string.h>
 #include <imm.h>
 #include <psapi.h>
@@ -55,6 +56,29 @@ static void OvlLog(const char* fmt, ...)
     va_start(ap, fmt);
     Logv(fmt, ap);
     va_end(ap);
+}
+
+/* A milestone: written to this module's own log at info and debug, and to the
+ * session's floor (logs\scripthook.log) when [Settings] LogLevel has dropped
+ * that file - which is what a released package runs at. Which route the
+ * overlay took, and whether it came up at all, is the first thing a "the menu
+ * never appeared" or "black screen" report needs, and it used to be visible
+ * only to whoever thought to raise the level first. */
+#define OvlLogFloor(...)                       \
+    do {                                       \
+        LogInit(OVL_LOG);                      \
+        LogAt(LOG_ALWAYS, __VA_ARGS__);         \
+    } while (0)
+
+/* [loader] overlay: 0 = off. Set by the loader thread once the config is up;
+ * 0 means "not answered yet", and the overlay's install waits for it rather
+ * than assuming. */
+static volatile LONG g_ovlAllow = 0;   /* 0 = waiting, 1 = on, -1 = off */
+
+/* Called by loader.c. Declared through C linkage: the loader is C. */
+extern "C" void ShOvlAllow(int on)
+{
+    InterlockedExchange(&g_ovlAllow, on ? 1 : -1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1858,6 +1882,20 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
     {
         static DWORD retryAt = 0;   /* back off after a failed init */
         DWORD now = GetTickCount();
+        /* Present is already hooked (a captured swapchain gives us that
+         * before the window is chosen), so frames can arrive while the init
+         * thread is still waiting for the render window. ImGui's Win32
+         * backend needs a live window: without this the init would fail once
+         * a second for as long as the wait lasts, and the log would be a
+         * column of retries saying nothing. */
+        if (!g_hwnd || !IsWindow(g_hwnd))
+        {
+            static int noted;
+            if (!noted) { noted = 1; OvlLog("present hooked before the render "
+                                            "window is chosen - not starting "
+                                            "ImGui yet"); }
+            return g_origPresent(pSwap, sync, flags);
+        }
         if (retryAt && (int)(now - retryAt) < 1000) {
             /* fall through: skip re-init attempts this frame */
         }
@@ -2147,8 +2185,304 @@ static HRESULT STDMETHODCALLTYPE HookResizeBuffers(IDXGISwapChain* pSwap, UINT b
 
 // ---------------------------------------------------------------------------
 // hook installation
+//
+// Two routes, in this order:
+//
+//   1. Capture the swapchain the game creates for itself. A DXGI factory's
+//      vtable is one shared array per interface version per dxgi.dll, so
+//      patching CreateSwapChain / CreateSwapChainForHwnd on the factory we
+//      create here intercepts every swapchain the game makes, whichever
+//      factory object it happened to use. This route creates no device of
+//      its own, which is the point: the old probe device was a second D3D11
+//      device created while the game was creating its first, and that race
+//      is the one the field reports keep landing on (2026-09-16 19:23: a
+//      fresh install crashing 0.35 s after the window was found).
+//
+//   2. Only if (1) never fires: the probe device, and only long after the
+//      render window is up, by which time the game's own renderer has
+//      either finished or is not coming. Which route was taken is logged.
 // ---------------------------------------------------------------------------
-static bool InstallSwapChainHooks()
+static volatile LONG  g_vtablePatched = 0;  /* Present/ResizeBuffers are ours */
+static volatile LONG  g_captured      = 0;  /* route 1 fired */
+static PVOID volatile g_capturedHwnd  = nullptr;  /* its swapchain's window */
+
+/* Patch the shared swapchain vtable: Present=8, ResizeBuffers=13. Idempotent
+ * - every swapchain of the same driver shares one vtable, so the first call
+ * is the one that matters and the rest only record the window. */
+static bool PatchSwapChainVtable(IDXGISwapChain* swap, const char* how)
+{
+    void** vtbl = *(void***)swap;
+    DWORD oldProtect = 0;
+    bool patched = false;
+
+    if (InterlockedCompareExchange(&g_vtablePatched, 0, 0))
+        return g_origPresent != nullptr;
+
+    g_origPresent = (PresentFn)vtbl[8];
+    g_origResize  = (ResizeFn)vtbl[13];
+    if (VirtualProtect(&vtbl[8], sizeof(void*) * 6, PAGE_READWRITE, &oldProtect))
+    {
+        vtbl[8]  = (void*)&HookPresent;
+        vtbl[13] = (void*)&HookResizeBuffers;
+        VirtualProtect(&vtbl[8], sizeof(void*) * 6, oldProtect, &oldProtect);
+        patched = true;
+    }
+    else
+    {
+        /* Nothing was written, so neither entry point is ours. Report it
+         * rather than logging a success the overlay can never live up to. */
+        g_origPresent = nullptr;
+        g_origResize  = nullptr;
+    }
+    if (patched)
+        InterlockedExchange(&g_vtablePatched, 1);
+    OvlLogFloor("hooks installed (%s): origPresent=%llx origResize=%llx ok=%d",
+           how,
+           (unsigned long long)(uintptr_t)g_origPresent,
+           (unsigned long long)(uintptr_t)g_origResize,
+           patched ? 1 : 0);
+    return patched && g_origPresent != nullptr;
+}
+
+/* A swapchain the game just created: patch its vtable and remember which
+ * window it is on, so the init thread subclasses the window the renderer
+ * actually draws into instead of guessing by size. */
+static void OnSwapChainSeen(IDXGISwapChain* swap, const char* how)
+{
+    DXGI_SWAP_CHAIN_DESC d = {};
+
+    if (!swap) return;
+    if (SUCCEEDED(swap->GetDesc(&d)) && d.OutputWindow)
+        InterlockedExchangePointer(&g_capturedHwnd, (PVOID)d.OutputWindow);
+    InterlockedExchange(&g_captured, 1);
+    PatchSwapChainVtable(swap, how);
+    OvlLogFloor("swapchain captured (%s): hwnd=%llx buffer %ux%u windowed=%d",
+           how, (unsigned long long)(uintptr_t)d.OutputWindow,
+           (unsigned)d.BufferDesc.Width, (unsigned)d.BufferDesc.Height,
+           d.Windowed ? 1 : 0);
+}
+
+typedef HRESULT(STDMETHODCALLTYPE* FactoryCreateSwapChainFn)(
+    IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**);
+typedef HRESULT(STDMETHODCALLTYPE* FactoryCreateSwapChainForHwndFn)(
+    IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*,
+    const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**);
+
+struct FactoryHook
+{
+    void** vt;
+    FactoryCreateSwapChainFn        origCreate;
+    FactoryCreateSwapChainForHwndFn origForHwnd;
+};
+static FactoryHook g_factoryHooks[8];
+static int          g_factoryHookCount = 0;
+
+/* The record for a vtable, no questions asked. */
+static FactoryHook* FactoryRecord(void** vt)
+{
+    for (int i = 0; i < g_factoryHookCount; i++)
+        if (g_factoryHooks[i].vt == vt) return &g_factoryHooks[i];
+    return nullptr;
+}
+
+/* The record for a vtable, but only if it can hand over the method the
+ * caller is standing in for. A record that cannot is a hook whose only
+ * answer is E_FAIL - see the note above PatchFactoryVtable for the session
+ * that was read through a black screen because of it. */
+static FactoryHook* FactoryRecordFor(void** vt, int needForHwnd)
+{
+    FactoryHook* h = FactoryRecord(vt);
+
+    if (!h) return nullptr;
+    if (needForHwnd) return h->origForHwnd ? h : nullptr;
+    return h->origCreate ? h : nullptr;
+}
+
+static HRESULT STDMETHODCALLTYPE HookFactoryCreateSwapChain(
+    IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**);
+static HRESULT STDMETHODCALLTYPE HookFactoryCreateSwapChainForHwnd(
+    IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*,
+    const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**);
+
+/* Present=10 on every version, CreateSwapChainForHwnd=15 (v2 and up).
+ * Slot 16 (CreateSwapChainForCoreWindow) is deliberately left alone: this
+ * overlay cannot say which window such a swapchain ends up on, and answering
+ * a call we do not understand is worse than not answering it at all.
+ *
+ * One record per vtable array, and each slot taken once. The v1 and v2
+ * factories are the same object with the same vtable - measured, not
+ * assumed: IDXGIFactory, IDXGIFactory1 and IDXGIFactory2 all answered the
+ * same pointer (dxgi.dll+0xD3670 on the machine of 2026-09-17) - so the two
+ * calls InstallFactoryCapture makes land on one array.
+ *
+ * That measurement is the fix. The first version recorded a row per call:
+ * the v1 row (CreateSwapChain only, origForHwnd null) was written first, the
+ * v2 row second, and the hook lookup returned the FIRST row matching the
+ * vtable. So a CreateSwapChainForHwnd call walked into the v1 row, found no
+ * original, and answered E_FAIL without ever calling it. A game that makes
+ * its main swapchain that way - which is how a Win32 D3D11 game does it -
+ * then has no swapchain to draw the loading screen into: the logos, whose
+ * swapchain was created before the patch went in, are fine, the window is
+ * up and black, the process spins and eventually gives up. That is the
+ * report from 2026-09-17 23:51 on the development machine, and the same
+ * shape as the one from the field.
+ *
+ * Two guards, then: a row is reused rather than duplicated, and a hook that
+ * cannot find its original says so in the log instead of failing in
+ * silence. */
+static bool PatchFactoryVtable(void** vt, bool hasForHwnd)
+{
+    DWORD oldProtect = 0;
+    FactoryHook* h = FactoryRecord(vt);
+    bool isNew = false;
+
+    if (!h)
+    {
+        if (g_factoryHookCount >= (int)(sizeof(g_factoryHooks) /
+                                        sizeof(g_factoryHooks[0])))
+        {
+            OvlLogFloor("overlay: factory hook table is full (%d vtables) - "
+                   "the game's own swapchain cannot be captured",
+                   g_factoryHookCount);
+            return false;
+        }
+        h = &g_factoryHooks[g_factoryHookCount];
+        h->vt = vt;
+        h->origCreate = nullptr;
+        h->origForHwnd = nullptr;
+        isNew = true;
+    }
+
+    if (!h->origCreate || (hasForHwnd && !h->origForHwnd))
+    {
+        if (!VirtualProtect(&vt[10], sizeof(void*) * 7, PAGE_READWRITE,
+                            &oldProtect))
+        {
+            OvlLogFloor("overlay: factory vtable %llx is not writable - the "
+                   "game's own swapchain cannot be captured",
+                   (unsigned long long)(uintptr_t)vt);
+            return false;
+        }
+        /* A slot that is already ours must never be recorded as its own
+         * original: that would make the hook call itself. */
+        if (!h->origCreate)
+        {
+            h->origCreate = (FactoryCreateSwapChainFn)vt[10];
+            vt[10] = (void*)&HookFactoryCreateSwapChain;
+        }
+        if (hasForHwnd && !h->origForHwnd)
+        {
+            h->origForHwnd = (FactoryCreateSwapChainForHwndFn)vt[15];
+            vt[15] = (void*)&HookFactoryCreateSwapChainForHwnd;
+        }
+        VirtualProtect(&vt[10], sizeof(void*) * 7, oldProtect, &oldProtect);
+    }
+    if (isNew)
+        g_factoryHookCount++;      /* published only once the row is filled */
+    OvlLogFloor("hooks installed (factory %llx): origCreate=%llx origForHwnd=%llx",
+           (unsigned long long)(uintptr_t)vt,
+           (unsigned long long)(uintptr_t)h->origCreate,
+           (unsigned long long)(uintptr_t)h->origForHwnd);
+    return true;
+}
+
+/* A refused call, said out loud, once. E_FAIL was silent before, which is
+ * how a broken interception could look exactly like a game that never asked. */
+static void FactoryCallRefused(const char* what, void** vt)
+{
+    static volatile LONG said;
+
+    if (InterlockedExchange(&said, 1) == 0)
+        OvlLogFloor("overlay: %s reached the hook with no original recorded "
+               "(vtable %llx) - the game's own swapchain cannot be created",
+               what, (unsigned long long)(uintptr_t)vt);
+}
+
+static HRESULT STDMETHODCALLTYPE HookFactoryCreateSwapChain(
+    IDXGIFactory* self, IUnknown* dev, DXGI_SWAP_CHAIN_DESC* desc,
+    IDXGISwapChain** out)
+{
+    void** vt = self ? *(void***)self : nullptr;
+    FactoryHook* h = FactoryRecordFor(vt, 0);
+    HRESULT hr;
+
+    if (!h)
+    {
+        FactoryCallRefused("CreateSwapChain", vt);
+        return E_FAIL;
+    }
+    hr = h->origCreate(self, dev, desc, out);
+    if (SUCCEEDED(hr) && out && *out) OnSwapChainSeen(*out, "CreateSwapChain");
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE HookFactoryCreateSwapChainForHwnd(
+    IDXGIFactory2* self, IUnknown* dev, HWND hwnd,
+    const DXGI_SWAP_CHAIN_DESC1* desc,
+    const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs, IDXGIOutput* restrict,
+    IDXGISwapChain1** out)
+{
+    void** vt = self ? *(void***)self : nullptr;
+    FactoryHook* h = FactoryRecordFor(vt, 1);
+    HRESULT hr;
+
+    if (!h)
+    {
+        FactoryCallRefused("CreateSwapChainForHwnd", vt);
+        return E_FAIL;
+    }
+    hr = h->origForHwnd(self, dev, hwnd, desc, fs, restrict, out);
+    if (SUCCEEDED(hr) && out && *out)
+    {
+        InterlockedExchangePointer(&g_capturedHwnd, (PVOID)hwnd);
+        InterlockedExchange(&g_captured, 1);
+        PatchSwapChainVtable(*out, "CreateSwapChainForHwnd");
+        /* A milestone like the rest: at warn this is the line that says which
+         * window the game renders into, and it used to be info-only. */
+        OvlLogFloor("swapchain captured (CreateSwapChainForHwnd): hwnd=%llx "
+               "%ux%u format %u buffers %u",
+               (unsigned long long)(uintptr_t)hwnd, (unsigned)desc->Width,
+               (unsigned)desc->Height, (unsigned)desc->Format,
+               (unsigned)desc->BufferCount);
+    }
+    return hr;
+}
+
+/* Route 1. Called before the game creates anything, so every factory it makes
+ * afterwards lands on a patched vtable. */
+static bool InstallFactoryCapture()
+{
+    IDXGIFactory1* f1 = nullptr;
+    HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&f1);
+
+    if (FAILED(hr) || !f1)
+    {
+        OvlLogFloor("overlay: CreateDXGIFactory1 failed (%08lX) - the probe device "
+               "is the only route left", (unsigned long)hr);
+        return false;
+    }
+
+    PatchFactoryVtable(*(void***)f1, false);            // IDXGIFactory1: slot 10
+    {
+        IDXGIFactory2* f2 = nullptr;
+        if (SUCCEEDED(f1->QueryInterface(__uuidof(IDXGIFactory2), (void**)&f2))
+            && f2)
+        {
+            PatchFactoryVtable(*(void***)f2, true);     // + ForHwnd (15) / ForCoreWindow (16)
+            f2->Release();
+        }
+    }
+    f1->Release();
+    OvlLogFloor("overlay: factory capture installed (%d vtable(s)) - the game's own "
+           "swapchain is the target; no probe device is created while it is up",
+           g_factoryHookCount);
+    return g_factoryHookCount > 0;
+}
+
+/* Route 2, kept for the case where the game never goes through a DXGI factory
+ * we can see. Only ever called long after the render window is up, so the
+ * second device it creates cannot race the game's first one. */
+static bool InstallSwapChainHooksProbe()
 {
     static const wchar_t kClass[] = L"SHOvlDummy";
     WNDCLASSEXW wc = {};
@@ -2162,7 +2496,7 @@ static bool InstallSwapChainHooks()
      * found, and this function is everything that runs in between - a log
      * that stops mid-way names the step that died, and the silent returns
      * this used to have could not. */
-    OvlLog("overlay: probe device - d3d11=%llx dxgi=%llx ntdll=%llx",
+    OvlLogFloor("overlay: probe device (fallback) - d3d11=%llx dxgi=%llx ntdll=%llx",
            (unsigned long long)(uintptr_t)GetModuleHandleA("d3d11.dll"),
            (unsigned long long)(uintptr_t)GetModuleHandleA("dxgi.dll"),
            (unsigned long long)(uintptr_t)GetModuleHandleA("ntdll.dll"));
@@ -2205,53 +2539,62 @@ static bool InstallSwapChainHooks()
             nullptr, 0, D3D11_SDK_VERSION, &sd, &swap, &dev, nullptr, &ctx);
     if (FAILED(hr) || !swap)
     {
-        OvlLog("overlay: D3D11CreateDeviceAndSwapChain failed (%08lX), no overlay",
+        OvlLogFloor("overlay: D3D11CreateDeviceAndSwapChain failed (%08lX), no overlay",
                (unsigned long)hr);
         if (swap) swap->Release();
         DestroyWindow(dummy);
         return false;
     }
 
-    // Patch the shared vtable: Present=8, ResizeBuffers=13.
-    void** vtbl = *(void***)swap;
-    g_origPresent = (PresentFn)vtbl[8];
-    g_origResize  = (ResizeFn)vtbl[13];
-    DWORD oldProtect = 0;
-    bool patched = false;
-    if (VirtualProtect(&vtbl[8], sizeof(void*) * 6, PAGE_READWRITE, &oldProtect))
-    {
-        vtbl[8]  = (void*)&HookPresent;
-        vtbl[13] = (void*)&HookResizeBuffers;
-        VirtualProtect(&vtbl[8], sizeof(void*) * 6, oldProtect, &oldProtect);
-        patched = true;
-    }
-    else
-    {
-        /* Nothing was written, so neither entry point is ours. Report it
-         * rather than logging a success the overlay can never live up to. */
-        g_origPresent = nullptr;
-        g_origResize  = nullptr;
-    }
-
+    bool ok = PatchSwapChainVtable(swap, "probe");
     swap->Release();
     ctx->Release();
     dev->Release();
     DestroyWindow(dummy);
-    OvlLog("hooks installed: origPresent=%llx origResize=%llx ok=%d",
-           (unsigned long long)(uintptr_t)g_origPresent,
-           (unsigned long long)(uintptr_t)g_origResize,
-           patched ? 1 : 0);
-    return patched && g_origPresent != nullptr;
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
-// find the game's main window: the LARGEST visible window owned by
-// this process. The game may show a small splash/loading window
-// first, so the init thread retries until a real render window
-// (>= 640x480) appears instead of subclassing a temporary one.
+// find the game's render window
+//
+// Three answers, in the order they can be trusted:
+//   1. the window of a swapchain the game itself created (route 1 above) -
+//      by definition the window the renderer draws into;
+//   2. a visible window of the engine's render class;
+//   3. only once the budget is spent: the largest visible window, which is
+//      the old behaviour and is logged as the fallback it is.
+//
+// It used to be (3) after exactly 60 s, taking whatever it had found - and a
+// default install plays its intro in full (~47 s), so on the field machine of
+// 2026-09-17 the scan expired during the intro, the 466x310 splash window was
+// subclassed, and a second D3D11 device was created while the engine was
+// starting its own renderer. Waiting for the right window is what removes
+// both halves of that.
 // ---------------------------------------------------------------------------
+static const wchar_t kRenderClass[] = L"ScimitarEngineWindowClass";
+static const DWORD   kWindowBudgetMs = 180000;   /* 3 minutes, not 60 s */
+static const DWORD   kProbeGraceMs   = 20000;    /* after the window is up */
+static const DWORD   kSettleMs       = 1500;
+
 static HWND g_foundWindow = nullptr;
 static int  g_foundW = 0, g_foundH = 0;
+static int  g_foundByClass = 0;
+
+static int IsRenderClass(HWND h)
+{
+    wchar_t cls[64];
+
+    if (!h || GetClassNameW(h, cls, 64) <= 0) return 0;
+    return _wcsicmp(cls, kRenderClass) == 0;
+}
+
+/* A window worth attaching ImGui to: the engine's render window, or one that
+ * is at least big enough to be a render window rather than the splash. */
+static int LooksLikeRender(HWND h, int w, int hh)
+{
+    if (IsRenderClass(h)) return 1;
+    return w >= 640 && hh >= 480;
+}
 
 static BOOL CALLBACK FindWindowCb(HWND h, LPARAM lp)
 {
@@ -2267,93 +2610,177 @@ static BOOL CALLBACK FindWindowCb(HWND h, LPARAM lp)
     int w = rc.right - rc.left, ht = rc.bottom - rc.top;
     if (w < 64 || ht < 64)
         return TRUE;
-    if (!g_foundWindow || w * ht > g_foundW * g_foundH)
+    int byClass = IsRenderClass(h);
+
+    /* A window of the render class wins outright; a plain one is only kept
+     * while no render-class window has been seen, and is what the fallback
+     * budget ends up using. */
+    if (byClass && (!g_foundByClass || w * ht > g_foundW * g_foundH))
+    {
+        g_foundWindow = h;
+        g_foundW = w;
+        g_foundH = ht;
+        g_foundByClass = 1;
+    }
+    else if (!g_foundByClass && (!g_foundWindow || w * ht > g_foundW * g_foundH))
     {
         g_foundWindow = h;
         g_foundW = w;
         g_foundH = ht;
     }
-    return TRUE; // keep scanning for a larger one
+    return TRUE; // keep scanning for a better one
 }
 
 static HWND FindGameWindow()
 {
     g_foundWindow = nullptr;
     g_foundW = g_foundH = 0;
+    g_foundByClass = 0;
     EnumWindows(FindWindowCb, (LPARAM)(uintptr_t)GetCurrentProcessId());
     return g_foundWindow;
+}
+
+static HWND CapturedWindow()
+{
+    return (HWND)InterlockedCompareExchangePointer(&g_capturedHwnd, nullptr,
+                                                   nullptr);
 }
 
 // ---------------------------------------------------------------------------
 // init thread
 // ---------------------------------------------------------------------------
-/* How long the game gets the machine to itself before the overlay creates
- * its own D3D11 device. The window appearing means the game's renderer is
- * starting up this instant, and on a fresh install that is the one moment
- * the two device creations can race - see the note in InitThread. */
-static const DWORD kSettleMs = 2000;
-
 static DWORD WINAPI InitThread(LPVOID)
 {
-    // Wait for a real render window. The game may show a small
-    // splash/loading window first; subclassing that would leave
-    // the real window untouched and lose ImGui's input target.
-    // Retry every second for up to a minute, then take whatever
-    // the largest window is.
-    for (int tries = 0; tries < 60; tries++)
-    {
-        g_hwnd = FindGameWindow();
-        if (g_hwnd && g_foundW >= 640 && g_foundH >= 480)
-            break;
-        OvlLog("waiting for game window (%dx%d)...", g_foundW, g_foundH);
-        Sleep(1000);
-    }
+    DWORD start = GetTickCount();
+    HWND  w = nullptr;
+    int   choseByClass = 0, choseByCapture = 0;
 
-    OvlLog("init thread: hwnd=%llx client %dx%d",
-           (unsigned long long)g_hwnd, g_foundW, g_foundH);
     if (!g_imeLockReady) {
         InitializeCriticalSection(&g_imeLock);
         g_imeLockReady = 1;
     }
-    if (g_hwnd)
+
+    /* [loader] overlay: 0 takes the whole overlay out of the session. The
+     * answer arrives on the loader thread once the config is up; a few
+     * seconds of waiting covers it, and no answer at all means on, which is
+     * the default. */
+    for (int i = 0; i < 100 && !InterlockedCompareExchange(&g_ovlAllow, 0, 0); i++)
+        Sleep(50);
+    if (InterlockedCompareExchange(&g_ovlAllow, 0, 0) < 0)
     {
-        /* Let the game settle. The window has just appeared, which means
-         * the game's own renderer is creating its D3D11 device at this
-         * very moment - and a fresh install is exactly when that work is
-         * at its heaviest (no shader cache, first run of the config). Two
-         * device creations racing inside the driver is not a race this
-         * side can win, and the one reported crash happened 0.35 s after
-         * the line above. Nothing here is worth a crash to have sooner:
-         * the overlay only draws once Present is hooked, and two seconds
-         * of a game that is still loading is two seconds nobody sees. */
-        Sleep(kSettleMs);
-        OvlLog("init thread: settled %lu ms, installing the overlay",
-               (unsigned long)kSettleMs);
-        g_origWndProc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC,
-                                                   (LONG_PTR)SubWndProc);
-        OvlLog("init thread: subclass %s (previous proc %llx)",
-               g_origWndProc ? "installed" : "NOT installed",
-               (unsigned long long)(uintptr_t)g_origWndProc);
-        /* Retried, because a refusal here is almost always the timing
-         * above rather than a permanent state: the device is not there
-         * yet, the driver is still busy. Three tries a second apart, and
-         * then a line that says the overlay is off rather than a silence
-         * that looks like a hang. */
-        for (int attempt = 0; attempt < 3; attempt++)
+        OvlLogFloor("overlay: off ([loader] overlay=0) - no window scan, no "
+                    "capture, no Present hook, the game runs untouched");
+        return 0;
+    }
+
+    /* Route 1 has to be in place before the game creates its first
+     * swapchain, which it does within seconds of start up - and this thread
+     * starts while the host is still resolving its imports under the loader
+     * lock, where creating a factory would block. One second is long before
+     * the game's first window (four seconds in, measured on both the field
+     * machine and this one) and long after the loader is done. */
+    Sleep(1000);
+    InstallFactoryCapture();
+
+    for (;;)
+    {
+        DWORD waited = GetTickCount() - start;
+
+        /* The captured window is the game's own render window, so it is
+         * taken as soon as it is one - but not when it is the splash
+         * window, which is a swapchain too and comes first. */
+        w = CapturedWindow();
+        if (w && IsWindow(w))
         {
-            if (InstallSwapChainHooks())
-                return 0;
-            OvlLog("overlay: hook install failed (attempt %d of 3), "
-                   "retrying in 1s", attempt + 1);
-            Sleep(1000);
+            RECT rc = {};
+            int ww = 0, hh = 0;
+            if (GetClientRect(w, &rc)) { ww = rc.right; hh = rc.bottom; }
+            if (LooksLikeRender(w, ww, hh))
+            {
+                g_hwnd = w;
+                choseByCapture = 1;
+                OvlLogFloor("init thread: render window %llx is the captured "
+                       "swapchain's (%dx%d)", (unsigned long long)(uintptr_t)w,
+                       ww, hh);
+                break;
+            }
         }
-        OvlLog("overlay: disabled - the swap chain hooks could not be "
-               "installed; the game runs untouched and F4 does nothing");
+        if (FindGameWindow() && g_foundByClass)
+        {
+            g_hwnd = g_foundWindow;
+            choseByClass = 1;
+            OvlLogFloor("init thread: render window %llx by class, client %dx%d",
+                   (unsigned long long)(uintptr_t)g_hwnd, g_foundW, g_foundH);
+            break;
+        }
+        if (waited >= kWindowBudgetMs)
+        {
+            g_hwnd = g_foundWindow ? g_foundWindow : w;
+            OvlLogFloor("init thread: no render window in %lu s - falling back to "
+                   "the largest visible window (%llx, %dx%d), which is the "
+                   "pre-2026-09-17 behaviour",
+                   (unsigned long)(waited / 1000),
+                   (unsigned long long)(uintptr_t)g_hwnd, g_foundW, g_foundH);
+            break;
+        }
+        if ((waited % 5000) < 500)
+            OvlLog("waiting for the render window (%lu s; captured=%llx, "
+                   "largest=%llx %dx%d%s)",
+                   (unsigned long)(waited / 1000),
+                   (unsigned long long)(uintptr_t)w,
+                   (unsigned long long)(uintptr_t)g_foundWindow, g_foundW,
+                   g_foundH, g_foundByClass ? " by class" : "");
+        Sleep(500);
     }
-    else
+
+    if (!g_hwnd || !IsWindow(g_hwnd))
     {
-        OvlLog("overlay: no game window found in 60 tries, disabled");
+        OvlLogFloor("overlay: no usable window - the game runs untouched and F4 "
+               "does nothing");
+        return 0;
     }
+
+    /* Subclass, so ImGui gets the keyboard and the IME work has a target.
+     * Route 1 already hooked Present on the game's own swapchain, so there
+     * is no device to create and nothing to race here. */
+    g_origWndProc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC,
+                                               (LONG_PTR)SubWndProc);
+    OvlLogFloor("init thread: subclass %s (previous proc %llx) (%s)",
+           g_origWndProc ? "installed" : "NOT installed",
+           (unsigned long long)(uintptr_t)g_origWndProc,
+           choseByCapture ? "captured swapchain"
+                          : (choseByClass ? "render class" : "fallback"));
+
+    if (InterlockedCompareExchange(&g_captured, 0, 0) &&
+        g_origPresent != nullptr)
+    {
+        OvlLogFloor("overlay: the captured swapchain carries the hooks - no probe "
+               "device is created at all");
+        return 0;
+    }
+
+    /* Route 2, and only here: the render window is up, so the game's own
+     * renderer has had its chance to create its device, and the probe
+     * cannot race it any more. */
+    OvlLogFloor("overlay: no swapchain captured yet - waiting %lu ms before the "
+           "probe device (fallback)", (unsigned long)kProbeGraceMs);
+    Sleep(kProbeGraceMs);
+    if (InterlockedCompareExchange(&g_captured, 0, 0) &&
+        g_origPresent != nullptr)
+    {
+        OvlLogFloor("overlay: the capture arrived while waiting - no probe device");
+        return 0;
+    }
+    for (int attempt = 0; attempt < 3; attempt++)
+    {
+        if (InstallSwapChainHooksProbe())
+            return 0;
+        OvlLogFloor("overlay: probe install failed (attempt %d of 3), retrying "
+               "in 1s", attempt + 1);
+        Sleep(1000);
+    }
+    OvlLogFloor("overlay: disabled - neither route could hook the swap chain; the "
+           "game runs untouched and F4 does nothing");
     return 0;
 }
 

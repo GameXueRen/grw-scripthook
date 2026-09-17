@@ -7,9 +7,21 @@
 /* The play mode module (scripthook_playmode.c): not a plugin facing
  * export beyond ShSelectedPlayMode and friends, so it is declared here. */
 extern void ShPlayModeStart(void);
+/* The overlay's switch (scripthook_ovl.cpp), for the same reason: it is the
+ * loader's config that decides it, and the overlay thread waits for the
+ * answer before doing anything. */
+extern void ShOvlAllow(int on);
 
 typedef HRESULT (WINAPI *DirectInput8Create_t)(
     HINSTANCE, DWORD, REFIID, LPVOID *, LPUNKNOWN);
+/* The sixth export of the system dinput8, and the one every proxy forgets.
+ * Its prototype is deliberately not declared: it is either
+ * "no arguments, returns a pointer to the standard joystick data format" or
+ * "one out-parameter, returns an HRESULT", and the x64 ABI makes a
+ * four-integer-argument, pointer-sized-return forward correct for both - the
+ * extra arguments sit in registers the real function ignores, and the caller
+ * only reads the part of the return the real function actually wrote. */
+typedef void *(WINAPI *GetdfDIJoystick_t)(void *, void *, void *, void *);
 typedef HRESULT (WINAPI *DllCanUnloadNow_t)(void);
 typedef HRESULT (WINAPI *DllGetClassObject_t)(REFCLSID, REFIID, LPVOID *);
 typedef HRESULT (WINAPI *DllRegisterServer_t)(void);
@@ -29,6 +41,7 @@ static HMODULE g_realDinput8 = NULL;
 #endif
 
 static DirectInput8Create_t   p_DirectInput8Create;
+static GetdfDIJoystick_t      p_GetdfDIJoystick;
 static DllCanUnloadNow_t      p_DllCanUnloadNow;
 static DllGetClassObject_t    p_DllGetClassObject;
 static DllRegisterServer_t    p_DllRegisterServer;
@@ -40,20 +53,22 @@ static void LoadRealDinput8(void) {
     /* The system dir fits easily, but never trust MAX_PATH math:
      * truncate instead of strcat past the buffer. */
     if (n == 0 || n > MAX_PATH - 14) {
-        Log("FATAL: system directory path too long");
+        LogAlways("FATAL: system directory path too long");
         return;
     }
     memcpy(sysdir + n, "\\dinput8.dll", 13);
 
     g_realDinput8 = LoadLibraryA(sysdir);
     if (!g_realDinput8) {
-        Log("FATAL: could not load real dinput8.dll from %s", sysdir);
+        LogAlways("FATAL: could not load real dinput8.dll from %s", sysdir);
         return;
     }
-    Log("loaded real dinput8.dll from %s", sysdir);
+    LogAlways("loaded real dinput8.dll from %s", sysdir);
 
     p_DirectInput8Create = (DirectInput8Create_t)
         GetProcAddress(g_realDinput8, "DirectInput8Create");
+    p_GetdfDIJoystick = (GetdfDIJoystick_t)
+        GetProcAddress(g_realDinput8, "GetdfDIJoystick");
     p_DllCanUnloadNow = (DllCanUnloadNow_t)
         GetProcAddress(g_realDinput8, "DllCanUnloadNow");
     p_DllGetClassObject = (DllGetClassObject_t)
@@ -106,7 +121,7 @@ static void LoadASIPlugins(void) {
     int n = 0, nSkipped = 0, nAdded = 0, count = 0, i, j;
 
     if (!ShPluginsDir(pluginsDir, sizeof(pluginsDir))) {
-        Log("cannot find the game directory");
+        LogAlways("cannot find the game directory");
         return;
     }
     /* Fresh install: make the layout the loader expects.
@@ -121,14 +136,14 @@ static void LoadASIPlugins(void) {
     }
 
     if (!ShConfigGetBool("loader", "load_plugins", 1)) {
-        Log("plugin loading disabled in scripthook.ini");
+        LogAlways("plugin loading disabled in scripthook.ini");
         return;
     }
 
     snprintf(pat, sizeof(pat), "%s*", pluginsDir);
     h = FindFirstFileA(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) {
-        Log("no plugin folders in %s", pluginsDir);
+        LogAlways("no plugin folders in %s", pluginsDir);
         return;
     }
 
@@ -210,8 +225,8 @@ static void LoadASIPlugins(void) {
                 Log("  FAILED (error %lu)", GetLastError());
         }
     }
-    Log("plugin scan done: %d loaded, %d skipped, %d line(s) written back",
-        n, nSkipped, nAdded);
+    LogAlways("plugin scan done: %d loaded, %d skipped, %d line(s) written back",
+              n, nSkipped, nAdded);
 }
 
 /* Plugins load here, not in DllMain. LoadLibrary blocks on
@@ -220,7 +235,14 @@ static void LoadASIPlugins(void) {
 static DWORD WINAPI LoaderThread(LPVOID p) {
     (void)p;
     ShConfigInit();
-    Log("config loaded from scripthook.ini");
+    LogAlways("config loaded from scripthook.ini");
+    /* The overlay's own switch, read here because the overlay thread starts
+     * from a static initialiser and waits for this answer: with
+     * [loader] overlay=0 it does nothing at all - no factory capture, no
+     * window scan, no Present hook, no subclass. It is the one switch that
+     * takes the overlay out of the equation on its own, which is what
+     * 2026-09-17's field round had no way to do. */
+    ShOvlAllow(ShConfigGetBool("loader", "overlay", 1));
     /* One line saying how much this session's logs\ holds, so a folder
      * with only two files in it explains itself. */
     LogAlways("log level: %s - %s", LogLevelName(ShLogLevel()),
@@ -273,6 +295,92 @@ static BOOL IsGRW(void) {
     return (_stricmp(name, "GRW.exe") == 0);
 }
 
+/* ---- the framework's own start up --------------------------------------
+ *
+ * Where this runs is not a detail; it is the difference between a session
+ * that comes up and one that does not, and the two field reports say the
+ * same thing from opposite sides.
+ *
+ * It used to run on the attach path, in DllMain, and that is where it is
+ * again. It was moved off the attach path on 2026-09-17 to keep two
+ * documented-unsafe things out of DllMain:
+ *
+ *   LoadLibraryA(system32\dinput8.dll) - a nested module load while the
+ *   host's own import resolution still holds the loader lock, which can
+ *   deadlock against another thread inside a module's init.
+ *
+ *   CreateThread(LoaderThread) - the new thread can start before the loader
+ *   lock is released, then block on it, and everything it sets up waits
+ *   behind that.
+ *
+ * The fix for both is not "later", it is "not inside DllMain": the thread is
+ * created here, on the attach path, and the thread is what loads the real
+ * dinput8, reads the config, installs the hook layers and loads the plugins.
+ * A LoadLibrary on our own thread is an ordinary load under the loader lock,
+ * not a nested one under our own DllMain, so the deadlock case is gone.
+ *
+ * "Later" - starting on the host's first call into our exports - was the
+ * other answer, and it was wrong in a way only a machine can show: on the
+ * development machine the host's first DirectInput call arrives about six
+ * seconds in, by which time the engine's renderer and its threads are
+ * already running. Every install then lands on a live process - 18 file
+ * hooks, the factory vtable patch, playmode's and fpx's patches of the
+ * game's own code, eight plugin DLLs - and every session black-screened at
+ * the front end, while the same machine, game build and config ran the
+ * 18:52 build (which installs from the attach path) fine.
+ *
+ * The exports still wait: the thread publishes "ready" only once the real
+ * dinput8 answers, so a host thread that gets in first waits for it instead
+ * of being handed a null pointer.
+ */
+static volatile LONG g_framework;   /* 0 = nothing, 1 = thread up, 2 = ready */
+
+/* The thread that does the loading. Loading the real dinput8 here rather
+ * than on the attach path is the half that removes the nested module load. */
+static DWORD WINAPI FrameworkThread(LPVOID p) {
+    (void)p;
+    LoadRealDinput8();
+    /* Published here and not before: an export that ran while this was in
+     * flight is waiting on this word. */
+    InterlockedExchange(&g_framework, 2);
+    LoaderThread(NULL);
+    return 0;
+}
+
+/* Called from DllMain. Never waits: the thread it creates cannot get past
+ * its first LoadLibrary until this DllMain returns, so waiting here would be
+ * a deadlock with ourselves. */
+static void ShFrameworkStartEarly(void) {
+    HANDLE h;
+
+    if (InterlockedCompareExchange(&g_framework, 0, 0) != 0) return;
+    if (InterlockedCompareExchange(&g_framework, 1, 0) != 0) return;
+    h = CreateThread(NULL, 0, FrameworkThread, NULL, 0, NULL);
+    if (h) {
+        CloseHandle(h);      /* never waited on: prompt close */
+        return;
+    }
+    /* No thread available. This is the one case that has to touch the loader
+     * lock from the attach path - and a load that might nest is still better
+     * than every export forwarding to a null pointer for the session. */
+    LogAlways("loader: could not start the load thread - loading inline");
+    FrameworkThread(NULL);
+}
+
+/* Called from every export. Waits for the real dinput8 to be resolved, so a
+ * host thread that arrives first is served rather than short changed. */
+static void ShFrameworkStart(void) {
+    int i;
+
+    ShFrameworkStartEarly();
+    for (i = 0; i < 30000; i++) {           /* 30 s, then say so */
+        if (InterlockedCompareExchange(&g_framework, 0, 0) == 2) return;
+        Sleep(1);
+    }
+    LogAlways("loader: the real dinput8 did not answer in 30 s - input "
+              "forwarding will fail");
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     (void)inst; (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
@@ -295,21 +403,16 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
          * touches not one scheduling API.
          */
         ShCoreFixStartup();
-        LoadRealDinput8();
-        /* State watching moved into LoaderThread: starting a thread here
-         * is the one thing this file warns about (the loader lock), and
-         * the watch only has to be up before the plugins load. */
-        {
-            HANDLE h = CreateThread(NULL, 0, LoaderThread, NULL, 0, NULL);
-
-            if (h) CloseHandle(h);   /* never waited on: prompt close */
-            else
-                /* Nothing else can explain a session that came up with no
-                 * plugins, no config and no hooks: the thread that reads
-                 * them never started. */
-                Log("loader: could not start the load thread - nothing will "
-                    "be loaded this session");
-        }
+        /* The framework's thread, started here so every install is in place
+         * before the host's own threads reach the code they patch - the file
+         * hooks, the factory vtable patch, playmode's and fpx's patches of
+         * the game's own code, the plugin DLLs. DllMain itself only creates
+         * the thread: the real dinput8 load, the config, the hook layers and
+         * the plugins all happen on it, which is what keeps a nested module
+         * load out of the attach path. See the note above
+         * ShFrameworkStartEarly for why this cannot be deferred to the host's
+         * first call into our exports. */
+        ShFrameworkStartEarly();
     } else if (reason == DLL_PROCESS_DETACH) {
         /* Handed back, not left to the OS: the pump event is the one kernel
          * object the framework holds that outlives its users. */
@@ -331,9 +434,13 @@ SH_PROXY_EXPORT HRESULT WINAPI DirectInput8Create(
     HINSTANCE inst, DWORD ver, REFIID iid, LPVOID *out, LPUNKNOWN outer)
 {
     HRESULT hr;
+    ShFrameworkStart();          /* the real dinput8, and the loader thread */
     if (!p_DirectInput8Create) return E_FAIL;
     hr = p_DirectInput8Create(inst, ver, iid, out, outer);
-    Log("DirectInput8Create hr %08lx", (unsigned long)hr);
+    /* A milestone: this line is what proves the host got as far as starting
+     * its input, which is the first thing a "black screen" report is asked
+     * about. */
+    LogAlways("DirectInput8Create hr %08lx", (unsigned long)hr);
     if (SUCCEEDED(hr) && out && *out) ShWrapDirectInput(*out);
     return hr;
 }
@@ -348,9 +455,34 @@ SH_PROXY_EXPORT HRESULT WINAPI DllCanUnloadNow(void) {
     return S_FALSE;
 }
 
+/* The sixth export of the system dinput8, and the one a proxy must not drop.
+ *
+ * Callers reach it through the standard joystick data format - a module that
+ * uses c_dfDIJoystick / c_dfDIJoystick2 from dinput8.lib resolves this
+ * export's name, either at load or on first use - so a proxy that does not
+ * carry it turns every such caller into a failed resolution. That failure is
+ * silent from the outside: the caller's module either refuses to load
+ * (ERROR_PROC_NOT_FOUND) or is handed a null and takes its own error path,
+ * and the host stops somewhere in its input init with no CPU use and nothing
+ * in any log, which is the shape of the 2026-09-17 field report.
+ *
+ * The prototype is not declared on purpose: this export is reached as
+ * "no arguments, returns the format pointer" by some callers and as
+ * "one out-parameter, returns an HRESULT" by others, and on x64 a
+ * four-integer-argument, pointer-sized-return forward is correct for both.
+ */
+SH_PROXY_EXPORT void *WINAPI GetdfDIJoystick(void *a1, void *a2, void *a3,
+                                             void *a4)
+{
+    ShFrameworkStart();
+    if (!p_GetdfDIJoystick) return NULL;
+    return p_GetdfDIJoystick(a1, a2, a3, a4);
+}
+
 SH_PROXY_EXPORT HRESULT WINAPI DllGetClassObject(
     REFCLSID clsid, REFIID iid, LPVOID *out)
 {
+    ShFrameworkStart();          /* the CoCreateInstance route in */
     if (p_DllGetClassObject)
         return p_DllGetClassObject(clsid, iid, out);
     return E_FAIL;

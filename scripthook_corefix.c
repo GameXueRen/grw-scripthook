@@ -1689,14 +1689,14 @@ void ShCoreFixStartup(void)
          * switch honestly. The stage thread still starts (see
          * ShCoreFixLateStartup), because the stage is part of the public
          * CPU API whether or not a dial asks for anything. */
-        Log("corefix: disabled - every dial is leave-alone and no cap is "
+        LogAlways("corefix: disabled - every dial is leave-alone and no cap is "
             "set, so no hook and not one scheduling API is touched (the "
             "efficiency mode's arrival state was read once, so the status "
             "can report it honestly)");
         return;
     }
 
-    Log("corefix: dials boot=%d(%s) window=%d(%s) play=%d(%s) "
+    LogAlways("corefix: dials boot=%d(%s) window=%d(%s) play=%d(%s) "
         "play-max-cores=%lu",
         g_dial[STAGE_BOOT], dial_name(g_dial[STAGE_BOOT]),
         g_dial[STAGE_WINDOW], dial_name(g_dial[STAGE_WINDOW]),
@@ -1754,7 +1754,7 @@ void ShCoreFixStartup(void)
 
     ok = install_hooks();
     ApplyDial(STAGE_BOOT);
-    Log("corefix: hooks=%s", ok ? "ENABLED" : "INCOMPLETE");
+    LogAlways("corefix: hooks=%s", ok ? "ENABLED" : "INCOMPLETE");
 }
 
 /* ========================================================================= */

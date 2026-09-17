@@ -553,3 +553,162 @@ static void LogInit(const char *name) {
 2. 开发机 `2026-09-16 00:26` 那次崩溃：位置在 `GRW.exe+0x1061FD54`，与 ovl 首启那条不是同一处；仅一次、无复现，若再出现请保留 `logs\` 与 `scripthook_crash.log`。
 3. 第五节 12 条已知限制、第六节实机验证清单 12 条（部分已由本轮实机覆盖）、10.4 的 9 条。
 4. 反馈 5（第一人称开镜过渡）待复现。
+
+---
+
+## 十一、公测后第一份现场报障与修复（2026-09-17 夜）
+
+**报障**：首个公测版发布当晚，一名 **Steam 版**玩家反馈"启动游戏后黑屏、进不去游戏"，共四轮日志留档（`F:\UbisoftGames\Beta1.0\BUG\`）：20:42（warn 级）、22:32 与 22:58（debug 级，两轮 A/B）、23:33（修复验证）。
+
+### 11.1 第一轮（warn 级）为什么读不出东西
+
+`logs\` 里只有三行：版本、构建时间、`log level: warn - module logs off, plugin logs on`，加五份插件日志（内容与开发机健康会话逐字节同长）。没有崩溃报告（崩溃报告不受级别影响，所以**进程里没发生过致命异常**；玩家是把卡死的进程结束掉的）。
+
+问题不在玩家：`warn` 是**整文件级**的门（`log.h` 的 `LogWanted`），框架各模块自己的日志文件根本不创建，连 `scripthook.log` 里非 ALWAYS 的行也被过滤 —— 于是 `loader.c` 自己的 `FATAL: could not load real dinput8.dll`（info 级）、插件扫描计数、覆盖层分步日志、判断游戏版本是否匹配的健康日志，**全部无声**。"真实 dinput8 加载失败""覆盖层装到错窗口""版本不符"这三种情况在这份日志里完全同形。**这一条直接催生了 11.6 的"地板里程碑"。**
+
+### 11.2 第二轮（debug 级）把范围收窄到"框架自身"
+
+| 事实 | 证据 |
+| --- | --- |
+| 插件可以排除 | 20:42/21:55 两场插件全开也黑；22:23/22:58 两场 `plugin loading disabled` 也黑 |
+| 文件拦截层可以排除 | `[forgemod] ledger=0` 后该层一个钩子都不装（它只在有规则时才挂钩），仍黑 |
+| playmode 的两个 MinHook 可以排除 | 再加 `[playmode] enabled=0`，仍黑；且那两场 `CreateGameMode`/`SetCurrentGameMode` 一次都没被调用 |
+| 没有崩溃 | 无 `logs\scripthook_crash.log`（VEH 默认就位，只报不治） |
+| 前端从未起来 | corefix 认出主窗口（`ScimitarEngineWindowClass`）创建，但**始终没有** `the main menu is up (state MenuOrLobby)`；`scripthook_dinput.log` 里 `game reads GetDeviceState` 一整场都没出现（游戏从未进入前端/输入轮询） |
+| 游戏版本相符 | Steam 版 exe 在 `SetCurrentGameMode`/`CreateGameMode` 两个站点通过字节验证（`verified and hooked (try 1)`），reflect 也报方法表 `pinned ... ok` |
+| 游戏是被阻塞 | 玩家实测"卡黑屏时 CPU 几乎为 0" |
+
+### 11.3 一条被修正的判断（值得记：这是本次最容易读错的地方）
+
+起初我把"主窗口出现后 10–21 秒还没变成可见大窗口"读成"引擎卡住"。修复后的成功会话证明**这台机器上前端本来就要 ~55 秒**（主窗口 `23:25:34` 创建 → `the main menu is up` `23:26:29`）。
+
+于是失败会话要重读：主窗口出现 → 引擎在前端加载中（几十秒）→ **旧代码"60 秒预算用尽就取它看到的最大窗口"正好落在引擎建渲染器的窗口期里**：子类化了 466×310 的**启动画面窗**，并在引擎建设备的同时建了**第二个 D3D11 设备**。这与 2026-09-16 19:23 那场"新装首启 0.35 秒闪退"（探针设备刚建完就崩）是同一族，也就是 `scripthook_ovl.cpp` 注释里自认"这个竞态赢不了"的那一条。开发机之所以从没复现：它前端 ~6 秒就起来，60 秒的扫描总能先抓到真窗口，探针也就落在游戏设备已建好之后。
+
+### 11.4 三处修改
+
+| # | 文件 | 改了什么 | 为什么 |
+| --- | --- | --- | --- |
+| 1 | `proxy.def`、`loader.c` | 补上 `GetdfDIJoystick`，代理的 6 个导出此后与系统 `dinput8.dll` **逐序对齐**（ordinal 0–5 相同）。转发不猜原型：四参透传、按指针宽度返回，对"无参返回指针"和"出参 + HRESULT"两种形状都正确 | 系统 dinput8 有 6 个导出，我们只有 5 个。用标准摇杆数据格式（`c_dfDIJoystick`）的代码按名字解析它，装我们的代理就必然解析失败 —— 调用方要么整模块加载失败，要么拿到 NULL 走自己的错误路径。核对手法固化在 `tools/list-pe-exports.ps1` |
+| 2 | `loader.c` | `LoadLibraryA(system32\dinput8.dll)` 与 `CreateThread(LoaderThread)` 移出 `DllMain`，改为**首次调用本 DLL 任意导出**时由 `ShFrameworkStart()` 执行（三态 once 守卫，并发调用者等待而不是转发空指针） | 在宿主的导入解析期间（loader 锁里）做嵌套 `LoadLibrary` / 建线程是 MSDN 明确警告区，可能与其他线程的模块初始化互等。这类 loader 锁死锁的表现正是"卡住、CPU 近 0、日志里什么都没有"。Steam 启动时注入的 overlay、驱动 shim 都在这时间窗里初始化 |
+| 3 | `scripthook_ovl.cpp` | 挂载重做：**route 1 先捕获游戏自己的 swapchain**（自建一个 DXGI 工厂并给其 vtable 的 `CreateSwapChain`/`CreateSwapChainForHwnd` 打补丁，游戏自建 swapchain 时接住并挂 `Present`/`ResizeBuffers`，**此路径不创建任何设备**）；窗口选择三级：捕获到的窗口 → `ScimitarEngineWindowClass` 类匹配 → 只在 **180 秒**预算用尽后才退回"取最大可见窗口"。探针设备降级为**兜底**，且只在渲染窗口出现后再等 20 秒才走；两条路都落日志 | 关掉"两个设备抢驱动"这一族（09-16 闪退），也不再在错误时机挂错窗口（默认安装片头 47 秒 + 前端 55 秒，60 秒预算必然踩在中间） |
+
+### 11.5 验证（玩家第四轮，23:33）
+
+```
+23:24:37.249 overlay: factory capture installed (2 vtable(s)) - the game's own swapchain is the target
+23:26:07.579 hooks installed (CreateSwapChain): origPresent=… ok=1
+23:26:07.579 swapchain captured (CreateSwapChain): hwnd=2011082 buffer 1920x1055 windowed=1
+23:26:07.921 init thread: render window 2011082 is the captured swapchain's (1920x1055)
+23:26:07.921 init thread: subclass installed (…) (captured swapchain)
+23:26:07.921 overlay: the captured swapchain carries the hooks - no probe device is created at all
+23:26:09.574 imgui ready: hwnd=2011082 device=…
+23:26:20.357 menu OPEN … menu closed …（玩家按 F4 用了菜单）
+23:26:29.402 corefix: the main menu is up (state MenuOrLobby)
+```
+
+`loaded real dinput8.dll` 出现在 `23:25:09.879`（游戏第一次调用导出的那一刻，而不是 DllMain）—— 第 2 处也按设计生效。全量扫描（`FAILED|refused|error|MISMATCH|unrecognised|…`）**无真错误行**；playmode 正确识别 `campaign`；我们自己的每帧开销可忽略（`ours 3µs`、`threads: none`）。**黑屏消失，菜单可用。**
+
+### 11.6 诊断地板与 `[loader] overlay=0`
+
+- **地板里程碑**：`log.h` 新增 `g_logFloor` 路由 —— 某个编译单元自己的日志被级别丢掉时，它的 `LOG_ALWAYS` 行改为**追加写入 `logs\scripthook.log`**（多单元共享同一文件，故一行一次 `fwrite`，避免交错）；同时把该写的行提升为 `LOG_ALWAYS`：loader 的 `FATAL`/真实 dinput8 加载/`DirectInput8Create hr`/配置加载/插件扫描计数、覆盖层的路线与失败、playmode 挂载结果、文件层挂载计数与失败、forge 扫描与 io 安装、dinput 接口/键盘设备包装与首次读键、corefix 档位与"全默认未动任何东西"、blacklist 注册与生效。**从此发布包（warn）也能回答"谁、到哪一步、有没有失败"。**
+- **`[loader] overlay=0/1`（默认 1）**：覆盖层此前**没有任何开关**，玩家和我们都没法把它单独摘出来做对照 —— 这是本次排查唯一卡住的地方。关掉后：不扫窗口、不捕获/挂钩 Present、不子类化窗口。随包 `scripthook.ini` 里已带这一行与说明。
+
+### 11.7 重发
+
+`build_msvc.ps1 -Release` + `tools/package-beta.ps1 -Zip` → `out\GRW-ScriptHook-1.0-beta1.zip`（23:42，替换线上资产）。`SH_RELEASE` 全树**只用在 `log.h:85`**（默认日志级别），所以正式包与玩家验证过的 `-Beta` 包行为一致，差别仅在默认级别为 `warn`。
+
+### 11.8 版本号与第二次打包（同日 23:46）
+
+`SH_VERSION` 提到 **`1.0-beta2`**（`scripthook.h:37`，单点定义；`README.md` 首行同步）。理由：这一版带的是"黑屏"的承重修法，与线上已有的 `1.0-beta1` 资产只是同名不同内容，日志首行若还写 beta1，玩家与我们都分不清手里是哪一份。随后：
+
+- `build_msvc.ps1 -Release` 重新构建并**部署到当前游戏目录**（`dinput8.dll` 23:46:23，1,281,536 B；已核对产物内含 `1.0-beta2`、不含 `1.0-beta1`）；
+- `tools/package-beta.ps1 -Zip` → **`out\GRW-ScriptHook-1.0-beta2.zip`**（1,587,684 B，23:46:36），线上资产用这个替换；
+- 随包 `scripthook.ini` 带 `overlay=1`（已文档化），无 `LogLevel` 行（默认 `warn`），插件 8 个。
+- 尚未同步的文档：`docs/beta-test-plan.md`（换机测试说明）与 `docs/release-post-1.0-beta1.md` 里仍写着 `1.0-beta1`、旧 zip 名与旧 tag —— 下一轮测试说明按 beta2 重写时一并更新。
+
+### 11.9 遗留
+
+1. **三处修复里"哪一处是致命一击"无法从日志单独判定**。机理与时间线上最可能是第 3 处（与 09-16 闪退同族、且它的日志证据最直接：route 1 之后游戏顺利完成前端加载），但第 1 处是客观缺陷、第 2 处是对"CPU≈0 阻塞"这一大类的加固，两条都保留。要彻底分清需要一次"只带其一"的对照实验，**不建议**为此再占用一轮玩家。
+2. `build_msvc.ps1` 的 `-Release` 帮助文字写"diagnostics are compiled out"，与事实不符（`SH_RELEASE` 只决定默认级别）—— 顺手改。
+3. 九节那条"换机判据：健康日志出现 MISMATCH…"在 11.6 之后才真正成立；此前那些行都在模块日志里，`warn` 下并不存在。**11.12 已补齐**：`LogFirst` 在地板上改为 `LOG_ALWAYS`，这九类模块"没匹配上/没读到"的行现在 warn 档也落在 `logs\scripthook.log`。
+4. 本节的修复**未提交 git**（改动见 `git status`：`loader.c`、`proxy.def`、`scripthook_ovl.cpp`、`log.h`、`scripthook.ini`、`scripthook_playmode.c`、`scripthook_files.c`、`scripthook_forge.c`、`scripthook_forge_io.c`、`scripthook_dinput.c`、`scripthook_corefix.c`、`scripthook_blacklist.c`，新增 `tools/list-pe-exports.ps1`）。
+
+### 11.10 本机复现（23:51）与真正的根因（同日 23:58 修）
+
+**现象**：本机（`graphicstatedump.txt` 自报 GPU 为 AMD Radeon RX 5700）用 23:46 部署的那一版启动 —— 走到主窗口加载阶段黑屏、进程有明显占用、约 17 秒后游戏自己走崩溃上报退出。
+
+**当时的旁证**：
+
+| 证据 | 说明 |
+| --- | --- |
+| `graphicstatedump.txt`（游戏根目录，23:51:54） | **引擎自己的**渲染器状态转储，11 个设备上下文列表（Main + Deferred 0–10）**全空** = 渲染器根本没建起来。它写在覆盖层最后一行日志的**同一秒** |
+| `logs\client_crash_reporter.txt`（0 B，23:52:11）、`dxdiag.txt`（103 KB，23:52:20） | 游戏侧的崩溃上报流程跑了一遍 |
+| 系统事件日志 | **无** Application Error / AppHang，**无** TDR 事件 → 不是驱动重置，也不是未处理异常，是游戏自己判定渲染器失败后退出（与 `logs\` 里没有 `scripthook_crash.log` 一致） |
+| `logs\scripthook.log` 末行（23:51:53.939） | `overlay: no swapchain captured yet - waiting 20000 ms before the probe device (fallback)` —— 之后再无覆盖层行；探针兜底还在睡觉，游戏就已经倒了 |
+
+**根因：route 1 的两条补丁打在同一张 vtable 上，而钩子查找取到了没有原函数的那条记录。**
+
+- 实测（离线小程序，CreateDXGIFactory1 取 vtable 后比对，用完即删）：`IDXGIFactory`、`IDXGIFactory1`、`IDXGIFactory2` 三个接口返回**同一个** vtable 指针；本机 23:24 那次自己的日志也写着 `factory capture installed (2 vtable(s))` —— 一个数组、两条记录。
+- 旧代码"一次调用一条记录"，`HookForVtable` 返回**第一条**匹配 vtable 的记录：槽 10 那条（`origForHwnd = NULL`）排在前面 → **任何 `CreateSwapChainForHwnd` 调用都走进没有原函数的记录，直接返回 `E_FAIL`，从不调用真正的实现**；而失败路径**完全静默**（只有成功才写日志）。同一份小程序还证明 `D3D11CreateDeviceAndSwapChain` 与 `IDXGIFactory2::CreateSwapChainForHwnd` 两条路**都会**进到我们的钩子里 —— 即 route 1 这条路本身是通的，坏的只是查找与失败处理。
+- 现代 D3D11 游戏建主交换链走的正是 `CreateSwapChainForHwnd`（flip model 只有这一条），于是引擎拿不到交换链 → 上下文全空的 `graphicstatedump` → 黑屏、空转、然后退出。23:24 那次为什么没事：那次游戏的主交换链走的是槽 10（日志 `swapchain captured (CreateSwapChain)`），槽 10 的记录是对的。
+- **第二条独立缺陷**，证据就在同一份日志里：`scripthook.log` 第 8 行只剩片段 `d while it is up`，正是 `overlay: factory capture installed (...) - ... no probe device is created while it is up` 的**尾巴**。原因是 loader 用 `"w"` 打开 `scripthook.log`（私有写位置），而别的单元按追加写同一文件 —— loader 下一次写入把那几行追加的内容**盖掉了**。当次最关键的一行（走了哪条捕获路线）就是这样变成碎片的。
+
+**修复与验证**：
+
+- `scripthook_ovl.cpp`：工厂记录改为**一张 vtable 一条**、每个槽只打一次补丁；钩子查找要求"这条记录能交出我要调的那个原函数"，交不出时经 `FactoryCallRefused()` **大声写日志**而不是静默 `E_FAIL`；`CreateSwapChainForHwnd` 的捕获行升为地板级并带上尺寸/格式/缓冲数；表满、vtable 不可写也各有日志。
+- `log.h`：`scripthook.log` 改为"先用 `"w"` 截断、随即以 `"a"` 打开"（`LogOpen()`），所有写者统一为追加语义 → 不再互相覆盖。
+- 重新构建 `-Release` 并部署（`dinput8.dll` 23:58，1,285,632 B，含 `1.0-beta2`），`tools/package-beta.ps1 -Zip` 重打 **`out\GRW-ScriptHook-1.0-beta2.zip`**（1,589,342 B，00:00:49）。**23:46 那一版 beta2（部署的与打进 zip 的）都带这个缺陷，不能发给玩家；线上资产要用 00:00 这一版替换。**
+- **本节结论当晚就被推翻，见 11.11**：工厂记录的缺陷是**真的**、也确实该修（它就摆在那里，任一台机器只要走 `CreateSwapChainForHwnd` 就会被拒），但它**不是这次黑屏的原因** —— 修完之后同一台机器四次运行仍然黑屏，覆盖层那一层也被 `overlay=0` 排除。真正的根因是 11.4 第 2 处的启动时机，见下。
+
+### 11.11 根因：框架启动时机（当日 00:29 修，00:28 运行验证）
+
+**根因一句话**：11.4 第 2 处把框架启动从 `DllMain` 挪到了"宿主第一次调用我们导出函数"的那一刻。本机宿主第一次 `DirectInput8Create` 在 DLL 加载后**约 6 秒**，那时引擎的渲染器和它自己的线程**已经在跑**；于是 18 个文件钩子、工厂 vtable 补丁、playmode/fpx 对游戏代码的补丁、8 个插件 DLL 全都落在**一个活着的进程**上，而 18:52 构建（在 attach 路径装完）在同一台机器、同一游戏构建、同一配置下正常。
+
+**四轮对照**（本机，AMD RX 5700，游戏 `GRW.exe` 为 2026-09-15 的 TU25）：
+
+| 轮次 | 构建 | 结果 |
+| --- | --- | --- |
+| 1 | 23:58（beta2 + 11.10 的修复） | 黑屏（三次运行同一形状） |
+| 2 | 同上 + `[loader] overlay=0` | **仍黑屏** → 覆盖层（route 1 / 选窗 / 子类化）洗清 |
+| 3 | 18:52:53（今晚改动之前的构建，取自 `out\GRW-ScriptHook-1.0-beta1-testkit.zip`，核对过 DLL 内构建字符串） | **正常进游戏**，F4 菜单可用 |
+| 4 | 23:58 的代码 + 启动时机回到 attach 路径 | **正常进游戏** |
+
+**旁证（失败轮 vs 成功轮的差别）**：
+
+- 失败轮 `config loaded` 在 DLL 加载后 6 秒、splash 窗口**已可见之后**；18:52 轮与第 4 轮都在 `DllMain` 的同一毫秒。
+- 失败轮里游戏在根目录写下 `graphicstatedump.txt`（11 个设备上下文列表全空）与 `dxdiag.txt`（晚约 15 秒）；**这两份文件在跑通的轮次里根本没有被写** —— 它们确实是引擎渲染器初始化失败时留下的记录，不是常规启动产物（11.10 里对它们的读法是对的，但**触发原因**判断错了）。
+- 系统事件日志四轮都没有 Application Error / AppHang / TDR，也没有 `scripthook_crash.log`：不是崩溃，是渲染器起不来之后游戏自己走上报并退出。
+
+**修复（"两全"）**：安装必须**早**（回到 attach 路径），但**加载不能在 `DllMain` 里做**（嵌套 `LoadLibrary` 正是 11.4 要规避的死锁成因）。分工：
+
+- `DllMain`：`ShCrashStartup()` / `ShCoreFixStartup()` / **`ShFrameworkStartEarly()`** —— 只创建框架线程、**不等待**（该线程的第一件事就是 `LoadLibrary`，在我们自己的 `DllMain` 返回前拿不到 loader 锁，等它等于和自己死锁）；
+- 框架线程 `FrameworkThread()`：`LoadRealDinput8()` → 发布"就绪" → 执行 `LoaderThread()` 正文（配置、状态、文件层、playmode/fpx、插件、黑名单）；
+- 每个导出：`ShFrameworkStart()` 先确保线程已起（导出被先调用时兜底），再等"就绪"（30 秒上限，超时写一行）—— 宿主线程先到也不会被塞空指针。
+
+**目击验证**（本机 00:28:55–00:29:20，`1.0-beta2` / built `Sep 18 2026 00:27:27`）：
+
+```
+00:28:55.576 GRW ScriptHook 1.0-beta2
+00:28:55.579 loaded real dinput8.dll from C:\Windows\system32\dinput8.dll   ← 与版本行同一瞬间
+00:28:55.579 config loaded from scripthook.ini
+00:28:56.255 plugin scan done: 8 loaded, 0 skipped
+00:28:56.657 overlay: factory capture installed (1 vtable(s))
+00:29:12.770 hooks installed (CreateSwapChain): origPresent=7ffeef8787e0 ok=1
+00:29:12.770 swapchain captured (CreateSwapChain): hwnd=8a02c6 buffer 1920x1080 windowed=1   ← route 1 抓到游戏自己的交换链，未建探针设备
+00:29:13.346 imgui ready: hwnd=8a02c6
+00:29:20.110 corefix: the main menu is up (state MenuOrLobby)
+```
+
+早装之后 route 1 **第一次真正生效**（此前每一轮都是 `no swapchain captured yet` → 只能退探针）：我们的工厂补丁比游戏创建交换链早约 16 秒落地，于是无需第二个 D3D11 设备就挂上了 `Present`。这也说明"探针设备竞态"这类推测在本机并不成立 —— 真正的问题一直是**安装时机**。
+
+**收尾**：`out\GRW-ScriptHook-1.0-beta2.zip`（1,589,440 B，00:29:58）已用这一版重打；随包 `scripthook.ini` 为 `overlay=1`、`[forgemod] enabled=0`、无 `LogLevel`（= `warn`）。
+
+### 11.12 最后一处盲区：`LogFirst` 在地板上提升为 `LOG_ALWAYS`（当日 00:36）
+
+**问题**：`LogFirst` 是每个模块"我要说的第一件事" —— 站点校验通过、或者**字节签名与游戏版本不符而拒绝挂载**（`entity`、`havok`、`stealth`、`input`、`fov`、`blur`、`hit`、`npc`、`reflect` 九个模块都用它）。它走的却是 `LOG_INFO`，而 11.6 的地板只保留 `LOG_ALWAYS` —— 于是**发布包（warn）里"模块因为版本不符没挂上"和"根本没人问过"仍然无法区分**。九节写的换机判据（"看健康日志里的 MISMATCH"）在这条修掉之前，对玩家手上的包并不成立。
+
+**改法**（`log.h`）：`LogFirstNow()` 改走 `LogAt(g_logFloor ? LOG_ALWAYS : LOG_INFO, …)` —— 模块自己的日志存在时（info/debug）行为一字不变；被级别丢掉、整个单元挂在地板上时，那行就去 `logs\scripthook.log`。每个调用点本来就是"一次一处"（11.6 已把它做成 per-call-site 的 static 守卫），所以地板最多多出十几行，代价可以忽略。
+
+**验证**：本机 ini 已处于 `LogLevel=warn`（随包默认，也是玩家手上那一档），下一次启动就是玩家视角验收 —— 预期在 `logs\scripthook.log` 里能看到这九个模块各自的那一行（通过或拒绝都会写），而不是只有加载器的三行。
+
+**已重打**：`out\GRW-ScriptHook-1.0-beta2.zip`（1,589,551 B，00:36:44），部署与包内 `dinput8.dll` 均为 `built Sep 18 2026 00:36:20`。

@@ -273,14 +273,14 @@ static int ArmOne(uint32_t site, uint32_t proof, void *detour, void **orig,
     if (!RefVerified(SH_IMG(site), SH_IMG(proof))) return 0;
     s = MH_CreateHook(target, detour, orig);
     if (s != MH_OK) {
-        Log("playmode: hook %s at %08X failed (%d)", what, site, (int)s);
+        LogAlways("playmode: hook %s at %08X failed (%d)", what, site, (int)s);
         return -1;
     }
     s = MH_EnableHook(target);
     if (s != MH_OK) {
         /* Not left half-installed: a created-but-disabled hook still owns
          * the trampoline *orig points at, and this install is retried. */
-        Log("playmode: enabling %s at %08X failed (%d)", what, site, (int)s);
+        LogAlways("playmode: enabling %s at %08X failed (%d)", what, site, (int)s);
         MH_RemoveHook(target);
         *orig = NULL;
         return -1;
@@ -314,7 +314,7 @@ static void GmInstall(void) {
     }
     s = MH_Initialize();
     if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
-        Log("playmode: minhook init failed (%d) - the mode stays unknown",
+        LogAlways("playmode: minhook init failed (%d) - the mode stays unknown",
             (int)s);
         InterlockedExchange(&g_gmArmed, -1);
         InterlockedExchange(&g_gmCmArmed, -1);
@@ -331,7 +331,7 @@ static void GmInstall(void) {
     }
     if (a == 1) InterlockedExchange(&g_gmArmed, 1);
     if (b == 1) InterlockedExchange(&g_gmCmArmed, 1);
-    Log("playmode: SetCurrentGameMode at %08X and CreateGameMode at %08X "
+    LogAlways("playmode: SetCurrentGameMode at %08X and CreateGameMode at %08X "
         "verified and hooked (try %ld) - the mode comes from the game",
         GM_SITE_RVA, CM_SITE_RVA, (long)n);
 }
@@ -635,14 +635,14 @@ void ShPlayModeStart(void) {
 
     g_enabled = ShConfigGetBool("playmode", "enabled", 1) ? 1 : 0;
     if (!g_enabled) {
-        Log("playmode: disabled in scripthook.ini");
+        LogAlways("playmode: disabled in scripthook.ini");
         return;
     }
     GmInstall();
     {
         HANDLE h = CreateThread(NULL, 0, ModeThread, NULL, 0, NULL);
 
-        if (!h) Log("playmode: watcher thread failed to start");
+        if (!h) LogAlways("playmode: watcher thread failed to start");
         else    CloseHandle(h);   /* never waited on */
     }
 }

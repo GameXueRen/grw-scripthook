@@ -2,9 +2,19 @@
 ; builds. GCC builds use __declspec(dllexport) instead.
 ; PRIVATE keeps the COM exports out of the import library,
 ; exactly as the system dinput8 does.
+;
+; The list mirrors the system dinput8's six exports exactly
+; (tools\list-pe-exports.ps1 prints both for comparison).
+; GetdfDIJoystick is the sixth: a caller that uses the standard
+; joystick data format - c_dfDIJoystick in dinput8.lib - resolves
+; it by name, and a proxy that does not forward it turns that
+; caller's load or first use into a failed resolution. Missing it
+; was a real defect (2026-09-17, a Steam copy's black screen at the
+; front end's input init), so the parity is checked, not assumed.
 LIBRARY dinput8
 EXPORTS
     DirectInput8Create
+    GetdfDIJoystick
     DllCanUnloadNow PRIVATE
     DllGetClassObject PRIVATE
     DllRegisterServer PRIVATE

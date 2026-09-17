@@ -483,11 +483,11 @@ static DWORD WINAPI WatchThread(LPVOID p) {
             ShGetGameStateName(state, (int)sizeof(state));
             ShBlockedText(bits, text, (int)sizeof(text));
             why = bits ? text : "nothing (everything is allowed)";
-            Log("blacklist: in force now: %s (state %s)", why,
+            LogAlways("blacklist: in force now: %s (state %s)", why,
                 state[0] ? state : "?");
             if (first) {
                 first = 0;
-                Log("blacklist: %d plugin(s) seen; one that does not declare "
+                LogAlways("blacklist: %d plugin(s) seen; one that does not declare "
                     "is blocked in Ghost War and Mercenaries", g_n);
             }
         }
@@ -546,7 +546,7 @@ void ShBlacklistStartup(void) {
     }
     Unlock();
 
-    Log("blacklist: registry up with %d plugin(s) from plugins\\", n);
+    LogAlways("blacklist: registry up with %d plugin(s) from plugins\\", n);
     {
         HANDLE h = CreateThread(NULL, 0, WatchThread, NULL, 0, NULL);
 

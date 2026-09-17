@@ -1494,20 +1494,20 @@ static void SyncTargets(void)
                 a->target = (void *)GetProcAddress(
                     GetModuleHandleA("kernel32.dll"), a->name);
                 if (!a->target) {
-                    Log("files: %s is not on this system - not hooked",
+                    LogAlways("files: %s is not on this system - not hooked",
                         a->name);
                     continue;
                 }
             }
             s = MH_CreateHook(a->target, a->detour, a->real);
             if (s != MH_OK) {
-                Log("files: hooking %s failed (%s)", a->name,
+                LogAlways("files: hooking %s failed (%s)", a->name,
                     MH_StatusToString(s));
                 continue;
             }
             s = MH_EnableHook(a->target);
             if (s != MH_OK) {
-                Log("files: enabling %s failed (%s)", a->name,
+                LogAlways("files: enabling %s failed (%s)", a->name,
                     MH_StatusToString(s));
                 MH_RemoveHook(a->target);
                 *(a->real) = NULL;  /* the trampoline went with it */
@@ -1527,10 +1527,10 @@ static void SyncTargets(void)
 
     InterlockedExchange(&g_installed, have ? 1 : 0);
     if (changed)
-        Log("files: %d of %d target(s) hooked, the rest released",
+        LogAlways("files: %d of %d target(s) hooked, the rest released",
             have, (int)ARRAY_LEN(g_api));
     if (was && !have)
-        Log("files: the layer is out - not one file call is intercepted");
+        LogAlways("files: the layer is out - not one file call is intercepted");
     SyncUnlock();
 }
 

@@ -1,4 +1,4 @@
-# GRW ScriptHook 魔改版（1.0-beta1）
+# GRW ScriptHook 魔改版
 
 此为《幽灵行动：荒野》ScriptHook模组的魔改版，以dinput8.dll代理的形式随游戏加载，不修改游戏本体文件的脚本扩展框架。
 

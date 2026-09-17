@@ -33,8 +33,15 @@ extern "C" {
 /** The build's own version, in one place. The loader's start up line, the
  *  crash report header and the README all carry this same string, so a bug
  *  report names the build it came from without anyone having to ask. Bump
- *  it here and nowhere else. */
-#define SH_VERSION "1.0-beta1"
+ *  it here and nowhere else.
+ *
+ *  1.0-beta2 (2026-09-17 night) is the first beta with a load bearing fix:
+ *  the overlay no longer creates a second D3D11 device and no longer waits
+ *  for "any big window" - it captures the game's own swapchain - and the
+ *  proxy carries the real dinput8's full export set. The 1.0-beta1 asset was
+ *  replaced rather than left up, so the version string is what tells the two
+ *  apart in a log. */
+#define SH_VERSION "1.0-beta2"
 
 /** Where this build's source lives, in one place for the same reason the
  *  version is: the About page formats it in rather than typing it, so a

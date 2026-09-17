@@ -239,7 +239,7 @@ static HRESULT WINAPI HookGetState(void *dev, DWORD cb, void *data) {
         uint8_t *k = (uint8_t *)data;
         DWORD d;
         static int logged;
-        if (!logged) { logged = 1; Log("dinput: game reads GetDeviceState"); }
+        if (!logged) { logged = 1; LogAlways("dinput: game reads GetDeviceState"); }
         for (d = 0; d < 256; d++) g_lastState[d] = k[d];
         g_lastGot = 1;
         for (d = 1; d < 256; d++) if (k[d] && Suppressed(d)) k[d] = 0;
@@ -264,7 +264,7 @@ static HRESULT WINAPI HookGetData(void *dev, DWORD cb, void *data,
     hr = g_origData[i](dev, cb, data, inout, flags);
     if (SUCCEEDED(hr) && data && inout && cb) {
         static int logged;
-        if (!logged) { logged = 1; Log("dinput: game reads GetDeviceData"); }
+        if (!logged) { logged = 1; LogAlways("dinput: game reads GetDeviceData"); }
         uint8_t *p = (uint8_t *)data;
         DWORD n = *inout, src, dst = 0;
         for (src = 0; src < n; src++) {
@@ -288,7 +288,7 @@ static void WrapDevice(void *dev) {
         return;
     Patch(vt, 10, (void *)HookGetData, (void **)&g_origData[g_nDev]);
     g_nDev++;
-    Log("dinput: keyboard device wrapped, vtable %p", (void *)vt);
+    LogAlways("dinput: keyboard device wrapped, vtable %p", (void *)vt);
 }
 
 static HRESULT WINAPI HookCreateDevice(void *di, const GUID *guid,
@@ -319,6 +319,6 @@ void ShWrapDirectInput(void *di) {
     if (Patch(vt, 3, (void *)HookCreateDevice,
               (void **)&g_origCreate[g_nDi])) {
         g_nDi++;
-        Log("dinput: interface wrapped, vtable %p", (void *)vt);
+        LogAlways("dinput: interface wrapped, vtable %p", (void *)vt);
     }
 }
