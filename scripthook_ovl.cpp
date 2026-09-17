@@ -1859,6 +1859,16 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
             ImGui::CreateContext();
             ImGuiIO& io = ImGui::GetIO();
             io.IniFilename = nullptr; // fixed layout, no .ini to save
+            /* The menu is walked from the keyboard (scripthook_menu.c, and
+             * the hints say so), so the pointer is never wanted - and left
+             * alone the ImGui Win32 backend shows the OS arrow the moment
+             * ImGui asks for one AND answers WM_SETCURSOR itself, which
+             * takes that message away from the game's own window procedure:
+             * the pointer the game had hidden came back the moment the menu
+             * opened.  Told to leave the cursor alone, the OS cursor stays
+             * exactly as the game left it - hidden in play, and the game's
+             * own wherever the game's own screens want one. */
+            io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
             // Keyboard navigation stays with the menu thread
             // (scripthook_menu.c), ImGui only draws.
 
