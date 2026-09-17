@@ -40,6 +40,13 @@ static const ShText kEnUS[] = {
     { "@menu.off",            "off" },
     { "@menu.footer.pos",     "%d / %d" },
 
+    /* the root menu's top-right credits. Framework text like the rest, so
+     * a lang.ini can override either line; the build line formats the
+     * version in (%s), which is SH_VERSION and not a number typed here. */
+    { "@ui.credit.author",    "Original: Phiality \xC2\xB7 "
+                              "modded by GameXueRen" },
+    { "@ui.credit.build",     "Version: %s \xC2\xB7 QQ group: 299177445" },
+
     /* the settings tree */
     { "@settings.page",       "ScriptHook settings" },
     { "@settings.load",       "Load plugins (master switch)" },
@@ -78,6 +85,12 @@ static const ShText kEnUS[] = {
     { "@settings.saved",      "Saved. Restart to apply." },
     { "@settings.restart",    "Plugin switch changes take effect on the next start." },
     { "@settings.mode",       "Play mode" },
+    /* The bottom line of the switches page when no mode has been read yet,
+     * which is the normal state in the front end. Three words on purpose:
+     * the evidence it used to print is recorded line by line in
+     * scripthook_playmode.log, and ShPlayModeEvidence still hands it to
+     * anything that asks. */
+    { "@settings.mode.none",  "no mode" },
     { "@settings.plugins.note",
       "No [plugins] line means off. Switch it on here; deleting "
       "scripthook.ini resets every plugin to off." },
@@ -172,6 +185,9 @@ static const ShText kZhCN[] = {
     { "@menu.off",            "关" },
     { "@menu.footer.pos",     "第 %d / %d 行" },
 
+    { "@ui.credit.author",    "原作者：Phiality · 魔改：GameXueRen" },
+    { "@ui.credit.build",     "版本：%s · Q群：299177445" },
+
     { "@settings.page",       "ScriptHook 设置" },
     { "@settings.load",       "加载插件（总开关）" },
     { "@settings.plugins",    "各插件开关" },
@@ -198,6 +214,7 @@ static const ShText kZhCN[] = {
     { "@settings.saved",      "已保存。重启后生效。" },
     { "@settings.restart",    "插件开关改变需下次启动生效。" },
     { "@settings.mode",       "游玩模式" },
+    { "@settings.mode.none",  "no mode" },
     { "@settings.plugins.note",
       "没有 [plugins] 行即为关闭。在这里打开；删除 scripthook.ini 会把所有"
       "插件重置为关闭。" },

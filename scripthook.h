@@ -34,7 +34,7 @@ extern "C" {
  *  crash report header and the README all carry this same string, so a bug
  *  report names the build it came from without anyone having to ask. Bump
  *  it here and nowhere else. */
-#define SH_VERSION "1.0.0-beta1"
+#define SH_VERSION "1.0-beta1"
 
 #ifdef SH_BUILD
 #define SH_API __declspec(dllexport)
@@ -622,6 +622,13 @@ SH_API uint64_t ShSpawnVehicle(uint32_t vehicleId,
  *  spawn does not scan the address space synchronously. Call
  *  once after the world is loaded; later calls do nothing. */
 SH_API void ShSpawnWarm(void);
+/** How that warm-up is going, for a status line: 1 while the
+ *  walk runs, with *done of *total specs resolved, and 0 when
+ *  nothing is running (the numbers are not written then). The
+ *  walk takes about fifteen seconds and a dispatch that lands
+ *  in the middle of it waits, so a caller that is about to
+ *  wait can say what for. Either pointer may be NULL. */
+SH_API int  ShSpawnWarmProgress(int *done, int *total);
 SH_API void ShSpawnInvalidate(void);
 
 /** Guarded reads, for anything walking engine memory. They
@@ -2657,6 +2664,13 @@ typedef int (*ShUiInputFn)(uint32_t scene, const ShUiEvent *e,
 SH_API int      ShUiSetInput(uint32_t scene, ShUiInputFn fn, void *user);
 SH_API int      ShUiFocus(uint32_t scene, int take);
 SH_API uint32_t ShUiFocused(void);
+/** Declare that a virtual key needs event polling (1) or withdraw it (0).
+ *  While nothing has been declared the poll thread sweeps the whole
+ *  keyboard, exactly as it always did; once anything is declared it sweeps
+ *  the declared keys plus every key it is currently holding, and nothing
+ *  else. Declaring is therefore how a consumer says what it listens for -
+ *  and a consumer that declares nothing keeps working unchanged. */
+SH_API int      ShUiInputWatch(int vk, int on);
 /** One virtual key hidden from the game until released. */
 SH_API int      ShBlockKey(int vk, int on);
 /** Every key but the escapes hidden, focus uses this. */

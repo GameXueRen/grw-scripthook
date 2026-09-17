@@ -1,4 +1,4 @@
-# GRW ScriptHook 魔改版（1.0.0-beta1）
+# GRW ScriptHook 魔改版（1.0-beta1）
 
 《幽灵行动：荒野》（Ghost Recon Wildlands）的
 ScriptHookV 同类框架。以 `dinput8.dll` 代理形式随游戏加载，暴露

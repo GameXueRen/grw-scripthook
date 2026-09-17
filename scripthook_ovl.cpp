@@ -1153,9 +1153,24 @@ void RenderMenu(const ShMenuView* v)
     float rightX = x + MENU_W - PAD;
     float creditW = 0.0f, cFs = MENU_CREDIT_FS, cGap = 2.0f * s;
     ImVec2 s1, s2;
+    // The two credit lines are framework text, one row per language, so
+    // they follow the menu language like every other line of the panel
+    // (a language with no row of its own falls back to English). The
+    // build line takes the version as a value: the template is checked
+    // and formatted the same way a page's status line is, and the version
+    // it formats is SH_VERSION, so this line cannot name a build other
+    // than the one drawing it.
+    const char* c1 = "";
+    const char* c2 = "";
+    char c2buf[192];
+    c2buf[0] = 0;
     if (v->isRoot) {
-        const char* c1 = "原作者：Phiality · 魔改：GameXueRen";
-        const char* c2 = "版本：Beta1.0 · Q群：299177445";
+        const char* en = ShTextEnUS(nullptr, "@ui.credit.build");
+        const char* tr = ShLang("@ui.credit.build");
+
+        c1 = ShLang("@ui.credit.author");
+        ShTextFormat(c2buf, sizeof(c2buf), en ? en : tr, tr, SH_VERSION);
+        c2 = c2buf;
         s1 = font->CalcTextSizeA(cFs, FLT_MAX, 0.0f, c1);
         s2 = font->CalcTextSizeA(cFs, FLT_MAX, 0.0f, c2);
         creditW = s1.x > s2.x ? s1.x : s2.x;
@@ -1173,8 +1188,6 @@ void RenderMenu(const ShMenuView* v)
                 Col(0xFFD25Au), v->title);
     // Root menu top-right credits: original author + this build.
     if (v->isRoot) {
-        const char* c1 = "原作者：Phiality · 魔改：GameXueRen";
-        const char* c2 = "版本：Beta1.0 · Q群：299177445";
         float blockH = cFs + cGap + cFs;
         float bTop = y + PAD_TOP + (TITLE_H - blockH) * 0.5f;
         dl->AddText(font, cFs, ImVec2(rightX - s1.x, bTop),
