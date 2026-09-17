@@ -73,8 +73,11 @@ static const ShText kEnUS[] = {
     { "@about.modder",        "Modded by: GameXueRen" },
     { "@about.qq",            "QQ group: 299177445" },
 
-    /* the Forge page */
-    { "@forge.page",          "Forge Mod Loader" },
+    /* the Forge page. "(experimental)" is part of the label the root menu
+     * shows: the feature serves mod bytes without touching the archives,
+     * which is proven, but the shape of what it accepts is still moving -
+     * so the page says so where a player reads it, not only in the docs. */
+    { "@forge.page",          "Forge Mod Loader (experimental)" },
     { "@forge.hint",
       "Loads loose files from mods\\ over existing\n"
       ".forge entries without touching the archives.\n"
@@ -195,7 +198,7 @@ static const ShText kZhCN[] = {
     { "@about.modder",        "魔改版：GameXueRen" },
     { "@about.qq",            "QQ群：299177445" },
 
-    { "@forge.page",          "Forge 资源侧载" },
+    { "@forge.page",          "Forge资源侧载（实验功能）" },
     { "@forge.hint",
       "把 mods\\ 下的文件覆盖到已有 .forge 游戏文件上。此项开关改变需下次启动生效。" },
     { "@forge.enabled",       "启用" },

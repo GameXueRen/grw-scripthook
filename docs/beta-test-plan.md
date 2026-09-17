@@ -39,6 +39,7 @@ Tom Clancy's Ghost Recon Wildlands\
 ├── dinput8.dll
 ├── scripthook.ini
 ├── logs\                    ← 首次启动自动创建（日志都在这里）
+│                              重启会重写 scripthook.log，上一场留在 scripthook.log.prev
 ├── mods\                    ← 本套件带：Forge 侧载的测试资源（见 4.1）
 │   └── DataPC\                  3 个 .data 贴图条目 + 一份 README.txt
 ├── docs\                    ← 本套件带：beta-test-plan.md 与 beta-audit-….md
@@ -112,9 +113,9 @@ MISMATCH                 （版本/指纹不一致）
 | 2 | 打开 `logs\scripthook.log` | 头两行是 `GRW ScriptHook 1.0-beta1` / `built <日期> <时间>` |
 | 3 | 同一文件里搜 `loading plugin:` | **正好 8 行**，且每行下面跟一行 `loaded at ...` |
 | 4 | 同一文件里搜 `no ... .asi` 或 `no plugin folders` | **一行都没有**（有就说明文件没放全） |
-| 5 | 进游戏（进战役），按 **`F4`** | 出现模组菜单；左侧应有 8 个插件页 + `ScriptHook 设置` + `Forge 资源侧载` |
+| 5 | 进游戏（进战役），按 **`F4`** | 出现模组菜单；左侧应有 8 个插件页 + `ScriptHook 设置` + `Forge资源侧载（实验功能）` |
 | 6 | 菜单最后一行切一次语言（中文 ↔ English） | **即时**全菜单换语言，不需要重启 |
-| 7 | 进 `Forge 资源侧载` 页（本套件带 `mods\`） | 页面上显示已启用、能看到已加载的 mod；`logs\` 里与 Forge 相关的行**没有** `refused`（拒绝替换）字样 |
+| 7 | 进 `Forge资源侧载（实验功能）` 页（本套件带 `mods\`） | 页面上显示已启用、能看到已加载的 mod；`logs\` 里与 Forge 相关的行**没有** `refused`（拒绝替换）字样 |
 
 > 菜单缩放：如果这台机器的分辨率 / 显示器让菜单过大过小，可在 `scripthook.ini` 的 `[Settings]` 里加
 > `MenuScale=1.2`（0 = 自动按分辨率缩放，默认就是自动）。UI 是自绘覆盖层，不吃系统 DPI 缩放。
@@ -138,7 +139,7 @@ MISMATCH                 （版本/指纹不一致）
 
 > `cnchat` 与 `OpticalCamo` **默认关闭**是设计（前者要在自己的 ini 里开，后者在菜单里开），不算故障。
 
-### 4.1 Forge 资源侧载（框架功能，本套件带 `mods\`）
+### 4.1 Forge资源侧载（实验功能 · 框架功能，本套件带 `mods\`）
 
 本套件里的 `mods\` 是一份**侦察直升机外观贴图替换**：`mods\DataPC\` 下三个
 `.data` 条目，替换 `DataPC` 归档里 MTV Santa UNI Recon Heli 的外表面贴图
@@ -149,7 +150,7 @@ MISMATCH                 （版本/指纹不一致）
 |---|---|
 | 用 `spawner` 页召唤一架**侦察直升机**，靠近看机身贴图 | 是替换后的贴图（与不带 `mods\` 时不同）|
 | 读一次档 / 快速旅行 / 换张地图后再看 | 替换**仍然生效**（不是只在第一张地图有效）|
-| `F4` → `Forge 资源侧载` 页 | 显示已启用，能看到加载的条目 |
+| `F4` → `Forge资源侧载（实验功能）` 页 | 显示已启用，能看到加载的条目 |
 | 看 `logs\scripthook_forge.log` 与 `logs\scripthook_forge_io.log` | 有「找到并应用」的记录；**没有** `refused` 字样（唯一会被拒的原因写在 `mods\README.txt` 里：替换体积大于原条目 —— 这份资源是按原样做的，不该出现）|
 | 想看关掉后的样子 | 把 `mods\DataPC` 改名为 `mods\~DataPC`（以 `~` 开头的文件夹被跳过），重启游戏 |
 
@@ -236,6 +237,7 @@ MISMATCH                 （版本/指纹不一致）
 9. **`mods\README.txt` 不参与替换**：Forge **只看文件夹、不看文件**，那份说明留着就行。
 10. **`docs\` 只在测试套件里**：玩家版不带（内部资料）；`mods\` 则是**两个包都带**（Forge 侧载的测试资源，逐字节原样，不测就不加载）。
 11. **模组菜单里没有鼠标指针**：本版有意**完全不碰**系统指针（菜单本来就靠键盘：`F4` / `↑↓` / `←→` / `Enter` / `ESC`），游戏自己的地图与暂停界面里指针照旧。
+12. **本套件自带 `LogLevel=debug`**：包内 `scripthook.ini` 的 `[Settings]` 由打包脚本写入这一行，所以 `logs\` 里各模块日志齐全（下面各条的「看哪里」都依赖它）。**玩家包不带这一行**，走发布版默认 `warn`：框架的模块日志不生成，`logs\` 里是 `scripthook.log`、崩溃报告（若有）与各插件自己的日志。你要临时改级别，就改这一行再重启一次 —— 想照玩家包的形态看一眼，把这一行改成 `warn` 重启即可。
 
 ---
 
