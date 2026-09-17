@@ -92,6 +92,11 @@ static DWORD WINAPI Tick(LPVOID p) {
   中文环境下第二行显示为「当前不可用（幽灵战争）：…」——`"Off now"` 是框架自己的文本键，
   译文在编译期基线里（也可由 `<gamedir>\lang.ini` 覆盖）。行尾的插件名目前仍是**目录名**，
   改用菜单显示名是待办项（见 `docs/i18n-refactor.md` 的 P1）。
+- **该页底部**另有一行状态：`游玩模式：…`。读到模式时是它的名字（`Ghost War` / `MERCENARIES` …）；
+  没读到（还在前端，或这个 build 读不出来）时只显示 `游玩模式：no mode` —— **2026-09-17 按反馈收短**：
+  这里原来打印的是 `ShPlayModeEvidence()` 的**整句证据**，而主菜单里模式本来就是未知的，于是最常
+  看到的那一眼恰好是最长的一句。详细证据没有丢：`logs\scripthook_playmode.log` 逐行记着它，
+  `ShPlayModeEvidence()` 也照旧交给任何想看的调用方（文案键 `@settings.mode.none`，可覆盖）。
 
 ---
 

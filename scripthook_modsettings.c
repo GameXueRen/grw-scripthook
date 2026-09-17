@@ -657,20 +657,23 @@ static char g_modeLast[160];
 /* The bottom line of that page: which play mode the framework has. The
  * notice above it says which plugins the mode took away, and this says
  * what the mode is - the two questions a player (or a bug report) asks in
- * that order. When the mode could not be read the line says what was
- * read instead (the object number, or that there is none yet), because
- * "nothing is blocked" has several causes and only one of them is a bug. */
+ * that order. When no mode has been read the line says that in three
+ * words. It used to print what had been read instead - the object number,
+ * or that there is none yet - which is a sentence at the bottom of a
+ * page, and it is the normal state in the front end: the state most
+ * people would ever see. Nothing is lost by the change: the same evidence
+ * is what scripthook_playmode.log records line by line, and
+ * ShPlayModeEvidence still hands it to anything that asks. */
 static void SetModeLine(void) {
-    char line[160], ev[192];
+    char line[160];
     int mode = ShSelectedPlayMode();
 
     if (mode != SH_PLAYMODE_NONE)
         snprintf(line, sizeof(line), "%s: %s", ShLang("@settings.mode"),
                  ShLang(ShPlayModeName(mode)));
-    else {
-        ShPlayModeEvidence(ev, sizeof(ev));
-        snprintf(line, sizeof(line), "%s: %s", ShLang("@settings.mode"), ev);
-    }
+    else
+        snprintf(line, sizeof(line), "%s: %s", ShLang("@settings.mode"),
+                 ShLang("@settings.mode.none"));
     if (!strcmp(line, g_modeLast)) return;
     snprintf(g_modeLast, sizeof(g_modeLast), "%s", line);
     ShMenuStatus(g_pluginMenu, line);
