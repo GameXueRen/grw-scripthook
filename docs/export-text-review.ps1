@@ -2,9 +2,13 @@ Set-Location 'f:\UbisoftGames\GameXueRen\grw-scripthook'
 $enc = [Text.UTF8Encoding]::new($false)
 
 # C joins adjacent string literals; merge them so a wrapped hint reads whole.
+# The quote a join starts at must not be a backslash-escaped one: the two
+# quotes at the end of `...over \"Apply the set time\""` are the row's closing
+# quote plus its own, not two literals, and joining them dropped that row from
+# this table (and from anything built on it) before the lookbehind was added.
 function Merge-Lits([string]$t) {
     $prev = ''
-    while ($prev -ne $t) { $prev = $t; $t = $t -replace '"\s*"', '' }
+    while ($prev -ne $t) { $prev = $t; $t = [regex]::Replace($t, '(?<!\\)"\s*"', '') }
     return $t
 }
 
