@@ -66,8 +66,12 @@
  * plugins\skipintro\skipintro.ini:
  *
  *   [Settings]
- *   skip_launch_videos=1   Nvidia.bk2, Ubisoft_Logo.bk2
- *   skip_legal_videos=1    Epilepsy.bk2, WarningSaving.bk2
+ *   skip_launch_videos=0   Nvidia.bk2, Ubisoft_Logo.bk2
+ *   skip_legal_videos=0    Epilepsy.bk2, WarningSaving.bk2
+ *
+ * Both default to 0: a plugin that has been loaded is not yet a plugin
+ * that does something, which is the rule every plugin here follows. The
+ * two keys above are what the menu writes once a switch is turned on.
  *
  * For compatibility the old scripthook.ini [loader] keys of the same
  * name are read as a fallback when the plugin ini is absent or lacks
@@ -122,8 +126,10 @@
 /* Live switches. Hooks run on arbitrary threads, menu callbacks on the
  * API's own thread, so both are volatile LONG accessed with
  * Interlocked* and never cached in a plain local. */
-static volatile LONG g_skipLaunch = 1;  /* logo + startup intros */
-static volatile LONG g_skipLegal  = 1;  /* TRC legal/health clips */
+/* Off by default, like every other function in every plugin here: being
+ * loaded is not the same as doing something. */
+static volatile LONG g_skipLaunch = 0;  /* logo + startup intros */
+static volatile LONG g_skipLegal  = 0;  /* TRC legal/health clips */
 
 static const char *g_launch[] = {
     "Nvidia.bk2",
@@ -513,17 +519,20 @@ static int IniBool(const char *key, int fallback) {
 static void LoadConfig(void) {
     HMODULE di = GetModuleHandleA("dinput8.dll");
     int (*getBool)(const char *, const char *, int) = NULL;
-    int launchFallback = 1;
-    int legalFallback  = 1;
+    /* 0: this plugin's own ini and the legacy [loader] keys both win over
+     * these, so a configuration already written is unaffected - only a
+     * fresh install starts switched off. */
+    int launchFallback = 0;
+    int legalFallback  = 0;
 
     if (di) {
         *(FARPROC *)&getBool =
             GetProcAddress(di, "ShConfigGetBool");
         if (getBool) {
             launchFallback =
-                getBool("loader", "skip_launch_videos", 1);
+                getBool("loader", "skip_launch_videos", 0);
             legalFallback =
-                getBool("loader", "skip_legal_videos", 1);
+                getBool("loader", "skip_legal_videos", 0);
         }
     }
     InterlockedExchange(&g_skipLaunch,

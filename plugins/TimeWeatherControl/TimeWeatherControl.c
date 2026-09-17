@@ -68,7 +68,10 @@
 
 /* ---- state ------------------------------------------------------------ */
 
-static volatile LONG g_enabled = 1;
+/* Off by default, like every other function in every plugin here: being
+ * loaded is not the same as doing something. Switched off, the plugin
+ * hands the clock and the weather straight back. */
+static volatile LONG g_enabled = 0;
 /* One rate per phase, x100 so Interlocked fits, indexed the way PhaseOf
  * numbers them: 0 day, 1 dusk, 2 night, 3 dawn. */
 static volatile LONG g_speed[4] = { 100, 100, 100, 100 };
@@ -323,7 +326,7 @@ static void LoadConfig(void) {
     int i;
 
     if (!g_iniPath[0]) return;
-    InterlockedExchange(&g_enabled, IniInt("enabled", 1, 0, 1));
+    InterlockedExchange(&g_enabled, IniInt("enabled", 0, 0, 1));
     for (i = 0; i < 4; i++)
         InterlockedExchange(&g_speed[i], IniSpeed(g_speedKey[i], 100));
     InterlockedExchange(&g_hour, IniInt("hour", 12, 0, 23));
