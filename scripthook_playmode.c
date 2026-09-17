@@ -20,7 +20,11 @@
  * 2. What that number means is not known; a session class (offline,
  * online, PvP) fits everything seen so far. So it is recorded, and the
  * object decides. An object that is not in the table is left undecided
- * and logged, never guessed at.
+ * and logged, never guessed at - with one exception, measured twice and
+ * never once contradicted: an argument that has only ever named a single
+ * mode (3 Ghost War, 0 the campaign) is believed even when the object is
+ * new, because dropping it is not caution but a wrong answer. 2 stays
+ * undecided: three modes share it and only the object separates them.
  *
  * The engine's own name table at 0x390CCF0 (MP / TG / MERC / empty / SP
  * / COOP) is not used for this: it is not indexed by the argument (3 is
@@ -133,6 +137,13 @@ static const struct {
     { 0x38DCD80u, SH_PLAYMODE_GHOST_MODE,  "Ghost Mode" },
     { 0x38DD178u, SH_PLAYMODE_MERCENARIES, "MERCENARIES" },
     { 0x38DCF80u, SH_PLAYMODE_GUERRILLA,   "Guerrilla" },
+    /* Measured 2026-09-17, entering Ghost War from the front end: arg 3
+     * with this object. It sits 0xE0 below the row recorded for Ghost War
+     * years-of-notes ago, which is what the other table region's spacing
+     * looks like - Ghost War's entry is not in the 0x38DDxxx block the
+     * other four share. That older row is kept: it may well be the entry
+     * itself, with this being the description 0xE0 before it. */
+    { 0x3908CB8u, SH_PLAYMODE_GHOST_WAR,   "Ghost War" },
     { 0x3908D98u, SH_PLAYMODE_GHOST_WAR,   "Ghost War" },
     { 0x38DC7F0u, SH_PLAYMODE_CAMPAIGN,    "campaign" }
 };
@@ -146,6 +157,14 @@ static const struct {
 static volatile LONG  g_gmType = -1;     /* RDX of the last call seen */
 static volatile LONG  g_gmCalls;
 static volatile LONG  g_gmLogged = -2;   /* argument the watcher logged */
+static volatile LONG  g_gmFpLogged;      /* mode object the watcher logged */
+static volatile LONG  g_gmCmCalls;       /* CreateGameMode calls seen */
+/* How many calls the watcher writes a line for. Everything past this is
+ * still resolved; it just stops filling the log - and mode changes are
+ * logged whatever the count is. */
+#define CALL_LOG_MAX 40
+static volatile LONG  g_gmCallsLogged;   /* calls the watcher has logged */
+static volatile LONG  g_gmCmLogged;      /* (set gm, then create mode) */
 static volatile LONG  g_gmTries;
 static volatile LONG  g_gmArmed;         /* 1 armed, -1 given up */
 static volatile LONG  g_gmCmArmed;
@@ -202,6 +221,7 @@ static void *GmDetour(void *self, void *type, void *a3, void *a4) {
  * a memory read is not something to do from inside this hook. */
 static void *CmDetour(void *self, void *desc, void *a3, void *a4) {
     if (desc) g_gmDesc = desc;
+    g_gmCmCalls++;
     return ((GmFn)g_cmOrig)(self, desc, a3, a4);
 }
 
@@ -293,11 +313,27 @@ static uint32_t FingerprintOf(void) {
     return rva;
 }
 
+/* 1 when a reading belongs to this row: the entry the table recorded, or
+ * the slot the game's description actually points at, which sits
+ * MODE_DESC_BACK before it.
+ *
+ * Measured twice on 2026-09-17, both times to the byte: the campaign
+ * arrived as 38DC760 = 38DC7F0 - 0x90, and Mercenaries as 38DD0E8 =
+ * 38DD178 - 0x90. Two modes, one distance - and the entries themselves
+ * are 0x1F8 or more apart (0x1F8 is the closest pair, Guerrilla to
+ * Mercenaries), so a reading can only ever reach the row it belongs to.
+ * Before this, both of those sessions read as "unrecognised mode object",
+ * the mode stayed NONE and nothing was blocked in either of them. */
+#define MODE_DESC_BACK 0x90u
+static int FpIsRow(uint32_t fp, uint32_t rva) {
+    return fp == rva || fp + MODE_DESC_BACK == rva;
+}
+
 static const char *NameOfFp(uint32_t fp) {
     int i;
 
     for (i = 0; i < GM_FP_N; i++)
-        if (g_fp[i].rva == fp) return g_fp[i].name;
+        if (FpIsRow(fp, g_fp[i].rva)) return g_fp[i].name;
     return NULL;
 }
 
@@ -315,7 +351,16 @@ static int ResolveMode(LONG t, uint32_t fp) {
     if (t < 0 && !fp) return SH_PLAYMODE_NONE;
     if (fp) {
         for (i = 0; i < GM_FP_N; i++)
-            if (g_fp[i].rva == fp) return g_fp[i].mode;
+            if (FpIsRow(fp, g_fp[i].rva)) return g_fp[i].mode;
+        /* An object the table does not know does not throw away an
+         * argument that has only ever named one mode. 3 has only ever been
+         * Ghost War (measured again on 2026-09-17, entering it from the
+         * front end: arg 3, object 03908CB8), and 0 only ever the campaign,
+         * whose content - Narco Road, Fallen Ghosts, The Last Rites - is
+         * the campaign. 2 stays undecided: Ghost Mode, Mercenaries and
+         * Guerrilla all set it, and only the object tells them apart. */
+        if (t == GM_TYPE_GHOST_WAR) return SH_PLAYMODE_GHOST_WAR;
+        if (t == 0) return SH_PLAYMODE_CAMPAIGN;
         return SH_PLAYMODE_NONE;
     }
     if (t == GM_TYPE_GHOST_WAR) return SH_PLAYMODE_GHOST_WAR;
@@ -345,21 +390,62 @@ static DWORD WINAPI ModeThread(LPVOID p) {
             GmInstall();
         }
         t = g_gmType;
-        if (t < 0) continue;
         fp = FingerprintOf();
+        /* The object is the mode, and it arrives with CreateGameMode -
+         * which is called whether or not SetCurrentGameMode ever was. An
+         * argument that was never seen is not a reason to stop reading,
+         * and this used to be exactly that: the watcher skipped everything
+         * until SetCurrentGameMode had been called, so its object was
+         * never looked at. Measured 2026-09-17 (this machine, the shipped
+         * build): a whole session - the front end into Ghost War and into
+         * Mercenaries - in which SetCurrentGameMode was never called once,
+         * which left the mode undecided and nothing blocked in either PvP
+         * mode. */
+        /* Every call, up to a cap. The change-only lines below cannot tell
+         * "the manager was never touched" from "it was touched and repeated
+         * what it had already said", and that is exactly the question left
+         * when a mode that should block does not - 2026-09-17, after the
+         * game's September update: Mercenaries blocked correctly, while
+         * entering Ghost War left no line anywhere in the log. */
+        if ((LONG)g_gmCallsLogged != g_gmCalls && g_gmCalls <= CALL_LOG_MAX) {
+            g_gmCallsLogged = g_gmCalls;
+            Log("playmode: SetCurrentGameMode call %ld: arg %ld, mode "
+                "object %08X", (long)g_gmCalls, (long)t, (unsigned)fp);
+        }
+        if ((LONG)g_gmCmLogged != g_gmCmCalls && g_gmCmCalls <= CALL_LOG_MAX) {
+            g_gmCmLogged = g_gmCmCalls;
+            Log("playmode: CreateGameMode call %ld: mode object %08X",
+                (long)g_gmCmCalls, (unsigned)fp);
+        }
+        if (t < 0 && !fp) continue;
         if (fp) waited = 0;
         else if (++waited < 25)
             continue;           /* five seconds: the object is the answer */
         mode = ResolveMode(t, fp);
-        if (t == g_gmLogged && mode == g_gmMode) continue;
+        /* A changed object is worth a line of its own even when the mode it
+         * resolves to does not change: an object that is not in the table
+         * is precisely the case the table needs a row for, and two unknown
+         * objects in a row would otherwise go by unlogged. */
+        if (t == g_gmLogged && fp == (uint32_t)g_gmFpLogged &&
+            mode == g_gmMode)
+            continue;
         g_gmLogged = t;
+        g_gmFpLogged = (LONG)fp;
         g_gmMode = (LONG)mode;
         g_gmFp = (LONG)fp;
         name = fp ? NameOfFp(fp) : NULL;
-        Log("playmode: the game set GameModeType %ld with mode object %08X "
-            "(%ld calls) - %s", (long)t, (unsigned)fp, (long)g_gmCalls,
-            name ? name : (fp ? "unrecognised mode object"
-                              : "mode object not read yet"));
+        if (t < 0)
+            Log("playmode: mode object %08X (%ld calls), no "
+                "SetCurrentGameMode seen yet - %s", (unsigned)fp,
+                (long)g_gmCalls,
+                name ? name : (fp ? "unrecognised mode object"
+                                  : "mode object not read yet"));
+        else
+            Log("playmode: the game set GameModeType %ld with mode object "
+                "%08X (%ld calls) - %s", (long)t, (unsigned)fp,
+                (long)g_gmCalls,
+                name ? name : (fp ? "unrecognised mode object"
+                                  : "mode object not read yet"));
     }
     return 0;
 }
@@ -413,19 +499,37 @@ SH_API int ShPlayModeFingerprint(void) {
 
 SH_API int ShPlayModeEvidence(char *buf, int len) {
     LONG t = g_gmType;
-    const char *name;
+    int  fp = (int)g_gmFp;
+    const char *name = fp ? NameOfFp((uint32_t)fp) : NULL;
 
     if (!buf || len < 1) return 0;
-    if (t < 0) {
-        snprintf(buf, (size_t)len, g_gmArmed
-                 ? "the game has not set a mode yet"
-                 : "SetCurrentGameMode is not hooked on this build");
+    if (!g_gmArmed || !g_gmCmArmed) {
+        snprintf(buf, (size_t)len,
+                 "the mode hooks are not armed on this build");
         return 0;
     }
-    name = g_gmFp ? NameOfFp((uint32_t)g_gmFp) : NULL;
-    snprintf(buf, (size_t)len, "GameModeType %ld with mode object %08X (%s)",
-             (long)t, (unsigned)g_gmFp, name ? name : "not recognised");
-    return 1;
+    if (!fp) {
+        if (t < 0)
+            snprintf(buf, (size_t)len, "no mode object read yet, and "
+                     "SetCurrentGameMode has not been called either");
+        else
+            snprintf(buf, (size_t)len,
+                     "GameModeType %ld, mode object not read yet", (long)t);
+        return 0;
+    }
+    /* The object is what decides the mode, so an argument that was never
+     * seen is a detail rather than a reason to have no answer - the same
+     * reading the watcher takes (2026-09-17: a session went into Ghost War
+     * and into Mercenaries without SetCurrentGameMode being called once). */
+    if (t < 0)
+        snprintf(buf, (size_t)len,
+                 "mode object %08X (%s); SetCurrentGameMode not called",
+                 (unsigned)fp, name ? name : "not recognised");
+    else
+        snprintf(buf, (size_t)len,
+                 "GameModeType %ld with mode object %08X (%s)", (long)t,
+                 (unsigned)fp, name ? name : "not recognised");
+    return ShSelectedPlayMode() != SH_PLAYMODE_NONE;
 }
 
 SH_API int ShPlayModeHookArmed(void) {

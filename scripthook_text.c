@@ -77,6 +77,7 @@ static const ShText kEnUS[] = {
     /* lines and hints those pages carry */
     { "@settings.saved",      "Saved. Restart to apply." },
     { "@settings.restart",    "Plugin switch changes take effect on the next start." },
+    { "@settings.mode",       "Play mode" },
     { "@settings.plugins.note",
       "No [plugins] line means off. Switch it on here; deleting "
       "scripthook.ini resets every plugin to off." },
@@ -196,6 +197,7 @@ static const ShText kZhCN[] = {
 
     { "@settings.saved",      "已保存。重启后生效。" },
     { "@settings.restart",    "插件开关改变需下次启动生效。" },
+    { "@settings.mode",       "游玩模式" },
     { "@settings.plugins.note",
       "没有 [plugins] 行即为关闭。在这里打开；删除 scripthook.ini 会把所有"
       "插件重置为关闭。" },

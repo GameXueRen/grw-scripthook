@@ -907,6 +907,8 @@ void ShMenuCaptureView(ShMenuView *v) {
  *   - ReorderRoot keeps the highlight pinned to its own row through
  *     the [MenuOrder] sort, and Scroll brings it back into view. */
 static void OpenRoot(void) {
+    char ev[192];
+
     g_current = g_root;
     Lock();
     {
@@ -924,6 +926,16 @@ static void OpenRoot(void) {
         }
     }
     Unlock();
+
+    /* One line per open: this is the moment a player is looking at the
+     * framework's answer, and the mode it has is what every mode-dependent
+     * decision - the plugin blacklist above all - rests on. A report of
+     * "the plugins were not blocked in PvP" is only actionable with both
+     * facts, because they separate "no mode was ever read" from "a mode
+     * was read and nothing followed it". */
+    ShPlayModeEvidence(ev, sizeof(ev));
+    Log("menu open: mode=%d mask=%02X - %s", ShSelectedPlayMode(),
+        (unsigned)ShPlayModeBit(ShSelectedPlayMode()), ev);
 }
 
 /* Keys are polled here; the overlay draws the result. */
