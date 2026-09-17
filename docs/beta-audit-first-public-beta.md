@@ -12,9 +12,13 @@
 | 档位 | 条数 |
 | --- | --- |
 | 阻断发布 | **0**（无「无条件必崩/必坏档」项；有 2 条条件性高危，见 2.1） |
-| 发布前必修 | **11** |
-| 建议修 | **24** |
+| 发布前必修 | **11**（首轮审计） |
+| 建议修 | **24**（首轮审计） |
 | 已知限制 / 可接受 | **12** |
+| **终审必修**（2026-09-17，见第十节） | **6**（建议发前修 `M1` / `M4` / `M5`；`M2` / `M3` 各需一次实机确认；`M6` 视发布时间） |
+| **终审建议修** | **14**（不阻塞发布） |
+
+> **终审判定（2026-09-17，第十节）**：**条件可发布**。无阻断项；三条建议发前修（`M1` 模式识别的过期参数回落、`M4` 翻译缓存返回共享指针、`M5` 打包脚本可能静默缺件），两条需实机确认（`M2` 模式对象持续重读、`M3` cnchat 捕获判定竞态），一条属体验面（`M6` 五个插件 `lang.ini` 键与代码不匹配）。前几轮 20 条自述经逐条回读确认为已修、3 条为部分修；两处实机日志清扫无错误行。
 
 **是否可发布**：从代码层面看，**没有发现必须推倒重来的问题**，框架与 8 个插件在已实测的会话里行为正常（生成、反召唤、天气、FOV、隐身、弹药容量均已跑通）。但发布前有 **11 条必修**，其中 8 条是**几行内可改完**的确定性缺陷，3 条属「发布准备缺失」（打包清单、卸载说明、第三方声明）——**这三条是当前离「能发」最远的部分**，不是代码 bug，而是缺交付物。
 
@@ -326,7 +330,7 @@ static void LogInit(const char *name) {
 | 3.4 `LogFirst` 每编译单元一次 | `log.h:92-126` | 改为**按调用点一次**（宏内块级静态）；`entity.c` 五条、`havok.c` 四条、`stealth/input/fov` 各三条等原本被吞掉的诊断全部恢复可写 |
 | 3.5 `LogInit` 截断 | `log.h:42-74` | 同名幂等；换名时先关旧文件（`scripthook_npc.c` 的人工规避不再是必需） |
 | 3.6 skipintro 卸载路径 | `skipintro.c:171-181`、`:627`、`:682-690` | 加「锁就绪」标志，早到的 DETACH 不再触碰未初始化临界区；保留「必须交还规则」的取舍说明与理由 |
-| 3.7 版本标识 | `scripthook.h:31-37`、`loader.c:275`、`scripthook_crash.c:96`、`README.md:1` | 新增 `SH_VERSION "1.0.0-beta1"` 单点定义，四处引用同一串 |
+| 3.7 版本标识 | `scripthook.h:31-37`、`loader.c:275`、`scripthook_crash.c:96`、`README.md:1` | 新增 `SH_VERSION` 单点定义，四处引用同一串（当前值 `1.0-beta1`） |
 | 3.8–3.10 日志策略 | `scripthook_crash.c:20-28` + `Emit` | 按决定保留全量诊断；崩溃日志加 512 KB 上限，超限轮转并在新文件写下构建信息 |
 | 3.11 打包清单 | `tools/package-beta.ps1`（新增） | 白名单打包、生成 `THIRD-PARTY-NOTICES.txt`、列出被跳过项；产物落 `out/`（git 已忽略） |
 | 七节 安装/卸载/回滚 | `README.md` | 新增「版本与日志策略」「卸载」「回滚到上一版」「打包公测版」四节 |
@@ -422,3 +426,130 @@ static void LogInit(const char *name) {
 ### 覆盖度声明更正
 
 第八节结尾原写「本次未修改任何文件」——那是**审计阶段**的事实。定稿后按指示执行了上表的必修修复；完整改动清单以 `git status` 为准，未提交。
+
+---
+
+## 十、发布前终审（2026-09-17）
+
+首轮审计（一~八节）与五批修复（九节）之后，对**当前代码**做的最后一次全面复审。
+
+**方法**：三路静态复审（① 本轮改动区逐行；② 框架其余模块 + 逐条回读三批自述；③ 8 个随包插件）+ 两处实机日志（开发机 `logs\`、Beta 机 `logs\`）全量清扫。**本轮只审不改**，每条附「修 / 不修」建议。
+
+### 10.1 结论
+
+| 档位 | 条数 | 说明 |
+| --- | --- | --- |
+| 阻断发布 | **0** | 无「无条件必崩 / 必坏档」项 |
+| 必修（建议发前处理） | **6** | 见 10.2；改动多为数行，其中 2 条需一次实机确认才能定论 |
+| 建议修（不阻塞发布） | **14** | 见 10.3 |
+| 已知 / 可接受 / 刻意保留 | **9** | 见 10.4 |
+| 前几轮「已修」自述回读 | **20 条已修 / 3 条部分修** | 见 10.5 |
+
+**发布判定：条件可发布。** 代码层面没有新的结构性风险；本轮改动区实测（MERCENARIES / Ghost War 一进模式界面即禁、菜单无系统指针、发送后立刻按聊天键弹框）均已实机确认。但六条必修里 **M1、M4、M5** 与「发布件本身」直接相关（模式识别残留风险、翻译缓存指针、打包脚本可能静默缺件），建议先修这三条再发；**M2** 已修（2026-09-17，描述只在创建后的新鲜期内读、读到即存）；实机验证（**判据同日修正**）：**在战役会话里不重启切一次模式**，看第二次 `CreateGameMode` 有没有被跟上、黑名单有没有翻转即可（几秒 ✓，不必待 30–60 分钟）、**M3** 已实机确认（`0fbe49a`，发送后立刻按聊天键那一条）；**M6** 属体验与支持面，可视发布时间决定。**M1、M4、M5 已于 2026-09-17 修完（见 10.2 后的表）；M3 已由 `0fbe49a` 修完；M2、M6 仍未动。**
+
+### 10.2 必修（建议先修；逐条给判据与最小改法）
+
+| # | 位置 | 问题 | 判据 / 证据 | 最小修复方向 | 建议 |
+| --- | --- | --- | --- | --- | --- |
+| M1 | `scripthook_playmode.c:348-369`（`ResolveMode` 的「相信参数」分支） | 参数与对象来自**两个不同的钩子**，可错配：`g_gmType` 只在 `SetCurrentGameMode` 被调用时改写且**永不失效**，`fp` 只在 `CreateGameMode` 时更新。于是「过期的参数 0 + 一个未知的 PvP 对象」会被判成**战役** → PvP 里插件照常生效（正是反馈 8 的形态，只是换了个入口）；反向「过期的 3 + 未知对象」会在单机里**误禁** | 代码自证：注释里已记录「整个会话 `SetCurrentGameMode` 一次都没被调用」确实发生过；`ResolveMode` 在对象未识别时直接用参数结算 | **只保留 `3 → Ghost War`（保守方向），去掉 `0 → 战役` 的回落** —— 战役本来就由已实测的对象行覆盖（`38DC760` 命中容错）；去掉后那类未知对象回到 `NONE`（= 什么都不禁，与战役等价、无害） | **修**（数行） |
+| M2 | `scripthook_playmode.c:303-314`、`:393`（`FingerprintOf`） | `g_gmDesc` 被**永久保存**并每 200 ms 重读。若游戏释放/复用那段内存，`fp` 会读出垃圾并可能落在表或容错范围内 → 会话中途模式被改写，表现为「同一个场景有时封有时不封」 | 读到的 RVA 只要落在 `[0x1000,0x40000000)` 即被当作有效（`FingerprintOf` 只挡这两种越界） | 记录 `g_gmDesc` 所属的 `CreateGameMode` 调用号，只在对象**新近创建**时读；或同一 desc 只认第一次读到的 `fp` | **已修**（2026-09-17）：描述只在 `CmDetour` 开出的**新鲜期**（30 个监听周期 ≈ 6 s）内被读，**第一个有效读数即存下**（`FreshFingerprint`），之后不再碰那段内存；新的 `CreateGameMode` 会重开窗口并**清掉存下的读数**，所以「同一会话里换模式」那种情形（战役 ⇄ 其它，**不需要重启** ✓）每次都按新描述重读。实机验证（**判据同日修正**）：**在战役会话里不重启切一次模式** —— `playmode.log` 要有第二次 `CreateGameMode call N` 且模式行跟上、`blacklist.log` 的模式要翻转（几秒即可 ✓）；幽灵战/雇佣兵换模式必重启（一场一模式 ✓），**不必待 30–60 分钟** ✗。**另一条修法已否掉** ✗：以指针值为锚（同一 desc 只认第一次）在「新描述复用同一段地址」时会抱着旧模式不放 —— 那正是本行的症状本身 |
+| M3 | `plugins/cnchat/cnchat.c:625-626` | `g_pendingOpen = g_ownsKeys ? 2 : 1` 用的是一次**瞬时**读取，与 `SendThread` 的 `ReleaseKeys()` 存在竞态：判成 1 而实际仍持有 capture → 不补发键 → 游戏聊天框没开，后面的注入无处可落；判成 2 而 capture 已放 → 多打一个字符 | 两处非原子；`ReleaseKeys()`（`cnchat.c:447/465`）与 poll 线程的 15 ms 轮询交错 | 由发送线程在清 `g_sending` **之前**置一个「capture 已结束」标志，poll 线程按「按键发生在捕获期间 / 之后」判定 1/2，而不是读瞬时 `g_ownsKeys` | **修**（小改）+ 实机验证：发送后 0–2 秒内连按聊天键，看是否出现多余字符 |
+| M4 | `scripthook_config.c:1054-1056`、`1079-1082`（`ShLangText` 命中/未命中返回路径）、`:1014/1078`（`LCA_TEXT=160`） | 缓存虽然改为**自持文本**，但**返回给调用方的仍是共享槽内的指针**：`TextUnlock()` 之后，另一线程用同一槽（1/256）的键翻译时会覆盖它 → 与 09-17 那次「菜单串字」同一根因，只是窗口更窄。另外 `LCA_TEXT=160` 使 >159 字节的译文**命中时被截断、首读时完整**，同一键两次结果不同 | 返回指针指向静态槽，锁已释放；`CopyN(slot->text, sizeof(slot->text), v)` 只按 key 判定是否入缓存 | 缓存改为**按唯一键持有各自字符串**（键总数约 500 个，代价可忽略），指针终生有效；超长值不入缓存 | **修**（一处数据结构，收益是堵死同一类现场） |
+| M5 | `tools/package-beta.ps1:301-305`、`192-198`、`200-217` | ① `$missing` 非空时只 `Write-Warning`，**仍出包** → 可能发出静默缺件的发布包；② `[forgemod]` 重写只写 `enabled`，同节其余键（`dry_run` / `strict` / `report_copies` / `probe` / `log_reads`）被丢弃；③ `[plugins]` 只改已有节、不创建节 —— 源 ini 若没有该节，包内就没有，框架按「无行=关闭」把所有插件关掉 | 三处都能在脚本里直接读到（`$ErrorActionPreference='Stop'` 对 `$missing` 的累加不生效） | ① 玩家包在 `$missing` 非空时 `throw`；② 保留 `[forgemod]` 其余行，只改 `enabled`；③ 末尾 `-not $wrotePlugins` 时补写 `[plugins]` 与八行 | **修**（各 1–3 行） |
+| M6 | M6 | `plugins/{firstperson,fov_changer,OpticalCamo,skipintro}/lang.ini`（`spawner` 的 `@sp.*` 行同） | 这些 `lang.ini` 用**英文原文**作键，而代码查的是 `@ID`（`ShLangText` → `RowFind` 是精确 `strcmp`）→ 这些文件**从不生效**：玩家就地改文案无效、新增语言覆盖不到插件自身行（内置 zh-CN/en-US 由编译内基线兜底，所以当前显示正常，问题在「覆盖能力名不副实」） | 对照 `TimeWeatherControl/lang.ini` 用 `@tw.*` 是**正确**写法；`spawner` 的载具名行（英文键，无源码插件约定）是有效的 | 把这几个 `lang.ini` 的键改成与代码一致的 `@ID`（顺带修掉两行连字面都不匹配的死行） | **修**（机械替换，但要逐条核对）；至少要在文档里写明「带源码插件必须用 `@ID`」 |
+
+#### M1 / M4 / M5：已修（2026-09-17）
+
+三条都在同一天里改完并复核。改的是「输入的有效期」「缓存的存储形态」「脚本的拒绝条件」，没有一处动到别的东西。
+
+| # | 改了什么 | 怎么判它对 |
+| --- | --- | --- |
+| M1 | `ResolveMode` 里两个「0 → 战役」分支**去掉**，只留「3 → 幽灵战」；监听线程裁决定一次后，用 `InterlockedCompareExchange` 把参数**消费掉**（值仍是刚用过的那个才清，钩子在另一个线程写它） | 参数只在「刚设置后的第一次裁决」有效 → 过期参数不可能再落成任何模式；未知对象 + 无参数回到 `NONE`（按设计不贡献任何位，与战役等价、无害）。战役与雇佣兵仍由对象命中：`38DC760` / `38DD0E8` 都在容错范围（`MODE_DESC_BACK 0x90`）内 |
+| M4 | 翻译缓存从「256 个定长共享槽」改为**按唯一键各持一份堆字符串**：开放寻址索引（2048 槽 / 1024 条，读多写少时通常一次命中）、命中直接返回该条自己的串、语言切换（`g_lcGen` 变了）时整体释放重建、表满则「照常翻译但不缓存」并留一行字 | 返回的指针在语言切换前**终生有效**（不再有 1/256 被别的键改写）；`LCA_TEXT=160` 的截断随定长字段一起消失（>159 字节的行不再「首读完整、命中截断」）；键长不再有限制（`LCA_KEY=128` 曾把长句直接排除在缓存外，那也是一条串字通道） |
+| M5 | 打包脚本：① `$missing` 非空时 `throw` 并**不写 zip**；② `[forgemod]` 只替换自己的 `enabled=` 行，同节其余键原样保留；③ 源 ini 缺 `[plugins]` 时按本包插件集**补写**该节 | 用**合成游戏目录**实测（不动部署）：源 ini 无 `[plugins]`、`[forgemod]` 带 `dry_run/strict/report_copies/probe/log_reads` → 产物里八行插件开关齐、五个额外键**全部保留**、`[Settings]`/`[Other]` 未被触碰；再删掉一个 `.asi` → 脚本报 `this package is incomplete (1 file(s) missing) - no archive written`，**未产生 zip** |
+
+> 三条的构建与打包也随之复核：新 `dinput8.dll` 在两个 zip 里与部署版**逐字节一致**；测试套件 `docs\` 4 篇（`.md` 与 `.txt` 各一份）、`mods\` 4 个、8 个 `.asi`；玩家版无 `docs\`、`[forgemod] enabled=0`。
+
+### 10.3 建议修（不阻塞发布）
+
+| 位置 | 问题 | 判据 | 最小修复方向 |
+| --- | --- | --- | --- |
+| `scripthook_domino.c:189-203` | 帧任务队列槽位「查后即置」非原子，两个生产者可选中同一槽（对照 `scripthook_api.c` 的 `g_xq` 用 CAS） | `if (g_dq[i].ready) continue; … g_dq[i].ready = 1;`，`ready` 仅 `volatile int` | 增加独立 claim 位 CAS（同 `xq` 模式） |
+| `scripthook_files.c:1595-1602` | 全框架最热路径（文件调用，数万次/s）每次 2 次 `QueryPerformanceCounter` | `FilesDecide` 调 `ShTickNow()` + `ShDecideFeed(at)` 各一次 | 复用一次 QPC，把值传入 feed |
+| `scripthook_config.c:81`、`:107`、`:112`、`:1829` | 路径 `snprintf` 只判 `< 0`，截断仍返回成功（与已修的三个路径函数同类） | 对照 `ShPluginIniPath:135` 的 `n >= size` 检查 | 同款检查并置 `SH_ERR_BAD_ARG` |
+| `scripthook_ui.c:1060-1092`（`JOB_WAIT_MS=3000`）、`ui.c:1506-1524/806-844`、`scripthook_uiinput.c:75-88` | 三条**已知待改**：HUD 重建逐控件同步排队；子节点枚举 O(k×256)；有场景取得焦点时每 8 ms 轮询 1..255 全键（≈3.19 万次/s） | 与九节「刻意留作后续」一致，代码里均有据 | 单独一轮改（HUD 走 `ShUiBegin/Commit`、维护父→子索引、只轮询已注册热键） |
+| `scripthook_menu.c:358-375` | 回调 worker 无任务时 `Sleep(5)` 空转（≈200 次/s 取锁+比较） | `CallThread` 循环 | 空闲时等事件（`CallPush` 触发） |
+| `scripthook_ammocap.c:196-200` | 安装竞争时 `Sleep(1)` 自旋上限 5000（≈5 s）阻塞调用线程 | 自旋计数 | 事件或短超时 |
+| `scripthook_dinput.c:289` | slot 10 的 `Patch` 返回值未检查，失败仍 `g_nDev++` → 半包装设备（`HookGetData` 不可达，故不会空指针调用） | `Patch(vt,10,…)` 未判返回值 | 校验失败即回退 slot 9 并 `return` |
+| `scripthook_fov.c:136-139` | `ShFovSet` 越界直接 `return 0`，不置 `ShLastError` | 无 `ShSetError` | 置 `SH_ERR_BAD_ARG` |
+| `plugins/TimeWeatherControl/TimeWeatherControl.c:329-330` ↔ `:349-368` | `hour` / `minute` **只读不写**：`OnHour` / `OnMinute` 置脏却无对应写盘 | 读键 ↔ 写键不对称 | `SaveConfig` 补写两项，或去掉这两个回调的 `SaveConfigSoon()` |
+| `plugins/firstperson/firstperson.c:595-596/607-608`、`:795-801` | 两条 toast 与 away 状态行的 `why`（"menu"/"drone"/"engine view"）硬编码中文、绕过语言层 | `SayStatusWhy` 只译模板不译实参；`ShToastEx` 原样存文本 | 加 `@fp.*` ID 后再传 |
+| `plugins/OpticalCamo/OpticalCamo.c:287-296` | 投票翻转时每次变化写一行日志（现场约 1–2 行/s 的磁盘写） | `LatchCamoState` 在 `raw != lastRaw` 即 `Log` | 按时间窗限流 |
+| `plugins/{fov_changer,TimeWeatherControl,skipintro,ammo_capacity}` 菜单注册处 | 菜单行注册返回值多数未检查（`skipintro` 连 `ShMenuCreate` 的 0 也未判）→ 失败会留半成品页或缺行，无日志 | 对照 `OpticalCamo.c:512-524` 的正例 | 至少判 `ShMenuCreate==0` 与关键行，失败记状态/回滚 |
+| `plugins/{firstperson,spawner,skipintro}` | 未显式 `ShPluginBlacklist` / 未订阅 `ShPluginOnBlocked`（吃框架默认 GW+MERC）；`spawner` / `skipintro` 也没有 `ShPluginAllowed()` 检查点 | 框架默认行为与之一致（黑名单篇已声明「未声明即默认禁」），故**行为正确**，但少了「模式中途翻转时停下来」的通道 | 显式声明 + 订阅 + 干活前查一次（可选） |
+| `scripthook_scene.c:376`（`RenderHook` → `RenderOurs:199`、`TickAll:227`） | 每次场景渲染（一帧多 pass）都做一遍 O(16²) 选择排序与 16 次 tick 派发 | 注释 `:244` 明说「一帧多次 pass」 | 按帧缓存排序结果（只在场景集合变化时重排） |
+
+#### 性能八项：已修（2026-09-17）
+
+本表的第 4（三条结构改动）、6、7、8、9 行都在同一天改完。改法一律是「把重复的计算或空转去掉」，没有一处改语义；唯一新增的对外接口是 `ShUiInputWatch`。
+
+| 项 | 改了什么 | 怎么判它对 / 收益说明 |
+| --- | --- | --- |
+| 最热路径时钟采样 | `ShDecideFeed` 不再**每调用**做 64 位除法：累计原始计数，`ShDecideTake` 每帧转换一次 | 两次 `QueryPerformanceCounter` 采样**保留**——它们量的是区间，不是浪费；本项真实收益很小（每次数十周期），所以只做「把除法搬走」这类无损改动，没有为了凑条目去动诊断语义 |
+| 场景每 pass 排序 | 可见场景表**按帧缓存**（`g_ordGen`），只在场景创建/显示/隐藏/排序/世界失效时重建 | 一帧多 pass 的每次场景渲染不再重跑 O(16²) 选择排序；失效点覆盖 `Create` / `DestroyJob` / `ShSceneInvalidate` / `ShSceneSetOrder` / `ShSceneShow` |
+| 菜单回调线程空转 | 空闲改为**等事件**（`CallPush` 置位；10 ms 超时只为保住 ping 节奏） | 不再每 5 ms 取一次锁（≈200 次/s）；`SH_TICK_MENUCALL` 的 ping 节奏与语义不变（ping 仍在循环顶，晚帧行照旧） |
+| 帧任务队列槽位 | 加**独立 claim 位**（CAS，与 `ShQueueTransform` 的 `g_xq` 同型）；泵也持认领后再执行 | 「查后即置」曾允许两个生产者挑中同一槽并静默丢一个任务；现在认领是原子的，泵在处理期间也不会被改写 |
+| 安装竞争长自旋 | 改**等事件**（`InstalledWait/Signal`），5 秒只作上界；事件建不起来时退回有界睡眠 | 起装线程不再被阻塞 5 秒；顺带修掉 `prev == 2`（别人刚装好）被当成失败返回 0 的那一支 |
+| `uiinput` 全键轮询 | 新增 `ShUiInputWatch(vk, on)`：**声明过**就只扫「已声明 ∪ 正在按住」，**没有任何声明仍扫全键** | 对不调用它的消费方**零行为变化**。实测更正：真正经 `ShUiSetInput` 回调的只有开发样例 `ui_sample`（↑↓/Enter + F7），菜单与 8 个随包插件各自轮询或用钩子，**不走这条路径**——所以「3.19 万次/s」只在「有场景取得焦点且消费方做了声明」时才会出现 |
+| HUD 逐控件排队 | `SyncSlot` 的编辑改走 `ShUiBegin`/`ShUiCommit` **一次提交**（在 `EnsureView` 之后开始，避免早退留下未提交的批次；提交失败丢视图重建并留字） | 一次刷新从「几十个同步 job（每个都等渲染侧）」变成**一个**；单槽操作数（≤ ~40）远低于 `MAX_BOPS 256`，按槽分块即可 |
+| 父子枚举 O(k×256) | 新增**父→子链**（惰性构建），`Children` / `CascadeAlpha` / `DestroySubtree` 不再各自扫全表 | 失效只挂在**两处** `Widget.parent` 写入点（`Create`、`OP_REPARENT`）；死亡不需要重建——遍历本身校验 `alive`/`parent`，漏一次 bump 只会晚重建，绝不会走进已回收的控件 |
+
+> 结构改动的验收在 `docs/beta-test-plan.md` 第 17–19 项（HUD/面板照旧、菜单回调即时生效、热键与聊天键照旧），需要一次实机确认。
+
+### 10.4 已知 / 可接受 / 刻意保留（9 条）
+
+1. `log.h:115` 每行 `fflush`：**刻意保留**（崩溃现场的可诊断性优先）。
+2. `ui.c` 子节点 O(k×256)、HUD 重建未走批处理、`uiinput` 全键轮询：**刻意留后**（结构性改动，需进游戏验证）。→ **2026-09-17 已做**（父→子链、HUD 走批处理、`ShUiInputWatch` 声明式收窄），见 10.3 后的表；实机验收见测试清单第 17–19 项。
+3. `ShFindEntities` 半径 0 = 不裁剪、`tick.c` 32 位毫秒回绕：**刻意不改**（代码注释有据）。
+4. `skipintro.c:695` 在 `DLL_PROCESS_DETACH` 里调用框架 API（`ShFileRuleDel`）：与插件契约相悖，但属**有意权衡**（「必须把规则交还」）；风险是退出时与持层锁线程互等，概率低。
+5. `scripthook_state.c:296-308`：`busy` 期间丢弃的新状态由下一 tick 补处理。
+6. `scripthook_physics.c:631/726`：事件等待仍带 1 ms 超时轮转，量级远小于旧忙等。
+7. `image.h:15-32`：镜像基址惰性初始化无同步，多线程各算一次、值相同。
+8. `scripthook_domino.c` / `ShQueueTransform` 的可见性等问题属「需实机验证」，沿用第六节清单。
+9. 反馈 5（第一人称开镜过渡）：**行为未改**，待复现再定性。
+
+### 10.5 前几轮「已修」自述回读（不只信文档）
+
+**已修（20 条）**：配置解析 6 项 + 文本层缓存与语言切换失效 ✓、Havok 双缓冲与未命中不重建 ✓、physics 事件等待与 500 ms 上限 ✓、dinput 键码表原子发布 ✓、崩溃日志路径回退/写入回退/512 KB 轮转/去隐私 ✓、forge_io 三条规则全有或全无 + `CloseHandle` 清待完成读 ✓、forge overlay 分配检查 ✓、loader 线程失败留字 ✓、`ShReadFast` 字节校验 + `ShQueueTransform` 认领/就绪分离 ✓、HUD 日志一次 + 解析一次 ✓、`ShBlockKey` 计数 ✓、corefix 路径脱敏 + 全默认早退 ✓、`LogFirst` 按调用点 + `LogInit` 幂等 ✓、两条「刻意不改」注释有据 ✓；插件侧：firstperson 五项 ✓、spawner 三项 ✓、fov 返回值 ✓、OpticalCamo 四项 ✓、TWC 去抖与随包 ini ✓、skipintro 日志出口与写盘检查 ✓、ammo 四项 ✓。
+
+**部分修（3 条，已在 10.2 / 10.3 列出）**：
+- 路径 `snprintf` 截断只修了三个函数，`ShPluginsDir` / `ShLogPath` / 框架 `lang.ini` 路径仍是「静默截断成功」（10.3）。
+- 翻译缓存「自持文本」了，但**返回指针仍共享**，且 `LCA_TEXT=160` 截断（M4）。→ **2026-09-17 已补完**：改为按唯一键各持堆字符串，指针终生有效、截断与键长限制一并消失（见 10.2 后的表）。
+- `WrapDevice` 仍不检查 slot 10（10.3）。
+
+### 10.6 实机日志证据（两处 `logs\` 全量清扫）
+
+- **两处共 93 个日志文件（0.60 MB + 0.18 MB）**，按 `FAILED|refused|error|denied|MISMATCH|is not readable|unrecognised|ANOMALY|gave up` 全量扫：**唯一命中**是 Beta 机 `scripthook_playmode.log` 里那条**已修**的 `unrecognised mode object` —— 当前会话无错误行、无被拒调用。
+- **崩溃日志 3 份**：开发机 1 份（`2026-09-16 00:26:39`，first-chance `C0000005`，`GRW.exe+0x1061FD54`，`read of 0x20`，`rsi=0` / `rcx=0`）—— **未被后续任何修复覆盖，仅这一次、无复现**，列入遗留；Beta 机两份内容相同（`2026-09-16 19:23` 的已知首启崩溃，已加固 + 分步日志，等下次新装验证）。
+- **日志体积**：默认（全量诊断）一场约 30+ 文件 / 0.6 MB；`firstperson.log` 在开着 `diag=1` 的一场约 580 KB（默认 `diag=0`，无此量）。
+
+### 10.7 性能结论（当前代码）
+
+**每帧成本前三**：① `scripthook_scene.c:376 RenderHook`（每次场景渲染都跑，一帧多 pass：O(16²) 选择排序 + 16 次 tick 派发）；② `scripthook_camera.c:~288` 的泵链（`ShVisibilityPump → ShTransformPump → ShDominoPump → ShHeadPump`，每帧）；③ `scripthook_draw.c:252 ShDrawFrame`（最多 16 个 drawer × begin/end）。
+
+**每秒成本前三**：① `scripthook_uiinput.c:75-88`（焦点场景下 8 ms × 255 键 ≈ **3.19 万次/s**，全框架最高）；② `scripthook_files.c:1595-1602`（每次文件调用 2×QPC + 至多 32 条规则，属最热路径）；③ `scripthook_menu.c` 三个常驻线程（40 ms 键轮询 / `CallThread` 5 ms 空转 / `HitPump` 4 ms）。
+
+**结论**：本轮改动**没有新增热路径退化**（playmode 每 200 ms 读数、菜单开一次一行、`SetModeLine` 仅变化时写）；上表前三项与文档「刻意留后」一致，可在后续版本单独处理。
+
+**2026-09-17 更新**：上表各项已在同日处理完（见 10.3 后的「性能八项」表）。其中两条需要**实测更正**：
+
+- 每秒成本第 ① 名的 `uiinput` 全键轮询只在**有场景取得焦点**时发生（`InputThread` 先看 `g_focus`），而真正经 `ShUiSetInput` 注册回调的消费方只有开发样例 `ui_sample`；菜单与 8 个随包插件各自轮询或用钩子。所以这一项的「3.19 万次/s」是有条件的量级，不是常驻开销。
+- 每帧成本第 ① 名的场景排序，`TickAll` 其实**每帧只跑一次**（在 `NewFrame` 分支里），真正每 pass 重跑的是 `RenderOurs`——本轮缓存的是它。
+- 载具派遣的「首场十几秒」（2026-09-17 现场）：**不是本节的性能项**，是框架首次进世界时在后台扫全地址空间、找 vehicle spec（`logs\scripthook_spawn.log`，实测 14.7~19.3 s，跑在 `WarmThread` 上，游戏本身不卡）。已做两件：① 派遣不再自己跑扫描，改为等预热线程、有上界（30 s）并留一行字（`SpecScanWait`；实测那次只等了扫描的尾巴，随后的 12 次派遣各 **20 ms**）；② 进度经 `ShSpawnWarmProgress` 暴露，派遣页状态行显示「预热中 N/65」。**另一条「把 spec 地址按 RVA 记住」已实测不可行** ✗：写不进任何东西 —— 那些对象不在映像里（地址落在模块基址之下的游戏自有区域），RVA 描述不了它们，会话间变的是**堆布局**而不是映像 ASLR；此结论已同时记在 `scripthook_spawn.c` 的 `g_specCache` 注释里，免得再试一遍。
+
+### 10.8 遗留清单（可以不修，但要知道）
+
+1. `scripthook_playmode.c` 的两条必修（M1、M2）—— M1 建议发前修；M2 需一场 30–60 分钟的 PvP 观察。
+2. 开发机 `2026-09-16 00:26` 那次崩溃：位置在 `GRW.exe+0x1061FD54`，与 ovl 首启那条不是同一处；仅一次、无复现，若再出现请保留 `logs\` 与 `scripthook_crash.log`。
+3. 第五节 12 条已知限制、第六节实机验证清单 12 条（部分已由本轮实机覆盖）、10.4 的 9 条。
+4. 反馈 5（第一人称开镜过渡）待复现。
