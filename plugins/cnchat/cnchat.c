@@ -36,6 +36,12 @@
  *   - Enter: release the capture, then PostMessage WM_CHAR for every
  *     character to the game window (the channel GRW-CNChat proved
  *     works on GRW), followed by an Enter key press to submit.
+ *   - That send holds Enter for 800 ms, and no box may be opened while it
+ *     is in flight - the send thread owns the keyboard and the input
+ *     session for all of it.  A chat key pressed inside that window is
+ *     remembered rather than dropped (see g_pendingOpen) and the box opens
+ *     the moment the injection lands: dropping it is exactly what "it does
+ *     not answer right after sending" feels like from the outside.
  *   - Esc: release.  Nothing is posted: the keyboard capture deliberately
  *     never hides the escapes, so the player's own Esc has already reached
  *     the game and closed its chat box.  Posting a second one (as this
@@ -87,6 +93,11 @@ static ChatState g_chat;
 static volatile int g_ownsKeys = 0;
 static volatile LONG g_notMine = 0;  /* another owner took the session */
 static volatile int g_sending = 0;   /* injecting into the native box */
+/* A chat key pressed while the injection was in flight: 1 = open the box
+ * once it lands, 2 = open it and inject the key as well (the press was
+ * swallowed by our own capture, so the game never saw it and its chat box
+ * is not open - the text of a send would have nowhere to land). */
+static volatile int g_pendingOpen = 0;
 static CRITICAL_SECTION g_lock;
 static volatile int g_lockReady = 0;
 static unsigned char g_keyWas[256];
@@ -447,9 +458,13 @@ static DWORD WINAPI SendThread(LPVOID arg) {
          * action (the pause menu), and players noticed exactly that. */
         ReleaseKeys();
     }
+    /* The keyboard first, then the flag: a press remembered while sending
+     * opens the box the moment the poll loop sees g_sending == 0, and that
+     * path takes the capture itself - a trailing ReleaseKeys() after the
+     * flag would take it away again. */
+    ReleaseKeys();
     g_sending = 0;
     ShDrawInputSetSending(0);   /* the hook may let the keys through again */
-    ReleaseKeys();
     return 0;
 }
 
@@ -599,15 +614,24 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
     while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         Sleep(POLL_MS);
 
-        /* Injection in progress on the send thread: swallow every key
-         * (poll-side too) so nothing starts or leaks mid-send. */
+        /* Injection in progress on the send thread: the box must not be
+         * opened from here - the send thread still owns the keyboard and
+         * the framework's input session - but the chat key itself is still
+         * watched.  Dropping it outright is what a player feels as "it does
+         * not answer right after sending": the send holds Enter for 800 ms,
+         * so a chat key pressed inside that window did nothing at all, and
+         * the box only came up on the next press. */
         if (g_sending) {
+            if (g_cfgEnabled && !g_pendingOpen && KeyDown(g_cfgKey))
+                g_pendingOpen = g_ownsKeys ? 2 : 1;
             memset(g_keyWas, 0, sizeof(g_keyWas));
+            tDown = 0;
             continue;
         }
 
         if (ShMenuIsOpen()) {
             if (g_chat.open) ChatClose();
+            g_pendingOpen = 0;
             memset(g_keyWas, 0, sizeof(g_keyWas));
             tDown = 0;
             continue;
@@ -616,6 +640,7 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
         /* Feature switched off (default): never touch the chat key. */
         if (!g_cfgEnabled) {
             if (g_chat.open) ChatClose();
+            g_pendingOpen = 0;
             memset(g_keyWas, 0, sizeof(g_keyWas));
             tDown = 0;
             continue;
@@ -624,8 +649,30 @@ static DWORD WINAPI ChatThread(LPVOID arg) {
         if (!g_chat.open) {
             compLatch = 0;
             if (!IsPlaying() || !ShGameFocused()) {
+                g_pendingOpen = 0;
                 memset(g_keyWas, 0, sizeof(g_keyWas));
                 tDown = 0;
+                continue;
+            }
+            /* A chat key pressed while the last send was in flight: do the
+             * whole open now that the injection has landed.  Whether the
+             * game saw that press decides whether it still needs one - while
+             * our capture was up it saw nothing, so its chat box is not open
+             * and the text of a send would have nowhere to land. */
+            if (g_pendingOpen) {
+                int inject = (g_pendingOpen == 2);
+
+                g_pendingOpen = 0;
+                if (inject) {
+                    Log("chat key pressed while sending: opening, and "
+                        "injecting the key the game did not see");
+                    InjectKey(g_cfgKey);
+                } else {
+                    Log("chat key pressed while sending: opening now");
+                }
+                OpenChat();
+                focusLostAt = 0;   /* the box starts in front of the game */
+                escDownAt = 0;
                 continue;
             }
             /* Arm on the chat key going down, then open when it comes
