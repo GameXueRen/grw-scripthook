@@ -21,10 +21,18 @@
  * online, PvP) fits everything seen so far. So it is recorded, and the
  * object decides. An object that is not in the table is left undecided
  * and logged, never guessed at - with one exception, measured twice and
- * never once contradicted: an argument that has only ever named a single
- * mode (3 Ghost War, 0 the campaign) is believed even when the object is
- * new, because dropping it is not caution but a wrong answer. 2 stays
- * undecided: three modes share it and only the object separates them.
+ * never once contradicted: argument 3, which has only ever named Ghost
+ * War, is believed even when the object is new, because dropping it is
+ * not caution but a wrong answer. It is believed **once**: the watcher
+ * consumes the argument as soon as it has settled a mode, so a number the
+ * game set earlier can never decide a mode that arrives later.
+ *
+ * 0 is not believed any more. It used to answer "campaign", and the
+ * campaign's object is in the table either way; what the exception bought
+ * was nothing, and what it cost was the report of 2026-09-17: a 0 left
+ * over from an earlier call met an unrecognised PvP object, was answered
+ * "campaign", and every plugin stayed on in Ghost War. 2 stays undecided
+ * throughout: three modes share it and only the object separates them.
  *
  * The engine's own name table at 0x390CCF0 (MP / TG / MERC / empty / SP
  * / COOP) is not used for this: it is not indexed by the argument (3 is
@@ -72,8 +80,10 @@
  * ShPlayModeHookArmed tells a caller whether it ever will.
  *
  * What is still not covered, in full: the values above are measured, not
- * documented - 3 and 2 are the two PvP modes on this build, anything
- * else is reported as PvE. A build whose layout differs will not arm the
+ * documented - 3 is Ghost War on this build, 2 is shared by the three
+ * modes the object separates, and 0 is not taken as the campaign any more
+ * (its object is in the table; the argument on its own now decides
+ * nothing but Ghost War). A build whose layout differs will not arm the
  * hook, and the answer stays NONE rather than becoming a guess.
  */
 #include <windows.h>
@@ -169,6 +179,24 @@ static volatile LONG  g_gmTries;
 static volatile LONG  g_gmArmed;         /* 1 armed, -1 given up */
 static volatile LONG  g_gmCmArmed;
 static volatile void  *g_gmDesc;         /* RDX of CreateGameMode */
+/* The description g_gmDesc points at belongs to one of those CreateGameMode
+ * calls, and is only read while that call is fresh (M2 of the pre-release
+ * audit, 2026-09-17). The game builds a description for the mode it is about
+ * to create and may release it once the mode is up, so re-reading that memory
+ * every 200 ms for the rest of the session eventually reads whatever moved
+ * in - a value that gets past FingerprintOf's range check often enough to be
+ * believed, which rewrites the mode under a running match. That is the
+ * "sometimes blocked, sometimes not" shape of the report, and the session
+ * that can reach it is the one that switches mode without restarting: the
+ * campaign back to the front end and into a PvP mode (the PvP modes
+ * themselves need a restart, so they cannot change under themselves).
+ *
+ * Held as a count of ticks rather than a timestamp because the hook that
+ * hands the description over must not call out to anything - one locked
+ * store is all it gets to spend (see the note at the top of this file). */
+#define GM_FP_FRESH     30              /* ticks (6 s): a fresh desc is read */
+static volatile LONG  g_gmDescFresh;     /* ticks left to read g_gmDesc */
+static volatile LONG  g_gmFpKept;        /* what was read while it was fresh */
 static volatile LONG  g_gmFp;            /* mode object, as an RVA */
 static volatile LONG  g_gmMode;          /* resolved mode, NONE until known */
 static void          *g_gmOrig;
@@ -220,8 +248,19 @@ static void *GmDetour(void *self, void *type, void *a3, void *a4) {
  * kept as a pointer: reading it happens on the watcher thread, because
  * a memory read is not something to do from inside this hook. */
 static void *CmDetour(void *self, void *desc, void *a3, void *a4) {
-    if (desc) g_gmDesc = desc;
     g_gmCmCalls++;
+    if (desc) {
+        /* The window first, then the pointer: the watcher must never pair a
+         * fresh description with the previous call's window, which is what
+         * decides whether it is still allowed to read that memory. The
+         * answer read from the previous description is dropped here too, so
+         * the new one is read on its own merits - the two can be the same
+         * address, the allocator reuses it, which is exactly why the pointer
+         * itself cannot be what says "same mode". */
+        InterlockedExchange(&g_gmDescFresh, GM_FP_FRESH);
+        InterlockedExchange(&g_gmFpKept, 0);
+        g_gmDesc = desc;
+    }
     return ((GmFn)g_cmOrig)(self, desc, a3, a4);
 }
 
@@ -311,7 +350,30 @@ static uint32_t FingerprintOf(void) {
     rva = (uint32_t)(q - base);
     if (rva < 0x1000 || rva > 0x40000000u) return 0;
     return rva;
-}
+    }
+
+    /* The fingerprint of the description we hold - read while it is still ours to
+    * read, then kept.
+    *
+    * The window is the one CmDetour opens: reads happen only inside it, and the
+    * first valid one is remembered, so past the window nothing touches that
+    * memory again (the game may have released it by then). Keeping the answer
+    * also carries the mode through the description going away, which is what
+    * happens when a session leaves a mode without entering another one - the
+    * mode stays what it was last said to be, which is the truth for that
+    * session. A new description (a new CreateGameMode) opens a new window and
+    * clears what was kept, so the modes that can follow one another in a single
+    * session - the campaign, then a PvP mode - are each read from their own. */
+    static uint32_t FreshFingerprint(void) {
+    LONG kept = InterlockedCompareExchange(&g_gmFpKept, 0, 0);
+    uint32_t fp;
+
+    if (kept) return (uint32_t)kept;
+    if (!g_gmDescFresh) return 0;           /* its window has closed */
+    fp = FingerprintOf();
+    if (fp) InterlockedExchange(&g_gmFpKept, (LONG)fp);
+    return fp;
+    }
 
 /* 1 when a reading belongs to this row: the entry the table recorded, or
  * the slot the game's description actually points at, which sits
@@ -342,9 +404,10 @@ static const char *NameOfFp(uint32_t fp) {
  * The object is the mode, so it is what is looked up first, whatever the
  * argument says: the campaign has arrived with 0 and with 2. An object
  * that is not in the table leaves the mode undecided rather than guessed
- * at. Only while the object is not readable yet does the argument carry
- * anything - it names two modes on its own - and the log line carries
- * both, which is all a new row needs. */
+ * at. The argument carries one thing on its own, Ghost War's 3, and the
+ * watcher hands it over once (see the module header) so that it cannot
+ * decide anything the game said later. The log line carries both, which
+ * is all a new row needs. */
 static int ResolveMode(LONG t, uint32_t fp) {
     int i;
 
@@ -352,19 +415,22 @@ static int ResolveMode(LONG t, uint32_t fp) {
     if (fp) {
         for (i = 0; i < GM_FP_N; i++)
             if (FpIsRow(fp, g_fp[i].rva)) return g_fp[i].mode;
-        /* An object the table does not know does not throw away an
-         * argument that has only ever named one mode. 3 has only ever been
-         * Ghost War (measured again on 2026-09-17, entering it from the
-         * front end: arg 3, object 03908CB8), and 0 only ever the campaign,
-         * whose content - Narco Road, Fallen Ghosts, The Last Rites - is
-         * the campaign. 2 stays undecided: Ghost Mode, Mercenaries and
-         * Guerrilla all set it, and only the object tells them apart. */
+        /* An object the table does not know does not throw away the one
+         * argument that has only ever named a single mode. 3 has only ever
+         * been Ghost War (measured again on 2026-09-17, entering it from
+         * the front end: arg 3, object 03908CB8). 0 is not believed here
+         * any more: the campaign is in the table (38DC7F0, and its
+         * description 0x90 before it), so believing 0 added nothing for
+         * the campaign, while a 0 left over from an earlier call answered
+         * "campaign" for a PvP object the table did not know yet - and in
+         * that answer's world nothing is blocked, which is how the plugins
+         * stayed on in Ghost War and Mercenaries (2026-09-17). 2 stays
+         * undecided: Ghost Mode, Mercenaries and Guerrilla all set it, and
+         * only the object tells them apart. */
         if (t == GM_TYPE_GHOST_WAR) return SH_PLAYMODE_GHOST_WAR;
-        if (t == 0) return SH_PLAYMODE_CAMPAIGN;
         return SH_PLAYMODE_NONE;
     }
     if (t == GM_TYPE_GHOST_WAR) return SH_PLAYMODE_GHOST_WAR;
-    if (t == 0) return SH_PLAYMODE_CAMPAIGN;
     return SH_PLAYMODE_NONE;
 }
 
@@ -384,13 +450,14 @@ static DWORD WINAPI ModeThread(LPVOID p) {
 
         Sleep(200);
         ShTickPing(SH_TICK_PLAYMODE);
+        if (g_gmDescFresh > 0) g_gmDescFresh--;     /* the read window ages */
         now = GetTickCount();
         if (!(g_gmArmed && g_gmCmArmed) && now - lastTry >= GM_TRY_MS) {
             lastTry = now;
             GmInstall();
         }
         t = g_gmType;
-        fp = FingerprintOf();
+        fp = FreshFingerprint();
         /* The object is the mode, and it arrives with CreateGameMode -
          * which is called whether or not SetCurrentGameMode ever was. An
          * argument that was never seen is not a reason to stop reading,
@@ -422,6 +489,15 @@ static DWORD WINAPI ModeThread(LPVOID p) {
         else if (++waited < 25)
             continue;           /* five seconds: the object is the answer */
         mode = ResolveMode(t, fp);
+        /* One decision per argument: it is consumed the moment it has been
+         * used, so whatever decides the next mode is the object - which is
+         * the answer and cannot go stale. Cleared with a CAS, because the
+         * hook stores to this from another thread: an argument the game set
+         * while this decision was being made survives, and only the value
+         * just used is taken back. The trade-off is deliberate - an object
+         * the table does not know, arriving long after the 3 that would
+         * have named it, is left undecided rather than believed. */
+        if (t >= 0) InterlockedCompareExchange(&g_gmType, -1, t);
         /* A changed object is worth a line of its own even when the mode it
          * resolves to does not change: an object that is not in the table
          * is precisely the case the table needs a row for, and two unknown
@@ -510,21 +586,32 @@ SH_API int ShPlayModeEvidence(char *buf, int len) {
     }
     if (!fp) {
         if (t < 0)
-            snprintf(buf, (size_t)len, "no mode object read yet, and "
-                     "SetCurrentGameMode has not been called either");
+            snprintf(buf, (size_t)len, "no mode object read yet, and %s",
+                     g_gmCalls ? "the argument it set has been spent"
+                               : "SetCurrentGameMode has not been called");
         else
             snprintf(buf, (size_t)len,
                      "GameModeType %ld, mode object not read yet", (long)t);
         return 0;
     }
-    /* The object is what decides the mode, so an argument that was never
-     * seen is a detail rather than a reason to have no answer - the same
-     * reading the watcher takes (2026-09-17: a session went into Ghost War
-     * and into Mercenaries without SetCurrentGameMode being called once). */
+    /* The object is what decides the mode, so an argument that is not held is
+     * a detail rather than a reason to have no answer - the same reading the
+     * watcher takes (2026-09-17: a session went into Ghost War and into
+     * Mercenaries without SetCurrentGameMode being called once).
+     *
+     * "Not held" is no longer the same as "never called": the argument is
+     * used once and dropped (ResolveMode and the watcher, 2026-09-17), so a
+     * session that called SetCurrentGameMode at every mode change spends its
+     * last one and reads here as t < 0. Both readings are in the line now,
+     * because the first version said "SetCurrentGameMode not called" for a
+     * session whose own playmode log had just said "call 1: arg 3" - seen in
+     * the field log of 2026-09-17 and fixed the same day. */
     if (t < 0)
         snprintf(buf, (size_t)len,
-                 "mode object %08X (%s); SetCurrentGameMode not called",
-                 (unsigned)fp, name ? name : "not recognised");
+                 "mode object %08X (%s); %s", (unsigned)fp,
+                 name ? name : "not recognised",
+                 g_gmCalls ? "the argument it set was used once"
+                           : "SetCurrentGameMode has not been called");
     else
         snprintf(buf, (size_t)len,
                  "GameModeType %ld with mode object %08X (%s)", (long)t,

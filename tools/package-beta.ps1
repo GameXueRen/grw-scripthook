@@ -207,8 +207,27 @@ if ([System.IO.File]::Exists($iniPath)) {
             }
         }
         if ($inPlugins) { $dropped++; continue }
-        if ($inForge) { continue }        # the old enabled= line goes
+        # [forgemod] keeps everything else it was found with. dry_run, strict,
+        # report_copies, probe and log_reads are the operator's settings and
+        # this script has no business dropping them - it owns one line in that
+        # section, and its replacement is written at the section head.
+        if ($inForge) {
+            if ($t -match '^enabled\s*=') { $dropped++; continue }
+            $out.Add($line)
+            continue
+        }
         $out.Add($line)
+    }
+    # A source ini with no [plugins] section used to ship without one, and the
+    # framework reads a plugin with no line as off: the package loaded nothing
+    # and the tester saw a framework that had been ignored. The section is
+    # written from the set this package carries, exactly like the one that was
+    # found and rewritten above.
+    if (-not $wrotePlugins) {
+        $out.Add('')
+        $out.Add('[plugins]')
+        $out.Add("; the $($Plugins.Count) plugins this package ships - one line each")
+        foreach ($p in $Plugins) { $out.Add("$p=1") }
     }
     if (-not $wroteForge) {
         $out.Add('')
@@ -216,11 +235,11 @@ if ([System.IO.File]::Exists($iniPath)) {
         $out.Add("enabled=$forgeOn")
     }
 
-    if ($wrotePlugins -or $wroteForge) {
-        [System.IO.File]::WriteAllLines($iniPath, $out)
-        Write-Host ("  = [plugins] and [forgemod] enabled={0} rewritten" -f $forgeOn) `
-                   -ForegroundColor DarkGray
-    }
+    # Written whatever it was found as: both sections are the package's to
+    # state, and there is no case left in which neither has to change.
+    [System.IO.File]::WriteAllLines($iniPath, $out)
+    Write-Host ("  = [plugins] and [forgemod] enabled={0} rewritten" -f $forgeOn) `
+               -ForegroundColor DarkGray
 }
 
 # ---- third-party notices ---------------------------------------------------
@@ -312,6 +331,15 @@ Write-Host ""
 Write-Host ("package: {0} file(s), {1:N2} MB" -f $files.Count, ($total / 1MB))
 $files | Sort-Object FullName | ForEach-Object {
     Write-Host ("  {0,10:N0}  {1}" -f $_.Length, $_.FullName.Substring($dst.Length + 1))
+}
+
+# Refusing to pack an incomplete package. Every entry in $missing is a file
+# this package is meant to carry, and the shape this used to have - warn, then
+# pack anyway - is how a release goes out missing a plugin or the Forge
+# payload with nothing inside the archive to say so. The directory above is
+# left standing for the diagnosis; no archive is written.
+if ($missing) {
+    throw ("this package is incomplete ({0} file(s) missing) - no archive written" -f $missing.Count)
 }
 
 if ($Zip) {

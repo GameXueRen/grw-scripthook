@@ -990,39 +990,46 @@ static void LangMissOnce(const char *key) {
  * frame to produce an answer that only changes when the language does.
  *
  * The key is (owner, key), both copied so a caller's buffer going away
- * cannot leave a dangling pointer behind; anything longer than LCA_KEY is
- * looked up every time instead (a whole hint is a legal key). The value is
- * a copy, not the pointer the lookup returned: the miss path answers with
- * Readable(), which by design hands out four rotating buffers, so a slot
- * that remembered only the pointer was left reading whatever another key
- * had rotated in since - see the field report of 2026-09-17 below. The
- * generation makes every entry from before a language switch unusable
- * rather than merely unlikely to be read. All of it is touched under the
- * text lock, the one ShLangText already holds. */
-#define LCA_SLOTS 256
-#define LCA_OWNER 48
-#define LCA_KEY   128
-/* The slot owns its text. This is the fix for the field report of
- * 2026-09-17: on the plugin switches page every label is a sentence a
- * caller already translated, so every one of them misses, and the miss
- * path's four rotating buffers meant eight slots ended up pointing into
- * the same four - which is why several rows read "fov_changer(延展视野范围)"
- * at once, others came out empty, the time and weather page showed "< 9 >"
- * on every row (the last thing rotated in), and the language row could
- * read as a page name. A cached key can be a whole hint literal, so the
- * copy is a key long and then some. */
-#define LCA_TEXT  160
+ * cannot leave a dangling pointer behind - and the value is copied too,
+ * once, on the miss: what the caller is handed back is that copy and
+ * nothing else is ever allowed to write over it. Two earlier shapes had it
+ * otherwise, and the second one is the field report of 2026-09-17. The
+ * first stored the pointer the lookup returned, which the miss path
+ * answers with one of Readable()'s four rotating buffers, so entries ended
+ * up sharing four buffers between them. The second copied the text but
+ * still handed out the slot it lived in - 1 key in 256 shared it with a
+ * different one, which is the same wrong text in a narrower window - and
+ * remembered at most 159 bytes of it, so a row longer than that read
+ * complete the first time and cut in half on every hit after. A key is a
+ * whole hint here, and a caller may keep a pointer for as long as it
+ * likes: the copy is made once and never recycled, and the language
+ * changing is the only thing that releases it.
+ *
+ * The index is open-addressed and never evicts, so two keys whose hashes
+ * collide share the table instead of each other's text. It holds about
+ * 500 keys in the tree; on the day it cannot take another one, that
+ * lookup is answered but not remembered, with one line saying so - the
+ * old shape silently answered from wherever the 1-in-256 slot had got to.
+ * All of it is touched under the text lock, the one ShLangText holds. */
+#define LCA_MAX    1024                 /* translations remembered */
+#define LCA_SLOTS  2048                 /* index: power of two, > LCA_MAX */
+#define LCA_PROBE  8                    /* slots looked at per lookup */
 
 typedef struct {
-    uint32_t    gen;
-    uint32_t    hash;
-    char        owner[LCA_OWNER];
-    char        key[LCA_KEY];
-    char        text[LCA_TEXT];     /* ours: copied from the lookup */
-} LangCache;
+    char    *owner;                     /* ours; both are what we hand back */
+    char    *key;
+    char    *text;
+} LangEntry;
 
-static LangCache g_lc[LCA_SLOTS];
+static LangEntry g_lt[LCA_MAX];
+static int       g_ltN;
+static struct {
+    uint32_t hash;
+    int      ent;                       /* entry + 1; 0 = a free slot */
+} g_lx[LCA_SLOTS];
 static uint32_t  g_lcGen = 1;
+static uint32_t  g_ltGen = 1;           /* the language g_lt belongs to */
+static int       g_ltNoRoom;
 
 static uint32_t LcHash(const char *owner, const char *key) {
     uint32_t h = 2166136261u;
@@ -1033,28 +1040,108 @@ static uint32_t LcHash(const char *owner, const char *key) {
     return h;
 }
 
+/* A copy we own, or NULL. Lock held. */
+static char *LcDup(const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    char *p = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);
+
+    if (!p) return NULL;
+    if (n) memcpy(p, s, n);
+    p[n] = 0;
+    return p;
+}
+
+/* Drop everything: the text belonged to the language being left, and the
+ * language is the only thing that makes a remembered answer wrong. Lock
+ * held. */
+static void LcWipe(void) {
+    int i;
+
+    for (i = 0; i < g_ltN; i++) {
+        HeapFree(GetProcessHeap(), 0, g_lt[i].owner);
+        HeapFree(GetProcessHeap(), 0, g_lt[i].key);
+        HeapFree(GetProcessHeap(), 0, g_lt[i].text);
+    }
+    g_ltN = 0;
+    memset(g_lx, 0, sizeof(g_lx));
+}
+
+/* The remembered text for this key, or NULL. Lock held. A probe that lands
+ * on a free slot ends the chain - nothing was ever put past it - and one
+ * that lands on another key's entry keeps walking. */
+static const char *LcFind(uint32_t h, const char *own, const char *key) {
+    int i, home = (int)(h % LCA_SLOTS);
+
+    for (i = 0; i < LCA_PROBE; i++) {
+        int s = (home + i) % LCA_SLOTS;
+        const LangEntry *e;
+
+        if (!g_lx[s].ent) return NULL;
+        if (g_lx[s].hash != h) continue;
+        e = &g_lt[g_lx[s].ent - 1];
+        if (strcmp(e->owner, own) == 0 && strcmp(e->key, key) == 0)
+            return e->text;
+    }
+    return NULL;
+}
+
+/* Remember one translation and answer with the copy. Lock held. When there
+ * is no room the translation is still the answer - it is just not kept. */
+static const char *LcAdd(uint32_t h, const char *own, const char *key,
+                         const char *v) {
+    char *o, *k, *t;
+    int i, home = (int)(h % LCA_SLOTS), free_at = -1;
+
+    for (i = 0; i < LCA_PROBE; i++) {
+        int s = (home + i) % LCA_SLOTS;
+
+        if (!g_lx[s].ent) { free_at = s; break; }
+    }
+    if (free_at < 0 || g_ltN >= LCA_MAX) {
+        if (!g_ltNoRoom) {
+            g_ltNoRoom = 1;
+            TextLog("no room to remember \"%.40s\" (%d keys held): the text "
+                    "is translated but not cached", key, g_ltN);
+        }
+        return v;
+    }
+    o = LcDup(own);
+    k = LcDup(key);
+    t = LcDup(v);
+    if (!o || !k || !t) {
+        if (o) HeapFree(GetProcessHeap(), 0, o);
+        if (k) HeapFree(GetProcessHeap(), 0, k);
+        if (t) HeapFree(GetProcessHeap(), 0, t);
+        return v;                   /* answered, not remembered, as above */
+    }
+    g_lt[g_ltN].owner = o;
+    g_lt[g_ltN].key = k;
+    g_lt[g_ltN].text = t;
+    g_ltN++;
+    g_lx[free_at].hash = h;
+    g_lx[free_at].ent = g_ltN;
+    return t;
+}
+
 /** Translate one key for one owner (NULL or "" = framework text). */
 SH_API const char *ShLangText(const char *owner, const char *key) {
-    const char *v = NULL;
-    LangCache *slot = NULL;
-    uint32_t h = 0;
-    int cacheable;
+    const char *v;
+    const char *own = owner ? owner : "";
+    uint32_t h;
 
     if (!key) return "";
     LoadConfig();
     TextLock();
-    cacheable = (!owner || strlen(owner) < LCA_OWNER) &&
-                strlen(key) < LCA_KEY;
-    if (cacheable) {
-        h = LcHash(owner, key);
-        slot = &g_lc[h % LCA_SLOTS];
-        if (slot->gen == g_lcGen && slot->hash == h &&
-            strcmp(slot->owner, owner ? owner : "") == 0 &&
-            strcmp(slot->key, key) == 0) {
-            v = slot->text;
-            TextUnlock();
-            return v;
-        }
+    if (g_ltGen != g_lcGen) {           /* every remembered answer belonged
+                                         * to the language just left */
+        LcWipe();
+        g_ltGen = g_lcGen;
+    }
+    h = LcHash(owner, key);
+    v = LcFind(h, own, key);
+    if (v) {
+        TextUnlock();
+        return v;
     }
     if (EnsureRows()) {
         LoadLang(owner);
@@ -1067,17 +1154,7 @@ SH_API const char *ShLangText(const char *owner, const char *key) {
         v = Readable(key);              /* never empty, never a failure */
         if (key[0] == '@') LangMissOnce(key);
     }
-    if (cacheable) {
-        slot->gen = g_lcGen;
-        slot->hash = h;
-        CopyN(slot->owner, sizeof(slot->owner), owner ? owner : "");
-        CopyN(slot->key, sizeof(slot->key), key);
-        /* Copied, and the copy is what goes back to the caller: v may be
-         * pointing into Readable()'s rotating buffers, which the next
-         * lookup of a different key has already moved on from. */
-        CopyN(slot->text, sizeof(slot->text), v);
-        v = slot->text;
-    }
+    v = LcAdd(h, own, key, v);
     TextUnlock();
     return v;
 }
