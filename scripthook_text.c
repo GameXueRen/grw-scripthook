@@ -64,6 +64,15 @@ static const ShText kEnUS[] = {
     { "@settings.order.empty", "No plugin menu to order yet." },
     { "@settings.order.saved", "Order saved" },
 
+    /* the About page: one fact per row, and the build's version and
+     * source address come in as values (SH_VERSION, SH_REPO) so this page
+     * cannot name a build other than the one drawing it */
+    { "@about.page",          "About" },
+    { "@about.version",       "Version: %s" },
+    { "@about.author",        "Original author: Phiality" },
+    { "@about.modder",        "Modded by: GameXueRen" },
+    { "@about.qq",            "QQ group: 299177445" },
+
     /* the Forge page */
     { "@forge.page",          "Forge Mod Loader" },
     { "@forge.hint",
@@ -179,6 +188,12 @@ static const ShText kZhCN[] = {
       "改变菜单显示顺序。← → 把当前行上移 / 下移。" },
     { "@settings.order.empty", "还没有可排序的插件菜单。" },
     { "@settings.order.saved", "菜单显示顺序已保存" },
+
+    { "@about.page",          "关于" },
+    { "@about.version",       "版本：%s" },
+    { "@about.author",        "原作者：Phiality" },
+    { "@about.modder",        "魔改版：GameXueRen" },
+    { "@about.qq",            "QQ群：299177445" },
 
     { "@forge.page",          "Forge 资源侧载" },
     { "@forge.hint",

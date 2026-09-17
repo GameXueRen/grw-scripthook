@@ -36,6 +36,11 @@ extern "C" {
  *  it here and nowhere else. */
 #define SH_VERSION "1.0-beta1"
 
+/** Where this build's source lives, in one place for the same reason the
+ *  version is: the About page formats it in rather than typing it, so a
+ *  move costs one line here. */
+#define SH_REPO "https://github.com/GameXueRen/grw-scripthook"
+
 #ifdef SH_BUILD
 #define SH_API __declspec(dllexport)
 #else

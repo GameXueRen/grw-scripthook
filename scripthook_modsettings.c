@@ -485,6 +485,7 @@ static void LoadLanguages(void) {
  * since the last look.
  */
 static uint32_t g_orderMenu = 0;
+static uint32_t g_aboutMenu = 0;    /* the About page */
 #define ORDER_MAX 64
 
 typedef struct {
@@ -824,6 +825,46 @@ static void BuildHints(void) {
     ShMenuHint(g_cpuMenu, hint);
 }
 
+/* ---- the About page ---------------------------------------------- */
+
+/* What this build is, one fact a row: which version, who wrote the
+ * original, who modded it, where to ask, and the address of the source
+ * itself. The version is formatted in through the template check every
+ * other formatted line goes through, so a translation cannot put a %s
+ * where nothing is passed. The rows do nothing when they are chosen:
+ * the page is here to be read. */
+
+static void OnAboutInfo(uint32_t menu, uint32_t item, int value,
+                        void *user) {
+    (void)menu; (void)item; (void)value; (void)user;
+}
+
+/* One row. `value` is NULL for a line that carries no value of its own. */
+static void AboutRow(uint32_t menu, const char *key, const char *value) {
+    char line[256];
+    const char *tr = ShLang(key);
+    const char *en = ShTextEnUS(NULL, key);
+
+    if (value)
+        ShTextFormat(line, sizeof(line), en ? en : tr, tr, value);
+    else
+        snprintf(line, sizeof(line), "%s", tr);
+    ShMenuAction(menu, line, OnAboutInfo, NULL);
+}
+
+static void BuildAboutMenu(void) {
+    if (!g_aboutMenu) return;
+    ShMenuClear(g_aboutMenu);
+    AboutRow(g_aboutMenu, "@about.version", SH_VERSION);
+    AboutRow(g_aboutMenu, "@about.author", NULL);
+    AboutRow(g_aboutMenu, "@about.modder", NULL);
+    AboutRow(g_aboutMenu, "@about.qq", NULL);
+    /* The address itself is the row's text, not a label in front of one:
+     * there is nothing to translate, so this one row is not keyed - it is
+     * SH_REPO, the same string the header defines. */
+    ShMenuAction(g_aboutMenu, SH_REPO, OnAboutInfo, NULL);
+}
+
 /* Text this module composed itself does not follow a language switch:
  * menu rows do (they are translated as they are captured), but a hint
  * and a status line are strings we handed over. Called right after a
@@ -837,6 +878,7 @@ static void RefreshOwnText(void) {
     if (cur) snprintf(g_langSeen, sizeof(g_langSeen), "%s", cur);
     BuildHints();
     SetCpuLine();
+    BuildAboutMenu();
     /* The order page's row labels are the pages' own titles, resolved
      * when the list was taken, so they need reading again in the new
      * language - OrderTick does that on its next pass. */
@@ -880,7 +922,8 @@ void ShModSettingsStartup(void) {
 
     /* Rows sort by the order they are made in: the plugin master switch
      * first, on this page, then the sub pages - the plugin list, then the
-     * CPU dials on a page of their own - and the language row last. */
+     * CPU dials on a page of their own - and About last of all, which is
+     * made further down, after the language row. */
     BuildSettings(g_modMenu, g_loaderSettings,
                   (int)(sizeof(g_loaderSettings) / sizeof(g_loaderSettings[0])));
     g_pluginMenu = ShMenuSub(g_modMenu, "@settings.plugins");
@@ -894,6 +937,10 @@ void ShModSettingsStartup(void) {
     OrderReload();
     BuildOrderMenu();
     BuildLanguageRow(g_modMenu);
+    /* Made after the language row on purpose: a row keeps the place it was
+     * made in, and About belongs under everything else on the page. */
+    g_aboutMenu = ShMenuSub(g_modMenu, "@about.page");
+    BuildAboutMenu();
 
     /* The hints, then the live line. The note the pages carry is text we
      * composed, so the language it is in is remembered here: the poll
