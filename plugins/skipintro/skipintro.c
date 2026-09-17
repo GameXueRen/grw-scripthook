@@ -610,23 +610,14 @@ static void BuildMenu(HMODULE m) {
 
 static void OpenLog(void) {
     char path[MAX_PATH];
-    char *slash;
-    int len;
 
-    /* The main module is GRW.exe, so its folder is the game dir. */
-    if (!GetModuleFileNameA(NULL, path, MAX_PATH)) return;
-    slash = strrchr(path, '\\');
-    if (!slash) return;
-    slash[1] = 0;                         /* keep the trailing backslash */
-
-    len = (int)strlen(path);
-    if (len + 5 >= (int)sizeof(path)) return;
-    strcpy(path + len, "logs");           /* <gamedir>\logs */
-    CreateDirectoryA(path, NULL);
-    if (len + 22 < (int)sizeof(path))
-        strcpy(path + len, "logs\\skipintro.log");
-    else
-        strcpy(path + len, "skipintro.log");
+    /* <gamedir>\logs\skipintro.log, through the same rule every other log in
+     * the session takes - the framework resolves it and creates logs\ on the
+     * way. This path used to be built by hand here, and when the install
+     * folder was long enough that the file name no longer fitted, the last
+     * branch dropped the file beside GRW.exe instead: one plugin's log in the
+     * game folder, and missing from the logs\ a player is asked to send. */
+    if (!ShLogPath("skipintro.log", path, sizeof(path))) return;
     /* "w", not "a": the framework's own logs are per session, and a
      * diagnostic that only ever grows is a file that grows on the player's
      * disk forever. */
