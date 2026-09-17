@@ -105,6 +105,7 @@ ShCpuOnStageChange(OnStage, NULL);       /* 阶段变化时回调（每个插件
 
 ## 怎么验证
 
+- **全默认 = 零改动**：六个键都还是 0（不加干涉）时，日志里**只有**这一行 —— `corefix: disabled - every dial is leave-alone and no cap is set, so no hook and not one scheduling API is touched (the efficiency mode's arrival state was read once, so the status can report it honestly)`。不装钩子、不改亲和性、不改优先级类、不改效率模式，连 P 核 / SMT 的探测都不会跑（那条判断在所有档位之前就返回了）。看到它，就等于这一场什么都没发生；下面那几行都只在**有档位**时出现（哪怕只设了 `cpu_cores`，这行也会消失）。
 - **任务管理器 → 详细信息**：右键列头勾出「效率模式」，启动阶段 GRW.exe 显示"已启用"，进入游玩后变为关闭（**仅 Win11 有此列**）；
 - `logs\scripthook_corefix.log` 应能看到：
   - `efficiency mode: available (Windows build 22621)` 或 `not applicable - ... build 19045`（一行，带 build 号）；
