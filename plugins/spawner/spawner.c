@@ -87,6 +87,12 @@ static volatile int g_spawned = 0;
 typedef int (*Camera_t)(ShCamera *);
 static Camera_t g_camera;
 
+/* How far the framework's spec warm-up has got (ShSpawnWarmProgress).
+ * Optional as well: a framework that does not carry it leaves the status
+ * line saying "spawning...", which is what it said before. */
+typedef int (*WarmProgress_t)(int *done, int *total);
+static WarmProgress_t g_warmProgress;
+
 /* Runs on the menu thread with the API's lock dropped, so a
  * plain API call here is exactly what the ABI expects.
  */
@@ -126,6 +132,21 @@ static void OnSpawn(uint32_t menu, uint32_t item, int value,
     if (!aimed) pos.x += AHEAD;      /* no camera to ask: the old offset */
     pos.z += LIFT;
 
+    /* The framework walks the whole address space for the vehicle specs the
+     * first time the world is playable, about fifteen seconds (measured on
+     * this machine, 2026-09-17). A dispatch that lands inside that window
+     * waits for it - which is fine, and used to look like nothing was
+     * happening at all. The number moving is the whole difference between
+     * waiting and being stuck, so this waits here rather than in there, and
+     * says so while it does. */
+    if (g_warmProgress) {
+        int done = 0, total = 0;
+
+        while (g_warmProgress(&done, &total)) {
+            g_statusF(menu, "@sp.warming", done, total);
+            Sleep(200);
+        }
+    }
     g_status(menu, "@sp.spawning");
     ent = g_spawn(v->id, &pos);
     if (ent) {
@@ -153,6 +174,7 @@ static const TextRow kEn[] = {
     { "@sp.noplayer", "no player position" },
     { "@sp.spawning", "spawning..." },
     { "@sp.spawned",  "spawned, %d this session" },
+    { "@sp.warming",  "preparing, %d of %d specs" },
     { "@sp.nothing",  "nothing appeared" }
 };
 
@@ -162,6 +184,7 @@ static const TextRow kZh[] = {
     { "@sp.noplayer", "无法获取玩家位置" },
     { "@sp.spawning", "正在生成……" },
     { "@sp.spawned",  "已生成，本次会话共 %d 辆" },
+    { "@sp.warming",  "预热中 %d/%d" },
     { "@sp.nothing",  "没有出现" }
 };
 
@@ -201,6 +224,9 @@ static DWORD WINAPI BindThread(LPVOID p) {
     /* Optional: the facing the vehicle is placed along. Absent means the
      * old east offset, which is a worse landing but not a failure. */
     *(FARPROC *)&g_camera = GetProcAddress(m, "ShGetCamera");
+    /* Optional: how far along the framework's spec warm-up is. */
+    *(FARPROC *)&g_warmProgress = GetProcAddress(m,
+                                                 "ShSpawnWarmProgress");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");

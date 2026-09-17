@@ -32,6 +32,11 @@ extern void ShSetError(int err);
 extern int ShRequireInGame(void);
 extern int ShGetPlayer(ShPlayer *out);
 
+/* Defined further down, next to the scan they belong to. A dispatch waits
+ * for the warm thread's scan rather than running one of its own. */
+static void SpecScanWait(void);
+void ShSpawnOnEnterPlaying(void);       /* not static: scripthook_state.c calls it */
+
 /* The spec vtable, learned rather than assumed - the same reason the entity
  * vtable is learned. A game update moves it, and a stale value does not fail
  * loudly: every spec check simply answers no and the vehicle list stays
@@ -208,6 +213,14 @@ static const ShVehicle g_vehicles[] = {
 
 /* Spec addresses move each session, so resolve once on
  * demand and remember. Bounded, never on a hot path.
+ *
+ * Remembering them for the *next* session was tried and cannot work: an ini
+ * cache of them as RVAs was built on 2026-09-17 and wrote nothing, because
+ * the objects are not in the image. Their addresses sit in the game's own
+ * regions, below the module base, so no offset from the image describes
+ * them and image ASLR is not what moves them - the heap layout is. The walk
+ * is paid once per session on the warm thread, and what is left to do about
+ * the wait is to say how far along it is (ShSpawnWarmProgress).
  */
 static volatile uint64_t g_specCache[VEHICLE_COUNT];
 /* A vehicle whose spec was not found in the walk is marked
@@ -504,7 +517,11 @@ static uint64_t SpecFor(uint32_t vehicleId) {
         if (!g_specTried[i]) need = 1;
         break;
     }
-    if (need) FindAllSpecs();
+    /* Never walked here: the walk is the warm thread's, and this waits for
+     * it (see SpecScanWait). Running it on this thread is what made a
+     * dispatch occasionally take the whole fifteen seconds - see the
+     * field report quoted there. */
+    if (need) SpecScanWait();
     if (g_specCache[i] &&
         ShReadQ(g_specCache[i]) == SpecVt())
         return g_specCache[i];
@@ -748,6 +765,40 @@ static DWORD WINAPI WarmThread(LPVOID p) {
     return 0;
 }
 
+/* Wait for a scan to land, without ever running one here.
+ *
+ * Running it here is what made a dispatch occasionally take the whole walk
+ * (field report, 2026-09-17: "vehicle dispatch sometimes takes a very long
+ * time"). A request that arrived while the warm thread was walking waited
+ * for all of it, and a request that arrived with no scan running did the
+ * walking itself - on the thread the plugin's menu action runs on. The walk
+ * belongs to the warm thread; this asks for one if none is running, says
+ * once what it is waiting for, and gives up after a bound rather than
+ * holding a plugin's call open for ever. */
+#define SPEC_WAIT_MS 30000
+
+static void SpecScanWait(void) {
+    DWORD t0 = GetTickCount();
+    int logged = 0;
+
+    ShSpawnOnEnterPlaying();            /* starts one if none is running */
+    for (;;) {
+        if (!InterlockedCompareExchange(&g_scanBusy, 0, 0) && !g_warmRunning)
+            return;                     /* done: the cache is as good as it gets */
+        if (!logged && GetTickCount() - t0 >= 250) {
+            logged = 1;
+            Log("spawn: a spec scan is running - this dispatch waits for it "
+                "(up to %d ms)", SPEC_WAIT_MS);
+        }
+        if (GetTickCount() - t0 >= SPEC_WAIT_MS) {
+            Log("spawn: the spec scan has not finished in %d ms - this "
+                "dispatch goes on without it", SPEC_WAIT_MS);
+            return;
+        }
+        Sleep(10);
+    }
+}
+
 void ShSpawnOnEnterPlaying(void) {
     HANDLE h;
 
@@ -760,4 +811,19 @@ void ShSpawnOnEnterPlaying(void) {
 
 SH_API void ShSpawnWarm(void) {
     ShSpawnOnEnterPlaying();
+}
+
+/* 1 while the walk runs, with *done of *total specs resolved; 0 when
+ * nothing is running, and then the numbers are left alone - the count from
+ * a finished walk is not progress and must not be read as one. */
+SH_API int ShSpawnWarmProgress(int *done, int *total) {
+    int left, busy;
+
+    busy = InterlockedCompareExchange(&g_scanBusy, 0, 0) || g_warmRunning;
+    if (!busy) return 0;
+    left = g_scanLeft;
+    if (left < 0 || left > VEHICLE_COUNT) left = VEHICLE_COUNT;
+    if (done) *done = VEHICLE_COUNT - left;
+    if (total) *total = VEHICLE_COUNT;
+    return 1;
 }
