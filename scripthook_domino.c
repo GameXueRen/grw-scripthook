@@ -171,7 +171,8 @@ typedef struct {
     uint64_t a, b;
     int      i0, i1;
     float    m[16];
-    volatile int ready;
+    volatile LONG claim;    /* a producer is filling this slot */
+    volatile LONG ready;    /* filled, waiting for the pump */
 } DomJob;
 
 static DomJob g_dq[DQ_MAX];
@@ -186,17 +187,29 @@ static int ShFail_NotEntity(void) {
     return 0;
 }
 
+/* Fill one slot and hand it over. The claim bit is what makes that atomic:
+ * "this slot is free" and "it is mine now" used to be two separate steps,
+ * so two producers could both find slot i free and the last store won - one
+ * job quietly replacing another, which is a transform that never runs.
+ * ShQueueTransform's queue (scripthook_api.c) claims the same way. */
 static int Queue(const DomJob *job) {
     int i;
+
     for (i = 0; i < DQ_MAX; i++) {
-        if (g_dq[i].ready) continue;
+        if (InterlockedCompareExchange(&g_dq[i].claim, 1, 0) != 0)
+            continue;                       /* someone else is filling it */
+        if (InterlockedCompareExchange(&g_dq[i].ready, 0, 0)) {
+            InterlockedExchange(&g_dq[i].claim, 0);
+            continue;                       /* claimed, and not empty */
+        }
         g_dq[i].kind = job->kind;
         g_dq[i].a = job->a;
         g_dq[i].b = job->b;
         g_dq[i].i0 = job->i0;
         g_dq[i].i1 = job->i1;
         memcpy(g_dq[i].m, job->m, sizeof(job->m));
-        g_dq[i].ready = 1;
+        InterlockedExchange(&g_dq[i].ready, 1);
+        InterlockedExchange(&g_dq[i].claim, 0);
         return 1;
     }
     return ShFail_NoSlot();
@@ -231,6 +244,9 @@ void ShDominoPump(void) {
     for (i = 0; i < DQ_MAX; i++) {
         DomJob *j = &g_dq[i];
         if (!j->ready) continue;
+        /* The claim as well: a producer that has just taken this slot would
+         * otherwise overwrite the fields under the game call below. */
+        if (InterlockedCompareExchange(&j->claim, 1, 0) != 0) continue;
         switch (j->kind) {
         case DQ_VIS:
             /* The node resolves the handle first and passes
@@ -249,7 +265,8 @@ void ShDominoPump(void) {
         default:
             break;
         }
-        j->ready = 0;
+        InterlockedExchange(&j->ready, 0);
+        InterlockedExchange(&j->claim, 0);
     }
 }
 

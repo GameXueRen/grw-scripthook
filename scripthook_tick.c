@@ -62,7 +62,9 @@ static Tick g_t[SH_TICK_MAX] = {
 };
 
 static LARGE_INTEGER g_freq;
-static volatile LONG64 g_decideNs;
+/* Raw counts. What the layer spent is converted to nanoseconds once, in
+ * ShDecideTake - not once per call, which is what this used to do. */
+static volatile LONG64 g_decideTicks;
 
 uint64_t ShTickNow(void) {
     LARGE_INTEGER c;
@@ -132,24 +134,29 @@ int ShTickReport(char *buf, int n, DWORD now) {
 
 void ShDecideFeed(uint64_t at) {
     LARGE_INTEGER c;
-    uint64_t dt;
 
     QueryPerformanceCounter(&c);
     if (!g_freq.QuadPart || (uint64_t)c.QuadPart < at) return;
-    dt = (uint64_t)c.QuadPart - at;
-    /* Nanoseconds: one pass through the rules is well under a microsecond,
-     * so a microsecond accumulator would round the whole layer to zero. */
-    InterlockedExchangeAdd64(&g_decideNs,
-                             (LONG64)(dt * (uint64_t)1000000000 /
-                                      (uint64_t)g_freq.QuadPart));
+    /* Counts, and no division: this runs on the hottest path the framework
+     * owns (tens of thousands of calls a second - see scripthook_files.c),
+     * and turning each measurement into nanoseconds there cost as much as
+     * the sample it measured. The unit only has to be consistent, and
+     * ShDecideTake converts the whole window at once, once a frame, where
+     * the number is actually read. */
+    InterlockedExchangeAdd64(&g_decideTicks,
+                             (LONG64)((uint64_t)c.QuadPart - at));
 }
 
 int ShDecideTake(void) {
-    LONG64 ns = InterlockedExchangeAdd64(&g_decideNs, 0);
+    LONG64 ticks = InterlockedExchangeAdd64(&g_decideTicks, 0);
 
-    if (ns <= 0) return 0;
+    if (ticks <= 0) return 0;
     /* Only what was just read is taken back, so a pass that lands in
      * between is still counted - in the next window. */
-    InterlockedExchangeAdd64(&g_decideNs, -ns);
-    return (int)(ns / 1000);
+    InterlockedExchangeAdd64(&g_decideTicks, -ticks);
+    if (!g_freq.QuadPart) return 0;
+    /* Nanoseconds: one pass through the rules is well under a microsecond,
+     * so a microsecond accumulator would round the whole layer to zero. */
+    return (int)((uint64_t)ticks * 1000000000ull /
+                 (uint64_t)g_freq.QuadPart / 1000ull);
 }

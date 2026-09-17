@@ -195,10 +195,27 @@ static int NewFrame(void) {
     return fresh;
 }
 
-/* visible scenes of one sign, lowest order first */
-static void RenderOurs(uint64_t renderer, int negatives) {
+/* Which scenes this sign draws, lowest order first - kept between passes.
+ *
+ * The game draws its UI in several passes per frame and this runs before and
+ * after each of them, so one answer was being sorted out again and again: a
+ * selection sort over MAX_SCENES, up to two dozen times for a frame. The
+ * list only changes when a scene is created, shown, hidden, reordered or the
+ * world is invalidated, and each of those bumps the generation below. */
+static volatile LONG g_ordGen;
+static LONG          g_ordBuilt = -1;   /* the generation the lists hold */
+static int           g_ordNeg[MAX_SCENES], g_nOrdNeg;
+static int           g_ordPos[MAX_SCENES], g_nOrdPos;
+
+/* Anything that can change which scenes are drawn, or in what order. */
+static void BumpOrder(void) {
+    InterlockedIncrement(&g_ordGen);
+}
+
+/* Fills out[] with the slots to draw for one sign, lowest order first. */
+static void OrderOf(int negatives, int *out, int *n) {
     int done[MAX_SCENES] = {0};
-    int i, pass;
+    int i, pass, k = 0;
 
     for (pass = 0; pass < MAX_SCENES; pass++) {
         int best = -1;
@@ -207,17 +224,35 @@ static void RenderOurs(uint64_t renderer, int negatives) {
             if ((g_s[i].order < 0) != (negatives != 0)) continue;
             if (best < 0 || g_s[i].order < g_s[best].order) best = i;
         }
-        if (best < 0) return;
+        if (best < 0) break;
         done[best] = 1;
-        {
-            int32_t r2 = 0, r3 = 0;
-            if (g_s[best].flippedFrame != g_frame) {
-                g_s[best].flippedFrame = g_frame;
-                ((Scene2)F_SCENE_FLIP)(g_s[best].handle, &r2);
-            }
-            RecordCall(g_s[best].handle, renderer, 1);
-            ((Scene3)F_SCENE_RENDER)(g_s[best].handle, &r3, renderer);
+        out[k++] = best;
+    }
+    *n = k;
+}
+
+static void RenderOurs(uint64_t renderer, int negatives) {
+    const int *list;
+    LONG gen = (LONG)InterlockedCompareExchange(&g_ordGen, 0, 0);
+    int n, i;
+
+    if (gen != g_ordBuilt) {
+        OrderOf(1, g_ordNeg, &g_nOrdNeg);
+        OrderOf(0, g_ordPos, &g_nOrdPos);
+        g_ordBuilt = gen;
+    }
+    list = negatives ? g_ordNeg : g_ordPos;
+    n = negatives ? g_nOrdNeg : g_nOrdPos;
+    for (i = 0; i < n; i++) {
+        SceneSlot *s = &g_s[list[i]];
+        int32_t r2 = 0, r3 = 0;
+
+        if (s->flippedFrame != g_frame) {
+            s->flippedFrame = g_frame;
+            ((Scene2)F_SCENE_FLIP)(s->handle, &r2);
         }
+        RecordCall(s->handle, renderer, 1);
+        ((Scene3)F_SCENE_RENDER)(s->handle, &r3, renderer);
     }
 }
 
@@ -503,6 +538,7 @@ static uint64_t __attribute__((ms_abi)) CreateJob(uint64_t sid, uint64_t b,
     s->rootH = root; s->rootP = rootP;
     s->flippedFrame = -1;
     s->live = 1;
+    BumpOrder();
     Log("scene %llu: created %llx priv %llx root %llx/%llx order %d",
         (unsigned long long)sid, (unsigned long long)scene,
         (unsigned long long)priv, (unsigned long long)root,
@@ -529,6 +565,7 @@ static uint64_t __attribute__((ms_abi)) DestroyJob(uint64_t sid, uint64_t b,
         DestroyEngineScene(s->handle);
     }
     memset(s, 0, sizeof(*s));
+    BumpOrder();
     return 1;
 }
 
@@ -632,6 +669,7 @@ int ShSceneSetOrder(int sid, int order) {
     SceneSlot *s = Slot(sid);
     if (!s) return 0;
     s->order = order;
+    BumpOrder();
     return 1;
 }
 
@@ -639,6 +677,7 @@ int ShSceneShow(int sid, int visible) {
     SceneSlot *s = Slot(sid);
     if (!s) return 0;
     s->visible = visible ? 1 : 0;
+    BumpOrder();
     return 1;
 }
 
@@ -668,6 +707,7 @@ void ShSceneInvalidate(void) {
         }
         g_s[i].dead = g_s[i].handle;
         g_s[i].live = 0;
+        BumpOrder();
     }
     SUnlock();
 }

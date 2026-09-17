@@ -165,6 +165,60 @@ static int Install(void) {
     return 1;
 }
 
+/* ---- the installer's signal ------------------------------------------ */
+
+/* A second caller used to sit in a Sleep(1) spin for up to five seconds while
+ * the first one installed the hook - and the loader thread is one of those
+ * callers: five seconds of a start-up thread, for a hook that takes
+ * microseconds to set. Waiters sleep on this instead, with the same five
+ * seconds kept as the outer bound. Nothing waits when the event could not be
+ * made: that path keeps the bounded sleep. */
+static HANDLE        g_instEvent;
+static volatile LONG g_instEventMade;   /* 0 no, 1 yes, 2 being made, -1 no */
+
+static HANDLE InstalledEvent(void) {
+    for (;;) {
+        LONG s = InterlockedCompareExchange(&g_instEventMade, 0, 0);
+
+        if (s == 1) return g_instEvent;
+        if (s == -1) return NULL;
+        if (s == 2) { Sleep(0); continue; }     /* another thread is making it */
+        if (InterlockedCompareExchange(&g_instEventMade, 2, 0) == 0) {
+            HANDLE h = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+            g_instEvent = h;
+            InterlockedExchange(&g_instEventMade, h ? 1 : -1);
+            return h;
+        }
+    }
+}
+
+/* Called by whoever finished the install, either way. The installer gets here
+ * before a waiter can be waiting on the handle, and this is manual-reset: an
+ * event set before the wait still wakes the next waiter, so the signal cannot
+ * be missed and nobody sleeps the timeout out over a finished install. */
+static void InstalledSignal(void) {
+    HANDLE h = InstalledEvent();
+
+    if (h) SetEvent(h);
+}
+
+/* 1 when the install finished, 0 when it did not within ms. */
+static int InstalledWait(DWORD ms) {
+    HANDLE h = InstalledEvent();
+
+    if (!h) {
+        int spins = 0;
+
+        while (InterlockedCompareExchange(&g_installed, 0, 0) == 1 &&
+               spins++ < (int)ms)
+            Sleep(1);
+    } else {
+        WaitForSingleObject(h, ms);
+    }
+    return InterlockedCompareExchange(&g_installed, 0, 0) == 2;
+}
+
 /* ---- public API ------------------------------------------------------ */
 
 SH_API int ShSetAmmoScale(int num, int den) {
@@ -190,19 +244,24 @@ SH_API int ShSetAmmoScale(int num, int den) {
         if (prev == 0) {
             if (!Install()) {
                 InterlockedExchange(&g_installed, 0);
+                InstalledSignal();
                 return 0;
             }
             InterlockedExchange(&g_installed, 2);
+            InstalledSignal();
         } else if (prev == 1) {
-            int spins = 0;
-            while (InterlockedCompareExchange(&g_installed, 0, 0) == 1 &&
-                   spins++ < 5000)
-                Sleep(1);
-            if (InterlockedCompareExchange(&g_installed, 0, 0) != 2)
+            /* Someone else is installing. This used to be a Sleep(1) spin for
+             * up to 5000 rounds - five seconds of a blocked caller thread
+             * (the loader's, at start up) for a hook that takes microseconds
+             * to set. It waits on the installer's signal now, with the same
+             * five seconds as the outer bound. */
+            if (!InstalledWait(5000) ||
+                InterlockedCompareExchange(&g_installed, 0, 0) != 2)
                 return 0;
-        } else {
-            return 0;
         }
+        /* prev == 2: another thread finished the install while this one was
+         * reading g_installed above, which is the success case, not a
+         * failure - it is the same hook, and the caller's request is met. */
     }
     /* Log only a real change: the setter can be called in a loop. */
     if (InterlockedExchange(&g_scale, packed) != packed) {

@@ -801,11 +801,70 @@ static void Detach(Widget *w, uint64_t parentP) {
 extern void ShSceneLock(uint64_t priv);
 extern void ShSceneUnlock(uint64_t priv);
 
+/* ---- parent -> child chains ---------------------------------------
+ *
+ * The walks below all need one widget's children, and each of them used to
+ * find them by scanning the whole table: CascadeAlpha and DestroySubtree
+ * scan MAX_UI widgets once per node they visit (a twelve-line HUD panel
+ * therefore cost a few thousand compares per alpha change), and Children
+ * scanned MAX_UI per child handle. These chains are the table's own parent
+ * field, linked once and rebuilt only when a widget is given a parent -
+ * which happens in exactly two places, Create and OP_REPARENT, and both bump
+ * the counter.
+ *
+ * Deaths need no rebuild, because a walk validates every node it meets
+ * (alive and parent) instead of trusting the links. That is the whole reason
+ * this stays correct with so little bookkeeping: there is one counter to
+ * keep in step, and a missed bump can only make a walk rebuild later than it
+ * had to - it can never make the walk enter a widget that is not there. */
+static int      g_kidFirst[MAX_UI + 1];     /* by widget id, 0 = no children */
+static uint32_t g_kidNext[MAX_UI + 1];
+static volatile LONG g_kidGen;
+static LONG     g_kidBuilt = -1;
+
+static void BumpKids(void) {
+    InterlockedIncrement(&g_kidGen);
+}
+
+static void KidsBuild(void) {
+    int i;
+
+    memset(g_kidFirst, 0, sizeof(g_kidFirst));
+    memset(g_kidNext, 0, sizeof(g_kidNext));
+    /* Head insertion while walking backwards, so a parent's children come
+     * out in table order - the order the scan this replaces produced, which
+     * the cascades and the destroy order were both built on. */
+    for (i = MAX_UI - 1; i >= 0; i--) {
+        uint32_t id;
+
+        if (!g_w[i].alive || !g_w[i].parent) continue;
+        id = (uint32_t)i + 1;
+        g_kidNext[id] = (uint32_t)g_kidFirst[g_w[i].parent];
+        g_kidFirst[g_w[i].parent] = id;
+    }
+    g_kidBuilt = (LONG)InterlockedCompareExchange(&g_kidGen, 0, 0);
+}
+
+/* The next live child of `parent` after `after` (0 = the first). Callers hold
+ * the UI lock. One that is about to kill a child must take the next id
+ * first: the links outlive the widget, the walk does not. */
+static uint32_t NextKid(uint32_t parent, uint32_t after) {
+    uint32_t c;
+
+    if (g_kidBuilt != (LONG)InterlockedCompareExchange(&g_kidGen, 0, 0))
+        KidsBuild();
+    for (c = after ? g_kidNext[after] : (uint32_t)g_kidFirst[parent]; c;
+         c = g_kidNext[c]) {
+        if (g_w[c - 1].alive && g_w[c - 1].parent == parent) return c;
+    }
+    return 0;
+}
+
 /* Effective alpha is own alpha x own shown x the shown of
  * every ancestor; applied down the whole subtree. */
 static void CascadeAlpha(Widget *w, float inherit, uint64_t pp) {
     float a = w->alpha * w->shown * inherit;
-    int i;
+    uint32_t id = (uint32_t)(w - g_w) + 1, c;
 
     ShPropSetF(w->handle, SH_P_ALPHA, a);
     if (w->kind == K_PANEL && w->plate) {
@@ -813,24 +872,19 @@ static void CascadeAlpha(Widget *w, float inherit, uint64_t pp) {
         Dirty(w->plate, w->priv);
     }
     Dirty(w->priv, pp);
-    for (i = 0; i < MAX_UI; i++) {
-        Widget *k = &g_w[i];
-        if (k->alive && k->parent == (uint32_t)(w - g_w) + 1)
-            CascadeAlpha(k, w->shown * inherit, w->priv);
-    }
+    for (c = NextKid(id, 0); c; c = NextKid(id, c))
+        CascadeAlpha(&g_w[c - 1], w->shown * inherit, w->priv);
 }
 
 /* Children first, then the plate, then the widget itself,
  * every handle and instance freed. */
 static void DestroySubtree(Widget *w, uint64_t pp) {
-    int i;
+    uint32_t id = (uint32_t)(w - g_w) + 1, c, next;
 
-    for (i = 0; i < MAX_UI; i++) {
-        Widget *k = &g_w[i];
-        if (k->alive && k->parent == (uint32_t)(w - g_w) + 1) {
-            DestroySubtree(k, w->priv);
-            k->alive = 0;
-        }
+    for (c = NextKid(id, 0); c; c = next) {
+        next = NextKid(id, c);          /* taken before the child dies */
+        DestroySubtree(&g_w[c - 1], w->priv);
+        g_w[c - 1].alive = 0;
     }
     if (w->kind == K_PANEL && w->plate) {
         Widget plate;
@@ -967,6 +1021,7 @@ static uint64_t ApplyOp(int op, Widget *w) {
         uint64_t nh, npv;
         Detach(w, pp);
         w->parent = np;
+        BumpKids();                 /* the other place a parent is set */
         ParentOf(w, &nh, &npv);
         /* a panel's plate is its first child, keep it first */
         if (np && g_w[np - 1].kind == K_PANEL && at >= 0) at += 1;
@@ -1367,6 +1422,7 @@ static uint32_t Create(uint32_t scene, int kind, int op, uint32_t parent,
     wd->rgb = rgb; wd->alpha = alpha; wd->shown = 1.0f;
     if (text) { SafeText(wd->text, text); }
     wd->alive = 1;
+    BumpKids();                 /* one of the two places a parent is set */
     if (!RunJob(op, wd)) { wd->alive = 0; id = 0; }
     Log("create kind %d parent %u -> id %u handle %llx priv %llx "
         "plate %llx gen %d", kind, parent, id,
@@ -1506,16 +1562,19 @@ SH_API int ShUiReparent(uint32_t id, uint32_t parent, int index) {
 static int Children(uint32_t id, uint32_t *out, int max) {
     Widget *w = Get(id);
     uint64_t n, arr, i;
-    int k = 0, j;
+    int k = 0;
     if (!w) return -1;
     n = RQ(w->priv + C_ORDER + 8);
     arr = RQ(w->priv + C_ORDER + 16);
     for (i = 0; i < n && k < max; i++) {
         uint64_t h = RQ(arr + 8 * i);
-        for (j = 0; j < MAX_UI; j++) {
-            if (g_w[j].alive && g_w[j].handle == h &&
-                g_w[j].parent == id) {
-                out[k++] = (uint32_t)j + 1;
+        uint32_t c;
+
+        /* This widget's children only - the chain - instead of every widget
+         * in the table for every handle. */
+        for (c = NextKid(id, 0); c; c = NextKid(id, c)) {
+            if (g_w[c - 1].handle == h) {
+                out[k++] = c;
                 break;
             }
         }

@@ -156,7 +156,7 @@ static void SyncSlot(int idx, float x, float y,
                      char lines[][HUD_LINE], int n, int widest) {
     HudSlot s;
     HudView *v = &g_view[idx];
-    int i;
+    int i, batched;
     float w, h;
 
     HudLock();
@@ -180,6 +180,16 @@ static void SyncSlot(int idx, float x, float y,
         }
         return;
     }
+    /* One batch for the edits below. A slot is a panel and up to HUD_LINES
+     * lines, and every setter used to be its own synchronous job into the
+     * engine - tens of round trips through the job queue per refresh, each
+     * one waiting on the render side. They are recorded and run as one job
+     * instead. Best effort: a batch that could not be started leaves the
+     * setters running one by one, exactly as before. It starts after
+     * EnsureView, whose creates cannot be batched and whose early return
+     * would strand an open batch on this thread for the rest of the
+     * session. */
+    batched = ShUiBegin();
     if (v->x != x || v->y != y) {
         ShUiSetPos(v->panel, x, y);
         v->x = x; v->y = y;
@@ -203,6 +213,15 @@ static void SyncSlot(int idx, float x, float y,
     v->lines = n;
     v->colour = s.colour;
     if (!v->visible) { ShUiShow(v->panel, 1); v->visible = 1; }
+    if (batched && !ShUiCommit()) {
+        /* What was in the batch went with it. The view is dropped rather
+         * than left believing it is on screen, so the next refresh builds
+         * the panel again - and the line above is the only trace, because a
+         * HUD that quietly stops updating is the kind of thing that gets
+         * reported as "the mod stopped working". */
+        Log("slot %d: the batched edit did not commit, rebuilding", idx);
+        DropView(v);
+    }
 }
 
 /* Lay every corner out and push whatever changed. */

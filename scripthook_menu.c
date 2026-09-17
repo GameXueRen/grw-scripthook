@@ -321,6 +321,13 @@ static Call g_call[CALL_MAX];
 static volatile int g_callHead = 0;
 static volatile int g_callTail = 0;
 static HANDLE g_callThread = NULL;
+/* Signalled by every push; see CallPush and CallThread. Auto-reset, made
+ * once, under the lock that makes the thread. Volatile because the consumer
+ * reads it from its own loop: the thread is created and the event is made in
+ * the same critical section, so the consumer can get there first - and it
+ * must see the handle the moment it appears rather than keep a cached NULL
+ * and sleep out the rest of the session. */
+static volatile HANDLE g_callEvent = NULL;
 
 static DWORD WINAPI CallThread(LPVOID p);
 
@@ -352,6 +359,13 @@ static void CallPush(ShMenuFn fn, void *user, uint32_t menu,
          * the thread object is released at once. */
         if (g_callThread) CloseHandle(g_callThread);
     }
+    /* Made under the same lock as the thread, for the same reason: two
+     * pushers at the same instant must not each make one. A signalled
+     * auto-reset event stays signalled until somebody waits on it, so a push
+     * that lands between the consumer's look at the queue and its wait still
+     * wakes it - nothing is lost by waiting instead of polling. */
+    if (!g_callEvent) g_callEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (g_callEvent) SetEvent(g_callEvent);
     Unlock();
 }
 
@@ -369,7 +383,17 @@ static DWORD WINAPI CallThread(LPVOID p) {
             has = 1;
         }
         Unlock();
-        if (!has) { Sleep(5); continue; }
+        if (!has) {
+            /* Nothing to run, and this is where the idle cost went: it used
+             * to be Sleep(5), which is the lock taken 200 times a second to
+             * find the queue empty. The timeout is not a poll - it is what
+             * keeps the ping above at its own cadence (10ms, the period the
+             * tick table expects of this thread), and a wait with a timeout
+             * costs no lock and no work. */
+            if (g_callEvent) WaitForSingleObject(g_callEvent, 10);
+            else Sleep(5);                  /* the event would not be made */
+            continue;
+        }
         if (c.fn) c.fn(c.menu, c.item, c.value, c.user);
     }
     return 0;

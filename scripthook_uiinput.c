@@ -20,6 +20,12 @@ static HANDLE g_thread;
 static uint8_t g_down[256];
 static uint8_t g_held[256];      /* consumed on down, blocked */
 static POINT g_lastPos;
+/* Declared keys. While g_watchAny is 0 the sweep below covers the whole
+ * keyboard, which is what it has always done; the first ShUiInputWatch turns
+ * it into a sweep of the keys somebody asked for, plus whatever is being
+ * held. Nothing that ignores this API can lose a key. */
+static uint8_t g_watch[256];
+static volatile LONG g_watchAny;
 
 /* g_fn/g_user are written by ShUiSetInput on a plugin thread and read by
  * InputThread. Static initialiser, so there is no lazy-init window. */
@@ -73,7 +79,15 @@ static DWORD WINAPI InputThread(LPVOID arg) {
             Deliver(SH_UI_EV_MOVE, 0, x, y);
         }
         for (vk = 1; vk < 256; vk++) {
-            int now = (GetAsyncKeyState(vk) & 0x8000) != 0;
+            int now;
+            /* Skipped only once somebody has declared what it listens for: a
+             * key that is neither declared nor down has no edge to report,
+             * and one that is down is always polled, so its release - and the
+             * ShBlockKey that is paired with it - cannot be missed. */
+            if (InterlockedCompareExchange(&g_watchAny, 0, 0) &&
+                !g_watch[vk] && !g_down[vk])
+                continue;
+            now = (GetAsyncKeyState(vk) & 0x8000) != 0;
             if (now == g_down[vk]) continue;
             g_down[vk] = (uint8_t)now;
             if (now) {
@@ -118,4 +132,19 @@ SH_API int ShUiFocus(uint32_t scene, int take) {
 
 SH_API uint32_t ShUiFocused(void) {
     return g_focus;
+}
+
+/* Narrow what the sweep above covers, or widen it again. See scripthook.h
+ * for what declaring does and does not change; a consumer that never calls
+ * this keeps polling the whole keyboard. */
+SH_API int ShUiInputWatch(int vk, int on) {
+    if (vk < 1 || vk > 255) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    if (on) {
+        g_watch[vk] = 1;
+        InterlockedExchange(&g_watchAny, 1);
+    } else {
+        g_watch[vk] = 0;
+    }
+    ShSetError(SH_OK);
+    return 1;
 }
