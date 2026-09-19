@@ -3,7 +3,8 @@
  * scripthook.ini are gone from the tree and from the game folder, so this is
  * now the only time/weather control in the build.
  *
- * See docs/timeweather-reverse.md for the derivation. The short version of
+ * See docs/timeweather-reverse.md (not shipped in the repository) for the
+ * derivation. The short version of
  * why this rewrite is the easy one of the two: that plugin is already a
  * pure consumer of this framework's own weather API. Its import table has
  * no VirtualProtect and no VirtualAlloc, and every entry point it resolves

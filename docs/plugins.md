@@ -160,7 +160,8 @@ keeps a session that goes wrong diagnosable. A plugin that needs an
 effect the API does not have is the reason the API grows a call for it -
 `ShSetAmmoScale` is the most recent one, written because a plugin wanted
 the magazine capacity and only a hook over the engine's own computation
-can reach it (docs/ammocapacity-reverse.md). When the effect is a rule
+can reach it (docs/ammocapacity-reverse.md - a write-up kept out of the
+repository). When the effect is a rule
 over someone else's calls - a file that must look missing, a read that
 must be answered differently - a plugin registers with the layer that
 already owns those calls instead (@ref files).
@@ -183,6 +184,7 @@ their shipped binaries: AmmoCapacity
 capacity hook point came from, and Time&Weather
 (nexusmods.com/ghostreconwildlands/mods/124), whose day/night windows
 and weather behaviour the rewrite follows. The derivations are in
-docs/ammocapacity-reverse.md and docs/timeweather-reverse.md.
+docs/ammocapacity-reverse.md and docs/timeweather-reverse.md, both kept
+out of the repository.
 
 Source: https://github.com/PhialsBasement/grw-scripthook

@@ -321,7 +321,14 @@ if ($TestKit) {
     foreach ($doc in @('beta-test-plan.md', 'beta-audit-first-public-beta.md')) {
         $src = [System.IO.Path]::Combine($root, 'docs', $doc)
         if (-not [System.IO.File]::Exists($src)) {
-            $missing += "docs\$doc  (repo file)"
+            # Optional on purpose (2026-09-19). These two are kept out of the
+            # repository - see .gitignore - and live only in the author's
+            # working copy, so a tree without them must still pack: it simply
+            # has no test plan to hand a tester. Everything else that goes
+            # missing is still a hard miss, which is what the player package
+            # refuses to build on.
+            Write-Host "  - docs\$doc  (not in this tree: kept out of the repository)" `
+                       -ForegroundColor DarkGray
             continue
         }
         $copied = [System.IO.Path]::Combine($docsDst, $doc)

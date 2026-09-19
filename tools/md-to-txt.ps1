@@ -25,7 +25,7 @@
   every Chinese character into mojibake.
 
 .EXAMPLE
-  pwsh ./tools/md-to-txt.ps1 -Path docs/beta-test-plan.md
+  pwsh ./tools/md-to-txt.ps1 -Path docs/forge-mod-loader.md
   pwsh ./tools/md-to-txt.ps1 -Path docs/*.md -OutDir out\readable
 #>
 [CmdletBinding()]

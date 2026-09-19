@@ -2,7 +2,8 @@
  *
  * A behaviour-equivalent re-implementation of the third-party plugin
  * plugins\OpticalCamo\OpticalCamo.asi, recovered by disassembly - see
- * docs/opticacamo-reverse.md for every address behind what is below.
+ * docs/opticacamo-reverse.md (not shipped in the repository) for every
+ * address behind what is below.
  * The original is a C++ plugin that late-binds this framework's exports
  * (GetModuleHandleA("dinput8.dll") + GetProcAddress) and votes on a
  * part-level flag to decide whether the player's optical camo is doing

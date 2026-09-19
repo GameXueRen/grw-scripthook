@@ -1,6 +1,6 @@
 /* Ammo capacity, scaled - the framework's own replacement for the
- * third-party AmmoCapacity.asi. See docs/ammocapacity-reverse.md for the
- * full derivation; this file is its section 7.1.
+ * third-party AmmoCapacity.asi. See docs/ammocapacity-reverse.md (kept out
+ * of the repository) for the full derivation; this file is its section 7.1.
  *
  * The fact that made every other approach fail, and the reason this is a
  * hook and not a field write: the magazine capacity is STORED NOWHERE. The

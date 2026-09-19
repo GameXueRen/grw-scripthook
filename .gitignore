@@ -10,3 +10,15 @@ out/
 .claude/
 .codebuddy/
 __pycache__/
+
+# Kept out of the repository on purpose: the reverse-engineering write-ups
+# and the public-beta documents. They stay in the working copy and are never
+# published. `git rm --cached` is what untracks them; these lines are what
+# keep them untracked afterwards.
+docs/ammocapacity-reverse.md
+docs/npcspawner-reverse.md
+docs/opticacamo-reverse.md
+docs/timeweather-reverse.md
+docs/beta-audit-first-public-beta.md
+docs/beta-test-plan.md
+docs/release-post-1.0-beta1.md

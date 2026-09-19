@@ -716,7 +716,8 @@ SH_API int ShDespawn(uint64_t entity);
  * ShNpcArchetype carries only {id, kind} with no name, so the
  * grouping cannot be derived: it is the four id tables
  * NPCSpawner.asi shipped plus the engine's own kind value as the
- * fallback. See docs/npcspawner-reverse.md for the evidence.
+ * fallback. See docs/npcspawner-reverse.md (kept out of the repository)
+ * for the evidence.
  */
 
 #define SH_NPC_GROUP_SANTA_BLANCA 0
@@ -2395,7 +2396,8 @@ SH_API int  ShGetVisibility(float *out);
  *
  *  Capacity is the return value of one engine function (RVA 0x614CB0) and
  *  is stored nowhere, so this hook is the only way to change it - reading
- *  memory cannot find it. See docs/ammocapacity-reverse.md.
+ *  memory cannot find it. See docs/ammocapacity-reverse.md (kept out of
+ *  the repository).
  *
  *  The hook installs on the first call that asks for something other than
  *  1,1; asking for 1,1 first leaves the game alone and installs nothing.

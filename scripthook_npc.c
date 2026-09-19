@@ -547,8 +547,8 @@ uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos) {
  * grouping has ever been written down: the engine keeps an
  * archetype's faction to itself and ShNpcArchetype has no name.
  * The four id tables win; the engine's kind is the fallback.
- * docs/npcspawner-reverse.md carries the evidence, and the
- * originals of these bytes.
+ * docs/npcspawner-reverse.md (kept out of the repository) carries the
+ * evidence, and the originals of these bytes.
  */
 
 static const char *g_groupNames[SH_NPC_GROUP_MAX] = {

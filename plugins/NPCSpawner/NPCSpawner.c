@@ -23,7 +23,8 @@
  * ShNpcSpawnFormation - so this plugin keeps only what is its
  * own: the menu, the spinner, the tracked list and the undo.
  * Another plugin gets the same summon by calling those exports;
- * see scripthook.h and docs/npcspawner-reverse.md.
+ * see scripthook.h and docs/npcspawner-reverse.md (not shipped in the
+ * repository).
  *
  * Deviations from the original, all deliberate (see the report):
  *   - the tracked list is pruned of dead handles before the
