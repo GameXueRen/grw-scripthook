@@ -33,9 +33,11 @@ param(
     [string]$OutDir,
 
     # The plugins that ship. Everything else under plugins\ is left out.
+    # Keep this in step with $betaSet in build_msvc.ps1: that one decides what
+    # a -Beta / -Release build deploys, this one what the package carries.
     [string[]]$Plugins = @(
         'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat',
-        'TimeWeatherControl', 'OpticalCamo', 'ammo_capacity'
+        'TimeWeatherControl', 'OpticalCamo', 'ammo_capacity', 'micfix'
     ),
 
     # Also produce a .zip beside the tree.

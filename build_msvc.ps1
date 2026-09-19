@@ -10,7 +10,7 @@ Usage:
   pwsh ./build_msvc.ps1
   pwsh ./build_msvc.ps1 -Gamedir "D:\Games\GRW"
   pwsh ./build_msvc.ps1 -Clean
-  pwsh ./build_msvc.ps1 -Beta        # public beta: only the eight shipped plugins
+  pwsh ./build_msvc.ps1 -Beta        # public beta: only the nine shipped plugins
   pwsh ./build_msvc.ps1 -Release     # -Beta plus diagnostics compiled out
 #>
 [CmdletBinding()]
@@ -68,7 +68,7 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 #                     taught, and the next step.
 $betaSet = @(
     'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat',
-    'TimeWeatherControl', 'OpticalCamo', 'ammo_capacity'
+    'TimeWeatherControl', 'OpticalCamo', 'ammo_capacity', 'micfix'
 )
 $script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
 $releaseBuild     = [bool]$Release
