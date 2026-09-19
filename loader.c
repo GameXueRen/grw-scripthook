@@ -236,6 +236,20 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     (void)p;
     ShConfigInit();
     LogAlways("config loaded from scripthook.ini");
+    /* Which menu language this session runs in, and - on the one run that
+     * picks it - where it came from. The config layer cannot write this
+     * itself: a line logged while it is loading would ask it for the log
+     * level, which is one of the settings it is loading. logs\scripthook.log
+     * is the file a report arrives with, whatever [Settings] LogLevel says,
+     * so the answer belongs here, beside the version and the plugin count. */
+    {
+        char note[200];
+        if (ShLangPickLine(note, sizeof(note)))
+            LogAlways("menu language: %s (%s)", ShLangGet(), note);
+        else
+            LogAlways("menu language: %s ([Settings] Language=)",
+                      ShLangGet());
+    }
     /* The overlay's own switch, read here because the overlay thread starts
      * from a static initialiser and waits for this answer: with
      * [loader] overlay=0 it does nothing at all - no factory capture, no

@@ -47,7 +47,15 @@ extern "C" {
  *  for this process only, plus the device picker the game has no option for.
  *  Two rules proven in the field are inside it - a device is renamed on both
  *  of the doors the game asks or on neither, and a name it can already read is
- *  never touched - and both were paid for in game launches. */
+ *  never touched - and both were paid for in game launches.
+ *
+ *  It also picks the menu language on a first run. With no [Settings]
+ *  Language= line - which is what a package now ships, the line is dropped
+ *  when one is packed - the language comes from the Windows user language,
+ *  matched against what the menu can actually show: the exact code, else the
+ *  same language in another variant (zh-TW for zh-CN, en-GB for en-US), else
+ *  English. The pick is written back to scripthook.ini, which is what makes
+ *  it a first run only and what a player deletes to have it picked again. */
 #define SH_VERSION "1.0-beta3"
 
 /** Where this build's source lives, in one place for the same reason the
@@ -2948,6 +2956,11 @@ SH_API const char *ShLangForOwned(const char *owner,
 SH_API int ShLangMatch(const char *a, const char *b);
 /** The active language, from [Settings] Language. */
 SH_API const char *ShLangGet(void);
+/** Internal, for the loader: one line saying where this session's menu
+ *  language came from, on the run that picked it because the settings file
+ *  had no [Settings] Language= row. Returns 0 - and empties buf - on every
+ *  other run. */
+SH_API int ShLangPickLine(char *buf, int size);
 /** Switch the active language now: what was read for the old language is
  *  dropped and the next lookup reads the files again, so the menu - which
  *  translates as it captures - is in the new language on the next frame.

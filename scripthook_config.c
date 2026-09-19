@@ -213,13 +213,15 @@ static const char *DEFAULT_CONFIG =
     "enabled=0\n"
     "\n"
     "[Settings]\n"
-    "Language=zh-CN\n"
-    "Languages=zh-CN,en-US\n"
-    "; LogLevel: none/error/warn/info/debug. Left out, a working build logs\n"
-    "; at info (every module's log) and a release build at warn (the\n"
-    "; framework's module logs off; scripthook.log, the crash report and\n"
-    "; the plugins' own logs are still written). Uncomment to change.\n"
-    ";LogLevel=info\n";
+    "; LogLevel: none/error/warn/info/debug (a release build defaults to\n"
+    "; warn, any other to info). Uncomment to change.\n"
+    ";LogLevel=info\n"
+    "\n"
+    "; Menu language: left out - as here - the first launch picks one from\n"
+    "; the Windows user language and writes it below. Delete the line to\n"
+    "; have it picked again.\n"
+    ";Languages=zh-CN,en-US\n"
+    ";Language=zh-CN\n";
 static void WriteDefaultConfig(const char *path) {
     FILE *f = fopen(path, "w");
     if (f) {
@@ -475,6 +477,23 @@ static char g_langName[LANG_CODE_MAX] = "";
 static char g_langList[LANG_LIST_MAX][LANG_CODE_MAX];
 static int  g_nLangList;
 static char g_langDisp[LANG_LIST_MAX][32];
+/* [Settings] Language= was in the file. Only its ABSENCE is a reason to
+ * pick one: as soon as the line is there - even empty, even a code the
+ * menu has no text for - the file is the answer and LangAutoChoose never
+ * runs. */
+static int  g_langSet;
+/* The code picked on that first run, waiting for LoadConfig to write it
+ * back into the settings file - which is what makes it a first run only.
+ * Empty whenever the file already had the line. */
+static char g_langAuto[LANG_CODE_MAX];
+/* Why it was picked, and how the write went: the one line the loader puts
+ * next to the version in logs\scripthook.log, through ShLangPickLine. The
+ * line is not written from here - logging during this load would ask this
+ * layer for the log level while this layer is still loading (ShLogLevel
+ * reads [Settings] LogLevel through ShConfigGetStr), which re-enters
+ * LoadConfig and leaves the log unopened. */
+static char g_langWhy[96];
+static char g_langNote[200];
 
 static CRITICAL_SECTION g_textLock;
 static volatile LONG    g_textLockReady = 0;
@@ -828,6 +847,7 @@ static void PeekLanguages(const char *text) {
         if (!_strnicmp(s, "Language=", 9)) {
             const char *v = s + 9;
             size_t l;
+            g_langSet = 1;              /* present, whatever it says */
             while (*v == ' ' || *v == '\t') v++;
             l = strlen(v);
             while (l > 0 && (v[l - 1] == ' ' || v[l - 1] == '\t'))
@@ -858,6 +878,97 @@ static int g_nDisp;
 
 static void LangNameAdd(const char *code, const char *label);
 
+/* ---- picking a language nobody picked ---------------------------- */
+
+/* The Windows user interface language, as a BCP-47 tag: "zh-CN" on a
+ * Chinese Windows, "en-US" on an English one. The user's own choice comes
+ * first - that is the language they read - and the system's only if the
+ * first has nothing to say. */
+static int SysLangCode(char *out, int cap) {
+    WCHAR tag[LOCALE_NAME_MAX_LENGTH];
+    LANGID id = GetUserDefaultUILanguage();
+    int n;
+
+    if (!id) id = GetSystemDefaultUILanguage();
+    if (!id) return 0;
+    /* LCIDToLocaleName is the Unicode entry point: it takes the tag as
+     * wchar_t and hands back the same "zh-CN" every other part of this
+     * file uses only after the conversion. */
+    if (!LCIDToLocaleName(MAKELCID(id, SORT_DEFAULT), tag,
+                          (int)(sizeof(tag) / sizeof(tag[0])), 0))
+        return 0;
+    n = WideCharToMultiByte(CP_UTF8, 0, tag, -1, out, cap, NULL, NULL);
+    return n > 0 && out[0] != 0;
+}
+
+/* "zh-TW" and "zh-CN" are one language in two scripts, "en-GB" and
+ * "en-US" one language in two regions: the primary subtag is what makes
+ * them the same language, and a menu in the right language with the wrong
+ * variant beats English. Two different languages are never matched this
+ * way - no spelling of "ja-JP" makes it "zh-CN". */
+static int LangPrimaryEq(const char *a, const char *b) {
+    size_t na = 0, nb = 0;
+
+    if (!a || !b) return 0;
+    while (a[na] && a[na] != '-' && a[na] != '_') na++;
+    while (b[nb] && b[nb] != '-' && b[nb] != '_') nb++;
+    if (!na || na != nb) return 0;
+    return _strnicmp(a, b, na) == 0;
+}
+
+/* The code this session will use, out of the languages the menu can
+ * actually show: the exact one, else the same language in another variant,
+ * else English - which every build carries (the framework declares en-US
+ * text, and the lookup falls back to it per key even when en-US is not on
+ * offer). *how says which of the three it was, for the log line. */
+static const char *LangPickOffered(const char *code, const char **how) {
+    int i;
+
+    if (code && code[0]) {
+        for (i = 0; i < g_nLangList; i++)
+            if (LangEq(g_langList[i], code)) {
+                *how = "exact match";
+                return g_langList[i];
+            }
+        for (i = 0; i < g_nLangList; i++)
+            if (LangPrimaryEq(g_langList[i], code)) {
+                *how = "same language, another variant";
+                return g_langList[i];
+            }
+        *how = "not offered - using en-US";
+    } else {
+        *how = "nothing to match - using en-US";
+    }
+    return "en-US";
+}
+
+/* Called once, from ResolveLanguage, and only when [Settings] Language= is
+ * not in the file at all: pick one for this session out of the Windows
+ * user language, and leave the code in g_langAuto for LoadConfig to write
+ * back. That write is what makes this a first run only - from the second
+ * launch the line is in the file, so nothing here is reached. Deleting the
+ * line is therefore also how a player has the pick made again, which is
+ * what the README tells them to do when the guess is wrong or the language
+ * they want has changed. */
+static void LangAutoChoose(void) {
+    char sys[LANG_CODE_MAX];
+    const char *pick, *how = "nothing to match";
+    int have = SysLangCode(sys, sizeof(sys));
+
+    if (!have) sys[0] = 0;
+    pick = LangPickOffered(sys, &how);
+    CopyN(g_langName, sizeof(g_langName), pick);
+    CopyN(g_langAuto, sizeof(g_langAuto), pick);
+    /* Where it came from, for the line the loader writes - LoadConfig adds
+     * how the write back went. See ShLangPickLine. */
+    if (have)
+        snprintf(g_langWhy, sizeof(g_langWhy),
+                 "Windows UI language %s, %s", sys, how);
+    else
+        snprintf(g_langWhy, sizeof(g_langWhy),
+                 "the Windows UI language could not be read, %s", how);
+}
+
 /* The languages the build declares text for, then what the file asked
  * for. [Settings] Languages wins when it lists one (it may offer a
  * subset, or a language that only some plugins translate yet);
@@ -886,6 +997,12 @@ static void ResolveLanguage(void) {
             CopyN(g_langList[i], sizeof(g_langList[i]), g_builtin[i]);
         g_nLangList = keep;
     }
+    /* Nobody picked one and the file does not say: pick it now, once (see
+     * LangAutoChoose). An EMPTY Language= is not this case - the line is in
+     * the file, so the file is the answer, and the fallback below (the
+     * first language on offer) is what an empty line has always meant. */
+    if (!g_langName[0] && !g_langSet)
+        LangAutoChoose();
     if (!g_langName[0]) {
         if (g_nLangList)
             CopyN(g_langName, sizeof(g_langName), g_langList[0]);
@@ -1794,6 +1911,32 @@ SH_API const char *ShLangGet(void) {
     return g_langName;
 }
 
+/** Internal, for the loader: the one line that says where this session's
+ *  menu language came from, when this run is the run that picked it -
+ *  which is exactly the run whose settings file had no [Settings]
+ *  Language= row. Returns 0, and empties buf, on every later run.
+ *
+ *  The loader writes it rather than this layer logging it: the line goes
+ *  into logs\scripthook.log at every level, and a line logged from inside
+ *  this load would ask this layer for the log level - which is one of the
+ *  settings still being loaded (ShLogLevel reads [Settings] LogLevel
+ *  through ShConfigGetStr), so the log ends up not opened at all. */
+SH_API int ShLangPickLine(char *buf, int size) {
+    if (!buf || size <= 0) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    LoadConfig();
+    buf[0] = 0;
+    if (!g_langNote[0]) {
+        ShSetError(SH_OK);
+        return 0;
+    }
+    CopyN(buf, (size_t)size, g_langNote);
+    ShSetError(SH_OK);
+    return 1;
+}
+
 /* One lock guards parse-once publication and read-back: without it,
  * a parse in flight published half-filled tables to concurrent
  * readers, and two writers raced the same .tmp file. */
@@ -1857,6 +2000,24 @@ static void LoadConfig(void) {
          * ShConfigGet* / ShLang call re-read the file and appended the
          * same rows to the entry table again. */
         g_configReady = 1;
+        /* The one thing a first run writes on its own: the language
+         * LangAutoChoose picked. After the flag above, so that the call
+         * below finds a loaded config and returns, instead of parsing this
+         * file into the entry table a second time. A read-only game folder
+         * fails the write and costs nothing else: the session keeps the
+         * language it picked, and the next launch picks again. */
+        if (g_langAuto[0]) {
+            if (ShConfigSetStr("Settings", "Language", g_langAuto))
+                snprintf(g_langNote, sizeof(g_langNote),
+                         "picked on this run - no [Settings] Language= line; "
+                         "%s; written back, delete the line to have it picked "
+                         "again", g_langWhy);
+            else
+                snprintf(g_langNote, sizeof(g_langNote),
+                         "picked on this run - no [Settings] Language= line; "
+                         "%s; scripthook.ini could not be written, so the "
+                         "next launch picks again", g_langWhy);
+        }
     } else {
         /* No file, and no second one either: a read-only folder, or the
          * file held open by something else. The flag goes up anyway, because

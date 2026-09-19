@@ -194,6 +194,7 @@ if ([System.IO.File]::Exists($iniPath)) {
     $wroteForge = $false
     $inSettings = $false
     $wroteSettings = $false
+    $langDropped = $false
 
     foreach ($line in $lines) {
         $t = $line.Trim()
@@ -226,16 +227,26 @@ if ([System.IO.File]::Exists($iniPath)) {
                     $out.Add("LogLevel=$logLevel")
                     continue
                 }
-                # A player package writes nothing here; its other keys
-                # (Language, Languages, MenuScale*) are kept below.
+                # A player package writes nothing here; Languages,
+                # MenuScale* and the rest of the section are kept below.
             }
         }
         if ($inPlugins) { $dropped++; continue }
-        # [Settings] keeps everything it was found with except a LogLevel
-        # line: this script owns that one, and what it owns is written at
-        # the section head above.
+        # [Settings] keeps what it was found with except two lines. LogLevel
+        # is this script's own, and its replacement is written at the
+        # section head above. Language= is dropped because a package has to
+        # arrive with NO language chosen: the framework only picks one
+        # (Windows user language -> a language the menu has -> English)
+        # while that line is absent, so shipping the packing machine's own
+        # choice would decide the menu language for every player. The line
+        # is a player's to write, not ours. Languages= stays - an optional
+        # list of what the menu offers is a setting somebody may well have
+        # meant to send.
         if ($inSettings) {
             if ($t -match '^LogLevel\s*=') { $dropped++; continue }
+            if ($t -match '^Language\s*=') {
+                $dropped++; $langDropped = $true; continue
+            }
             $out.Add($line)
             continue
         }
@@ -279,6 +290,11 @@ if ([System.IO.File]::Exists($iniPath)) {
     Write-Host ("  = [plugins], [forgemod] enabled={0}, LogLevel={1} rewritten" -f `
                 $forgeOn, $(if ($logLevel) { $logLevel } else { '(build default)' })) `
                -ForegroundColor DarkGray
+    if ($langDropped) {
+        Write-Host ("  = Language= dropped: the package ships with no menu " +
+                    "language chosen (first launch picks one)") `
+                   -ForegroundColor DarkGray
+    }
 }
 
 # ---- third-party notices ---------------------------------------------------

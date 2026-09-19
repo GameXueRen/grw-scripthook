@@ -119,9 +119,23 @@ log_reads=0             ; 1 = 记录每次读取（排查用）
 
 [Settings]
 LogLevel=warn           ; 日志等级：debug, info, warn, error
-Languages=zh-CN,en-US   ; 设置菜单中可选的语言列表（逗号分隔，BCP-47 语言码）
-Language=zh-CN          ; 当前菜单语言
+Languages=zh-CN,en-US   ; 菜单可选的语言列表（逗号分隔，BCP-47 语言码）；留空 = 内置的全部语言
+;Language=zh-CN         ; 当前菜单语言（首次启动自动写入；删掉这行 = 下次启动按系统语言重选）
 ```
+
+---
+
+## 菜单语言是怎么定下来的
+
+`[Settings]` 里**没有** `Language=` 这一行时（新装就是这样），启动时会自己选一次：
+
+1. 取 **Windows 用户语言**（`zh-CN` / `en-US` / `ja-JP` …）；
+2. 在菜单实际提供的语言里匹配：**精确命中**就用它；否则**同一门语言的不同变体**也算命中（`zh-TW`、`zh-Hans` → 菜单里的 `zh-CN`；`en-GB` → `en-US`）；都不中就用 **`en-US`**（英文文本每个版本都带，逐条也会回落到它）；
+3. 把选中的码**写回 `scripthook.ini`**（就是上面那行 `Language=`），并往 `logs\scripthook.log` 写一行 `language: ...`，说明系统语言读到什么、为什么这样选。
+
+从第二次启动起，`Language=` 这一行就是唯一依据：改它、或在菜单的「菜单语言」里改，都立即生效并写回；**删掉这一行，下次启动就会重新按当时的系统语言选一次**。
+
+> 老版本生成的 `scripthook.ini` 里有写死的 `Language=zh-CN`。那是"已配置"，框架不会去改它 —— 想让海外玩家自动落到英文、或想用上这条自动逻辑，把那行删掉即可。
 
 ---
 
