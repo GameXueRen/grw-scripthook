@@ -386,6 +386,25 @@ Build-Plugin 'ammo_capacity' 'ammo_capacity.c' @($libPath, 'libscripthook.lib')
 # memory.
 Build-Plugin 'TimeWeatherControl' 'TimeWeatherControl.c' @($libPath, 'libscripthook.lib')
 
+# micfix hands the game ASCII names for recording devices whose own name is
+# not ASCII - the in-process form of the community fix for "the game finds no
+# microphone on a Chinese Windows" - and adds the device picker the game has
+# none of. It hooks ole32!CoCreateInstance with MinHook and patches the vtable
+# slots of the DirectShow objects that call returns; see the source header.
+# It links the import library for the menu/text/paths, oleaut32 for the BSTR
+# it writes back into a VARIANT, and ole32 for CoInitializeEx/CoUninitialize -
+# its scan runs on a plugin thread and has to initialize COM there itself.
+# CoCreateInstance is still resolved by name at run time rather than linked,
+# so the plugin's own scan can reach the original with the hook installed.
+Build-Plugin -Name 'micfix' -Source 'micfix.c' `
+    -LinkArgs @($libPath, 'libscripthook.lib', 'ole32.lib', 'oleaut32.lib') `
+    -ExtraSources @(
+    (Join-Path $root 'third_party/minhook/src/buffer.c'),
+    (Join-Path $root 'third_party/minhook/src/hook.c'),
+    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
+    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
+)
+
 # A plugin's own files are seeded next to its .asi the first time only:
 # a later build must never overwrite settings changed in game, and never
 # a lang.ini that was edited in place. Both sit in the plugin's source

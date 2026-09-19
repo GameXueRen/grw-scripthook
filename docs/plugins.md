@@ -166,9 +166,15 @@ over someone else's calls - a file that must look missing, a read that
 must be answered differently - a plugin registers with the layer that
 already owns those calls instead (@ref files).
 
-Four plugin sources still carry MinHook of their own, from before this
-rule: `skipintro`, `ModeExitProbe`, `ModeCallProbe` and `LastRites_dlcfix`.
-Each is a convergence item, not a licence.
+Five plugin sources still carry MinHook of their own, from before this
+rule: `skipintro`, `ModeExitProbe`, `ModeCallProbe`, `LastRites_dlcfix` and
+`micfix`. Each is a convergence item, not a licence. `micfix` is the most
+recent one and the only one aimed outside the game: it hooks
+`ole32!CoCreateInstance` and patches the vtable slots of the DirectShow and
+MMDevice objects that call returns, so the recording-device names the game
+walks through both doors come back ASCII
+(`plugins/micfix/micfix.c` says why, and what would
+move it into the framework: a second consumer of the device list).
 
 ## Credits
 

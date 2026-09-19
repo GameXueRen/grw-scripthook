@@ -20,7 +20,7 @@ GAMEDIR = ../..
 .PHONY: all roulette fling spawner npcspawner enemyreinforce modeprobe \
         modecallprobe blacklistsample filewatchsample drawsample cnchat \
         crazycars freecam fov fps chaos sample skipintro opticalcamo \
-        ammocapacity timeweathercontrol \
+        ammocapacity timeweathercontrol micfix \
         docs clean
 
 capprobe: $(GAMEDIR)/plugins/CapProbe/CapProbe.asi
@@ -206,6 +206,29 @@ $(GAMEDIR)/plugins/tp_roulette/tp_roulette.asi: plugins/tp_roulette/tp_roulette.
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/tp_roulette/tp_roulette.c \
 		-L. -lscripthook -lgdi32 -luser32
+
+micfix: $(GAMEDIR)/plugins/micfix/micfix.asi
+
+# micfix.ini and lang.ini sit beside the source and are seeded into the plugin
+# folder by build_msvc.ps1; this target only builds the .asi. MinHook is
+# compiled in (the plugin hooks ole32!CoCreateInstance) and the framework is
+# linked, because the menu, the text and the paths are all Sh* calls.
+# oleaut32 is the BSTR written back into a VARIANT, ole32 is
+# CoInitializeEx/CoUninitialize for the scan's own thread; CoCreateInstance
+# itself is resolved by name at run time.
+$(GAMEDIR)/plugins/micfix/micfix.asi: plugins/micfix/micfix.c scripthook.h log.h \
+        libscripthook.a \
+        third_party/minhook/src/buffer.c third_party/minhook/src/hook.c \
+        third_party/minhook/src/trampoline.c \
+        third_party/minhook/src/hde/hde64.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ plugins/micfix/micfix.c \
+		third_party/minhook/src/buffer.c \
+		third_party/minhook/src/hook.c \
+		third_party/minhook/src/trampoline.c \
+		third_party/minhook/src/hde/hde64.c \
+		-Ithird_party/minhook/include \
+		-L. -lscripthook -lole32 -loleaut32
 
 libscripthook.a: $(GAMEDIR)/dinput8.dll
 
