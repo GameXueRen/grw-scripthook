@@ -187,6 +187,8 @@ MISMATCH                 （版本/指纹不一致）
 | 17 | **HUD 与插件面板照旧**（性能改动的验收）| 让 HUD 出几行（换弹/载具提示等），再看插件自己的面板：开关一次、调一次透明度、进出一次页面 | HUD 行**照常出现、位置/颜色/显隐正常、内容会更新**；面板显示与透明度正常，关闭后不残留 |
 | 18 | **菜单回调即时生效**（性能改动的验收）| 在菜单里改任意一个开关（如弹药上限），立刻退回游戏看效果 | 改动**立刻生效**，不需要开关菜单或重启（回调线程改成了等事件） |
 | 19 | **键盘照旧**（性能改动的验收）| 菜单里 `↑↓/←→/Enter/ESC` 走一圈；用一次聊天键；按一次你设的插件热键（如第一人称 `F2`）| 全部**照旧可用**，没有哪一个键失灵或需要按两次 |
+| 21 | **提示条跟随菜单语言**（2026-09-19 修）| 把菜单语言切成 English（菜单里的「菜单语言」，或在 `scripthook.ini` 的 `[Settings]` 写 `Language=en-US`）→ 切一次第一人称（热键或菜单开关）| 提示条显示**英文**：`Third person on` / `First person on (aim or toggle again if the head shows)` | `logs\scripthook_hud.log`：`toast 1 "Third person on"` / `toast 1 "First person on (aim or toggle again if the head shows)"` —— 这一行写的是**渲染后**的文本，所以不必截图也能验 |
+| 20 | **第一人称不再眨眼**（2026-09-19 修的验收）| 开第一人称，在**联机**里与队友靠近到 20 米内走动一段（十几分钟就够）；中间**开关几次第一人称**、进一次菜单/地图、至少一次加载；结束时把 `logs\scripthook_fpx.log` 整份发回 | 视角**不闪到队友身上**，也不应有明显的「闪一下第三人称」 | `scripthook_fpx.log` 六条判据：① `ring p:` 每条目应显示**坐标 + 年龄**（如 `4410.4,2387.9,752.4@1200ms`），**只有真换世界后才会短暂出现 `retired(Nms)`**；② `pick:` 变化行应**极少**（8 分钟 7 次是上一版，十几分钟目标个位数）；③ `pick: no position this frame, kept the last capture (N)` = 位置短抖被粘滞兜住（玩家看不到，N 是救下来的次数）；④ `pick: no player position for N ms - the world is being replaced` = 真的换了世界（一场几次正常）；⑤ `pick: ring had nothing, kept the last capture (N)` = 环空窗被兜住；⑥ `logs\scripthook_crash.log` **不该有新条目** |
 
 ---
 

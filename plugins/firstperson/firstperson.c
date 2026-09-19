@@ -132,7 +132,10 @@ static const ShText kEn[] = {
       "on, view taken by the engine (%s) [%s %+.0f %+.0f %+.0f]" },
     { "@fp.hint",
       "If the head is not hidden by itself, aim with the right mouse "
-      "button or switch first person off and on again." }
+      "button or switch first person off and on again." },
+    { "@fp.say.on",
+      "First person on (aim or toggle again if the head shows)" },
+    { "@fp.say.off", "Third person on" }
 };
 
 static const ShText kZh[] = {
@@ -166,7 +169,10 @@ static const ShText kZh[] = {
     { "@fp.status.away",
       "已开启，视角由引擎接管（%s）[%s %+.0f %+.0f %+.0f]" },
     { "@fp.hint",
-      "头部若未自动隐藏，请按右键瞄准或重新切换解决。" }
+      "头部若未自动隐藏，请按右键瞄准或重新切换解决。" },
+    { "@fp.say.on",
+      "第一人称已开启（头部若未隐藏，请按右键瞄准或重切一次）" },
+    { "@fp.say.off", "第三人称已开启" }
 };
 
 /* Late binding, like everything else in this plugin: the entry points
@@ -616,7 +622,15 @@ static void SetFp(int on) {
          * on the rare frame that call cannot name the head, the
          * player's own toggle is what sets it right again. Say
          * so up front rather than leave it to be discovered. */
-        Say(SAY_FP_ON, "第一人称已开启（头部若未隐藏，请按右键瞄准或重切一次）",
+        /* Both lines are keys now, not Chinese (2026-09-19). They were
+         * the last two strings in this plugin that ignored the menu
+         * language: the rows, the status line and the hint all went
+         * through the plugin's own table, and these two did not. They are
+         * read by whoever set [Settings] Language, so they belong in
+         * kEn/kZh like everything else - SetText falls back to the key
+         * when the framework cannot resolve one, the same as the status
+         * rows below. */
+        Say(SAY_FP_ON, SetText("@fp.say.on"),
             SAY_RGB_DONE, SH_TOAST_MS_DEFAULT);
     } else {
         InterlockedExchange(&g_on, 0);
@@ -628,7 +642,7 @@ static void SetFp(int on) {
         ShowHead();
         if (g_setBlur) g_setBlur(1);
         Hold(0);
-        Say(SAY_TP, "第三人称已开启", SAY_RGB_PLAIN,
+        Say(SAY_TP, SetText("@fp.say.off"), SAY_RGB_PLAIN,
             SH_TOAST_MS_DEFAULT);
     }
     /* The Enabled row shows the state a hotkey may have just

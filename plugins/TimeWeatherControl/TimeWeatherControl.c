@@ -621,8 +621,15 @@ static DWORD WINAPI TickThread(LPVOID p) {
             RefreshStatus(0.0f, 0.0f, inGame, allowed);
             continue;
         }
-        gaveBack = 0;
 
+        /* The flag is not cleared here (2026-09-19). It used to be, and
+         * that one line sat above the switch check - so every 250 ms the
+         * "already handed back" memory was wiped, the guard below was
+         * always true, and a session with the feature switched off wrote
+         * "handed back (switch off)" four times a second: 64,498 lines
+         * and 2.5 MB in one evening of the field log. Coming back into
+         * the driving path clears it below, which is the only place that
+         * means "there is something to give back again". */
         if (!InterlockedCompareExchange(&g_enabled, 0, 0)) {
             /* Switching the plugin off hands back what it took, exactly
              * like a blocked mode does: leaving a 2x clock and a pinned

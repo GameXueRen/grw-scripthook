@@ -302,10 +302,13 @@ static uint8_t *NewStub(uint64_t nearSite) {
  * r9, and the placement picks the one that sits where the
  * local player is.
  *
- * Layout, fixed so the stub can address it without help:
- *   +0x000  uint64 rcx of the calls that hashed here
- *   +0x200  uint64 r8 of the same calls
- *   +0x400  uint64 r9 of the same calls
+ * Layout, fixed so the stub can address it without help - the two
+ * strides follow RING_SLOTS, so the sizes here and the offsets the
+ * stub emits cannot drift apart:
+ *   +0x0000  uint64 rcx of the calls that hashed here
+ *   +0x0800  uint64 r8 of the same calls   (RING_SLOTS * 8)
+ *   +0x1000  uint64 r9 of the same calls   (RING_SLOTS * 16)
+ *   +0x1800  uint64 the frame it was captured in (RING_SLOTS * 24)
  *
  * No counter, no flag: the stub would have to read, bump and
  * write a shared index on every call, and all three crashes
@@ -317,13 +320,49 @@ static uint8_t *NewStub(uint64_t nearSite) {
  * slots and a stir of the pointer's upper bits: eight slots
  * let two soldiers of the same squad collide every other
  * frame, and the eye went wandering onto whoever wrote last.
+ *
+ * Sixty four was still not enough in co-op: with four soldiers the
+ * local capture was missing often enough, frame by frame, for the
+ * placement below to fall through to a squadmate - the flicker the
+ * field reported on 2026-09-18 (it stopped as soon as the squad was
+ * far away). The ring is 256 slots now, which is a wider spread of
+ * the same hash and no extra work in the stub: still one store per
+ * call, still no read and no bump.
  */
-#define RING_SLOTS   64
+#define RING_SLOTS   256
 static volatile struct {
-    uint64_t a0[RING_SLOTS];     /* +0x000 */
-    uint64_t a2[RING_SLOTS];     /* +0x200 */
-    uint64_t a3[RING_SLOTS];     /* +0x400 */
+    uint64_t a0[RING_SLOTS];              /* +0x0000 */
+    uint64_t a2[RING_SLOTS];              /* +0x0800 */
+    uint64_t a3[RING_SLOTS];              /* +0x1000 */
+    uint64_t t [RING_SLOTS];              /* +0x1800  the stamp it was written */
 } g_ring;
+
+/* The stamp the ring entries carry: the generation in the top bits and
+ * GetTickCount64() below it. The placement writes this one word every
+ * frame and the stub copies it into the slot along with the capture -
+ * the emitted code below loads it and stores it, so nothing about the
+ * engine's path changes with its meaning.
+ *
+ * Milliseconds rather than a frame count (2026-09-19). A frame count is
+ * only meaningful while the placement runs, and the ring is filled by
+ * the engine's own per-character calls, not by us: an entry the engine
+ * had written two seconds earlier was thrown away as too old, and in
+ * the field log of 2026-09-18 that is what "the eye is never placed
+ * again" looked like - one successful pick at 19:15, then nothing for
+ * four hours. What the stamp has to catch is a world that has been
+ * replaced, and that is the generation, not an entry a few seconds old.
+ */
+#define RING_GEN_SHIFT 40
+#define RING_GEN_MASK  (((uint64_t)1 << RING_GEN_SHIFT) - 1)
+static volatile uint64_t g_ringStamp;
+static volatile uint32_t g_ringGen = 1;
+
+/* Written from the placement, once a frame, and from Fp2Forget when the
+ * generation it carries is bumped. */
+static void RingStampNow(void) {
+    g_ringStamp = ((uint64_t)g_ringGen << RING_GEN_SHIFT)
+                | (GetTickCount64() & RING_GEN_MASK);
+}
 
 /* 1 while the head belongs to the engine's own state, 0 while
  * first person holds it down. ShFp2Enable turns it off - taking
@@ -364,15 +403,36 @@ static int InstallArgs(void) {
     s[o++] = 0xC1; s[o++] = 0xEA; s[o++] = 0x04;    /* shr edx,4           */
     s[o++] = 0x31; s[o++] = 0xCA;                   /* xor edx,ecx         */
     s[o++] = 0xC1; s[o++] = 0xEA; s[o++] = 0x04;    /* shr edx,4           */
-    s[o++] = 0x83; s[o++] = 0xE2; s[o++] = 0x3F;    /* and edx,63   slot   */
+    /* movzx edx,dl: the slot, 0..RING_SLOTS-1. Taking the low byte is
+     * deliberate - `and edx,imm8` sign-extends, so 0xFF would mask
+     * nothing and index straight past the ring, and `and edx,imm32`
+     * is two bytes longer. Three bytes, the same as the 64-slot
+     * version used. */
+    s[o++] = 0x0F; s[o++] = 0xB6; s[o++] = 0xD2;    /* movzx edx,dl  slot  */
     s[o++] = 0x49; s[o++] = 0x89; s[o++] = 0x0C;    /* mov [r10+rdx*8],    */
     s[o++] = 0xD2;                                  /*   rcx               */
-    s[o++] = 0x49; s[o++] = 0x89; s[o++] = 0x84;    /* mov [r10+rdx*8+200],*/
+    /* REX is 4D here, not 49: with the register number of r8/r9 the R
+     * bit is part of it (0100 WRXB), and 49 leaves R clear - which
+     * quietly stored rax and rcx instead of r8 and r9. The trace line
+     * made it visible (a2 = ffffffffffffffff, a3 = the argument
+     * itself), and those two values are handed to the engine's head
+     * call, so this was the ring carrying two wrong arguments. */
+    s[o++] = 0x4D; s[o++] = 0x89; s[o++] = 0x84;    /* mov [r10+rdx*8+a2], */
     s[o++] = 0xD2;
-    *(uint32_t *)(s + o) = 0x200; o += 4;           /*   r8                */
-    s[o++] = 0x49; s[o++] = 0x89; s[o++] = 0x8C;    /* mov [r10+rdx*8+400],*/
+    *(uint32_t *)(s + o) = (uint32_t)(RING_SLOTS * 8); o += 4;   /* r8  */
+    s[o++] = 0x4D; s[o++] = 0x89; s[o++] = 0x8C;    /* mov [r10+rdx*8+a3], */
     s[o++] = 0xD2;
-    *(uint32_t *)(s + o) = 0x400; o += 4;           /*   r9                */
+    *(uint32_t *)(s + o) = (uint32_t)(RING_SLOTS * 16); o += 4;  /* r9  */
+    /* And the frame it was captured in: a plain load of a counter this
+     * side owns, then a plain store. No read-modify-write in the stub -
+     * that is the instruction every earlier crash landed on. r11 is
+     * volatile in the x64 convention, so borrowing it costs nothing. */
+    s[o++] = 0x49; s[o++] = 0xBB;                   /* mov r11, imm64      */
+    *(uint64_t *)(s + o) = (uint64_t)(uintptr_t)&g_ringStamp; o += 8;
+    s[o++] = 0x4D; s[o++] = 0x8B; s[o++] = 0x1B;    /* mov r11,[r11]       */
+    s[o++] = 0x4D; s[o++] = 0x89; s[o++] = 0x9C;    /* mov [r10+rdx*8+t],  */
+    s[o++] = 0xD2;
+    *(uint32_t *)(s + o) = (uint32_t)(RING_SLOTS * 24); o += 4;  /* r11 */
     s[o++] = 0x5A;                                  /* pop rdx             */
     o = EmitJmp(s, o, (uint64_t)(uintptr_t)s + o, S_ARGS_FN);
     if (o < 0) return 0;
@@ -650,18 +710,46 @@ static uint64_t HeadTransform(uint64_t arg) {
     return RdQ(a + 0x238);
 }
 
-/* Of the last few captures, the one that sits where the local
- * player is. In a squad the ring holds the whole squad, so
- * metres from the player is the test; alone it is trivially
- * the only entry. Returns 0 when nothing is close enough,
- * which is the caller's cue to fall back.
+/* Of the captures in the ring, the one that sits where the local
+ * player is. In a squad the ring holds the whole squad, so metres
+ * from the player is the test; alone it is trivially the only entry.
+ * Returns 0 when nothing is close enough, which is the caller's cue
+ * to fall back to the capture it already had.
+ *
+ * The radius is tight on purpose. It used to be 12 m, which is wider
+ * than a squad walks apart: whenever the local capture was missing
+ * from the ring for a frame, the nearest entry was a teammate and the
+ * eye went to them and back - the co-op flicker of 2026-09-18, which
+ * stopped as soon as the squad moved away. A local head sits about
+ * head-height from the position the game reports, so a few metres is
+ * all the room this needs.
  */
-#define PICK_MAX_M   12.0f
+#define PICK_LOCAL_M 4.0f
+
+/* The capture the picker last chose, and when. A frame in which the
+ * ring holds nothing that resolves is not a reason to lose the eye: the
+ * capture used a moment ago is still this player's own character, and
+ * being without it for that frame is what the field reads as a flicker.
+ *
+ * Three things guard it and all three must hold before it is used: the
+ * generation (so it can never reach across the world change that the
+ * 2026-09-18 crash was), the window (a capture that was retired stays
+ * retired), and HeadTransform (a freed object is never handed to the
+ * engine). g_pickHolds counts the uses, because that count is what says
+ * whether keeping the ring entries actually removed the flicker. */
+#define PICK_HOLD_MS 1500
+static volatile uint64_t g_pickHold;
+static volatile uint64_t g_pickHoldA2;
+static volatile uint64_t g_pickHoldA3;
+static volatile uint64_t g_pickHoldAt;
+static volatile uint32_t g_pickHoldGen;
+static volatile uint64_t g_pickHolds;
 
 static uint64_t PickLocalCapture(const ShVec3 *me,
                                  uint64_t *outA2, uint64_t *outA3) {
     uint64_t arg = 0, a2 = 0, a3 = 0;
-    float best = PICK_MAX_M * PICK_MAX_M;
+    uint64_t cur = g_ringStamp;      /* one read for the whole sweep */
+    float best = PICK_LOCAL_M * PICK_LOCAL_M;
     int i;
 
     for (i = 0; i < RING_SLOTS; i++) {
@@ -670,6 +758,14 @@ static uint64_t PickLocalCapture(const ShVec3 *me,
         float p[3], dx, dy, dz, d;
 
         if (!a) continue;
+        /* Retired with its generation: the world this slot was written in
+         * has been replaced since. Age is deliberately not a test here -
+         * the engine writes a slot once per character as the world is
+         * built, so an entry an hour old is still this session's own, and
+         * a window that rejected it was what left the eye with nothing on
+         * 2026-09-18 and again on 09-19. */
+        if ((g_ring.t[i] >> RING_GEN_SHIFT) != (cur >> RING_GEN_SHIFT))
+            continue;
         t2 = HeadTransform(a);
         if (!t2) continue;
         if (!RdF(t2, p, 3)) continue;
@@ -695,7 +791,7 @@ static uint64_t PickLocalCapture(const ShVec3 *me,
  * apart in the log instead of all reading as the same zero. */
 static void RingTrace(const ShVec3 *me) {
     static uint64_t lastAt;
-    uint64_t now = GetTickCount64();
+    uint64_t now = GetTickCount64(), cur = g_ringStamp;
     int slot[8], used = 0, i, n;
     char line[300];
 
@@ -713,16 +809,27 @@ static void RingTrace(const ShVec3 *me) {
                       slot[i], (unsigned long long)g_ring.a0[slot[i]]);
     if (n > 0) Log("%s", line);
 
+    /* Each entry's own reason, so the three ways of picking nothing -
+     * retired, unresolvable, too far - are told apart in the log
+     * instead of all reading as the same zero. */
     n = snprintf(line, sizeof line, "ring p:");
     for (i = 0; i < used && n > 0; i++) {
-        uint64_t t2 = HeadTransform(g_ring.a0[slot[i]]);
+        uint64_t a = g_ring.a0[slot[i]], t = g_ring.t[i], t2;
         float p[3] = { 0, 0, 0 };
 
+        if ((t >> RING_GEN_SHIFT) != (cur >> RING_GEN_SHIFT)) {
+            n += snprintf(line + n, sizeof(line) - n, " retired(%ums)",
+                          (unsigned)(cur - t));
+            continue;
+        }
+        t2 = HeadTransform(a);
         if (t2 && RdF(t2, p, 3))
             n += snprintf(line + n, sizeof(line) - n,
-                          " %.1f,%.1f,%.1f", p[0], p[1], p[2]);
+                          " %.1f,%.1f,%.1f@%ums", p[0], p[1], p[2],
+                          (unsigned)(cur - t));
         else
-            n += snprintf(line + n, sizeof(line) - n, " -");
+            n += snprintf(line + n, sizeof(line) - n, " -@%ums",
+                          (unsigned)(cur - t));
     }
     if (n > 0) Log("%s", line);
 }
@@ -918,6 +1025,121 @@ static void HeadVis(int hide) {
     g_fp.visAt = GetTickCount64();
 }
 
+/* The arguments this session remembered, without the ring.
+ *
+ * For the frames that are not ours to place but in which the world has
+ * not been replaced: a pause, the map, a load. Those are most of what
+ * "not live" means, and retiring the ring for them is what the
+ * 2026-09-19 log caught - every ring trace read `retired`, the ring
+ * stayed dead, and the eye stayed in the engine's camera for minutes.
+ * The ring is the scarce thing here: the engine writes a slot only when
+ * it runs the head call for a character - once per character, not once
+ * per frame - and the log shows minutes between two of those.
+ */
+static void Fp2DropRemembered(void) {
+    g_fp.headArg = 0;
+    g_fp.headArg8 = 0;
+    g_fp.headArg9 = 0;
+    g_fp.headArgPrev = 0;
+    g_fp.headPtr = 0;
+}
+
+/* Everything remembered about the session that is being left behind,
+ * ring included. This is for the two cases that mean the world itself
+ * is gone rather than merely out of sight: a run of frames with no
+ * player position, and a loading screen seen on the way out (see
+ * g_worldSuspect).
+ *
+ * Past that point a capture that still resolves may belong to an object
+ * the game is already tearing down, and the head call built on it is
+ * the 2026-09-18 crash - the game re-set its game mode, the player
+ * position read 0, and two seconds later the call went in with the
+ * character from the session before. The ring goes with it, by
+ * generation rather than by emptying it - see the body. */
+static void Fp2Forget(void) {
+    Fp2DropRemembered();
+    g_pickHold = 0;
+
+    /* Retired, not emptied (2026-09-19). Emptying it left the picker
+     * with nothing until the engine ran the head call for a character
+     * again, and the field log of that evening shows what that gap
+     * costs: frames in which the eye has no capture at all, which the
+     * player reads as a flicker. Every entry carries the generation it
+     * was written under, so the bump below retires all of them at once:
+     * a retired slot is simply not picked, and the engine overwrites it
+     * the next time it runs the call for that character.
+     *
+     * What the paragraph above insists on is unchanged - nothing
+     * remembered may be used across a world change. Only the cases that
+     * count as one, and the way it is enforced, changed. */
+    g_ringGen++;
+    RingStampNow();
+}
+
+/* A loading screen is the one thing outside the world that says the
+ * world itself is being replaced. A pause and the map are not live
+ * either, but they leave the world alone - which is why the ring has to
+ * survive those and must not survive this. Set on the way out, acted on
+ * the first frame we are live again. */
+static volatile int g_worldSuspect = 0;
+
+/* How long a run of frames without a player position is a stutter rather
+ * than a world being replaced. Five of them in an eight minute session
+ * (2026-09-19), four of which were a trace away from working again; the
+ * 2026-09-18 crash was two seconds into such a run. Half a second covers
+ * the stutter and is a quarter of the way into the crash, which is what
+ * the long run is there to catch. */
+#define NO_POS_GRACE_MS 500
+static volatile uint64_t g_noPosAt;       /* first frame of the run        */
+static volatile int      g_noPosTold;     /* the long run is said once     */
+static volatile uint64_t g_noPosHolds;    /* stutters carried by the hold  */
+static volatile uint64_t g_noPosLogAt;
+
+/* One line every time the eye changes character, and the running
+ * count in every line after it.
+ *
+ * Which capture gets used is the whole question when the view
+ * flickers between players, and the ring makes it invisible: the old
+ * trace stopped after the first 24 placements, and the 2026-09-18
+ * report had nothing in it to look at. So a change is logged, with
+ * how far the new capture sits from the local player and whether the
+ * game could tell us where that is at all ("UNKNOWN" is the state
+ * that made the old code reuse whatever it had).
+ *
+ * Throttled, because a bad state changes partner every frame and 60
+ * lines a second would bury the pattern; the count keeps climbing
+ * whether a line is written or not, so the throttle cannot hide how
+ * often it happened.
+ */
+static uint64_t g_pickLogAt;
+static uint32_t g_pickFlips;
+
+static void PickNote(uint64_t arg, int haveMe, const ShVec3 *me) {
+    static uint64_t last;
+    uint64_t now;
+    float dist = -1.0f;
+
+    if (arg == last) return;
+    last = arg;
+    g_pickFlips++;
+    now = GetTickCount64();
+    if (now - g_pickLogAt < 250) return;
+    g_pickLogAt = now;
+    if (arg && haveMe && me) {
+        uint64_t t2 = HeadTransform(arg);
+        float p[3];
+
+        if (t2 && RdF(t2, p, 3)) {
+            float dx = p[0] - me->x, dy = p[1] - me->y, dz = p[2] - me->z;
+
+            dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        }
+    }
+    Log("pick: %llx (me %s, %.2f m away) - %u change(s) so far",
+        (unsigned long long)arg, haveMe ? "known" : "UNKNOWN",
+        dist, g_pickFlips);
+}
+
 /* Called from the camera manager's own frame, in the same
  * place the table hooks: the engine has just written the
  * position it computed, and this is the last moment at which
@@ -934,11 +1156,37 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
     SH_ALIGNED(16) float out[8];
     uint64_t arg, tf, a2, a3;
     ShVec3 me;
-    int tr;
+    int haveMe, tr, held = 0;
 
     (void)cm;
     tr = (g_trace < 24);
+    /* One frame, one stamp for the ring: see g_ringStamp. Here rather
+     * than in the camera callbacks so that it is written on the same
+     * path that reads the ring, which is what makes the age mean
+     * something. */
+    RingStampNow();
     if (!g_ready) { g_bow = BOW_OFF; return 0; }
+
+    /* The world checks run whatever first person is doing - before the
+     * "do we want the camera" gate, not after it (2026-09-19). The ring
+     * has to be right by the time it is asked for, and first person off
+     * is exactly when a change is easiest to miss: this used to return at
+     * the gate below, so a session joined while the switch was off went
+     * unnoticed and the switch-on path cleared the ring for it - retiring
+     * entries the engine writes once per world and never rewrites. */
+    if (!ShInLivePlay()) {
+        if (ShGetUiState() & SH_UI_LOADING) g_worldSuspect = 1;
+        Fp2DropRemembered();
+        g_bow = g_fp.want ? BOW_STALE : BOW_OFF;
+        return 0;
+    }
+    if (g_worldSuspect) {
+        /* The load is over: the world every slot was written in is gone. */
+        g_worldSuspect = 0;
+        Fp2Forget();
+        g_bow = g_fp.want ? BOW_STALE : BOW_OFF;
+        return 0;
+    }
     if (!g_fp.want)   { g_bow = BOW_OFF;   return 0; }
 
     /* Gates that bow out of placing the eye. The head is none
@@ -967,6 +1215,11 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
         return 0;
     }
 
+    /* The world checks are at the top of this function now: they have to
+     * run whatever first person is doing, and this is the point past
+     * which the frame is ours. What remains here is the placement's own
+     * work. */
+
     /* Pick the capture that belongs to the local player. The
      * engine runs the head call once per character, so the ring
      * holds the whole squad; no match falls back to the last
@@ -974,22 +1227,111 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
      * resolves. After a respawn the remembered argument points
      * at a freed object, and the head call below would be a
      * call into nothing: the whole chain has to answer before
-     * it is used. */
-    a2 = g_fp.headArg8;
-    a3 = g_fp.headArg9;
-    arg = ShGetPlayerPosition(&me)
-          ? PickLocalCapture(&me, &a2, &a3) : 0;
-    if (!arg && g_fp.headArgPrev &&
-        HeadTransform(g_fp.headArgPrev))
-        arg = g_fp.headArgPrev;
-    if (!arg) {
-        /* Nothing picked. Three ways to get here and the log
-         * has to say which: the ring was never written (the
-         * stub is not running), nothing in it resolves to a
-         * transform, or everything is too far away. */
-        g_bow = BOW_ARG;
-        RingTrace(&me);
-        return 0;
+     * it is used.
+     *
+     * That fallback is safe because only a capture that passed the
+     * tight radius is ever written back as the remembered one, so a
+     * squadmate cannot get into it. The pick itself is noted on every
+     * change - see PickNote, which is what the next field report will
+     * be read from. */
+    haveMe = ShGetPlayerPosition(&me);
+    if (haveMe) {
+        g_noPosAt = 0;
+        g_noPosTold = 0;
+        a2 = g_fp.headArg8;
+        a3 = g_fp.headArg9;
+        arg = PickLocalCapture(&me, &a2, &a3);
+        if (!arg && g_pickHold && g_pickHoldGen == g_ringGen &&
+            GetTickCount64() - g_pickHoldAt <= PICK_HOLD_MS &&
+            HeadTransform(g_pickHold)) {
+            /* The ring had nothing this frame. The capture this player
+             * was using a moment ago is still theirs, and handing the
+             * frame back to the engine for it is the flicker - so keep
+             * it, and count it: the count is what says whether retiring
+             * the ring only for a world change removed the flicker or
+             * only hid it. */
+            static uint64_t lastAt;
+            uint64_t now = GetTickCount64();
+
+            arg = g_pickHold;
+            a2 = g_pickHoldA2;
+            a3 = g_pickHoldA3;
+            held = 1;
+            g_pickHolds++;
+            if (now - lastAt >= 2000) {
+                lastAt = now;
+                Log("pick: ring had nothing, kept the last capture "
+                    "(%llu time(s) so far)",
+                    (unsigned long long)g_pickHolds);
+            }
+        }
+        if (!arg && g_fp.headArgPrev &&
+            HeadTransform(g_fp.headArgPrev))
+            arg = g_fp.headArgPrev;
+        PickNote(arg, 1, &me);
+        if (!arg) {
+            /* Nothing picked. Four ways to get here and the log
+             * has to say which: the ring was never written (the
+             * stub is not running), nothing in it resolves to a
+             * transform, everything is too far away, or every
+             * slot in it was retired. */
+            g_bow = BOW_ARG;
+            RingTrace(&me);
+            return 0;
+        }
+    } else {
+        /* No position this frame. The game does this through a session
+         * change - see logs\scripthook_api.log, "no player position" a
+         * few seconds before the 2026-09-18 join crash - and it also
+         * does it for a frame or two of a state flip: five such runs in
+         * an eight minute session on 2026-09-19, four of which were a
+         * trace away from working again.
+         *
+         * A long run is the crash's own signature, and there the answer
+         * is the one this branch has always given: forget everything,
+         * place nothing, and leave the frame to the engine until a
+         * capture from the new world arrives. That crash came two
+         * seconds into such a run, so a run of NO_POS_GRACE_MS is
+         * already the world being replaced, not a stutter.
+         *
+         * A short one is this player's own world seen through a stutter,
+         * and handing the frame back for it is the flicker the field
+         * reports. Keep the capture they were already using - the ring
+         * is not consulted, because with no position nothing in it can
+         * be measured - and count it, so the next log says which of the
+         * two this was. */
+        uint64_t now = GetTickCount64();
+
+        if (g_noPosAt == 0) g_noPosAt = now;
+        if (now - g_noPosAt >= NO_POS_GRACE_MS) {
+            if (!g_noPosTold) {
+                g_noPosTold = 1;
+                Log("pick: no player position for %llu ms - the world is "
+                    "being replaced, forgetting the session",
+                    (unsigned long long)(now - g_noPosAt));
+            }
+            Fp2Forget();
+            g_bow = BOW_STALE;
+            PickNote(0, 0, 0);
+            return 0;
+        }
+        arg = (g_pickHold && g_pickHoldGen == g_ringGen) ? g_pickHold : 0;
+        if (!arg || !HeadTransform(arg)) {
+            g_bow = BOW_STALE;
+            PickNote(0, 0, 0);
+            return 0;
+        }
+        a2 = g_pickHoldA2;
+        a3 = g_pickHoldA3;
+        held = 1;
+        g_noPosHolds++;
+        if (now - g_noPosLogAt >= 2000) {
+            g_noPosLogAt = now;
+            Log("pick: no position this frame, kept the last capture "
+                "(%llu time(s) so far)",
+                (unsigned long long)g_noPosHolds);
+        }
+        PickNote(arg, 0, 0);
     }
 
     /* Vetted readings are remembered as the last known good
@@ -1008,6 +1350,22 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
         g_fp.headArgPrev = arg;
         g_fp.headArg8 = a2;
         g_fp.headArg9 = a3;
+    }
+    /* Remembered for the frames in which the ring has nothing - see
+     * PICK_HOLD_MS. Written whether or not the reading vets: this one
+     * came from the tight radius, so it is this player's own character,
+     * and Sane is - as the paragraph above says - a note, not a veto.
+     *
+     * Not written when the capture being used is the held one itself. A
+     * hold that renews its own stamp never expires, and this one has to
+     * be measured from the last real pick: a stutter that goes on for a
+     * minute in short runs must not keep a capture alive through it. */
+    if (!held) {
+        g_pickHoldA2 = a2;
+        g_pickHoldA3 = a3;
+        g_pickHoldAt = GetTickCount64();
+        g_pickHoldGen = g_ringGen;
+        g_pickHold = arg;
     }
 
     memset(out, 0, sizeof(out));
@@ -1145,6 +1503,15 @@ SH_API int ShFp2Install(void) {
     if (g_tried) return g_ready;
     g_tried = 1;
     LogInit("scripthook_fpx.log");
+    /* The stamp is set before the stub can run even once, and that is the
+     * first half of the 2026-09-19 bug: stamping used to start on the
+     * first camera frame, while the engine runs the capture site earlier
+     * than that - while the world is being built, before the player is in
+     * it. Every entry in the ring therefore carried stamp 0, and stamp 0
+     * reads as a generation of its own, so the whole ring was retired for
+     * the session: at 04:19 the log had four slots, all live, none
+     * usable. */
+    RingStampNow();
     InstallCore();
     Log("install miss=%03x ready=%d", (unsigned)g_miss, g_ready);
     if (!g_ready) ShSetError(SH_ERR_HOOK_FAILED);
@@ -1183,7 +1550,25 @@ SH_API uint32_t ShFp2Missing(void) {
  *  through ShFp2HeadWant.
  */
 SH_API void ShFp2Enable(int on) {
+    int was = g_fp.want;
+
     g_fp.want = (uint8_t)(on ? 1 : 0);
+    /* A fresh claim on the camera drops what was remembered - but not the
+     * ring (2026-09-19). The ring is written by the engine, one slot per
+     * character as the world is built, and retiring it here retired
+     * entries the engine does not write again: that evening's log has
+     * four slots, three hours, and a switch flipped a handful of times.
+     *
+     * A world replaced while the switch was off is caught by the
+     * placement instead, which now runs its world checks before the "do
+     * we want the camera" gate - see the top of ShFp2PlaceEye. That was
+     * the whole reason this clear was here, and it is the better place
+     * for it: it also catches a load that happened while first person was
+     * on but the player was in a menu. */
+    if (on && !was) {
+        Fp2DropRemembered();
+        g_pickHold = 0;
+    }
     /* Taking the camera means taking the head: first person
      * holds it down every frame from here. Handing the camera
      * back hands the head back with it - through a window of
