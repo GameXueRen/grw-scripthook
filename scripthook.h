@@ -1820,6 +1820,33 @@ SH_API int  ShCameraApply(const ShCameraOverride *o);
 SH_API int  ShCameraMatrix(int index, float *out16);
 
 /** @} */
+/** @defgroup fov Field of view
+ *
+ *  The engine computes the fov from the active camera behaviour and
+ *  writes it into the camera manager every frame, so an override is a
+ *  value the engine keeps being handed rather than a field written once.
+ *  A value under 0.5 rad is a zoom optic - scopes and binoculars compute
+ *  far below the 0.78 to 0.83 gameplay range - and those keep their own
+ *  fov by default.
+ *  @{
+ */
+
+/** The engine's own fov of the last frame, radians, before any
+ *  replacement - 0 until the engine has run the site once. A plugin
+ *  uses it to tell a narrowed aim (a mild zoom, still inside the
+ *  gameplay range) apart from a magnified optic, which computes far
+ *  below it.
+ */
+SH_API float ShFovEngine(void);
+
+/** With the pin set, the override replaces the engine's value whatever
+ *  it is, the zoom optics included - which is what "no zoom on ads"
+ *  needs on the frames an aim would otherwise narrow the view. It stays
+ *  set until cleared, and releasing SH_CAM_FOV clears it with the rest.
+ */
+SH_API void ShFovPin(int on);
+
+/** @} */
 /** @defgroup fpx First person, the engine's own way
  *
  *  The eye is the engine's own head position. The argument the

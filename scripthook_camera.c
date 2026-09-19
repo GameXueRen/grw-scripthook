@@ -132,6 +132,7 @@ extern void ShHeadPump(int light);
 extern void ShHeadWant(void);
 extern int ShFovSet(float radians);
 extern void ShFovClear(void);
+extern int ShFovInstall(void);
 extern int ShHeadCached(ShVec3 *out);
 extern int ShGetGameState(void);
 extern int ShReadableAddr(uint64_t addr, size_t len);
@@ -582,6 +583,10 @@ SH_API int ShCameraHookInstall(void) {
             ShSetError(SH_ERR_HOOK_FAILED);
             return 0;
         }
+        /* The fov stub goes up with the camera rather than on the first
+         * override: it is what makes the engine's own value readable, and
+         * with nothing overriding it just passes that value through. */
+        ShFovInstall();
         return 1;
     }
     if (!ShReadableAddr(CAM_THUNK, 5)) {
@@ -624,6 +629,7 @@ SH_API int ShCameraHookInstall(void) {
      * is a separate question: a build without them keeps the
      * placement it has always had. */
     ShFp2Install();
+    ShFovInstall();
     Log("camera: thunk %llX hooked (calls on to %llX), manager site %llX hooked",
         (unsigned long long)CAM_THUNK, (unsigned long long)CAM_IMPL,
         (unsigned long long)MGR_SITE);

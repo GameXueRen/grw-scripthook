@@ -26,8 +26,17 @@ extern void ShSetError(int err);
 extern void *ShAllocNear(uint64_t target);
 extern int ShReadableAddr(uint64_t addr, size_t len);
 
-/* Read by the stub: enabled, then the value as bits. */
-static volatile uint32_t g_state[2] = { 0, 0 };
+/* Read by the stub: enabled, the value as bits, the engine's own last
+ * value, then the pin. The engine value is kept so a plugin can tell a
+ * narrowed aim apart from a zoom optic, and the pin is the no-zoom
+ * option: with it set the engine's value is replaced whatever it is, so
+ * an aim that would narrow the view keeps the one the override carries.
+ */
+#define ST_ENABLE 0
+#define ST_VALUE  1
+#define ST_ENGINE 2
+#define ST_PIN    3
+static volatile uint32_t g_state[4] = { 0, 0, 0, 0 };
 
 static uint8_t *g_stub = NULL;
 static uint8_t  g_orig[FOV_LEN];
@@ -45,9 +54,20 @@ static int BuildStub(void) {
     s[o++] = 0x49; s[o++] = 0xBA;                  /* mov r10,im */
     *(uint64_t *)(s + o) = (uint64_t)(uintptr_t)g_state;
     o += 8;
+    /* The engine's own value, kept for the menu: it is the only
+     * thing that says whether this frame is a zoom optic. */
+    s[o++] = 0x41; s[o++] = 0x89; s[o++] = 0x4A;   /* mov [r10+8],ecx */
+    s[o++] = 0x08;
     s[o++] = 0x41; s[o++] = 0x83; s[o++] = 0x3A;   /* cmp [r10],0 */
     s[o++] = 0x00;
-    s[o++] = 0x74; s[o++] = 0x0C;                  /* je +12     */
+    s[o++] = 0x74; s[o++] = 0x13;                  /* je +19     */
+
+    /* The pin replaces whatever the engine computed - that is what
+     * keeps an aim from narrowing the view. */
+    s[o++] = 0x41; s[o++] = 0x83; s[o++] = 0x7A;   /* cmp [r10+C],0 */
+    s[o++] = 0x0C;
+    s[o++] = 0x00;
+    s[o++] = 0x75; s[o++] = 0x08;                  /* jne +8     */
 
     /* Positive floats order like unsigned ints, so one cmp
      * passes a zooming engine value through untouched.
@@ -96,7 +116,14 @@ static int Patch(void) {
     return 1;
 }
 
-static int Install(void) {
+/* Called by the camera hook's own install, and not only on the first
+ * override. The engine's value has to be readable (ShFovEngine) before any
+ * value is pushed, and a caller that has to push a fov first to learn what
+ * the engine computed cannot tell a sight from the hip - which is the whole
+ * basis of no zoom on iron sights. With nothing overriding, the stub simply
+ * passes the engine's own value through, so installing it costs nothing.
+ */
+int ShFovInstall(void) {
     if (g_hooked) return 1;
     if (!ShReadableAddr(FOV_SITE, FOV_LEN)) {
         LogFirst("scripthook_fov.log", "fov site %llX is not readable",
@@ -137,17 +164,40 @@ int ShFovSet(float radians) {
     uint32_t bits;
 
     if (!(radians > 0.05f && radians < 3.0f)) return 0;
-    if (!Install()) return 0;
+    if (!ShFovInstall()) return 0;
     memcpy(&bits, &radians, 4);
-    g_state[1] = bits;
-    g_state[0] = 1;
+    g_state[ST_VALUE] = bits;
+    g_state[ST_ENABLE] = 1;
     return 1;
 }
 
 void ShFovClear(void) {
-    g_state[0] = 0;
+    g_state[ST_ENABLE] = 0;
+    g_state[ST_PIN] = 0;
+}
+
+/* Pin the override: while it is set the engine's own value is replaced
+ * whatever it is, so an aim that would narrow the view keeps the fov the
+ * override carries. Cleared with the override, because a pin with nothing
+ * to pin is a value nobody owns.
+ */
+SH_API void ShFovPin(int on) {
+    g_state[ST_PIN] = on ? 1u : 0u;
+}
+
+/* The engine's own value of the last frame, radians, before any
+ * replacement - 0 until the engine has run the site once. A plugin uses
+ * it to tell a narrowed aim (a mild zoom, still in the gameplay range)
+ * apart from a magnified optic, which computes far below it.
+ */
+SH_API float ShFovEngine(void) {
+    uint32_t bits = g_state[ST_ENGINE];
+    float f;
+
+    memcpy(&f, &bits, 4);
+    return f;
 }
 
 int ShFovActive(void) {
-    return (int)g_state[0];
+    return (int)g_state[ST_ENABLE];
 }
