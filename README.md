@@ -56,6 +56,16 @@
 
 ---
 
+## Linux / Proton
+
+用 Proton 跑游戏时菜单默认显示**英文**：Windows 的中文字体在 Proton 前缀里不存在，覆盖层会退回内置字体并把本次会话的语言切成英文（不改你的 `scripthook.ini`）。想要中文，任选一种：
+
+- `sudo apt install fonts-noto-cjk`（大多数发行版同理），覆盖层会自动找到它；
+- 把任意中文字体（如 `msyh.ttc`）改名为 `font.ttc` 放进游戏根目录（`GRW.exe` 同级）；
+- 在 `scripthook.ini` 的 `[Settings]` 段写 `Font=Z:\usr\share\fonts\...\xxx.ttc`（`Z:` 是 Proton 映射的宿主根目录）。
+
+装好字体后在菜单里把语言切回中文即可，不用重启游戏。
+
 ## 安装
 
 1. 将 `dinput8.dll`、`plugins\`、`mods\`、`scripthook.ini` 放入游戏根目录（与 `GRW.exe` 同级）。

@@ -20,6 +20,27 @@
 //#define IM_ASSERT(_EXPR)  MyAssert(_EXPR)
 //#define IM_ASSERT(_EXPR)  ((void)(_EXPR))     // Disable asserts
 
+// A -Release DLL loads inside a player's game, where an assert is a modal
+// dialog in front of it: the report of 2026-09-19 is a Proton session stopped
+// by "Could not load font file!" (imgui_draw.cpp:3199) before the menu could
+// come up, because the system font paths the overlay tried are Windows only.
+// So in a -Release build an ImGui assert is a line in the framework's log
+// instead - floor level, so a quiet package still carries it - and the library
+// keeps running; a development or -Beta build keeps the default abort, which
+// is what makes asserts worth having while working on the menu.
+// ShUiAssertFail is defined in scripthook_ovl.cpp, so this stays the only
+// place the switch lives.
+#ifdef SH_RELEASE
+#ifdef __cplusplus
+extern "C"
+#endif
+void ShUiAssertFail(const char *expr, const char *file, int line);
+#define IM_ASSERT(_EXPR)                                          \
+    do {                                                          \
+        if (!(_EXPR)) ShUiAssertFail(#_EXPR, __FILE__, __LINE__); \
+    } while (0)
+#endif
+
 //---- Define attributes of all API symbols declarations, e.g. for DLL under Windows
 // Using Dear ImGui via a shared library is not recommended, because of function call overhead and because we don't guarantee backward nor forward ABI compatibility.
 // - Windows DLL users: heaps and globals are not shared across DLL boundaries! You will need to call SetCurrentContext() + SetAllocatorFunctions()

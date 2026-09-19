@@ -20,6 +20,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <dxgi1_2.h>    // IDXGIFactory2, for the swapchain capture
+#include <stdio.h>      // snprintf, for the font path list
 #include <string.h>
 #include <imm.h>
 #include <psapi.h>
@@ -69,6 +70,26 @@ static void OvlLog(const char* fmt, ...)
         LogInit(OVL_LOG);                      \
         LogAt(LOG_ALWAYS, __VA_ARGS__);         \
     } while (0)
+
+/* ---- ImGui's assertion handler in a release build ------------------------
+ * imconfig.h points IM_ASSERT here when SH_RELEASE is defined, so an assert
+ * inside Dear ImGui is a line in logs\scripthook.log rather than a modal
+ * dialog in front of a player's game: the report of 2026-09-19 is a Proton
+ * session stopped by "Could not load font file!" (imgui_draw.cpp:3199) before
+ * the menu could come up, because every font path the overlay tried was a
+ * Windows one. The first few only - one broken invariant can fire every frame,
+ * and a log is a support artefact, not a fuse box - and never fatal: the
+ * library carries on, which is the point of doing it here instead of aborting.
+ * A development or -Beta build keeps the default abort. */
+extern "C" void ShUiAssertFail(const char *expr, const char *file, int line)
+{
+    static volatile LONG seen = 0;
+    LONG n = InterlockedIncrement(&seen);
+
+    LogAlways("imgui assert: %s (%s:%d)%s", expr ? expr : "?",
+              file ? file : "?", line,
+              n > 4 ? " - further ones are not logged" : "");
+}
 
 /* [loader] overlay: 0 = off. Set by the loader thread once the config is up;
  * 0 means "not answered yet", and the overlay's install waits for it rather
@@ -1765,54 +1786,185 @@ static const ShDrawVtbl g_drawVtbl = {
 };
 
 // ---------------------------------------------------------------------------
-// font loading: a CJK-capable system font so Chinese menu labels
-// render (the game's own Phoenix font has no CJK glyphs).
+// font loading: the menu's own font.
+//
+// Not a "Chinese font": the same load draws every Latin string the menu shows,
+// and the range it asks for also carries kana, CJK punctuation and the
+// half-width forms. A session with no font loaded is still usable - ImGui's
+// built-in font draws Latin - which is why the last resort is "built-in font
+// + English" and not "give up": the field report of 2026-09-19 is a Proton
+// session whose menu never came up because the only paths tried were Windows
+// ones, and AddFontFromFileTTF asserts BEFORE it returns NULL.
+//
+// Every call here passes ImFontFlags_NoLoadError, which turns an unreadable
+// path into a NULL and lets the list move on. Where the font comes from, in
+// order:
+//
+//   1. [Settings] Font=   (any .ttc/.ttf; the answer for a Linux prefix)
+//   2. <gamedir>\font.ttc, \font.ttf, \msyh.ttc   (drop one next to GRW.exe)
+//   3. the Windows system paths
+//   4. Z:\usr\share\fonts\...  (Wine/Proton map the host root to Z:)
+//
+// The chat UI's bold variant follows the same order and falls back to the
+// normal weight when nothing is there.
 // ---------------------------------------------------------------------------
+static int g_menuFontCjk = 0;   /* 1 = a CJK-capable font is in use */
+
+/* One path, one try. Both outcomes are logged: the list of paths tried is
+ * what "the menu is in English" is read for. */
+static ImFont* TryMenuFont(const char* path, float size, const ImWchar* ranges)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    ImFontConfig cfg = {};
+    cfg.Flags |= ImFontFlags_NoLoadError;
+    ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, ranges);
+
+    if (f) OvlLogFloor("font loaded: %s", path);
+    else   OvlLog("font: not readable: %s", path);
+    return f;
+}
+
+/* The candidate list, in the order documented above. Returns how many paths
+ * it offered; both callers hand it room for 24. */
+static int MenuFontCandidates(char paths[][MAX_PATH], int cap)
+{
+    char dir[MAX_PATH] = "";
+    char cfg[MAX_PATH] = "";
+    int n = 0;
+
+    if (ShConfigGetStr("Settings", "Font", "", cfg, sizeof(cfg)))
+    {
+        /* [Settings] Font=none (or -) is the switch that makes a Linux
+         * session reproducible on any machine: no candidate is offered at
+         * all, so what comes up is the fallback - built-in font, English menu
+         * - and the whole path can be checked without a Proton prefix. */
+        if (_stricmp(cfg, "none") == 0 || _stricmp(cfg, "-") == 0)
+            return 0;
+        if (cfg[0] && n < cap)
+            snprintf(paths[n++], MAX_PATH, "%s", cfg);
+    }
+
+    if (GetModuleFileNameA(NULL, dir, MAX_PATH))
+    {
+        char* slash = strrchr(dir, '\\');
+        if (slash) slash[1] = 0;
+        if (n < cap) snprintf(paths[n++], MAX_PATH, "%sfont.ttc", dir);
+        if (n < cap) snprintf(paths[n++], MAX_PATH, "%sfont.ttf", dir);
+        if (n < cap) snprintf(paths[n++], MAX_PATH, "%smsyh.ttc", dir);
+    }
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "C:\\Windows\\Fonts\\msyh.ttc");
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "C:\\Windows\\Fonts\\msyh.ttf");
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "C:\\Windows\\Fonts\\simhei.ttf");
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "C:\\Windows\\Fonts\\simsun.ttc");
+    /* Wine and Proton map the host's root to Z:, so these are the fonts a
+     * Linux player already has once fonts-noto-cjk or wqy is installed. On
+     * Windows the opens simply fail and the list moves on. */
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc");
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\truetype\\noto\\NotoSansCJK-Regular.ttc");
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\noto-cjk\\NotoSansCJK-Regular.ttc");
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\truetype\\wqy\\wqy-microhei.ttc");
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\wqy-zenhei\\wqy-zenhei.ttc");
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\truetype\\arphic\\uming.ttc");
+    if (n < cap) snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\truetype\\Droid\\DroidSansFallbackFull.ttf");
+    return n;
+}
+
 static void LoadCjkFont()
 {
     ImGuiIO& io = ImGui::GetIO();
-    static const char* kCandidates[] = {
-        "C:\\Windows\\Fonts\\msyh.ttc",   // 微软雅黑
-        "C:\\Windows\\Fonts\\msyh.ttf",
-        "C:\\Windows\\Fonts\\simhei.ttf", // 黑体
-        "C:\\Windows\\Fonts\\simsun.ttc", // 宋体
-    };
-    /* Bold variant preferred for the chat UI.  msyhbd.ttc ships with
-     * the YaHei family on every supported Windows release. */
-    static const char* kBoldCandidates[] = {
-        "C:\\Windows\\Fonts\\msyhbd.ttc", // 微软雅黑 Bold
-        "C:\\Windows\\Fonts\\msyhbd.ttf",
-    };
+    const ImWchar* ranges = io.Fonts->GetGlyphRangesChineseFull();
+    char paths[24][MAX_PATH];
+    int n = MenuFontCandidates(paths, 24);
+    int i;
     ImFont* base = nullptr;
-    for (const char* path : kCandidates)
+
+    for (i = 0; i < n && !base; i++)
+        base = TryMenuFont(paths[i], 16.0f, ranges);
+
+    if (base)
     {
-        base = io.Fonts->AddFontFromFileTTF(
-            path, 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-        if (base)
-        {
-            io.FontDefault = base;
-            OvlLog("font loaded: %s", path);
-            break;
-        }
+        io.FontDefault = base;
+        g_menuFontCjk = 1;
     }
-    if (!base)
+    else
     {
-        OvlLog("WARNING: no CJK font loaded, Chinese text will not render");
-        return;
+        /* Nothing to draw with. The built-in font keeps the menu usable, and
+         * because it carries no CJK glyphs the menu goes English - for this
+         * session only: ShLangSet does not write scripthook.ini, so the
+         * player's own Language= is left waiting for the day a font turns up
+         * (they can point [Settings] Font= at one, drop a .ttc next to the
+         * game, or install a system CJK font). */
+        ImFontConfig defCfg = {};
+        defCfg.Flags |= ImFontFlags_NoLoadError;
+        base = io.Fonts->AddFontDefault(&defCfg);
+        io.FontDefault = base;
+        g_menuFontCjk = 0;
+        OvlLogFloor("font: none of the %d candidate(s) could be read - the "
+                    "built-in font is in use and the menu is English for this "
+                    "session ([Settings] Font= overrides the list)", n);
+        if (base && !ShLangMatch(ShLangGet(), "en-US"))
+            ShLangSet("en-US");
     }
-    for (const char* path : kBoldCandidates)
+
+    /* The chat box's heavier weight, same order, then the normal font. */
+    g_chatFont = base;
+    if (!base || !g_menuFontCjk) return;
     {
-        ImFont* b = io.Fonts->AddFontFromFileTTF(
-            path, 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
+        char bold[24][MAX_PATH];
+        char cfg[MAX_PATH] = "";
+        int nb = 0;
+        ImFont* b = nullptr;
+
+        if (ShConfigGetStr("Settings", "FontBold", "", cfg, sizeof(cfg)) &&
+            cfg[0])
+            snprintf(bold[nb++], MAX_PATH, "%s", cfg);
+        snprintf(bold[nb++], MAX_PATH, "C:\\Windows\\Fonts\\msyhbd.ttc");
+        snprintf(bold[nb++], MAX_PATH, "C:\\Windows\\Fonts\\msyhbd.ttf");
+        snprintf(bold[nb++], MAX_PATH, "Z:\\usr\\share\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc");
+        snprintf(bold[nb++], MAX_PATH, "Z:\\usr\\share\\fonts\\truetype\\noto\\NotoSansCJK-Bold.ttc");
+
+        for (i = 0; i < nb && !b; i++)
+            b = TryMenuFont(bold[i], 16.0f, ranges);
         if (b)
         {
             g_chatFont = b;
-            OvlLog("chat bold font loaded: %s", path);
-            return;
+            OvlLogFloor("chat bold font loaded: %s", bold[i - 1]);
         }
+        else
+            OvlLog("no bold font variant, chat UI falls back to normal weight");
     }
-    OvlLog("no bold font variant, chat UI falls back to normal weight");
-    g_chatFont = base;
+}
+
+/* Called once a second from the Present hook, before NewFrame - the one
+ * moment the font atlas is not locked. While the menu sits on the fallback
+ * font and the active language asks for CJK again (the player switched back
+ * to Chinese, or a font arrived), the list is tried once more so the session
+ * does not have to be restarted. */
+static void MenuFontTick()
+{
+    static DWORD last = 0;
+    char paths[24][MAX_PATH];
+    ImFont* f = nullptr;
+    int n, i;
+    DWORD now = GetTickCount();
+
+    if (g_menuFontCjk || !g_ready) return;
+    if ((DWORD)(now - last) < 1000) return;
+    last = now;
+    if (ShLangMatch(ShLangGet(), "en-US")) return;   /* English needs no CJK */
+
+    n = MenuFontCandidates(paths, 24);
+    for (i = 0; i < n && !f; i++)
+        f = TryMenuFont(paths[i], 16.0f,
+                        ImGui::GetIO().Fonts->GetGlyphRangesChineseFull());
+    if (f)
+    {
+        ImGui::GetIO().FontDefault = f;
+        g_chatFont = f;
+        g_menuFontCjk = 1;
+        OvlLogFloor("font: the CJK font arrived (%s) - the menu follows the "
+                    "language from here", paths[i - 1]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1827,6 +1979,11 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
 {
     /* Taken here and read at the bottom: only what is in between is ours. */
     uint64_t hookAt = ShTickNow();
+
+    /* The menu's font can arrive late (a Linux prefix where the player
+     * installed one, or pointed [Settings] Font= at it): the atlas is only
+     * open for changes before a frame begins, which is exactly here. */
+    MenuFontTick();
 
     // Frame pacing, for attribution: what a player calls a stutter is a
     // Present interval far longer than a frame, and this log is the only
