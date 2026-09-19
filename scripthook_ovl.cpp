@@ -1188,7 +1188,17 @@ void RenderMenu(const ShMenuView* v)
 
     float h = PAD_TOP + TITLE_H + hintH + ROW_H * (float)v->rows + PAD;
     if (v->footer[0]) h += ROW_H;
-    if (v->status[0]) h += ROW_H;
+    // A status line may carry more than one line of its own: a page that
+    // reports two readings under each other writes one text with a newline
+    // in it. The panel has to grow for every line, or the second one is
+    // drawn outside the background. Lines after the first are stacked by
+    // the font's own line height, so they cost that and not a whole row.
+    if (v->status[0]) {
+        int statusLines = 1;
+        for (const char* sl = v->status; (sl = strchr(sl, '\n')) != NULL; sl++)
+            statusLines++;
+        h += ROW_H + (float)(statusLines - 1) * fs;
+    }
 
     // Panel: translucent rounded quad.
     dl->AddRectFilled(ImVec2(x, y), ImVec2(x + MENU_W, y + h),
