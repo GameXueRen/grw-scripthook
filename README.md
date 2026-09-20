@@ -29,13 +29,10 @@
 | Forge Mod Loader支持载具皮肤替换 | 已完成（机制待验证） |
 | Forge Mod Loader支持武器数据修改替换 | 已完成（机制待验证） |
 | 插件自绘 UI 公共 API（示例插件 `draw_sample`） | 已实现，见 [`docs/ui-drawing.md`](docs/ui-drawing.md) |
-| 重写插件：光学迷彩加强（OpticalCamo） | 已完成 |
 | 新插件开发：跳过启动时的动画视频（skipintro）| 已完成 |
 | 新功能开发：CPU调度控制 | 已实现，待大规模验证 |
 | 新插件开发：「最后的仪式」闪退修复（LastRites_dlcfix） | 已完成，官方已于9月15日更新修复 |
 | 新插件开发：自绘输入框（支持输入中文），支持全屏模式使用 | 已完成 | 
-| 重写插件：弹药上限 | 已完成 |
-| 重写插件：天气 & 时间实时控制 | 已完成 |
 | 新插件开发：游戏内麦克风修复（micfix）| 已完成，中文名/英文名两种状态均实机验证 |
 ---
 
@@ -230,8 +227,7 @@ static const ShText kEn[] = {
   - 第一人称 —— [intifofo](https://www.nexusmods.com/ghostreconwildlands/mods/20)
   - 延展视野范围 —— [Phiality](https://www.nexusmods.com/ghostreconwildlands/mods/111)
   - Wildlands Toolkit —— [AlphaGlyph1371](https://www.nexusmods.com/ghostreconwildlands/mods/114)
-  - 天气 & 时间实时控制 —— [IHateHUDClutter](https://www.nexusmods.com/ghostreconwildlands/mods/124)
-  - 光学迷彩加强 —— [IHateHUDClutter](https://www.nexusmods.com/ghostreconwildlands/mods/126)
+- **[IHateHUDClutter](https://www.nexusmods.com/ghostreconwildlands/mods/124) 的作品已按作者要求移除**：本仓库曾包含对其「天气 & 时间实时控制」「光学迷彩加强」「弹药上限」「NPC 生成」的重写与适配；自 2026-09-20 起，这些插件已从仓库与发售包中删除，请到作者那里获取他的最新版本。
 - **测试与反馈** —— 感谢内测群各位兄弟的反馈。
 
 ---

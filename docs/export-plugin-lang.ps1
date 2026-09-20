@@ -1,12 +1,11 @@
 Set-Location 'f:\UbisoftGames\GameXueRen\grw-scripthook'
 $enc = [Text.UTF8Encoding]::new($false)
 
-# The eight plugins that ship. Each one's text lives in its own .c table
-# (kEn / kZh) and its lang.ini is the override layer beside it. This script
-# writes every plugin's lang.ini out again from those two sources, so the
-# file a player reads carries both languages and can be copied for another.
-$plugins = @('ammo_capacity', 'cnchat', 'firstperson', 'fov_changer',
-             'OpticalCamo', 'skipintro', 'spawner', 'TimeWeatherControl')
+# The plugins whose text lives in their own .c table (kEn / kZh) and whose
+# lang.ini is the override layer beside them. This script writes each one's
+# lang.ini out again from those two sources, so the file a player reads
+# carries both languages and can be copied for another.
+$plugins = @('cnchat', 'firstperson', 'fov_changer', 'skipintro', 'spawner')
 
 # C joins adjacent string literals; merge them so a wrapped row reads whole.
 # The quote a join starts at must not be a backslash-escaped one: the two

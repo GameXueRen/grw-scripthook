@@ -10,7 +10,7 @@ Usage:
   pwsh ./build_msvc.ps1
   pwsh ./build_msvc.ps1 -Gamedir "D:\Games\GRW"
   pwsh ./build_msvc.ps1 -Clean
-  pwsh ./build_msvc.ps1 -Beta        # public beta: only the nine shipped plugins
+  pwsh ./build_msvc.ps1 -Beta        # public beta: only the six shipped plugins
   pwsh ./build_msvc.ps1 -Release     # -Beta plus diagnostics compiled out
 #>
 [CmdletBinding()]
@@ -55,20 +55,16 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 # The plugin set the first public beta ships. Everything else is built by a
 # plain run, and left out of a -Beta / -Release one.
 #
-# Two are out of the shipped set, both deliberately, and both keep their
-# source and their build entry in the tree for a plain build:
+# Four left the tree entirely on 2026-09-20, at the request of the author whose
+# plugins they re-implemented: OpticalCamo, TimeWeatherControl, ammo_capacity
+# and NPCSpawner. Nothing of his is built, shipped or kept here any more. One
+# other plugin is out of the shipped set and still in the tree, for a reason of
+# its own:
 #
 #   LastRites_dlcfix  the 2026-09 game update fixed what it worked around,
 #                     so the shipped set is one hook smaller.
-#   NPCSpawner        it spawns working NPCs, but they do not engage, and a
-#                     menu whose feature is half there is worse than no menu.
-#                     The spawn path itself is settled and measured - see
-#                     docs/npcspawner-reverse.md, section eleven (kept out of
-#                     the repository), for what is live, what the second crash
-#                     taught, and the next step.
 $betaSet = @(
-    'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat',
-    'TimeWeatherControl', 'OpticalCamo', 'ammo_capacity', 'micfix'
+    'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat', 'micfix'
 )
 $script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
 $releaseBuild     = [bool]$Release
@@ -332,19 +328,6 @@ Build-Plugin -Name 'GhostRevive' -Source 'GhostRevive.c' -LinkArgs @()
 #    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 #)
 Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')
-# NPCSpawner is a behaviour-equivalent C rewrite of the third-party
-# NPCSpawner.asi (see docs/npcspawner-reverse.md, kept out of the
-# repository). It late-binds the same exports the original did, so it needs
-# no import library.
-Build-Plugin 'NPCSpawner'   'NPCSpawner.c'   @()
-# OpticalCamo is a behaviour-equivalent C rewrite of the third-party
-# OpticalCamo.asi (see docs/opticacamo-reverse.md, kept out of the
-# repository). It keeps the
-# original's way of telling whether the optical camo is live (a vote on
-# the player's part flags) and drives the framework's visibility factor
-# with it. Unlike the original, it links the import library directly,
-# and it keeps its step in OpticalCamo.ini beside the source.
-Build-Plugin 'OpticalCamo'  'OpticalCamo.c'  @($libPath, 'libscripthook.lib')
 # EnemyReinforce sends reinforcements while a fight is on and hardens
 # the enemies it can prove are fighting. It late-binds as well, and
 # keeps its defaults in EnemyReinforce.ini and its text in lang.ini,
@@ -370,22 +353,6 @@ Build-Plugin 'CrazyCars'    'crazycars.c'    @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tp_roulette'  'tp_roulette.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'test_plugin'  'test_plugin.c'  @('ws2_32.lib', 'gdi32.lib', 'user32.lib')
-# ammo_capacity - behaviour-equivalent rewrite of the third-party
-# AmmoCapacity.asi (see docs/ammocapacity-reverse.md, kept out of the
-# repository). The hook and the
-# arithmetic belong to the framework (scripthook_ammocap.c), because the
-# framework is the one thing that writes engine memory; this plugin owns
-# the six values, the ini and the menu, and links the import library.
-Build-Plugin 'ammo_capacity' 'ammo_capacity.c' @($libPath, 'libscripthook.lib')
-# TimeWeatherControl - the rewrite that replaced the third-party
-# Time&Weather.asi outright (see docs/timeweather-reverse.md, kept out of
-# the repository): the old
-# plugin's folder, its three ini and its switch in scripthook.ini are gone
-# from both the tree and the game folder. It installs no hook at all - it is
-# a consumer of this framework's own weather API. No MinHook, no engine
-# memory.
-Build-Plugin 'TimeWeatherControl' 'TimeWeatherControl.c' @($libPath, 'libscripthook.lib')
-
 # micfix hands the game ASCII names for recording devices whose own name is
 # not ASCII - the in-process form of the community fix for "the game finds no
 # microphone on a Chinese Windows" - and adds the device picker the game has

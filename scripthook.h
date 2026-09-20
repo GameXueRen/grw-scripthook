@@ -728,11 +728,12 @@ SH_API int ShDespawn(uint64_t entity);
 /* ---- factions ----------------------------------------------------
  *
  * The engine keeps an archetype's faction private, and
- * ShNpcArchetype carries only {id, kind} with no name, so the
- * grouping cannot be derived: it is the four id tables
- * NPCSpawner.asi shipped plus the engine's own kind value as the
- * fallback. See docs/npcspawner-reverse.md (kept out of the repository)
- * for the evidence.
+ * ShNpcArchetype carries only {id, kind} with no name, so kind is
+ * what the grouping is read from - measured on this build rather than
+ * tabulated. The per-archetype id tables older versions carried came
+ * from a third-party plugin and were removed at its author's request on
+ * 2026-09-20, so an archetype whose kind does not name its faction now
+ * reads as the group its kind names.
  */
 
 #define SH_NPC_GROUP_SANTA_BLANCA 0
@@ -745,13 +746,12 @@ SH_API int ShDespawn(uint64_t entity);
 /** SH_NPC_GROUP_MAX. */
 SH_API int ShNpcGroupCount(void);
 /** "Santa Blanca", "Unidad", "Rebels", "Civilians", "Special",
- *  or "" for a group out of range. These are the menu labels
- *  NPCSpawner.asi used, so they double as its translation keys. */
+ *  or "" for a group out of range. The faction names are the game's, and
+ *  they are translation keys: pass them through ShLang. */
 SH_API const char *ShNpcGroupName(int group);
 
-/** The group an archetype belongs to, or -1 for one in none of
- *  them (the blacklist, or a kind no group claims). The tables
- *  are tried first and the engine's kind decides the rest. */
+/** The group an archetype belongs to, or -1 for a kind no group claims
+ *  (kinds 0..7 are the ones that do; see the note above). */
 SH_API int ShNpcGroupOfArchetype(const ShNpcArchetype *a);
 
 /** The same, looked up by id: walks the catalogue, so the first
@@ -770,13 +770,13 @@ SH_API int ShNpcAtInGroup(int group, int index, ShNpcArchetype *out);
 
 /* ---- formations and batches ------------------------------------- */
 
-/** The five layouts NPCSpawner.asi offered. */
+/** The five layouts ShNpcPlanFormation lays out. */
 enum ShNpcFormation {
-    SH_NPC_FORMATION_LINE = 0,   /**< abreast, 3 m apart        */
-    SH_NPC_FORMATION_SPREAD,     /**< a 3 column grid, 3.5 m    */
-    SH_NPC_FORMATION_SEMICIRCLE, /**< an arc, radius 5 m        */
-    SH_NPC_FORMATION_CIRCLE,     /**< a ring, radius 4 m        */
-    SH_NPC_FORMATION_RANDOM      /**< jittered, radius 2.5-7 m  */
+    SH_NPC_FORMATION_LINE = 0,   /**< abreast, 2.5 m apart      */
+    SH_NPC_FORMATION_SPREAD,     /**< a 3 column grid, 3 m      */
+    SH_NPC_FORMATION_SEMICIRCLE, /**< an arc, radius 4.5 m      */
+    SH_NPC_FORMATION_CIRCLE,     /**< a ring, radius 3.5 m      */
+    SH_NPC_FORMATION_RANDOM      /**< jittered, radius 2-6.5 m  */
 };
 
 /** Where a spawned batch looks. */
@@ -1113,7 +1113,7 @@ SH_API int  ShMenuIsOpen(void);
  *  this and the line is only written while it can be seen.  The framework
  *  shows whatever was written last the moment the page comes up, so a
  *  plugin that wants the first frame to be right keeps a dirty flag of
- *  its own (OpticalCamo.c does exactly that).
+ *  its own (any page with a live readout does exactly that).
  *
  *  0 for a menu that exists and is simply not showing is an answer, not a
  *  failure: ShLastError is set only when the id names no menu. */

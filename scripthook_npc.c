@@ -543,74 +543,27 @@ uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos) {
 
 /* ---- archetype groups --------------------------------------------
  *
- * Recouped from NPCSpawner.asi, which is the only place the
- * grouping has ever been written down: the engine keeps an
- * archetype's faction to itself and ShNpcArchetype has no name.
- * The four id tables win; the engine's kind is the fallback.
- * docs/npcspawner-reverse.md (kept out of the repository) carries the
- * evidence, and the originals of these bytes.
+ * Which faction an archetype belongs to is the engine's own business and it
+ * keeps it private: ShNpcArchetype carries {id, kind} and no name, so kind is
+ * the one value the framework can read. Kind is therefore what decides the
+ * group, measured on this build rather than looked up in a table:
+ *
+ *   kind 3         Santa Blanca
+ *   kind 5         Unidad
+ *   kind 6, 7      Rebels
+ *   kind 0, 1      Civilians
+ *   kind 4         Special
+ *   anything else  no group (-1)
+ *
+ * Older versions of this module also carried four per-archetype id tables,
+ * with a blacklist and an explicitly listed Unidad id. They had come from a
+ * third-party plugin and were removed at its author's request on 2026-09-20;
+ * what that costs is written down at ShNpcGroupOfArchetype below.
  */
 
 static const char *g_groupNames[SH_NPC_GROUP_MAX] = {
     "Santa Blanca", "Unidad", "Rebels", "Civilians", "Special"
 };
-
-/* Never spawned: the original's blacklist. @0x180007C00 */
-static const uint64_t g_blacklist[44] = {
-    0x5325BD7A52ULL, 0x78FADA79FFULL, 0x5325BD7A4DULL, 0x78FADA4D05ULL,
-    0x5325BD7A48ULL, 0x31B65512F7ULL, 0x10F2A192C3DULL, 0x10F2A192C35ULL,
-    0x3D66E0ABDFULL, 0x2309B3C694ULL, 0x5325BD7627ULL, 0x2FD455483EULL,
-    0x237A1CBFBAULL, 0x237A1CBFB9ULL, 0x10F2A192C39ULL, 0x4738A95B71ULL,
-    0x51021FED77ULL, 0x4FEB645A8DULL, 0x4FEB645A8EULL, 0x4AC59FEDD9ULL,
-    0x4FEB647516ULL, 0x4FEB6459B2ULL, 0x4AC59FEDD7ULL, 0x4FEB6459EBULL,
-    0x4D8AB38F5AULL, 0x4FEB6459ECULL, 0x4AC59FEDD6ULL, 0x4FEB647517ULL,
-    0x4AC59FEDD8ULL, 0x4D8AB38F5BULL, 0x4AC59FEDDAULL, 0x4FEB6459B1ULL,
-    0x7C33CC49CAULL, 0x3456303A13ULL, 0x5B708516B0ULL, 0x3F73BD8D99ULL,
-    0x3F4892BDFDULL, 0x8AFE25F47FULL, 0x6E164F05B3ULL, 0x3F4892BCF7ULL,
-    0x3456303D78ULL, 0x2EC3CD6993ULL, 0x2DF374C80CULL, 0xBBE631D833ULL
-};
-
-/* Special, explicitly listed. @0x180007D60 */
-static const uint64_t g_special[76] = {
-    0x1A987A8752DULL, 0x1AFB8794FE6ULL, 0x1B155F83D72ULL, 0x1AFB8751E8EULL,
-    0x1A987A5256FULL, 0x1B155F6628CULL, 0x1AFB8794FEAULL, 0x1A987A5FFD7ULL,
-    0x183A1B02363ULL, 0x185B81997B0ULL, 0x18173A2EB26ULL, 0x18173A5399AULL,
-    0x187334C4DB7ULL, 0x185B81B4750ULL, 0x187E427E5C5ULL, 0x18173A30AC6ULL,
-    0x18173A2FCA4ULL, 0x18173A3102FULL, 0x197A932C062ULL, 0x18F3D2B2FA2ULL,
-    0x1A16C520991ULL, 0x18D7BD5327EULL, 0x1994707A751ULL, 0x8A9482DAC2ULL,
-    0x7C0B092643ULL,  0x8A9482DACCULL, 0x14397E627AEULL, 0x154BBBC37D0ULL,
-    0x154BBB495E1ULL, 0x537991063FULL, 0x4AC59FCA66ULL, 0x5379910630ULL,
-    0x537991063EULL,  0x4AC59FCA65ULL, 0x5379910631ULL, 0x4AC59FCA64ULL,
-    0x68EB25F118ULL,  0x433A9B6E26ULL, 0x68EB25EB16ULL, 0x7D662A1D27ULL,
-    0x78C9B348CFULL,  0x45F1E58279ULL, 0x792C60E200ULL, 0x18B72EE403DULL,
-    0x198B997684CULL, 0x71CBB77732ULL, 0x71CBB77725ULL, 0x71CBB77721ULL,
-    0x71CBB77722ULL,  0x71CBB7772DULL, 0x71CBB77720ULL, 0x71CBB77739ULL,
-    0x7929219EF8ULL,  0x45F1E58223ULL, 0x71CBB77729ULL, 0x71CBB77724ULL,
-    0x71CBB77727ULL,  0x71CBB77736ULL, 0x147CD1A13C3ULL, 0x82AF1233BCULL,
-    0x71CBB77735ULL,  0x71CBB77731ULL, 0x71CBB7772CULL, 0x71CBB77728ULL,
-    0x71CBB7772BULL,  0x71CBB77726ULL, 0x71CBB77734ULL, 0x71CBB7772AULL,
-    0x71CBB77730ULL,  0x71CBB7773AULL, 0x71CBB77738ULL, 0x7926908976ULL,
-    0x71CBB77737ULL,  0xCA9DCD4408ULL, 0x71CBB77723ULL, 0x7C33CCA452ULL
-};
-
-/* @0x180007FC0 */
-static const uint64_t g_santaBlanca[2] = {
-    0xF645ED5E6DULL, 0x154BBBC8ADAULL
-};
-
-/* @0x180007FE8 */
-static const uint64_t g_civilians[3] = {
-    0x1AFB8765956ULL, 0x7DECAB61CDULL, 0x7DECAB1E1DULL
-};
-
-/* The one explicitly listed Unidad archetype. */
-#define NPC_ID_UNIDAD 0x1A987A7937CULL
-
-static int InTable(const uint64_t *t, int n, uint64_t v) {
-    int i;
-    for (i = 0; i < n; i++) if (t[i] == v) return 1;
-    return 0;
-}
 
 SH_API int ShNpcGroupCount(void) {
     return SH_NPC_GROUP_MAX;
@@ -621,22 +574,16 @@ SH_API const char *ShNpcGroupName(int group) {
     return g_groupNames[group];
 }
 
-/* The original's 0x1800011C0, reshaped: it asked "is this in
- * group G", which for one archetype answers exactly one group,
- * so one return says the same thing and is cheaper to ask. */
+/* One archetype, one group, decided by the engine's own kind - see the note
+ * above. There is no id table any more, so an archetype whose kind does not
+ * name its faction reads as the group its kind names; that is what most of
+ * the catalogue has always done, and it is the honest answer given that the
+ * engine keeps the faction itself private. */
 SH_API int ShNpcGroupOfArchetype(const ShNpcArchetype *a) {
-    uint64_t id;
     int kind;
 
     if (!a) return -1;
-    id = a->id;
     kind = a->kind;
-
-    if (InTable(g_blacklist, 44, id)) return -1;
-    if (InTable(g_santaBlanca, 2, id)) return SH_NPC_GROUP_SANTA_BLANCA;
-    if (id == NPC_ID_UNIDAD) return SH_NPC_GROUP_UNIDAD;
-    if (InTable(g_civilians, 3, id)) return SH_NPC_GROUP_CIVILIANS;
-    if (InTable(g_special, 76, id)) return SH_NPC_GROUP_SPECIAL;
 
     if (kind == 3) return SH_NPC_GROUP_SANTA_BLANCA;
     if (kind == 5) return SH_NPC_GROUP_UNIDAD;
@@ -690,12 +637,22 @@ SH_API int ShNpcAtInGroup(int group, int index, ShNpcArchetype *out) {
 
 /* ---- formations -------------------------------------------------- */
 
-#define PI_F      3.14159265f
-#define TWO_PI_F  6.28318531f
-#define INV_2P24  5.9604645e-8f   /* 2^-24, the PRNG scale */
+#define NPC_PI_F   3.14159265f
+#define NPC_TAU_F  6.28318531f
 
-/* One point, in the plane the caller then rotates by yaw.
- * Mirrors NPCSpawner.asi's 0x180001530. */
+/* One point of a layout, in the plane ShNpcPlanFormation then rotates by the
+ * player's yaw. Distances are metres, and every shape is the plain reading of
+ * its name:
+ *
+ *   line         abreast, 2.5 m apart, centred on the aim point
+ *   spread       a three column grid at 3 m, every row centred on its own
+ *   semicircle   an arc in front of the aim point, radius 4.5 m
+ *   circle       a ring around it, radius 3.5 m
+ *   random       a ring at 2-6.5 m, each spawn jittered inside its own slice
+ *
+ * The jitter is one step of xorshift32 per point, seeded by the caller: the
+ * same seed lays out the same batch, and each point keeps to its own slice of
+ * the ring, so a batch never lands two NPCs on one spot. */
 static void FormationPoint(int formation, int i, int n,
                            unsigned *seed, float *ox, float *oy) {
     float a;
@@ -706,7 +663,7 @@ static void FormationPoint(int formation, int i, int n,
 
     switch (formation) {
     case SH_NPC_FORMATION_LINE:
-        *ox = ((float)i - (float)(n - 1) * 0.5f) * 3.0f;
+        *ox = ((float)i - (float)(n - 1) * 0.5f) * 2.5f;
         break;
 
     case SH_NPC_FORMATION_SPREAD: {
@@ -714,39 +671,40 @@ static void FormationPoint(int formation, int i, int n,
         int q = i / 3, r = i % 3;
         int rowLen = n - 3 * q;
         int rows = (n + 2) / 3;
-        *ox = ((float)r - (float)(rowLen - 1) * 0.5f) * 3.5f;
-        *oy = ((float)q - ((float)rows - 1.0f) * 0.5f) * 3.5f;
+        *ox = ((float)r - (float)(rowLen - 1) * 0.5f) * 3.0f;
+        *oy = ((float)q - ((float)rows - 1.0f) * 0.5f) * 3.0f;
         break;
     }
 
     case SH_NPC_FORMATION_SEMICIRCLE:
-        a = PI_F * ((float)i / (float)(n - 1)) - PI_F * 0.5f;
-        *ox = 5.0f * cosf(a);
-        *oy = 5.0f * sinf(a);
+        a = NPC_PI_F * ((float)i / (float)(n - 1)) - NPC_PI_F * 0.5f;
+        *ox = 4.5f * cosf(a);
+        *oy = 4.5f * sinf(a);
         break;
 
     case SH_NPC_FORMATION_CIRCLE:
-        a = TWO_PI_F * (float)i / (float)n;
-        *ox = 4.0f * cosf(a);
-        *oy = 4.0f * sinf(a);
+        a = NPC_TAU_F * (float)i / (float)n;
+        *ox = 3.5f * cosf(a);
+        *oy = 3.5f * sinf(a);
         break;
 
     default: {
-        /* Random: a 24 bit hash of the running seed gives the
-         * angle a jitter inside its slice and the radius a value
-         * in [2.5, 7.0). */
+        /* Random: the low 16 bits of the step jitter the point inside its
+         * slice, the next 16 pick the radius in [2, 6.5). Zero is the one
+         * seed xorshift32 cannot leave, so it is replaced by a constant. */
         unsigned s = *seed;
-        unsigned h1 = (s * 0x19660Du + 0x3C6EF35Fu) & 0xFFFFFFu;
-        float r1, r2, rad;
+        float jitter, rad;
 
-        s = s * 0x17385CA9u + 0x47502932u;
+        if (!s) s = 0x9E3779B9u;
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
         *seed = s;
 
-        r1 = (float)h1 * INV_2P24;
-        r2 = (float)(s & 0xFFFFFFu) * INV_2P24;
+        jitter = (float)(s & 0xFFFFu) * (1.0f / 65536.0f);
+        rad = 2.0f + 4.5f * (float)((s >> 16) & 0xFFFFu) * (1.0f / 65536.0f);
 
-        a = (TWO_PI_F / (float)n) * ((float)i + r1);
-        rad = 2.5f + 4.5f * r2;
+        a = (NPC_TAU_F / (float)n) * ((float)i + jitter);
         *ox = rad * cosf(a);
         *oy = rad * sinf(a);
         break;
@@ -796,10 +754,10 @@ SH_API int ShNpcPlanFormation(int formation, int count, float distance,
 
 /* Runs on whichever thread calls it. progress, when it is not
  * NULL, is republished after every NPC so a poll can watch the
- * batch fill up; cancel is read between NPCs. Mirrors the
- * original's worker at 0x180002070, including its refusal to
- * work while the world is loading and its habit of dropping an
- * NPC it spawned just as the world went away. */
+ * batch fill up; cancel is read between NPCs. Two rules are its own:
+ * it stops while the world is loading (an NPC handed to a world that is
+ * not there yet is a crash waiting to happen), and it drops an NPC it
+ * spawned just as the world went away. */
 static int SpawnBatch(const ShNpcSpawnRequest *req, uint64_t *out,
                       int maxOut, volatile LONG *cancel,
                       volatile LONG *progress) {
@@ -842,8 +800,8 @@ static int SpawnBatch(const ShNpcSpawnRequest *req, uint64_t *out,
 
         /* Put the point on the ground first.
          *
-         * The planner leaves z at the origin's own, mirroring the original
-         * plugin, and that is what buries NPCs: a formation is metres across,
+         * The planner leaves z at the origin's own, and that is what buries
+         * NPCs: a formation is metres across,
          * so on a slope its far points sit above or below the surface the
          * player is standing on. The probe is the engine's own ray, hinted
          * with the planned height so it finds the surface there - a bridge

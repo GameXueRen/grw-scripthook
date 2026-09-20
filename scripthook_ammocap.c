@@ -1,6 +1,7 @@
-/* Ammo capacity, scaled - the framework's own replacement for the
- * third-party AmmoCapacity.asi. See docs/ammocapacity-reverse.md (kept out
- * of the repository) for the full derivation; this file is its section 7.1.
+/* Ammo capacity, scaled: this module hooks the one engine function that
+ * computes a magazine's capacity and scales what it returns. Which function
+ * that is, and why a hook is the only way in, is in
+ * docs/ammocapacity-reverse.md (kept out of the repository).
  *
  * The fact that made every other approach fail, and the reason this is a
  * hook and not a field write: the magazine capacity is STORED NOWHERE. The

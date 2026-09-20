@@ -17,10 +17,9 @@ GAMEDIR = ../..
 # in $(GAMEDIR)/plugins/<name>/<name>.asi, one folder per plugin, which
 # is what the loader scans for. Logs go into <gamedir>/logs at runtime.
 
-.PHONY: all roulette fling spawner npcspawner enemyreinforce modeprobe \
+.PHONY: all roulette fling spawner enemyreinforce modeprobe \
         modecallprobe blacklistsample filewatchsample drawsample cnchat \
-        crazycars freecam fov fps chaos sample skipintro opticalcamo \
-        ammocapacity timeweathercontrol micfix \
+        crazycars freecam fov fps chaos sample skipintro micfix \
         docs clean
 
 capprobe: $(GAMEDIR)/plugins/CapProbe/CapProbe.asi
@@ -30,27 +29,6 @@ sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 $(GAMEDIR)/plugins/ui_sample/ui_sample.asi: plugins/ui_sample/ui_sample.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/ui_sample/ui_sample.c -L. -lscripthook -luser32
-
-ammocapacity: $(GAMEDIR)/plugins/ammo_capacity/ammo_capacity.asi
-
-# The third-party AmmoCapacity.asi rewritten against this framework
-# (docs/ammocapacity-reverse.md, kept out of the repository). The hook and
-# the arithmetic are the framework's (scripthook_ammocap.c); this plugin owns
-# the values, the ini and the menu, and links the import library.
-$(GAMEDIR)/plugins/ammo_capacity/ammo_capacity.asi: plugins/ammo_capacity/ammo_capacity.c scripthook.h libscripthook.a
-	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -o $@ plugins/ammo_capacity/ammo_capacity.c -L. -lscripthook
-
-timeweathercontrol: $(GAMEDIR)/plugins/TimeWeatherControl/TimeWeatherControl.asi
-
-# The rewrite that replaced the third-party Time&Weather.asi outright
-# (docs/timeweather-reverse.md, kept out of the repository); the old plugin's
-# folder, its three ini and its switch are gone from the tree and from the
-# game folder. It installs no hook either: every change goes through the
-# framework's own weather API, so there is nothing to take over from anyone.
-$(GAMEDIR)/plugins/TimeWeatherControl/TimeWeatherControl.asi: plugins/TimeWeatherControl/TimeWeatherControl.c scripthook.h libscripthook.a
-	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -o $@ plugins/TimeWeatherControl/TimeWeatherControl.c -L. -lscripthook
 
 blacklistsample: $(GAMEDIR)/plugins/blacklist_sample/blacklist_sample.asi
 
@@ -128,15 +106,6 @@ $(GAMEDIR)/plugins/skipintro/skipintro.asi: plugins/skipintro/skipintro.c script
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/skipintro/skipintro.c -L. -lscripthook
 
-# OpticalCamo, the third-party plugin rewritten against this framework
-# (docs/opticacamo-reverse.md, kept out of the repository), plus the ini
-# seeded next to the .asi by build_msvc.ps1. It links the import library.
-opticalcamo: $(GAMEDIR)/plugins/OpticalCamo/OpticalCamo.asi
-
-$(GAMEDIR)/plugins/OpticalCamo/OpticalCamo.asi: plugins/OpticalCamo/OpticalCamo.c scripthook.h log.h libscripthook.a
-	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -o $@ plugins/OpticalCamo/OpticalCamo.c -L. -lscripthook
-
 fov: $(GAMEDIR)/plugins/fov_changer/fov_changer.asi
 
 $(GAMEDIR)/plugins/fov_changer/fov_changer.asi: plugins/fov_changer/fov_changer.c scripthook.h libscripthook.a
@@ -149,12 +118,6 @@ spawner: $(GAMEDIR)/plugins/spawner/spawner.asi
 $(GAMEDIR)/plugins/spawner/spawner.asi: plugins/spawner/spawner.c scripthook.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/spawner/spawner.c -lgdi32 -luser32
-
-npcspawner: $(GAMEDIR)/plugins/NPCSpawner/NPCSpawner.asi
-
-$(GAMEDIR)/plugins/NPCSpawner/NPCSpawner.asi: plugins/NPCSpawner/NPCSpawner.c scripthook.h log.h
-	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -o $@ plugins/NPCSpawner/NPCSpawner.c
 
 enemyreinforce: $(GAMEDIR)/plugins/EnemyReinforce/EnemyReinforce.asi
 
