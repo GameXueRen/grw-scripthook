@@ -64,7 +64,8 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 #   LastRites_dlcfix  the 2026-09 game update fixed what it worked around,
 #                     so the shipped set is one hook smaller.
 $betaSet = @(
-    'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat', 'micfix'
+    'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat', 'micfix',
+    'TimeWeatherControl'
 )
 $script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
 $releaseBuild     = [bool]$Release
@@ -328,6 +329,14 @@ Build-Plugin -Name 'GhostRevive' -Source 'GhostRevive.c' -LinkArgs @()
 #    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 #)
 Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')
+# TimeWeatherControl is time and weather from the menu: every change goes
+# through the framework's own engine calls (ShSetTime, ShSetTimeSpeed,
+# ShSetWeatherBlend, ShReleaseWeather), so it installs no hook, patches no code
+# and writes no engine memory of its own. The clock rate is per window -
+# dawn 05-07, day 07-18, dusk 18-20, night 20-05 - with the time of day sent
+# only when the player asks for it. Off by default, and turning the switch off
+# hands the weather and the clock rate back to the engine.
+Build-Plugin 'TimeWeatherControl' 'TimeWeatherControl.c' @($libPath, 'libscripthook.lib')
 # EnemyReinforce sends reinforcements while a fight is on and hardens
 # the enemies it can prove are fighting. It late-binds as well, and
 # keeps its defaults in EnemyReinforce.ini and its text in lang.ini,

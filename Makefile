@@ -17,7 +17,7 @@ GAMEDIR = ../..
 # in $(GAMEDIR)/plugins/<name>/<name>.asi, one folder per plugin, which
 # is what the loader scans for. Logs go into <gamedir>/logs at runtime.
 
-.PHONY: all roulette fling spawner enemyreinforce modeprobe \
+.PHONY: all roulette fling spawner timeweather enemyreinforce modeprobe \
         modecallprobe blacklistsample filewatchsample drawsample cnchat \
         crazycars freecam fov fps chaos sample skipintro micfix \
         docs clean
@@ -118,6 +118,17 @@ spawner: $(GAMEDIR)/plugins/spawner/spawner.asi
 $(GAMEDIR)/plugins/spawner/spawner.asi: plugins/spawner/spawner.c scripthook.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/spawner/spawner.c -lgdi32 -luser32
+
+timeweather: $(GAMEDIR)/plugins/TimeWeatherControl/TimeWeatherControl.asi
+
+# Time and weather from the menu, all of it through the framework's own engine
+# calls (ShSetTime, ShSetTimeSpeed, ShSetWeatherBlend, ShReleaseWeather): no
+# hook, no code patch, no engine memory written here. The clock rate follows
+# the time of day (dawn 05-07, day 07-18, dusk 18-20, night 20-05); the time
+# itself is sent only when the player asks. Off by default.
+$(GAMEDIR)/plugins/TimeWeatherControl/TimeWeatherControl.asi: plugins/TimeWeatherControl/TimeWeatherControl.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ plugins/TimeWeatherControl/TimeWeatherControl.c -L. -lscripthook
 
 enemyreinforce: $(GAMEDIR)/plugins/EnemyReinforce/EnemyReinforce.asi
 

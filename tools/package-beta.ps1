@@ -37,7 +37,7 @@ param(
     # a -Beta / -Release build deploys, this one what the package carries.
     [string[]]$Plugins = @(
         'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat',
-        'micfix'
+        'micfix', 'TimeWeatherControl'
     ),
 
     # Also produce a .zip beside the tree.

@@ -184,13 +184,17 @@ and ClowdPanini's Last Rites table for head identification.
 The GRW Environment table for weather. neburas for the Windows
 spawn fix.
 
-The two third-party plugins this repository rewrote, both read from
-their shipped binaries: AmmoCapacity
-(nexusmods.com/ghostreconwildlands/mods/123), which is where the
-capacity hook point came from, and Time&Weather
-(nexusmods.com/ghostreconwildlands/mods/124), whose day/night windows
-and weather behaviour the rewrite follows. The derivations are in
-docs/ammocapacity-reverse.md and docs/timeweather-reverse.md, both kept
-out of the repository.
+This repository used to carry rewrites of four third-party plugins -
+AmmoCapacity, Time&Weather, OpticalCamo and NPCSpawner, all by the same
+author, and all read from their shipped binaries. At his request they were
+removed from the tree, the packages and the development machine on 2026-09-20,
+so his own versions, updated for TU25, are the ones to use; the README says
+where to find them.
+
+What they needed from the framework is still here, because it was always ours:
+the ammo-capacity hook, the visibility factor, the time and weather API, and
+the NPC spawn and formation calls. An independent plugin can use any of them -
+which is also why the framework no longer carries the per-archetype id tables
+those routines used to be pointed at.
 
 Source: https://github.com/PhialsBasement/grw-scripthook
