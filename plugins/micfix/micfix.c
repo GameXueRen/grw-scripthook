@@ -272,6 +272,15 @@ static uint32_t g_menu;
 static CRITICAL_SECTION g_lock;
 static volatile LONG    g_lockReady;
 
+/* Set on the plugin's scan thread while the scan walks its own enumerator.
+ * The detours are there to answer the game, and must not answer the plugin:
+ * a scan read that comes back aliased records the alias where a device name
+ * belongs - "name='Mic1(Realtek High Definition Audio)'" in the log of
+ * 2026-09-19 - and then no device is ever matched by name, and none is ever
+ * recorded as having a non-ASCII one. Thread local, so a game thread reading
+ * a device name at that moment is still answered. */
+static __declspec(thread) int t_inScan;
+
 static void Lock(void)   { if (g_lockReady) EnterCriticalSection(&g_lock); }
 static void Unlock(void) { if (g_lockReady) LeaveCriticalSection(&g_lock); }
 
@@ -1191,6 +1200,11 @@ static HRESULT STDMETHODCALLTYPE HookBagRead(void *self, const WCHAR *name,
 
     if (!orig) return E_FAIL;
     hr = orig(self, name, var, errlog);
+
+    /* The scan asks this same bag for the same name, and it has to get the
+     * device's real name back: this detour is what makes the game's reads,
+     * and it must not make the plugin's own. */
+    if (t_inScan) return hr;
 
     /* One of the bags this plugin registered, not merely one of the class it
      * patched - see BagKnown. */
@@ -2153,17 +2167,49 @@ static UINT WINAPI HookWaveInGetNumDevs(void) {
     return n;
 }
 
+/* The alias for the name this door is about to answer with, found the same
+ * way the other two doors find theirs - and through the same name-to-alias
+ * memory, so all three hand the game one string per device.
+ *
+ * Matching by WaveInID alone was not enough, and that is the defect of
+ * 2026-09-21: the ID is only in the scan's table, and the table was written
+ * from reads this plugin had already aliased (see HookBagRead), so a device
+ * could sit there with its ID recorded and "has a non-ASCII name" never set -
+ * which is exactly what DevByWaveInId requires. Every device of that kind,
+ * and every device one of the other doors cannot cover at all - a disabled
+ * one among them - kept its non-ASCII name on this door, so the game saw two
+ * names for one device and offered no microphone. */
+static int WaveInAliasFor(const WCHAR *name, UINT_PTR id, char *out, int cap) {
+    if (name && name[0] && AliasFor(name, out, cap)) return 1;
+    return DevByWaveInId((int)id, out, cap);
+}
+
+/* The A door's name is in the ANSI code page - GBK on a Chinese Windows -
+ * so it is widened before the same matching runs. 0 when there is nothing to
+ * match on, and the caller falls back to the ID. */
+static int WaveInNameWide(const char *a, WCHAR *out, int cap) {
+    out[0] = 0;
+    if (a && a[0] && MultiByteToWideChar(CP_ACP, 0, a, -1, out, cap) <= 0)
+        out[0] = 0;
+    return out[0] != 0;
+}
+
 static UINT WINAPI HookWaveInGetDevCapsW(UINT_PTR id, MicWaveInCapsW *caps,
                                          UINT cb) {
     UINT r = g_waveInCapsW ? g_waveInCapsW(id, caps, cb) : 1;
     char alias[MIC_ALIAS_MAX];
-    int  known = DevByWaveInId((int)id, alias, sizeof(alias));
+    int  known = 0;
 
+    if (r == 0 && caps && cb >= sizeof(MicWaveInCapsW))
+        known = WaveInAliasFor(caps->szPname, id, alias, sizeof(alias));
+
+    /* The name is logged before it is replaced, so the probe log carries what
+     * the system said as well as what the game is given. */
     if (WantProbe())
         Log("waveInGetDevCapsW(id=%d) -> %u name='%ls'%s", (int)id, r,
             (r == 0 && caps) ? caps->szPname : L"",
             known ? "  (aliased)" : "");
-    if (r == 0 && caps && known && WantFix() && cb >= sizeof(MicWaveInCapsW)) {
+    if (known && WantFix()) {
         WaveInAliasW(alias, caps->szPname);
         if (WantProbe())
             Log("waveInGetDevCapsW(id=%d): the name is answered as '%s'",
@@ -2176,13 +2222,24 @@ static UINT WINAPI HookWaveInGetDevCapsA(UINT_PTR id, MicWaveInCapsA *caps,
                                          UINT cb) {
     UINT r = g_waveInCapsA ? g_waveInCapsA(id, caps, cb) : 1;
     char alias[MIC_ALIAS_MAX];
-    int  known = DevByWaveInId((int)id, alias, sizeof(alias));
+    int  known = 0;
+
+    if (r == 0 && caps && cb >= sizeof(MicWaveInCapsA)) {
+        WCHAR w[MIC_NAME_MAX];
+
+        /* The A variant's name is one byte per character in the ANSI code
+         * page, so it is widened before it goes into the same matching the W
+         * door uses. An empty or unconvertible name falls back to the ID. */
+        known = WaveInNameWide(caps->szPname, w, (int)ARRAY_LEN(w))
+                    ? WaveInAliasFor(w, id, alias, sizeof(alias))
+                    : DevByWaveInId((int)id, alias, sizeof(alias));
+    }
 
     if (WantProbe())
         Log("waveInGetDevCapsA(id=%d) -> %u name='%s'%s", (int)id, r,
             (r == 0 && caps) ? caps->szPname : "",
             known ? "  (aliased)" : "");
-    if (r == 0 && caps && known && WantFix() && cb >= sizeof(MicWaveInCapsA)) {
+    if (known && WantFix()) {
         snprintf(caps->szPname, MIC_PNAME_LEN, "%s", alias);
         if (WantProbe())
             Log("waveInGetDevCapsA(id=%d): the name is answered as '%s'",
@@ -2602,7 +2659,11 @@ static int ScanDevicesRaw(void) {
  * which the game initialized long before. */
 static int ScanDevices(void) {
     HRESULT coinit = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    int     n      = ScanDevicesRaw();
+    int     n;
+
+    t_inScan = 1;
+    n = ScanDevicesRaw();
+    t_inScan = 0;
 
     if (SUCCEEDED(coinit)) CoUninitialize();
     return n;
@@ -2668,7 +2729,7 @@ static void SaveIni(void) {
 static void LoadConfig(void) {
     InterlockedExchange(&g_cfgFix,   IniInt("fix", 1) ? 1 : 0);
     InterlockedExchange(&g_cfgForce, IniInt("force", 0) ? 1 : 0);
-    InterlockedExchange(&g_cfgProbe, IniInt("probe", 1) ? 1 : 0);
+    InterlockedExchange(&g_cfgProbe, IniInt("probe", 0) ? 1 : 0);
     InterlockedExchange(&g_cfgDevice, IniInt("device", 0));
     IniStr("device_key", g_targetKey, sizeof(g_targetKey), "");
     Log("config: fix=%d force=%d probe=%d device=%d key='%s'", WantFix(),
