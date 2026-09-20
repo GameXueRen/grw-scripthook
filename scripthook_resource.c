@@ -48,14 +48,12 @@ static int Sane(uint64_t p) {
     return p >= 0x10000ULL && p < 0x800000000000ULL;
 }
 
-/* Returns the protected int address for a resource spec, or
- * 0 if the manager is not ready or the spec is absent.
+/* The leaf both callers read: its base, how many entries it holds, and the
+ * value-array index its own count maps to. One walk, two users - the spec
+ * lookup below and the slot read a probe asks for.
  */
-static uint64_t Resolve(uint32_t spec) {
-    uint64_t handle, mgr, root, base, keyptr;
-    uint8_t count, valoff;
-    uint32_t sid;
-    int i;
+static int Leaf(uint64_t *base, uint8_t *count, uint8_t *valoff) {
+    uint64_t handle, mgr, root;
 
     if (!ShReadableAddr(RES_GLOBAL, 8)) return 0;
     handle = ShReadQ(RES_GLOBAL);
@@ -66,20 +64,49 @@ static uint64_t Resolve(uint32_t spec) {
 
     /* A single leaf holds all eight resources. */
     if ((root & 7) != 1) return 0;
-    base = root & ~7ULL;
-    if (!ShReadableAddr(base, 1)) return 0;
-    memcpy(&count, (void *)(uintptr_t)base, 1);
-    if (count > 32) return 0;
-    if (!ShReadableAddr(VALOFF_TBL + count, 1)) return 0;
-    memcpy(&valoff, (void *)(uintptr_t)(VALOFF_TBL + count), 1);
+    *base = root & ~7ULL;
+    if (!ShReadableAddr(*base, 1)) return 0;
+    memcpy(count, (void *)(uintptr_t)*base, 1);
+    if (*count > 32) return 0;
+    if (!ShReadableAddr(VALOFF_TBL + *count, 1)) return 0;
+    memcpy(valoff, (void *)(uintptr_t)(VALOFF_TBL + *count), 1);
+    return 1;
+}
+
+/* The spec id and the value behind one entry of the leaf. 1 when the row
+ * exists - i runs to count INCLUSIVE, which is how the node is laid out
+ * (see the loop in Resolve below). */
+static int Slot(int i, uint32_t *spec, uint64_t *prot) {
+    uint64_t base, keyptr, p;
+    uint8_t count, valoff;
+    uint32_t sid;
+
+    if (!Leaf(&base, &count, &valoff)) return 0;
+    if (i < 0 || i > (int)count) return 0;
+    keyptr = ShReadQ(base + 8 + (uint64_t)i * 8);
+    if (!Sane(keyptr) || !ShReadableAddr(keyptr + OFF_DEF_SPEC, 4)) return 0;
+    memcpy(&sid, (void *)(uintptr_t)(keyptr + OFF_DEF_SPEC), 4);
+    p = ShReadQ(base + ((uint64_t)valoff + (uint64_t)i) * 8);
+    if (spec) *spec = sid;
+    if (prot) *prot = p;
+    return 1;
+}
+
+/* Returns the protected int address for a resource spec, or
+ * 0 if the manager is not ready or the spec is absent.
+ */
+static uint64_t Resolve(uint32_t spec) {
+    uint64_t base, p;
+    uint8_t count, valoff;
+    uint32_t sid;
+    int i;
+
+    if (!Leaf(&base, &count, &valoff)) return 0;
 
     for (i = 0; i <= (int)count; i++) {
-        keyptr = ShReadQ(base + 8 + (uint64_t)i * 8);
-        if (!Sane(keyptr) || !ShReadableAddr(keyptr + OFF_DEF_SPEC, 4))
-            continue;
-        memcpy(&sid, (void *)(uintptr_t)(keyptr + OFF_DEF_SPEC), 4);
+        if (!Slot(i, &sid, &p)) continue;
         if (sid == spec)
-            return ShReadQ(base + ((uint64_t)valoff + i) * 8);
+            return p;
     }
     return 0;
 }
@@ -113,6 +140,32 @@ SH_API int ShSetAllResources(uint32_t value) {
         if (ShSetResource(i, value)) n++;
     ShSetError(n ? SH_OK : SH_ERR_NO_CANDIDATE);
     return n;
+}
+
+/* A probe's view of the same leaf the four named resources live in: that node
+ * holds EIGHT entries (see the comment above), and which four the others are
+ * is exactly the kind of question a probe is asked - it is where a count that
+ * moves by one per shot would be cheap to reach, no heap scan and no hook.
+ *
+ * i indexes the leaf in its own order, 0 up to the count the node reports.
+ * value is the decoded int behind the entry and prot the address of the
+ * protected int itself, either may be NULL. 1 when the row exists, 0 with
+ * SH_ERR_NO_CANDIDATE once past the end or while the manager is not up. */
+SH_API int ShGetResourceSlot(int i, uint32_t *spec, uint32_t *value,
+                             uint64_t *prot) {
+    uint64_t p = 0;
+    uint32_t sid = 0;
+
+    if (i < 0) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    if (!Slot(i, &sid, &p)) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
+    if (spec) *spec = sid;
+    if (prot) *prot = p;
+    if (value && !ShStatRead(p, value)) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
+    ShSetError(SH_OK);
+    return 1;
 }
 
 static uint64_t SkillAddr(void) {

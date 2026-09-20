@@ -10,7 +10,7 @@ Usage:
   pwsh ./build_msvc.ps1
   pwsh ./build_msvc.ps1 -Gamedir "D:\Games\GRW"
   pwsh ./build_msvc.ps1 -Clean
-  pwsh ./build_msvc.ps1 -Beta        # public beta: only the six shipped plugins
+  pwsh ./build_msvc.ps1 -Beta        # public beta: only the shipped plugins
   pwsh ./build_msvc.ps1 -Release     # -Beta plus diagnostics compiled out
 #>
 [CmdletBinding()]
@@ -63,9 +63,19 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 #
 #   LastRites_dlcfix  the 2026-09 game update fixed what it worked around,
 #                     so the shipped set is one hook smaller.
+#
+#   AmmoProbe         read-only evidence: it answered the question it was for
+#                     (docs\ammocapacity-reverse.md, section 9), so a plain
+#                     run builds it and a -Beta does not - and a -Beta also
+#                     moves its folder out of plugins\ like any other plugin
+#                     that is not in the set below.
+#
+# AmmoControl is IN the set: the capacity multiplier and the auto reload are
+# part of the release, and leaving it out of this list would quietly drop the
+# plugin from every beta build.
 $betaSet = @(
     'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat', 'micfix',
-    'TimeWeatherControl'
+    'TimeWeatherControl', 'AmmoControl'
 )
 $script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
 $releaseBuild     = [bool]$Release
@@ -337,6 +347,24 @@ Build-Plugin 'spawner'      'spawner.c'      @('gdi32.lib', 'user32.lib')
 # only when the player asks for it. Off by default, and turning the switch off
 # hands the weather and the clock rate back to the engine.
 Build-Plugin 'TimeWeatherControl' 'TimeWeatherControl.c' @($libPath, 'libscripthook.lib')
+# AmmoProbe is a read only evidence tool, and the answer it is after is "where
+# does the game keep the rounds left in the magazine". Where that is, is known
+# (the inventory object's vtable and owner handle, from the module that used to
+# read ammo); what is not known is a cheap way to reach the object, since that
+# module's finder swept every read/write page of the game (~23 s cold). So the
+# probe tries the objects at hand - the player root and entity, their
+# components, and the fire path's own projectile and shooter - and only sweeps
+# when that comes back empty and the player asks for it. Not in the beta set:
+# it ships to nobody.
+Build-Plugin 'AmmoProbe'    'AmmoProbe.c'    @($libPath, 'libscripthook.lib')
+# AmmoControl is the capacity multiplier and an automatic reload. Every change
+# goes through the framework's own engine calls (ShSetAmmoScale for the
+# capacity, ShFakeKey for the reload), so it installs no hook of its own and
+# writes no engine memory. The rounds come from ShGetAmmoRounds, which reads
+# the weapon the engine hands its capacity function - so the capacity hook has
+# to be installed for auto reload to have anything to read, and switching it on
+# is what installs it. Off by default: 1.00x installs nothing at all.
+Build-Plugin 'AmmoControl'  'AmmoControl.c'  @($libPath, 'libscripthook.lib')
 # EnemyReinforce sends reinforcements while a fight is on and hardens
 # the enemies it can prove are fighting. It late-binds as well, and
 # keeps its defaults in EnemyReinforce.ini and its text in lang.ini,

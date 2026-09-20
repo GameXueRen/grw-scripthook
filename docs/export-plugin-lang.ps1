@@ -5,8 +5,8 @@ $enc = [Text.UTF8Encoding]::new($false)
 # lang.ini is the override layer beside them. This script writes each one's
 # lang.ini out again from those two sources, so the file a player reads
 # carries both languages and can be copied for another.
-$plugins = @('TimeWeatherControl', 'cnchat', 'firstperson', 'fov_changer',
-             'skipintro', 'spawner')
+$plugins = @('TimeWeatherControl', 'AmmoControl', 'cnchat', 'firstperson',
+             'fov_changer', 'skipintro', 'spawner', 'AmmoProbe')
 
 # C joins adjacent string literals; merge them so a wrapped row reads whole.
 # The quote a join starts at must not be a backslash-escaped one: the two

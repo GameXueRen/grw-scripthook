@@ -17,12 +17,34 @@ GAMEDIR = ../..
 # in $(GAMEDIR)/plugins/<name>/<name>.asi, one folder per plugin, which
 # is what the loader scans for. Logs go into <gamedir>/logs at runtime.
 
-.PHONY: all roulette fling spawner timeweather enemyreinforce modeprobe \
-        modecallprobe blacklistsample filewatchsample drawsample cnchat \
-        crazycars freecam fov fps chaos sample skipintro micfix \
+.PHONY: all roulette fling spawner timeweather ammocontrol ammoprobe enemyreinforce \
+        modeprobe modecallprobe blacklistsample filewatchsample drawsample \
+        cnchat crazycars freecam fov fps chaos sample skipintro micfix \
         docs clean
 
-capprobe: $(GAMEDIR)/plugins/CapProbe/CapProbe.asi
+# Read only evidence: finds the player's weapon inventory object (its vtable
+# and owner handle are known from the module that used to read ammo) among the
+# objects at hand - root, entity, their components, the fire path's projectile
+# and shooter - and logs the rounds per slot while the player fires, reloads
+# and takes a crate. Falls back to a sweep of the game's memory only when the
+# player asks for it. See AmmoProbe.c.
+ammoprobe: $(GAMEDIR)/plugins/AmmoProbe/AmmoProbe.asi
+
+$(GAMEDIR)/plugins/AmmoProbe/AmmoProbe.asi: plugins/AmmoProbe/AmmoProbe.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ plugins/AmmoProbe/AmmoProbe.c -L. -lscripthook
+
+# The magazine capacity multiplier and a reload that happens when the magazine
+# runs dry. Every change goes through the framework's own engine calls
+# (ShSetAmmoScale, ShFakeKey): no hook of its own, no engine memory written
+# here. The rounds come from ShGetAmmoRounds, which follows the weapon the
+# engine hands its capacity function - so the capacity hook is installed while
+# auto reload is on, and 1.00x installs nothing. See AmmoControl.c.
+ammocontrol: $(GAMEDIR)/plugins/AmmoControl/AmmoControl.asi
+
+$(GAMEDIR)/plugins/AmmoControl/AmmoControl.asi: plugins/AmmoControl/AmmoControl.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ plugins/AmmoControl/AmmoControl.c -L. -lscripthook
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 

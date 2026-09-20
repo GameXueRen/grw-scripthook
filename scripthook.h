@@ -2423,6 +2423,19 @@ SH_API int  ShGetResource(int which, uint32_t *out);
 SH_API int  ShSetResource(int which, uint32_t value);
 SH_API int  ShSetAllResources(uint32_t value);
 
+/** One entry of the resource node, by its own order rather than by name - for
+ *  a probe. The node the four named resources live in holds EIGHT entries, and
+ *  what the other four are is a question worth answering from a log instead of
+ *  a heap scan: a count that moves by one per shot would be cheap to reach
+ *  there, with no hook at all.
+ *
+ *  i runs from 0 to the count the node reports. *value is the decoded int
+ *  behind the entry, *prot the address of the protected int itself; either
+ *  may be NULL. 1 when the row exists, 0 with SH_ERR_NO_CANDIDATE past the end
+ *  or while the manager is not up. */
+SH_API int  ShGetResourceSlot(int i, uint32_t *spec, uint32_t *value,
+                              uint64_t *prot);
+
 /** Skill points, a plain int rather than a protected one. */
 SH_API int  ShGetSkillPoints(uint32_t *out);
 SH_API int  ShSetSkillPoints(uint32_t value);
@@ -2451,6 +2464,61 @@ SH_API int  ShSetAmmoScale(int num, int den);
 SH_API void ShGetAmmoScale(int *num, int *den);
 /** 1 while a scale other than 1/1 is in force. */
 SH_API int  ShAmmoScaleActive(void);
+
+/** One capacity look the hook saw, for a probe.
+ *
+ *  This exists because the engine function's ARGUMENTS are the only place the
+ *  weapon - or whatever the engine passes - can be reached from, and nothing
+ *  in this API has ever said what they are: the scale only needs the return
+ *  value. A probe samples this while firing, reloading and refilling and reads
+ *  the answer out of its own log; a plugin that ships has no reason to call
+ *  it.
+ */
+typedef struct {
+    uint64_t args[4];   /**< rcx, rdx, r8, r9 as the engine passed them */
+    uint32_t raw;       /**< the capacity it computed: low 16 bits, UNSCALED */
+    uint32_t count;     /**< looks recorded since the hook went in */
+    uint64_t tick;      /**< GetTickCount64 of the last one */
+} ShAmmoLook;
+
+/** The last capacity look, or 0 with SH_ERR_NO_CANDIDATE before the first one
+ *  (and when no hook is installed at all - see ShSetAmmoScale: asking for 1/1
+ *  leaves the game alone and installs nothing, so a probe asks for some other
+ *  scale first and puts 1/1 back once it has what it came for). */
+SH_API int  ShGetAmmoLook(ShAmmoLook *out);
+
+/** Rounds left in the magazine of the weapon the engine last asked for a
+ *  capacity - the local player's own weapon, and the number the HUD shows.
+ *
+ *  How it is reached, because finding it took a while: the engine hands that
+ *  weapon to the one function that computes a magazine's capacity (the one
+ *  ShSetAmmoScale hooks), ShGetAmmoLook reports which object that was, and the
+ *  rounds are a protected int 0x180 into it - 0x130 for the weapons that keep
+ *  them there, which is the fallback the removed ShGetAmmo already used. No
+ *  heap scan, no class constant, nothing cached.
+ *
+ *  0 with SH_ERR_NO_CANDIDATE until the engine has asked once, which firing a
+ *  round or switching a weapon makes it do - so the capacity hook has to be
+ *  installed (asking for 1/1 alone installs nothing: see ShSetAmmoScale).
+ *  SH_ERR_BAD_ARG for a NULL out. This is the magazine, not the reserve:
+ *  reloading puts it back to the capacity that ShSetAmmoScale scales. */
+SH_API int  ShGetAmmoRounds(int *rounds);
+
+/** One entry of the call trace: what the engine asked a capacity about, and
+ *  when. */
+typedef struct {
+    uint64_t obj;       /**< the object the engine passed */
+    uint64_t tick;      /**< GetTickCount64 of that call */
+    uint64_t seq;       /**< its order: 1, 2, 3 ... since the hook went in */
+} ShAmmoCall;
+
+/** The last calls that changed WHICH object was asked about, oldest first, up
+ *  to max of them. A weapon switch runs both the weapon going down and the one
+ *  coming up through this function, and nothing about those objects says which
+ *  is which - so the order they were asked in is the only evidence there is.
+ *  Only transitions are recorded, so one switch is one burst. A probe reads
+ *  this while switching weapons; a plugin that ships has no reason to. */
+SH_API int  ShGetAmmoCalls(ShAmmoCall *out, int max);
 
 /** @} */
 /** @defgroup weather Weather and time
