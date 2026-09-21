@@ -402,6 +402,16 @@ SH_API int ShGameScenes(char *buf, int n) {
     return count;
 }
 
+/* Show or suppress the game-owned HUD_* scenes. Framework and menu
+ * scenes remain visible either way (ported from the Wildlands
+ * Immersion Suite). */
+static volatile LONG g_gameHudVisible = 1;
+
+SH_API int ShGameHudShow(int visible) {
+    InterlockedExchange(&g_gameHudVisible, visible ? 1 : 0);
+    return 1;
+}
+
 static void PassEnded(uint64_t last) {
     if (last && g_nEndsNext < MAX_PASS && !InList(g_endsNext, g_nEndsNext, last))
         g_endsNext[g_nEndsNext++] = last;
@@ -439,6 +449,12 @@ static int32_t *__attribute__((ms_abi)) RenderHook(uint64_t scene,
     NoteActive(scene);
     /* under the game: before each pass's first scene */
     if (passStart && renderer) RenderOurs(renderer, 1);
+    /* Preserve scene tracking, but suppress the game's HUD layers on
+     * request; framework and menu scenes still draw (ShGameHudShow). */
+    if (!g_gameHudVisible && strncmp(SceneName(scene), "HUD_", 4) == 0) {
+        if (res) *res = 0;
+        r = res;
+    } else
     r = ((Scene3)F_SCENE_RENDER)(scene, res, renderer);
     g_prevCall = scene;
     /* over the game: after each pass's last scene */

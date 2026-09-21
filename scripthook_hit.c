@@ -70,7 +70,7 @@ static volatile uint32_t g_ringHead = 0;
 static uint8_t *g_hitStub = NULL;
 
 /* Bullet physics, see the Sh*Projectile* exports below. */
-static volatile LONG g_velocityMilli = 1000;
+volatile LONG g_velocityMilli = 1000;   /* extern: the accuracy module */
 static volatile LONG g_dropMilli = 1000;
 static volatile LONG g_trajectoryCalls = 0;
 static volatile LONG g_trailCalls = 0;

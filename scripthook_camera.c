@@ -108,6 +108,7 @@ static volatile uint64_t g_uiAt = 0;
 
 static ShVec3 g_absPos;
 static volatile float g_back = 0.0f;
+static volatile float g_right = 0.0f;
 static volatile float g_up = 0.0f;
 static volatile float g_yaw = 0.0f;
 static volatile float g_pitch = 0.0f;
@@ -168,9 +169,9 @@ static void ApplyOrbit(float *m) {
 
     if (!ShGetPlayerPosition(&p)) return;
     WritePos(m,
-             p.x - m[4] * g_back,
-             p.y - m[5] * g_back,
-             p.z - m[6] * g_back + g_up);
+             p.x - m[4] * g_back + m[0] * g_right,
+             p.y - m[5] * g_back + m[1] * g_right,
+             p.z - m[6] * g_back + m[2] * g_right + g_up);
 }
 
 /* Game basis: x right, y forward, z up. Rebuilt absolutely
@@ -829,6 +830,23 @@ SH_API int ShSetCamera(const ShVec3 *pos) {
 SH_API int ShCameraOrbit(float back, float up) {
     if (!ShCameraHookInstall()) return 0;
     g_back = back;
+    g_up = up;
+    (void)InterlockedAnd((volatile LONG *)&g_apply,
+                         (LONG)~CAM_HEAD_BIT);
+    (void)InterlockedOr((volatile LONG *)&g_apply,
+                        (LONG)(SH_CAM_POS | CAM_ORBIT_BIT));
+    ShSetError(SH_OK);
+    return 1;
+}
+
+/* The same orbit with a third axis: metres sideways along the camera's
+ * right vector, which is what an over-the-shoulder offset is. Ported
+ * from the Wildlands Immersion Suite, whose ApplyOrbit carried the
+ * right term from the start. */
+SH_API int ShCameraOrbitAdvanced(float back, float right, float up) {
+    if (!ShCameraHookInstall()) return 0;
+    g_back = back;
+    g_right = right;
     g_up = up;
     (void)InterlockedAnd((volatile LONG *)&g_apply,
                          (LONG)~CAM_HEAD_BIT);

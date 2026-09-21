@@ -744,6 +744,30 @@ SH_API int ShGroundHeightFrom(float x, float y, float nearZ,
     return 1;
 }
 
+/* The full record of the first collision, not just its height (ported
+ * from the Wildlands Immersion Suite). */
+SH_API int ShProbeSurface(float x, float y, float nearZ,
+                          ShSurfaceProbe *out) {
+    float z;
+    uint16_t hits;
+    if (!out) return ShFailPhys(SH_ERR_BAD_ARG);
+    memset(out, 0, sizeof(*out));
+    if (!ShRequireInGame()) return 0;
+    if (!EnsurePhysics()) return 0;
+    if (!InStreamRange(x, y)) return ShFailPhys(SH_ERR_NOT_STREAMED);
+    /* Character/render and physics space differ by roughly ten metres in
+     * Wildlands. A local 24 m window covers that offset without selecting
+     * unrelated collision high above the player. */
+    if (!ProbeDown(x, y, nearZ + 16.0f, 24.0f, &z))
+        return ShFailPhys(SH_ERR_NO_GROUND);
+    hits = *(uint16_t *)(g_hitArr + 0x1a);
+    out->hitPos.x = x; out->hitPos.y = y; out->hitPos.z = z;
+    out->hits = hits;
+    memcpy(out->record, g_recs, sizeof(out->record));
+    ShSetError(SH_OK);
+    return 1;
+}
+
 /* No hint, so sweep down from high altitude. */
 SH_API int ShGroundHeight(float x, float y, float *outZ) {
     ShVec3 here;

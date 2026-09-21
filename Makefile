@@ -21,7 +21,7 @@ GAMEDIR = ../..
 .PHONY: all roulette fling spawner timeweather ammocontrol ammoprobe enemyreinforce \
         modeprobe modecallprobe blacklistsample filewatchsample drawsample \
         cnchat crazycars freecam fov fps chaos sample skipintro micfix \
-        ballistics docs clean
+        ballistics camerapresets docs clean
 
 # Read only evidence: finds the player's weapon inventory object (its vtable
 # and owner handle are known from the module that used to read ammo) among the
@@ -289,7 +289,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c scripthook
 		scripthook_physics.c scripthook_health.c \
 		scripthook_state.c scripthook_playmode.c scripthook_blacklist.c \
 		scripthook_entity.c \
-		scripthook_spawn.c scripthook_npc.c scripthook_domino.c scripthook_hit.c \
+		scripthook_spawn.c scripthook_npc.c scripthook_domino.c scripthook_hit.c scripthook_accuracy.c \
 		scripthook_camera.c scripthook_head.c \
 		scripthook_fov.c scripthook_blur.c scripthook_fpx.c \
 		scripthook_stat.c scripthook_resource.c \
@@ -328,3 +328,11 @@ $(GAMEDIR)/plugins/test_plugin/test_plugin.asi: plugins/test_plugin/test_plugin.
 clean:
 	rm -f $(GAMEDIR)/dinput8.dll
 	rm -rf $(GAMEDIR)/logs $(GAMEDIR)/plugins
+
+# The Immersion Suite's third person camera presets over
+# ShCameraOrbitAdvanced - the sideways axis is the shoulder offset.
+camerapresets: $(GAMEDIR)/plugins/CameraPresets/CameraPresets.asi
+
+$(GAMEDIR)/plugins/CameraPresets/CameraPresets.asi: plugins/CameraPresets/CameraPresets.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ plugins/CameraPresets/CameraPresets.c -L. -lscripthook

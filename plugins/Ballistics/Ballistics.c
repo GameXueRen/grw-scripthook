@@ -44,6 +44,7 @@ static uint32_t g_menu;
  * the switch is flipped (and then written to the ini). */
 static volatile LONG g_enabled;          /* 1 = scale new shots */
 static volatile LONG g_percent = 100;    /* 10..300, 100 = vanilla */
+static volatile LONG g_accuracy;         /* 1 = zero spread (player only) */
 
 /* The worker thread alone writes these; the status line reads them. */
 static int  g_hooked;                    /* the trajectory patch is in */
@@ -65,6 +66,7 @@ static void LoadSettings(void) {
 
     enabled = (LONG)GetPrivateProfileIntA("Settings", "enabled", 0, g_ini);
     percent = (LONG)GetPrivateProfileIntA("Settings", "percent", 100, g_ini);
+    g_accuracy = (LONG)GetPrivateProfileIntA("Settings", "accuracy", 0, g_ini) ? 1 : 0;
     if (percent < 10) percent = 10;
     if (percent > 300) percent = 300;
 
@@ -103,6 +105,26 @@ static void EnsureHook(void) {
     Apply(1);
 }
 
+/* Super accuracy (player-only zero spread) rides the same page: the
+ * hooks install once, the Active flag pauses the effect without
+ * uninstalling, which is what the mode blacklist needs. */
+static int g_accInstalled;
+
+static void ApplyAccuracy(void) {
+    if (g_accuracy && !g_accInstalled) {
+        if (!ShSetSuperAccuracy(1)) {
+            g_accuracy = 0;
+            Log("bt: super accuracy refused (%08x, %s)",
+                ShLastError(), ShErrorString(ShLastError()));
+            ShMenuSetValue(g_menu, "@bt.accuracy", 0);
+            return;
+        }
+        g_accInstalled = 1;
+        Log("bt: super accuracy installed");
+    }
+    if (g_accInstalled) ShSetSuperAccuracyActive(1);
+}
+
 /* The wanted scale is re-asserted every couple of seconds, and handed
  * back the moment the mode stops allowing this plugin: the framework
  * blacklists by mode, and the answer can change under a long session. */
@@ -116,21 +138,23 @@ static void ApplyWatch(void) {
         if (g_guarded) {
             g_guarded = 0;
             Apply(1);
-            Log("bt: took the scale back (mode allowed again)");
+            if (g_accInstalled) ShSetSuperAccuracyActive(1);
+            Log("bt: took the round speed back (mode allowed again)");
         } else {
             Apply(0);
         }
-    } else if (!g_guarded && g_hooked) {
-        ShSetProjectileVelocityMultiplier(1.0f);
+    } else if (!g_guarded && (g_hooked || g_accInstalled)) {
+        if (g_hooked) ShSetProjectileVelocityMultiplier(1.0f);
+        if (g_accInstalled) ShSetSuperAccuracyActive(0);
         g_guarded = 1;
         g_applied = 100;
-        Log("bt: handed the round speed back to the game (mode not allowed)");
+        Log("bt: handed the round speed and the spread back to the game (mode not allowed)");
     }
 }
 
 /* ---- the page -------------------------------------------------------- */
 
-enum { ROW_ENABLE = 1, ROW_PERCENT, ROW_RESET };
+enum { ROW_ENABLE = 1, ROW_PERCENT, ROW_ACCURACY, ROW_RESET };
 
 static void OnRow(uint32_t menu, uint32_t item, int value, void *user) {
     int which = (int)(intptr_t)user;
@@ -154,13 +178,24 @@ static void OnRow(uint32_t menu, uint32_t item, int value, void *user) {
         if (g_enabled) EnsureHook();
         Apply(1);
         break;
+    case ROW_ACCURACY:
+        InterlockedExchange(&g_accuracy, value ? 1 : 0);
+        SaveInt("accuracy", value ? 1 : 0);
+        Log("bt: super accuracy %s", value ? "on" : "off");
+        if (value) ApplyAccuracy();
+        else if (g_accInstalled) ShSetSuperAccuracyActive(0);
+        break;
     case ROW_RESET:
         InterlockedExchange(&g_enabled, 0);
         InterlockedExchange(&g_percent, 100);
+        InterlockedExchange(&g_accuracy, 0);
         SaveInt("enabled", 0);
         SaveInt("percent", 100);
+        SaveInt("accuracy", 0);
         ShMenuSetValue(g_menu, "@bt.enable", 0);
         ShMenuSetValue(g_menu, "@bt.percent", 100);
+        ShMenuSetValue(g_menu, "@bt.accuracy", 0);
+        if (g_accInstalled) ShSetSuperAccuracyActive(0);
         Log("bt: reset to vanilla");
         Apply(1);
         break;
@@ -175,6 +210,8 @@ static void BuildMenu(void) {
                  (void *)(intptr_t)ROW_ENABLE);
     ShMenuNumber(g_menu, "@bt.percent", (float)g_percent, 10.0f, 300.0f,
                  10.0f, OnRow, (void *)(intptr_t)ROW_PERCENT);
+    ShMenuToggle(g_menu, "@bt.accuracy", (int)g_accuracy, OnRow,
+                 (void *)(intptr_t)ROW_ACCURACY);
     ShMenuAction(g_menu, "@bt.reset", OnRow, (void *)(intptr_t)ROW_RESET);
     ShMenuStatus(g_menu, "@bt.st.off");
 }
@@ -184,7 +221,8 @@ static void RefreshStatus(void) {
     if (!g_hooked) { ShMenuStatus(g_menu, "@bt.st.off"); return; }
     ShMenuStatusF(g_menu, "@bt.status",
                   (int)ShGetProjectileTrailHookCount(),
-                  (int)(ShGetProjectileVelocityMultiplier() * 100.0f + 0.5f));
+                  (int)(ShGetProjectileVelocityMultiplier() * 100.0f + 0.5f),
+                  g_accuracy && g_accInstalled);
 }
 
 /* ---- the plugin's own name ------------------------------------------ */
@@ -215,7 +253,8 @@ static const ShText kEn[] = {
     { "@bt.enable",  "Enable global bullet velocity" },
     { "@bt.percent", "Global bullet velocity %" },
     { "@bt.reset",   "Reset ballistics to vanilla" },
-    { "@bt.status",  "velocity/tracer patch: ready  tracers scaled: %d  live: %d%%" },
+    { "@bt.accuracy", "Super accuracy (player only)" },
+    { "@bt.status",  "velocity/tracer patch: ready  tracers scaled: %d  live: %d%%  accuracy: %d" },
     { "@bt.st.off",  "velocity scaling off - the game's own numbers are in force" }
 };
 
@@ -225,7 +264,8 @@ static const ShText kZh[] = {
     { "@bt.enable",  "启用全局子弹速度" },
     { "@bt.percent", "全局子弹速度 %" },
     { "@bt.reset",   "恢复原始弹道" },
-    { "@bt.status",  "弹道补丁：已就绪  已缩放曳光： %d  当前： %d%%" },
+    { "@bt.accuracy", "超级精度（仅玩家）" },
+    { "@bt.status",  "弹道补丁：已就绪  已缩放曳光： %d  当前： %d%%  精度： %d" },
     { "@bt.st.off",  "子弹速度缩放已关闭 —— 使用游戏原始数值" }
 };
 
@@ -260,6 +300,7 @@ static DWORD WINAPI PluginThread(LPVOID param) {
         g_enabled ? "on" : "off", (int)g_percent);
 
     if (g_enabled) EnsureHook();        /* the ini's own value */
+    ApplyAccuracy();                    /* installs if the ini asks */
     Apply(0);
 
     for (;;) {
