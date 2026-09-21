@@ -966,6 +966,26 @@ typedef void (*ShHitFn)(const ShHit *hit, void *user);
 SH_API int  ShHitHookInstall(void);
 SH_API int  ShHitHookReady(void);
 
+/** Bullet physics: scale the muzzle velocity the engine stores into
+ *  each round it fires, tracer and authoritative round alike. 1.0 is
+ *  the game's own number; clamped to 0.10..10.0 and applied to shots
+ *  fired after the call. Takes effect once ShBallisticsHookInstall
+ *  has installed the trajectory patch. */
+SH_API int  ShSetProjectileVelocityMultiplier(float multiplier);
+/** The gravity half of the same idea, 0.0..10.0 (1.0 = vanilla). */
+SH_API int  ShSetProjectileDropMultiplier(float multiplier);
+SH_API float ShGetProjectileVelocityMultiplier(void);
+SH_API float ShGetProjectileDropMultiplier(void);
+/** How many trajectory steps the alternate sites have scaled. The
+ *  shipped feature patches the trail, so this stays 0. */
+SH_API uint32_t ShGetProjectileVelocityHookCount(void);
+/** How many tracers the trail patch has scaled this session - the
+ *  live proof the patch is running. */
+SH_API uint32_t ShGetProjectileTrailHookCount(void);
+/** Install the trajectory patch on its own; 1 once it is in (or
+ *  already was). Independent of the hit hook above. */
+SH_API int  ShBallisticsHookInstall(void);
+
 /** Flags on the subscription. 0 delivers every event. */
 /** MINE_ONLY depends on the shooter field, which some
  *  projectiles omit, so it is opt in.

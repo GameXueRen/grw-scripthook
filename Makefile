@@ -21,7 +21,7 @@ GAMEDIR = ../..
 .PHONY: all roulette fling spawner timeweather ammocontrol ammoprobe enemyreinforce \
         modeprobe modecallprobe blacklistsample filewatchsample drawsample \
         cnchat crazycars freecam fov fps chaos sample skipintro micfix \
-        docs clean
+        ballistics docs clean
 
 # Read only evidence: finds the player's weapon inventory object (its vtable
 # and owner handle are known from the module that used to read ammo) among the
@@ -46,6 +46,16 @@ ammocontrol: $(GAMEDIR)/plugins/AmmoControl/AmmoControl.asi
 $(GAMEDIR)/plugins/AmmoControl/AmmoControl.asi: plugins/AmmoControl/AmmoControl.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/AmmoControl/AmmoControl.c -L. -lscripthook
+
+# Ballistics from the Wildlands Immersion Suite: global projectile velocity
+# scaling for every weapon, through the framework's trajectory patch
+# (ShBallisticsHookInstall) - no hook of its own, no engine memory written
+# here. See Ballistics.c.
+ballistics: $(GAMEDIR)/plugins/Ballistics/Ballistics.asi
+
+$(GAMEDIR)/plugins/Ballistics/Ballistics.asi: plugins/Ballistics/Ballistics.c scripthook.h libscripthook.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ plugins/Ballistics/Ballistics.c -L. -lscripthook
 
 sample: $(GAMEDIR)/plugins/ui_sample/ui_sample.asi
 
