@@ -85,10 +85,10 @@ static const char *kMinPtr[MINS_N];
 typedef struct { const char *label; const char *name; float from, to; } Phase;
 
 static const Phase kPhases[] = {
-    { "@ck.dawn",  "@ck.p.dawn",   5.0f,  7.0f },
-    { "@ck.day",   "@ck.p.day",    7.0f, 18.0f },
-    { "@ck.dusk",  "@ck.p.dusk",  18.0f, 20.0f },
-    { "@ck.night", "@ck.p.night", 20.0f,  5.0f }
+    { "@tw.dawn",  "@tw.p.dawn",   5.0f,  7.0f },
+    { "@tw.day",   "@tw.p.day",    7.0f, 18.0f },
+    { "@tw.dusk",  "@tw.p.dusk",  18.0f, 20.0f },
+    { "@tw.night", "@tw.p.night", 20.0f,  5.0f }
 };
 #define PHASES_N ((int)(sizeof(kPhases) / sizeof(kPhases[0])))
 
@@ -121,10 +121,10 @@ static const char *kSpeedKeys[PHASES_N] = { "dawn_speed", "day_speed",
 
 /* Weather: index 0 hands the weather back to the engine (the old page's
  * "engine default"), 1..6 are the framework's enum from SH_WEATHER_SUNNY up. */
-static const char *kWeatherOpts[] = { "@ck.w.default", "@ck.w.sunny",
-                                      "@ck.w.lclouds", "@ck.w.hclouds",
-                                      "@ck.w.fog", "@ck.w.lrain",
-                                      "@ck.w.hrain" };
+static const char *kWeatherOpts[] = { "@tw.w.default", "@tw.w.sunny",
+                                      "@tw.w.lclouds", "@tw.w.hclouds",
+                                      "@tw.w.fog", "@tw.w.lrain",
+                                      "@tw.w.hrain" };
 #define WEATHER_N ((int)(sizeof(kWeatherOpts) / sizeof(kWeatherOpts[0])))
 
 /* ---- state -------------------------------------------------------- */
@@ -172,68 +172,68 @@ static void LogWorked(int kind) {
 /* ---- text --------------------------------------------------------- */
 
 static const ShText kEn[] = {
-    { "@ck.page",       "Weather & Real-time Time Control" },
-    { "@ck.hint",       "Set hour and minute first, then press Enter on "
+    { "@tw.page",       "Weather & Real-time Time Control" },
+    { "@tw.hint",       "Set hour and minute first, then press Enter on "
                         "Apply the set time to make them take effect" },
-    { "@ck.on",         "Enable" },
-    { "@ck.weather",    "Weather" },
-    { "@ck.hour",       "Hour (24h)" },
-    { "@ck.minute",     "Minute" },
-    { "@ck.apply",      "Apply the set time" },
-    { "@ck.applied",    "time set" },
-    { "@ck.apply.off",  "the switch is off - nothing was sent" },
-    { "@ck.apply.fail", "the engine refused that change - see the plugin log" },
-    { "@ck.dawn",       "Dawn speed (05:00-07:00)" },
-    { "@ck.day",        "Day speed (07:00-18:00)" },
-    { "@ck.dusk",       "Dusk speed (18:00-20:00)" },
-    { "@ck.night",      "Night speed (20:00-05:00)" },
-    { "@ck.p.dawn",     "Dawn" },
-    { "@ck.p.day",      "Day" },
-    { "@ck.p.dusk",     "Dusk" },
-    { "@ck.p.night",    "Night" },
-    { "@ck.status",     "%s  %s  rate: %.2f  weather: %s" },
-    { "@ck.st.none",    "not applied" },
-    { "@ck.off.ok",     "weather released, clock back to normal" },
-    { "@ck.off.fail",   "the engine did not take it back - see the plugin log" },
-    { "@ck.w.default",  "engine default" },
-    { "@ck.w.sunny",    "sunny" },
-    { "@ck.w.lclouds",  "light clouds" },
-    { "@ck.w.hclouds",  "heavy clouds" },
-    { "@ck.w.fog",      "fog" },
-    { "@ck.w.lrain",    "light rain" },
-    { "@ck.w.hrain",    "heavy rain" }
+    { "@tw.on",         "Enable" },
+    { "@tw.weather",    "Weather" },
+    { "@tw.hour",       "Hour (24h)" },
+    { "@tw.minute",     "Minute" },
+    { "@tw.apply",      "Apply the set time" },
+    { "@tw.applied",    "time set" },
+    { "@tw.apply.off",  "the switch is off - nothing was sent" },
+    { "@tw.apply.fail", "the engine refused that change - see the plugin log" },
+    { "@tw.dawn",       "Dawn speed (05:00-07:00)" },
+    { "@tw.day",        "Day speed (07:00-18:00)" },
+    { "@tw.dusk",       "Dusk speed (18:00-20:00)" },
+    { "@tw.night",      "Night speed (20:00-05:00)" },
+    { "@tw.p.dawn",     "Dawn" },
+    { "@tw.p.day",      "Day" },
+    { "@tw.p.dusk",     "Dusk" },
+    { "@tw.p.night",    "Night" },
+    { "@tw.status",     "%s  %s  rate: %.2f  weather: %s" },
+    { "@tw.st.none",    "not applied" },
+    { "@tw.off.ok",     "weather released, clock back to normal" },
+    { "@tw.off.fail",   "the engine did not take it back - see the plugin log" },
+    { "@tw.w.default",  "engine default" },
+    { "@tw.w.sunny",    "sunny" },
+    { "@tw.w.lclouds",  "light clouds" },
+    { "@tw.w.hclouds",  "heavy clouds" },
+    { "@tw.w.fog",      "fog" },
+    { "@tw.w.lrain",    "light rain" },
+    { "@tw.w.hrain",    "heavy rain" }
 };
 
 static const ShText kZh[] = {
-    { "@ck.page",       "天气 & 时间实时控制" },
-    { "@ck.hint",       "小时、分钟设置后，需回车“应用当前设置的时间”生效" },
-    { "@ck.on",         "启用" },
-    { "@ck.weather",    "天气" },
-    { "@ck.hour",       "小时（24h）" },
-    { "@ck.minute",     "分钟" },
-    { "@ck.apply",      "应用当前设置的时间" },
-    { "@ck.applied",    "已按设定时间跳转" },
-    { "@ck.apply.off",  "开关未打开，未下发" },
-    { "@ck.apply.fail", "引擎拒绝了这项改动 —— 见插件日志" },
-    { "@ck.dawn",       "黎明时间流速（05:00-07:00）" },
-    { "@ck.day",        "白天时间流速（07:00-18:00）" },
-    { "@ck.dusk",       "黄昏时间流速（18:00-20:00）" },
-    { "@ck.night",      "夜晚时间流速（20:00-05:00）" },
-    { "@ck.p.dawn",     "黎明" },
-    { "@ck.p.day",      "白天" },
-    { "@ck.p.dusk",     "黄昏" },
-    { "@ck.p.night",    "夜晚" },
-    { "@ck.status",     "%s  %s  时间流速：%.2f  天气：%s" },
-    { "@ck.st.none",    "未应用" },
-    { "@ck.off.ok",     "天气已交还，时间流速恢复正常" },
-    { "@ck.off.fail",   "引擎没有接受交还 —— 见插件日志" },
-    { "@ck.w.default",  "默认动态" },
-    { "@ck.w.sunny",    "晴天" },
-    { "@ck.w.lclouds",  "阴云" },
-    { "@ck.w.hclouds",  "多云" },
-    { "@ck.w.fog",      "起雾" },
-    { "@ck.w.lrain",    "下雨" },
-    { "@ck.w.hrain",    "风暴" }
+    { "@tw.page",       "天气 & 时间实时控制" },
+    { "@tw.hint",       "小时、分钟设置后，需回车“应用当前设置的时间”生效" },
+    { "@tw.on",         "启用" },
+    { "@tw.weather",    "天气" },
+    { "@tw.hour",       "小时（24h）" },
+    { "@tw.minute",     "分钟" },
+    { "@tw.apply",      "应用当前设置的时间" },
+    { "@tw.applied",    "已按设定时间跳转" },
+    { "@tw.apply.off",  "开关未打开，未下发" },
+    { "@tw.apply.fail", "引擎拒绝了这项改动 —— 见插件日志" },
+    { "@tw.dawn",       "黎明时间流速（05:00-07:00）" },
+    { "@tw.day",        "白天时间流速（07:00-18:00）" },
+    { "@tw.dusk",       "黄昏时间流速（18:00-20:00）" },
+    { "@tw.night",      "夜晚时间流速（20:00-05:00）" },
+    { "@tw.p.dawn",     "黎明" },
+    { "@tw.p.day",      "白天" },
+    { "@tw.p.dusk",     "黄昏" },
+    { "@tw.p.night",    "夜晚" },
+    { "@tw.status",     "%s  %s  时间流速：%.2f  天气：%s" },
+    { "@tw.st.none",    "未应用" },
+    { "@tw.off.ok",     "天气已交还，时间流速恢复正常" },
+    { "@tw.off.fail",   "引擎没有接受交还 —— 见插件日志" },
+    { "@tw.w.default",  "默认动态" },
+    { "@tw.w.sunny",    "晴天" },
+    { "@tw.w.lclouds",  "阴云" },
+    { "@tw.w.hclouds",  "多云" },
+    { "@tw.w.fog",      "起雾" },
+    { "@tw.w.lrain",    "下雨" },
+    { "@tw.w.hrain",    "风暴" }
 };
 
 /* ---- the plugin's own name ---------------------------------------- */
@@ -519,7 +519,7 @@ static void OnRow(uint32_t menu, uint32_t item, int value, void *user) {
         } else {
             /* The lines the action row that used to sit here wrote: with it
              * gone, this is where a failure to take the world back is said. */
-            ShMenuStatus(g_menu, HandBack() ? "@ck.off.ok" : "@ck.off.fail");
+            ShMenuStatus(g_menu, HandBack() ? "@tw.off.ok" : "@tw.off.fail");
         }
         break;
 
@@ -559,10 +559,10 @@ static void OnRow(uint32_t menu, uint32_t item, int value, void *user) {
 
     case ROW_APPLY:
         if (!g_on) {
-            ShMenuStatus(g_menu, "@ck.apply.off");
+            ShMenuStatus(g_menu, "@tw.apply.off");
             break;
         }
-        ShMenuStatus(g_menu, ApplyTime() ? "@ck.applied" : "@ck.apply.fail");
+        ShMenuStatus(g_menu, ApplyTime() ? "@tw.applied" : "@tw.apply.fail");
         break;
 
     default: {
@@ -581,20 +581,20 @@ static void OnRow(uint32_t menu, uint32_t item, int value, void *user) {
 static void BuildMenu(void) {
     int i;
 
-    ShMenuHint(g_menu, "@ck.hint");
-    ShMenuToggle(g_menu, "@ck.on", (int)g_on, OnRow, (void *)(intptr_t)ROW_ON);
-    ShMenuList(g_menu, "@ck.weather", kWeatherOpts, WEATHER_N, (int)g_weather,
+    ShMenuHint(g_menu, "@tw.hint");
+    ShMenuToggle(g_menu, "@tw.on", (int)g_on, OnRow, (void *)(intptr_t)ROW_ON);
+    ShMenuList(g_menu, "@tw.weather", kWeatherOpts, WEATHER_N, (int)g_weather,
                OnRow, (void *)(intptr_t)ROW_WEATHER);
-    ShMenuList(g_menu, "@ck.hour", kHourPtr, HOURS_N, (int)g_hour, OnRow,
+    ShMenuList(g_menu, "@tw.hour", kHourPtr, HOURS_N, (int)g_hour, OnRow,
                (void *)(intptr_t)ROW_HOUR);
-    ShMenuList(g_menu, "@ck.minute", kMinPtr, MINS_N, (int)g_minute, OnRow,
+    ShMenuList(g_menu, "@tw.minute", kMinPtr, MINS_N, (int)g_minute, OnRow,
                (void *)(intptr_t)ROW_MINUTE);
-    ShMenuAction(g_menu, "@ck.apply", OnRow, (void *)(intptr_t)ROW_APPLY);
+    ShMenuAction(g_menu, "@tw.apply", OnRow, (void *)(intptr_t)ROW_APPLY);
     for (i = 0; i < PHASES_N; i++)
         ShMenuList(g_menu, kPhases[i].label, kSpeedPtr, SPEED_N,
                    (int)g_speed[i], OnRow,
                    (void *)(intptr_t)(ROW_SPEED + i));
-    ShMenuStatus(g_menu, "@ck.st.none");
+    ShMenuStatus(g_menu, "@tw.st.none");
 }
 
 /* The status line names what the ENGINE is doing: the rate and the weather are
@@ -610,7 +610,7 @@ static void RefreshStatus(void) {
 
     if (!ShMenuIsShowing(g_menu)) return;
     if (!g_on) {
-        ShMenuStatus(g_menu, "@ck.st.none");
+        ShMenuStatus(g_menu, "@tw.st.none");
         return;
     }
 
@@ -628,11 +628,11 @@ static void RefreshStatus(void) {
         speed = kSpeedVal[g_speed[ph]];
 
     if (!ShGetWeather(&weather) || weather < 0 || weather >= 6)
-        label = ShLangText(g_name, "@ck.w.default");
+        label = ShLangText(g_name, "@tw.w.default");
     else
         label = ShLangText(g_name, kWeatherOpts[weather + 1]);
 
-    ShMenuStatusF(g_menu, "@ck.status", time,
+    ShMenuStatusF(g_menu, "@tw.status", time,
                   ShLangText(g_name, kPhases[ph].name), (double)speed, label);
 }
 
@@ -667,7 +667,7 @@ static DWORD WINAPI PluginThread(LPVOID param) {
     ShLangDeclare(g_name, "en-US", kEn, (int)(sizeof(kEn) / sizeof(kEn[0])));
     ShLangDeclare(g_name, "zh-CN", kZh, (int)(sizeof(kZh) / sizeof(kZh[0])));
 
-    g_menu = ShMenuCreate("@ck.page");
+    g_menu = ShMenuCreate("@tw.page");
     if (!g_menu) {
         Log("twc: no menu page (%08x) - the plugin does nothing",
             ShLastError());
@@ -679,23 +679,65 @@ static DWORD WINAPI PluginThread(LPVOID param) {
             "session would keep the forced weather and rate", ShLastError());
     Log("twc: page up, switch is %s", g_on ? "on" : "off");
 
-    for (;;) {
-        Sleep(1000);
-        if (!g_on) continue;
-        /* Blocked: nothing is written, and the world was already handed back
-         * by the callback when the answer flipped. */
-        if (!ShPluginAllowed()) continue;
-        /* Only in the world: the engine resets the clock and the weather while
-         * a session loads, so writing during one is work thrown away. */
-        if (ShGetGameState() != SH_STATE_INGAME &&
-            ShGetGameState() != SH_STATE_PAUSED)
-            continue;
-        /* The rate and the weather, never the time: the world's hour moves
-         * only when Enter is pressed on the action row that says so. See the
-         * header. */
-        ApplyRate();
-        ApplyWeather((int)g_weather);
-        RefreshStatus();
+    {
+        const DWORD settle = 3000;   /* ms: see the readiness note below */
+        int inWorld = 0;
+        int applied = 0;
+        DWORD readyAt = 0;
+
+        for (;;) {
+            int in, ready;
+            float hours;
+
+            Sleep(1000);
+            /* Only in the world: the engine resets the clock and the weather
+             * while a session loads, so writing during one is work thrown
+             * away - and that is true of the first seconds after the game
+             * state turns, which is exactly where the wish in the ini used to
+             * be lost. */
+            in = ShGetGameState() == SH_STATE_INGAME ||
+                 ShGetGameState() == SH_STATE_PAUSED;
+            /* The world answering for its own clock is what says the session
+             * has settled enough to write into; a few seconds more on top,
+             * because the engine is still putting the world up. */
+            ready = in && ShGetTime(&hours);
+
+            if (!in) {
+                inWorld = 0;
+                applied = 0;
+                readyAt = 0;
+            } else {
+                if (!inWorld) { inWorld = 1; readyAt = 0; }
+                if (!applied && ready && !readyAt) readyAt = GetTickCount();
+                if (!applied && readyAt &&
+                    (DWORD)(GetTickCount() - readyAt) >= settle) {
+                    /* A world entered with the switch already saved on: the
+                     * menu callback only runs when a row moves, so this is
+                     * the one place the wish in the ini can be taken up. The
+                     * world is handed back first - the blend record a
+                     * previous session armed is not one this session should
+                     * write through - and the settings are then applied, the
+                     * same sequence a manual off and on walks. */
+                    if (g_on) {
+                        HandBack();
+                        ApplySwitchOn();
+                        Log("twc: applied after the world settled");
+                    }
+                    applied = 1;
+                }
+            }
+
+            if (!g_on || !in) continue;
+            /* Blocked: nothing is written, and the world was already handed
+             * back by the callback when the answer flipped. */
+            if (!ShPluginAllowed()) continue;
+            /* The rate and the weather, never the time: the world's hour moves
+             * only when Enter is pressed on the action row that says so. See
+             * the header. */
+            ApplyRate();
+            ApplyWeather((int)g_weather);
+            RefreshStatus();
+        }
     }
 }
 
