@@ -69,6 +69,8 @@ static const ShText kEnUS[] = {
      * cannot name a build other than the one drawing it */
     { "@about.page",          "About" },
     { "@about.version",       "Version: %s" },
+    { "@about.build.ok",      "Game build: %s (verified)" },
+    { "@about.build.new",     "Game build: %s (not verified - see the log)" },
     { "@about.author",        "Original author: Phiality" },
     { "@about.modder",        "Modded by: GameXueRen" },
     { "@about.qq",            "QQ group: 299177445" },
@@ -211,6 +213,8 @@ static const ShText kZhCN[] = {
 
     { "@about.page",          "关于" },
     { "@about.version",       "版本：%s" },
+    { "@about.build.ok",      "游戏构建：%s（已验证）" },
+    { "@about.build.new",     "游戏构建：%s（未验证 —— 见日志）" },
     { "@about.author",        "原作者：Phiality" },
     { "@about.modder",        "魔改版：GameXueRen" },
     { "@about.qq",            "QQ群：299177445" },

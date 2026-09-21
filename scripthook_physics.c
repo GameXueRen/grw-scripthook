@@ -1,5 +1,11 @@
 /* Ground queries through the engine's collision world.
  * Build pinned: GRW Definitive, base 0x140000000.
+ *
+ * Two pins, and both are checked before either is used: the hook site has to
+ * open with the bytes below before it is patched, and the cast the pump calls
+ * has to be code inside the image - and, once its own opening bytes are
+ * pasted in, open with those. A build that moved either one is reported in
+ * logs\scripthook_physics.log instead of being called through.
  */
 #include <windows.h>
 #include <string.h>
@@ -532,6 +538,58 @@ RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
     if (g_probeEv) SetEvent(g_probeEv);
 }
 
+/* CAST_RAY_FN is called straight through, so it is the one pin in this
+ * module with nothing under it: a build that moved it would be a call into
+ * whatever now lives at that address. These six bytes are its prologue, read
+ * off the running build on 2026-09-21 - the line below prints them on every
+ * install, so the next pin is read straight out of
+ * logs\scripthook_physics.log rather than searched for.
+ *
+ * Six bytes is the number asked for: long enough not to repeat by accident,
+ * short enough to survive a build that moved nothing but a relative call.
+ */
+static const uint8_t kCastSig[8] = {
+    0x40, 0x55, 0x57, 0x41, 0x54, 0x41
+};
+static const int     kCastSigLen = 6;
+
+static int CastUsable(void) {
+    uint64_t fn = CAST_RAY_FN;
+    MEMORY_BASIC_INFORMATION mbi;
+    uint8_t got[sizeof kCastSig];
+
+    if (!ShInImage(fn)) {
+        Log("cast fn: %llX is outside the game image - the cast is not called",
+            (unsigned long long)fn);
+        return 0;
+    }
+    if (!VirtualQuery((const void *)(uintptr_t)fn, &mbi, sizeof mbi) ||
+        mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) ||
+        !(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
+        Log("cast fn: %llX is not executable code - the cast is not called",
+            (unsigned long long)fn);
+        return 0;
+    }
+    if (!ShReadMem(fn, got, sizeof got)) {
+        Log("cast fn: %llX is not readable - the cast is not called",
+            (unsigned long long)fn);
+        return 0;
+    }
+
+    Log("cast fn: %llX opens %02X %02X %02X %02X %02X %02X",
+        (unsigned long long)fn, got[0], got[1], got[2], got[3], got[4],
+        got[5]);
+
+    if (kCastSigLen && memcmp(got, kCastSig, (size_t)kCastSigLen) != 0) {
+        Log("cast fn: %llX does not open like the pinned cast - not called "
+            "(every ground query and teleport-to-ground would be wrong)",
+            (unsigned long long)fn);
+        return 0;
+    }
+    return 1;
+}
+
 static int InstallHook(void) {
     uint64_t fn = RAY_HOOK_SITE;
     uint8_t *s;
@@ -568,6 +626,11 @@ static int InstallHook(void) {
             "(the pump and every ray would never run)", (unsigned long long)fn);
         return 0;
     }
+    /* The site holds; the function it calls has to hold too, or the pump
+     * would run and then call something else at a fixed address. Checked
+     * once here rather than per ray: this is the only place it can be
+     * decided for the session. */
+    if (!CastUsable()) return 0;
 
     s = (uint8_t *)ShAllocNear(fn);
     if (!s) return 0;

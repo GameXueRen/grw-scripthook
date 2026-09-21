@@ -229,6 +229,123 @@ static void LoadASIPlugins(void) {
               n, nSkipped, nAdded);
 }
 
+/* Which game builds this framework has been run against, and what was
+ * verified on each.
+ *
+ * Every engine entry point in this framework is a plain offset from the
+ * module base (image.h), so a game update that moves code turns those
+ * constants into something else - and some of them are called rather than
+ * read, which is the failure that has nothing to report for itself. The two
+ * numbers are how a build names itself, read straight out of the PE header
+ * of the loaded module: the COFF TimeDateStamp and SizeOfImage.
+ *
+ * It is a report, not a gate. Which sites still hold is what the byte
+ * comparisons in each module decide - scripthook_physics.c refuses to patch
+ * a site that does not open as pinned and says so in its own log - so
+ * refusing to run on an unlisted build would take a working install down
+ * with it. What this line buys is the opposite: on a build nobody has
+ * verified yet it is the first line of the log that explains the others, and
+ * it carries the numbers to add here.
+ *
+ * The first entry is the build the RVAs were taken against, recorded by a
+ * third-party plugin that carried the same gate (docs\opticacamo-reverse.md,
+ * section on its build check). Every entry after it is a build this
+ * framework has actually run on, carrying the sites that answered for
+ * themselves - never a claim about the ones that cannot.
+ */
+typedef struct {
+    uint32_t stamp;
+    uint32_t image;
+    const char *note;
+} KnownBuild;
+
+static const KnownBuild kKnownBuilds[] = {
+    { 0x6A7C5143u, 0x18B09000u, "the build the engine RVAs were taken "
+                                "against" },
+    /* The shipped build moved on in 2026-09: a smaller image, a new stamp.
+     * The sites that check themselves were read out of the log on it on
+     * 2026-09-21 - the ray hook site, and the cast it calls. Nothing here
+     * says the rest of the pinned RVAs hold on this build; only a run, and
+     * only the ones that can answer for themselves, say that. */
+    { 0x6A99768Au, 0x185BA000u, "2026-09-21: the physics ray site and its "
+                                "cast were read back byte for byte" },
+};
+
+/* The build's two numbers, read out of the PE header of the loaded module
+ * the first time they are asked for and kept: nothing under us can change a
+ * header. 0 when there is no header to read. */
+static int GameBuildNums(uint32_t *stamp, uint32_t *size) {
+    static int      state;      /* 0 = not read, 1 = read, -1 = no header */
+    static uint32_t gStamp, gSize;
+
+    if (!state) {
+        const IMAGE_DOS_HEADER *dos =
+            (const IMAGE_DOS_HEADER *)(uintptr_t)GetModuleHandleA(NULL);
+        const IMAGE_NT_HEADERS *nt;
+
+        if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) {
+            state = -1;
+        } else {
+            nt = (const IMAGE_NT_HEADERS *)
+                ((const uint8_t *)dos + (uint32_t)dos->e_lfanew);
+            if (nt->Signature != IMAGE_NT_SIGNATURE) {
+                state = -1;
+            } else {
+                gStamp = nt->FileHeader.TimeDateStamp;
+                gSize  = nt->OptionalHeader.SizeOfImage;
+                state  = 1;
+            }
+        }
+    }
+    if (state < 0) return 0;
+    *stamp = gStamp;
+    *size  = gSize;
+    return 1;
+}
+
+/* The index+1 of the entry these numbers are, or 0 for a build this
+ * framework has not run on. */
+static int BuildIsKnown(uint32_t stamp, uint32_t size) {
+    int i;
+
+    for (i = 0; i < (int)(sizeof(kKnownBuilds) / sizeof(kKnownBuilds[0])); i++)
+        if (stamp == kKnownBuilds[i].stamp && size == kKnownBuilds[i].image)
+            return i + 1;
+    return 0;
+}
+
+static void ReportGameBuild(void) {
+    uint32_t stamp, size;
+    int i;
+
+    if (!GameBuildNums(&stamp, &size)) {
+        LogAlways("game build: no PE header - not the game module?");
+        return;
+    }
+    i = BuildIsKnown(stamp, size);
+    if (i)
+        LogAlways("game build: %08X / %08X - %s", stamp, size,
+                  kKnownBuilds[i - 1].note);
+    else
+        LogAlways("game build: %08X / %08X - NOT a build this framework has "
+                  "run on (%08X / %08X is the one the RVAs were taken "
+                  "against). A site that moved says so in its own module log; "
+                  "these are the numbers to add here.",
+                  stamp, size, kKnownBuilds[0].stamp, kKnownBuilds[0].image);
+}
+
+/* The game build for the About page: the two numbers as text, and whether
+ * they are a build this framework has run on. 1 = listed, 0 = not listed,
+ * -1 = nothing to report (no PE header, or no room for the string). */
+int ShGameBuildText(char *buf, int cap) {
+    uint32_t stamp, size;
+
+    if (!buf || cap < 24) return -1;
+    if (!GameBuildNums(&stamp, &size)) return -1;
+    snprintf(buf, (size_t)cap, "%08X / %08X", stamp, size);
+    return BuildIsKnown(stamp, size) ? 1 : 0;
+}
+
 /* Plugins load here, not in DllMain. LoadLibrary blocks on
  * the loader lock until DllMain returns, so a plugin binds
  * against a fully initialised DLL and may import it. */
@@ -236,6 +353,9 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     (void)p;
     ShConfigInit();
     LogAlways("config loaded from scripthook.ini");
+    /* Before any hook layer installs: this is the line that explains the
+     * rest of the log on a build nobody has verified. */
+    ReportGameBuild();
     /* Which menu language this session runs in, and - on the one run that
      * picks it - where it came from. The config layer cannot write this
      * itself: a line logged while it is loading would ask it for the log

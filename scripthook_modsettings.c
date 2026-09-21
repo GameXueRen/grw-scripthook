@@ -855,10 +855,25 @@ static void AboutRow(uint32_t menu, const char *key, const char *value) {
     ShMenuAction(menu, line, OnAboutInfo, NULL);
 }
 
+/* The game build's own name, from the loader (loader.c): two numbers read
+ * out of the PE header, and whether they are a build this framework has run
+ * on. -1 when there was nothing to read, and then the row is not made: the
+ * About page is a list of facts, and "no idea" is not one of them. */
+extern int ShGameBuildText(char *buf, int cap);
+
 static void BuildAboutMenu(void) {
+    char build[32];
+    int known;
+
     if (!g_aboutMenu) return;
     ShMenuClear(g_aboutMenu);
     AboutRow(g_aboutMenu, "@about.version", SH_VERSION);
+    /* Under the version, because it is the other half of "which build is
+     * this": the framework's own string, then the game's. */
+    known = ShGameBuildText(build, (int)sizeof(build));
+    if (known >= 0)
+        AboutRow(g_aboutMenu,
+                 known ? "@about.build.ok" : "@about.build.new", build);
     AboutRow(g_aboutMenu, "@about.author", NULL);
     AboutRow(g_aboutMenu, "@about.modder", NULL);
     AboutRow(g_aboutMenu, "@about.qq", NULL);
