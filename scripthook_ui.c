@@ -12,7 +12,7 @@
 #include "log.h"
 
 /* Engine entry points as RVAs. See FINDINGS, UI SYSTEM. */
-#define F_ALLOC_CTX     SH_IMG(0xE4094B0)
+#define F_ALLOC_CTX     SH_IMG(0xe410100)
 #define F_ALLOC         SH_IMG(0x674F1A0)
 #define G_POOL          SH_IMG(0x4D78D80)
 #define F_CONT_CTOR     SH_IMG(0x32F5310)

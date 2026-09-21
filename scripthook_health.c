@@ -20,7 +20,7 @@
 /* The engine's own inner damage function, so a kill runs
  * the real death path instead of a health poke. Verified
  * live: gcall 1427CBEA0 <comp> 1E 1 0 took 100 to 70. */
-#define SH_APPLY_DAMAGE  SH_IMG(0x261D1A0)
+#define SH_APPLY_DAMAGE  SH_IMG(0x27cc0c0)
 
 extern int ShQueueCall(uint64_t fn, uint64_t a0, uint64_t a1,
                        uint64_t a2, uint64_t a3);

@@ -8,15 +8,15 @@
 #include "image.h"
 #include "log.h"
 
-#define F_ALLOC_CTX     SH_IMG(0xE4094B0)
+#define F_ALLOC_CTX     SH_IMG(0xe410100)
 #define F_ALLOC         SH_IMG(0x674F1A0)
 #define G_POOL          SH_IMG(0x4D78D80)
 #define F_SCENE_CTOR    SH_IMG(0x32EE140)
 #define F_SCENE_DTOR    SH_IMG(0x32EE1C0)
-#define F_SCENE_TICK    SH_IMG(0x16B9A730)
-#define F_SCENE_FLIP    SH_IMG(0x16B99DC0)
-#define F_SCENE_RENDER  SH_IMG(0x16B9B8C0)
-#define F_SCENE_RESIZE  SH_IMG(0x16B99570)
+#define F_SCENE_TICK    SH_IMG(0x16b9bb20)
+#define F_SCENE_FLIP    SH_IMG(0x16b9b440)
+#define F_SCENE_RENDER  SH_IMG(0x16b99a30)
+#define F_SCENE_RESIZE  SH_IMG(0x16b98d80)
 #define F_SCENE_SETCTX  SH_IMG(0x16B9A730)
 #define F_SCENE_SETRES  SH_IMG(0x16B99DC0)
 #define F_ATTACH        SH_IMG(0x32F4230)
