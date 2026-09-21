@@ -1879,10 +1879,151 @@ static int MenuFontCandidates(char paths[][MAX_PATH], int cap)
     return n;
 }
 
+// The glyphs the menu draws with: the scripts of every language the game
+// ships, plus whatever the language names use. ImGui answers a codepoint
+// outside the ranges with '?', which is what a row reading "??????" was -
+// the range covered Latin and CJK, and Russian, Korean, Arabic and Czech
+// all live outside it.
+//
+// Naming the whole alphabet of each script is not the cost it would have
+// been: the DX11 backend reports RendererHasTextures, which is what makes
+// ImGui 1.92 rasterize on demand - a range says which codepoints may be
+// baked, and only the ones actually drawn are (the atlas grows and updates
+// in pieces). The alternative, pre-baking, is what a backend without that
+// flag forces, and it is why the ranges here used to be kept small.
+//
+// So a translation in any of those scripts needs no change here. The labels
+// are added as text as well, which covers a name whose characters are in no
+// range ImGui ships.
+//
+// The vector has to outlive the atlas build, ImGui keeps the pointer until
+// then, so it is static and built once.
+static const ImWchar kArabicRanges[] =
+{
+    /* The one script the game ships that ImGui has no range for: the Arabic
+     * block and its extended letters. The joined forms a shaper would use
+     * are not here - a plain ImGui menu draws what the atlas holds, which
+     * is the letters unjoined. */
+    0x0600, 0x06FF,
+    0x0750, 0x077F,
+    0
+};
+
+static const ImWchar* MenuFontRanges()
+{
+    static ImVector<ImWchar> out;
+    char one[64];
+    int i;
+
+    if (!out.empty()) return out.Data;
+    {
+        ImFontGlyphRangesBuilder b;
+        b.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesDefault());
+        b.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesCyrillic());
+        b.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesKorean());
+        b.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesChineseFull());
+        b.AddRanges(kArabicRanges);     /* kana comes with the Chinese range */
+        for (i = 0; ShLangBuiltin(i, one, sizeof(one)); i++)
+            b.AddText(one);            /* "code<TAB>label": the label counts */
+        b.BuildRanges(&out);
+    }
+    return out.Data;
+}
+
+// The two scripts no CJK font carries: a menu language can be Korean or
+// Arabic, and neither a Chinese nor a Japanese font on a Windows box has
+// Hangul or the Arabic letters - the ranges above say the codepoints are
+// allowed, and the font still has nothing to bake from, which is a row of
+// '?' with the range in place.
+//
+// ImGui's answer for that is merging: a second file added with MergeMode
+// puts its glyphs into the font already chosen, so one ImFont answers for
+// all of them and whichever file has the codepoint is the one asked.
+//
+// Merged only after a font was chosen, and logged like the base one: an
+// unreadable path costs nothing (NoLoadError) and those rows stay '?'.
+/* 1 when the file was merged, 0 when it was not read or not needed.
+ *
+ * A path equal to [Settings] Font= is refused: that file is already the
+ * font being merged into, and merging it into itself adds every glyph to
+ * the atlas twice and arms the font debugger's overlap warning.
+ */
+static int MenuFontMerge(const char* path, const ImWchar* ranges)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    ImFontConfig cfg = {};
+    char forced[MAX_PATH] = "";
+
+    if (ShConfigGetStr("Settings", "Font", "", forced, sizeof(forced)) &&
+        forced[0] && !_stricmp(forced, path))
+        return 0;
+    cfg.Flags |= ImFontFlags_NoLoadError;
+    cfg.MergeMode = true;
+    if (!io.Fonts->AddFontFromFileTTF(path, 16.0f, &cfg, ranges))
+    {
+        OvlLog("font: no %s to merge", path);
+        return 0;
+    }
+    OvlLogFloor("font merged: %s", path);
+    return 1;
+}
+
+/* The candidate files for one missing script, the same shape the base list
+ * has: the Windows fonts first, then what a Wine or Proton prefix carries,
+ * with [Settings] FontKorean= / FontArabic= ahead of both.
+ *
+ * The first file that reads wins and the rest are not tried. Trying them all
+ * used to be what a FontKorean= pointing at malgun.ttf did: the same face
+ * merged twice, its glyphs in the atlas twice over.
+ *
+ * which 2 is the CJK list, merged behind a font the player pointed at with
+ * Font= - one that is not necessarily able to draw the framework's own
+ * Chinese text.
+ */
+static void MenuFontMergeCandidates(int which)
+{
+    char cfg[MAX_PATH] = "";
+    char paths[5][MAX_PATH];
+    const ImWchar* ranges;
+    int n = 0, i;
+
+    if (which == 0)
+    {
+        ranges = ImGui::GetIO().Fonts->GetGlyphRangesKorean();
+        if (ShConfigGetStr("Settings", "FontKorean", "", cfg, sizeof(cfg)) &&
+            cfg[0])
+            snprintf(paths[n++], MAX_PATH, "%s", cfg);
+        snprintf(paths[n++], MAX_PATH, "C:\\Windows\\Fonts\\malgun.ttf");
+        snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\truetype\\noto\\NotoSansKR-Regular.otf");
+        snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\opentype\\noto\\NotoSansKR-Regular.otf");
+    }
+    else if (which == 1)
+    {
+        ranges = kArabicRanges;
+        if (ShConfigGetStr("Settings", "FontArabic", "", cfg, sizeof(cfg)) &&
+            cfg[0])
+            snprintf(paths[n++], MAX_PATH, "%s", cfg);
+        snprintf(paths[n++], MAX_PATH, "C:\\Windows\\Fonts\\segoeui.ttf");
+        snprintf(paths[n++], MAX_PATH, "C:\\Windows\\Fonts\\tahoma.ttf");
+        snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\truetype\\noto\\NotoSansArabic-Regular.ttf");
+    }
+    else
+    {
+        ranges = MenuFontRanges();
+        snprintf(paths[n++], MAX_PATH, "C:\\Windows\\Fonts\\msyh.ttc");
+        snprintf(paths[n++], MAX_PATH, "C:\\Windows\\Fonts\\msyh.ttf");
+        snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc");
+        snprintf(paths[n++], MAX_PATH, "Z:\\usr\\share\\fonts\\truetype\\wqy\\wqy-microhei.ttc");
+    }
+
+    for (i = 0; i < n; i++)
+        if (MenuFontMerge(paths[i], ranges)) return;
+}
+
 static void LoadCjkFont()
 {
     ImGuiIO& io = ImGui::GetIO();
-    const ImWchar* ranges = io.Fonts->GetGlyphRangesChineseFull();
+    const ImWchar* ranges = MenuFontRanges();
     char paths[24][MAX_PATH];
     int n = MenuFontCandidates(paths, 24);
     int i;
@@ -1893,8 +2034,26 @@ static void LoadCjkFont()
 
     if (base)
     {
+        char forced[MAX_PATH] = "";
+
         io.FontDefault = base;
         g_menuFontCjk = 1;
+        /* The two scripts no CJK font carries, merged into the one chosen: a
+         * Korean or Arabic menu language is otherwise a row of '?' however
+         * wide the ranges are. */
+        MenuFontMergeCandidates(0);
+        MenuFontMergeCandidates(1);
+        /* A font the player pointed at with Font= is not necessarily one
+         * that can draw the framework's own text, and g_menuFontCjk is what
+         * says the menu is readable in the chosen language - it was set
+         * unconditionally before, so a Latin-only Font= claimed Chinese and
+         * took the English fallback away with it. Merging the CJK
+         * candidates behind it makes the claim true instead; when the file
+         * pointed at is one of them the merge helper refuses it and the
+         * next candidate answers. */
+        if (ShConfigGetStr("Settings", "Font", "", forced, sizeof(forced)) &&
+            forced[0])
+            MenuFontMergeCandidates(2);
     }
     else
     {
@@ -1938,6 +2097,13 @@ static void LoadCjkFont()
         if (b)
         {
             g_chatFont = b;
+            /* The rows are drawn with this face, so the scripts no CJK font
+             * carries have to be merged into it too: the merge above went
+             * into the regular weight, and a menu row in Korean or Arabic
+             * was a row of '?' because this face has neither - the reason
+             * pointing [Settings] Font= at malgun changed nothing. */
+            MenuFontMergeCandidates(0);
+            MenuFontMergeCandidates(1);
             OvlLogFloor("chat bold font loaded: %s", bold[i - 1]);
         }
         else
@@ -1965,13 +2131,14 @@ static void MenuFontTick()
 
     n = MenuFontCandidates(paths, 24);
     for (i = 0; i < n && !f; i++)
-        f = TryMenuFont(paths[i], 16.0f,
-                        ImGui::GetIO().Fonts->GetGlyphRangesChineseFull());
+        f = TryMenuFont(paths[i], 16.0f, MenuFontRanges());
     if (f)
     {
         ImGui::GetIO().FontDefault = f;
         g_chatFont = f;
         g_menuFontCjk = 1;
+        MenuFontMergeCandidates(0);
+        MenuFontMergeCandidates(1);
         OvlLogFloor("font: the CJK font arrived (%s) - the menu follows the "
                     "language from here", paths[i - 1]);
     }

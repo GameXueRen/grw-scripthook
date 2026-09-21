@@ -151,7 +151,10 @@ static volatile int g_built = 0;
 
 #define PLUGIN_MAX 64
 #define NAME_MAX   64
-#define LANG_MAX   8
+/* The languages the settings page can offer. The game ships sixteen and
+ * the framework declares a name row for each, so this is that count - a
+ * smaller number silently cuts the tail of the picker off. */
+#define LANG_MAX   16
 
 static char g_plugins[PLUGIN_MAX][NAME_MAX];
 static int  g_nplugins = 0;

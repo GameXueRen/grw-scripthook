@@ -438,7 +438,10 @@ static void ParseConfig(const char *text) {
  * ours, the text belongs to whoever translated it.
  */
 #define LANG_CODE_MAX   16
-#define LANG_LIST_MAX   8
+/* The picker's list. The game ships sixteen languages and the framework
+ * declares a name row for each, so the list a fresh install builds is that
+ * long; a [Settings] Languages line shorter than this is a custom list. */
+#define LANG_LIST_MAX   16
 #define LANG_KEY_MAX    512     /* a literal key can be a whole hint */
 #define LANG_VAL_MAX    768     /* and its translation can be longer */
 #define LROW_MAX        2048
@@ -872,7 +875,9 @@ static int  g_nBuiltin;
 
 /* [LanguageNames] rows: the label to show for a code. Not gated by
  * the active language, so the picker reads in any language. */
-#define DISP_MAX 16
+/* Twice the languages the game ships: a player's own [LanguageNames] rows
+ * for regional variants are then not the ones dropped at the cap. */
+#define DISP_MAX 32
 static struct { char code[LANG_CODE_MAX]; char label[32]; } g_disp[DISP_MAX];
 static int g_nDisp;
 
@@ -916,12 +921,42 @@ static int LangPrimaryEq(const char *a, const char *b) {
     return _strnicmp(a, b, na) == 0;
 }
 
+/* The region subtag of a tag: "en-GB" -> "GB", "zh-Hant-TW" -> "TW", ""
+ * for a tag that carries none. Compared with _stricmp by the caller. */
+static const char *LangRegion(const char *code) {
+    const char *p;
+
+    if (!code || !code[0]) return "";
+    p = strrchr(code, '-');
+    if (!p) p = strrchr(code, '_');
+    return p ? p + 1 : "";
+}
+
+/* Whether a tag is the Chinese written in traditional characters. A Windows
+ * user language says zh-HK, not zh-Hant-HK - the script is not in the tag -
+ * so the regions that use it are what to go by. */
+static int LangChineseTraditional(const char *code) {
+    const char *r = LangRegion(code);
+
+    return !_stricmp(r, "TW") || !_stricmp(r, "HK") || !_stricmp(r, "MO");
+}
+
 /* The code this session will use, out of the languages the menu can
  * actually show: the exact one, else the same language in another variant,
  * else English - which every build carries (the framework declares en-US
  * text, and the lookup falls back to it per key even when en-US is not on
- * offer). *how says which of the three it was, for the log line. */
+ * offer). *how says which of the three it was, for the log line.
+ *
+ * Among the variants, the same region wins first and then the same Chinese
+ * script, because neither is the order the list happens to be declared in:
+ * a Windows set to zh-HK asks for "zh", and zh-CN answers that just as well
+ * as zh-TW does - one of them is an accident of declaration order, the
+ * other hands a Hong Kong player the script they do not read. Region and
+ * script only ever decide between variants of the SAME language
+ * (LangPrimaryEq above); two languages are still never matched this way.
+ */
 static const char *LangPickOffered(const char *code, const char **how) {
+    const char *region = LangRegion(code);
     int i;
 
     if (code && code[0]) {
@@ -930,6 +965,20 @@ static const char *LangPickOffered(const char *code, const char **how) {
                 *how = "exact match";
                 return g_langList[i];
             }
+        if (region[0])
+            for (i = 0; i < g_nLangList; i++)
+                if (LangPrimaryEq(g_langList[i], code) &&
+                    !_stricmp(LangRegion(g_langList[i]), region)) {
+                    *how = "same language, same region";
+                    return g_langList[i];
+                }
+        if (LangChineseTraditional(code))
+            for (i = 0; i < g_nLangList; i++)
+                if (LangPrimaryEq(g_langList[i], code) &&
+                    LangChineseTraditional(g_langList[i])) {
+                    *how = "same language, same script";
+                    return g_langList[i];
+                }
         for (i = 0; i < g_nLangList; i++)
             if (LangPrimaryEq(g_langList[i], code)) {
                 *how = "same language, another variant";

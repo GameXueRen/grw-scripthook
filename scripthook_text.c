@@ -160,11 +160,28 @@ static const ShText kEnUS[] = {
     { "@cpu.stage.window",    "window" },
     { "@cpu.stage.play",      "play" },
 
-    /* the languages this build ships, named in their own language, so
-     * the picker reads with no lang.ini present (a [LanguageNames] row
-     * in a file overrides these) */
+    /* Every language the game ships, named the way that language names
+     * itself, so the picker reads with no lang.ini present (a
+     * [LanguageNames] row in a file overrides these). This table is the
+     * one the lookup falls back to as well - see the note above the
+     * language tables below - so it carries all of them and not only the
+     * two with a translation. */
     { "@lang.name.zh-CN",     "简体中文" },
-    { "@lang.name.en-US",     "English" }
+    { "@lang.name.zh-TW",     "繁體中文" },
+    { "@lang.name.en-US",     "English" },
+    { "@lang.name.fr-FR",     "Français" },
+    { "@lang.name.it-IT",     "Italiano" },
+    { "@lang.name.de-DE",     "Deutsch" },
+    { "@lang.name.es-ES",     "Español (España)" },
+    { "@lang.name.es-MX",     "Español (Latinoamérica)" },
+    { "@lang.name.pt-BR",     "Português (Brasil)" },
+    { "@lang.name.ru-RU",     "Русский" },
+    { "@lang.name.pl-PL",     "Polski" },
+    { "@lang.name.cs-CZ",     "Čeština" },
+    { "@lang.name.nl-NL",     "Nederlands" },
+    { "@lang.name.ar-SA",     "العربية" },
+    { "@lang.name.ko-KR",     "한국어" },
+    { "@lang.name.ja-JP",     "日本語" }
 };
 
 /* ---- Chinese ---------------------------------------------------- */
@@ -262,6 +279,31 @@ static const ShText kZhCN[] = {
     { "@lang.name.en-US",     "English" }
 };
 
+/* The rest of the languages the game ships, each carrying its own name and
+ * nothing else. Declaring one is what puts it in the picker and in the
+ * first-run auto-pick (scripthook_config.c: a language exists only if some
+ * module declares text for it); every other key misses here and is answered
+ * by the English table above, which is the lookup's own second step. So the
+ * menu still reads as a menu, and a translation lands by adding rows to the
+ * table - or, without the source, to a lang.ini the player writes.
+ */
+static const ShText kNameFrFR[] = { { "@lang.name.fr-FR", "Français" } };
+static const ShText kNameItIT[] = { { "@lang.name.it-IT", "Italiano" } };
+static const ShText kNameDeDE[] = { { "@lang.name.de-DE", "Deutsch" } };
+static const ShText kNameEsES[] = { { "@lang.name.es-ES", "Español (España)" } };
+static const ShText kNameEsMX[] = { { "@lang.name.es-MX",
+                                      "Español (Latinoamérica)" } };
+static const ShText kNamePtBR[] = { { "@lang.name.pt-BR",
+                                      "Português (Brasil)" } };
+static const ShText kNameRuRU[] = { { "@lang.name.ru-RU", "Русский" } };
+static const ShText kNamePlPL[] = { { "@lang.name.pl-PL", "Polski" } };
+static const ShText kNameCsCZ[] = { { "@lang.name.cs-CZ", "Čeština" } };
+static const ShText kNameNlNL[] = { { "@lang.name.nl-NL", "Nederlands" } };
+static const ShText kNameArSA[] = { { "@lang.name.ar-SA", "العربية" } };
+static const ShText kNameKoKR[] = { { "@lang.name.ko-KR", "한국어" } };
+static const ShText kNameJaJP[] = { { "@lang.name.ja-JP", "日本語" } };
+static const ShText kNameZhTW[] = { { "@lang.name.zh-TW", "繁體中文" } };
+
 /* Declared in scripthook_config.c, called from ResolveLanguage before
  * the language list is built: a language exists only if some module
  * declares text for it. */
@@ -274,4 +316,22 @@ void ShTextInitFramework(void) {
                   (int)(sizeof(kEnUS) / sizeof(kEnUS[0])));
     ShLangDeclare(NULL, "zh-CN", kZhCN,
                   (int)(sizeof(kZhCN) / sizeof(kZhCN[0])));
+    /* The rest, in the order the game's own list keeps. That order is what
+     * the picker shows first and nothing else: the first-run pick no longer
+     * turns on it, it prefers the same region and then the same Chinese
+     * script (scripthook_config.c, LangPickOffered). */
+    ShLangDeclare(NULL, "fr-FR", kNameFrFR, 1);
+    ShLangDeclare(NULL, "it-IT", kNameItIT, 1);
+    ShLangDeclare(NULL, "de-DE", kNameDeDE, 1);
+    ShLangDeclare(NULL, "es-ES", kNameEsES, 1);
+    ShLangDeclare(NULL, "ar-SA", kNameArSA, 1);
+    ShLangDeclare(NULL, "zh-TW", kNameZhTW, 1);
+    ShLangDeclare(NULL, "ko-KR", kNameKoKR, 1);
+    ShLangDeclare(NULL, "ja-JP", kNameJaJP, 1);
+    ShLangDeclare(NULL, "nl-NL", kNameNlNL, 1);
+    ShLangDeclare(NULL, "pl-PL", kNamePlPL, 1);
+    ShLangDeclare(NULL, "pt-BR", kNamePtBR, 1);
+    ShLangDeclare(NULL, "ru-RU", kNameRuRU, 1);
+    ShLangDeclare(NULL, "cs-CZ", kNameCsCZ, 1);
+    ShLangDeclare(NULL, "es-MX", kNameEsMX, 1);
 }
