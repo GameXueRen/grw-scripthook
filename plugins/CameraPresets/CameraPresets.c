@@ -56,6 +56,34 @@ static volatile LONG g_sideCm  = 0;
 /* The worker thread alone writes these. */
 static int g_claimed;                      /* a preset is holding the camera */
 static int g_guarded;                      /* handed back for a blocked mode */
+static int g_adsYield;                     /* position released for native aim */
+
+static void ApplyPreset(int force);
+
+/* The Suite's own rule for its third person presets: while the player
+ * aims, the game's native aim camera owns the position, so a high or
+ * wide preset cannot drag the iron sights to its world position. Aim
+ * from the hip and the sights take over; release and the preset
+ * reclaims. Aim is read off the right mouse button, the game's own
+ * default, the way the Suite's own aim-side logic reads it. */
+static void AimYield(void) {
+    static int lastAim = -1;
+    int aim = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+
+    if (aim == lastAim) return;
+    lastAim = aim;
+    if (aim) {
+        if (g_claimed && !g_adsYield && !g_guarded) {
+            ShCameraReleaseFields(SH_CAM_POS);
+            g_adsYield = 1;
+            Log("cp: yielded the camera to the native aim");
+        }
+    } else if (g_adsYield) {
+        g_adsYield = 0;
+        ApplyPreset(1);
+        Log("cp: preset reclaimed the camera");
+    }
+}
 
 /* ---- settings -------------------------------------------------------- */
 
@@ -94,10 +122,12 @@ static void ApplyPreset(int force) {
     int preset = (int)g_preset;
     float back, up, side = 0.0f;
 
+    if (g_adsYield && !force) return;   /* the native aim owns the frame */
     if (preset == 0) {
         if (g_claimed || force) {
             ShCameraReleaseFields(SH_CAM_POS);
             g_claimed = 0;
+            g_adsYield = 0;
             Log("cp: camera handed back to the engine");
         }
         return;
@@ -139,6 +169,7 @@ static void ApplyWatch(void) {
         ShCameraReleaseFields(SH_CAM_POS);
         g_claimed = 0;
         g_guarded = 1;
+        g_adsYield = 0;
         Log("cp: handed the camera back to the game (mode not allowed)");
     }
 }
@@ -302,7 +333,8 @@ static DWORD WINAPI PluginThread(LPVOID param) {
     ApplyPreset(0);
 
     for (;;) {
-        Sleep(250);
+        Sleep(g_claimed || g_adsYield ? 40 : 250);
+        AimYield();
         RefreshStatus();
         ApplyWatch();
     }
