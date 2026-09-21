@@ -465,6 +465,24 @@ SH_API uint64_t ShEntityVtable(void) {
     return g_entityVt ? g_entityVt : SH_VT_ENTITY;
 }
 
+/* How long the heap walk below is allowed to keep the caller waiting.
+ *
+ * The walk reads every read/write committed page in the process, and the
+ * note further down says what that costs when it misses: seconds. It runs
+ * on the *caller's* thread - a plugin's, or the game's own - so a miss is a
+ * frame or a load standing still. ShPlayerLocked already keeps it out of
+ * menus and loads, prefers the engine's own static accessor and backs off
+ * after an empty walk; the budget is the last of those guards, for the case
+ * where a walk starts and simply does not finish: it stops, says so with
+ * its own elapsed time and region count, and the caller gets a miss it
+ * already knows how to take.
+ *
+ * 150 ms is deliberately short: it is under a frame at any playable rate on
+ * this engine, and the walk's own log line is what a longer budget would
+ * have to be argued from.
+ */
+#define WALK_BUDGET_MS 150u
+
 /* Match entities against the mirrored position, then
  * walk each candidate to its root.
  */
@@ -473,6 +491,8 @@ static int ShResolvePlayer(void) {
     MEMORY_BASIC_INFORMATION mbi;
     uint8_t *scan = (uint8_t *)0x1000000;
     uint64_t best = 0, root = 0;
+    uint64_t t0 = GetTickCount64();
+    uint32_t regions = 0;
 
     /* The global is read directly rather than through
      * ShGetPlayerPosition: that one starts with ShPeekPlayer's TryAcquire,
@@ -483,8 +503,9 @@ static int ShResolvePlayer(void) {
         uint64_t obj = ShQ(SH_PLAYER_GLOBAL);
 
         if (!obj || !ShVec(obj + OFF_GLOBAL_TF + OFF_TF_POS, &want)) {
-            ApiLog("resolve: no player position, global=%p",
-                   (void *)(uintptr_t)obj);
+            ApiLog("resolve: no player position, global=%p after %llu ms",
+                   (void *)(uintptr_t)obj,
+                   (unsigned long long)(GetTickCount64() - t0));
             return 0;
         }
     }
@@ -496,6 +517,21 @@ static int ShResolvePlayer(void) {
 
     while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
+
+        /* The budget above, checked per region rather than per chunk: a
+         * region is one VirtualQuery away from the next, and that is the
+         * granularity at which stopping still leaves the caller with a
+         * usable answer ("nothing here"), not half a candidate. What the
+         * walk covers is what it covered - it is not narrowed, only
+         * stopped when it stops paying for itself. */
+        if (GetTickCount64() - t0 >= WALK_BUDGET_MS) {
+            ApiLog("resolve: walk gave up after %llu ms, %u region(s) - the "
+                   "caller gets a miss, and the next try waits out the "
+                   "backoff",
+                   (unsigned long long)(GetTickCount64() - t0), regions);
+            return ShFail(SH_ERR_NO_CANDIDATE);
+        }
+        regions++;
         if (next <= scan) break;
         if ((uint64_t)(uintptr_t)mbi.BaseAddress >= SH_HEAP_HI) break;
         if (mbi.State == MEM_COMMIT &&
@@ -544,7 +580,8 @@ static int ShResolvePlayer(void) {
     }
 found:
     if (!best) {
-        ApiLog("resolve: no entity matched");
+        ApiLog("resolve: no entity matched (walk %llu ms, %u region(s))",
+               (unsigned long long)(GetTickCount64() - t0), regions);
         return ShFail(SH_ERR_NO_CANDIDATE);
     }
     if (!ShWalkToRoot(best, &root)) return ShFail(SH_ERR_NO_ROOT);
@@ -554,10 +591,11 @@ found:
     g_player.root = root;
     g_resolved = 1;
     g_lastError = SH_OK;
-    ApiLog("resolved: entity %p node %p root %p",
+    ApiLog("resolved: entity %p node %p root %p (walk %llu ms, %u region(s))",
         (void *)(uintptr_t)g_player.entity,
         (void *)(uintptr_t)g_player.node,
-        (void *)(uintptr_t)g_player.root);
+        (void *)(uintptr_t)g_player.root,
+        (unsigned long long)(GetTickCount64() - t0), regions);
     return 1;
 }
 

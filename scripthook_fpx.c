@@ -1140,6 +1140,40 @@ static void PickNote(uint64_t arg, int haveMe, const ShVec3 *me) {
         dist, g_pickFlips);
 }
 
+/* The aim gate's two edges, and the gap between them.
+ *
+ * An aim hands the frame to the engine's own aim camera the instant the
+ * gate says so (see the branch in ShFp2PlaceEye) and takes it back the
+ * instant the gate drops. Both are logged with the gap since the last edge,
+ * because what the gate does between two aims is the one thing the plugin's
+ * once-a-second beat cannot show: whether an aim is one window or a burst of
+ * them.
+ *
+ * Measured 2026-09-20 (firstperson.log, co-op): some aims are as short as
+ * 61 ms, and the gate changes hands every 60-250 ms in bursts. Every aim in
+ * that log took its own branch correctly - BOW_ADS going in, BOW_NONE coming
+ * out - so where a sitting aim's missing raise animation comes from is still
+ * open, and this is the line that will say it: a burst arrives here as
+ * "started after" a few tens of milliseconds.
+ *
+ * A hold that kept the frame with the engine for a while after the gate
+ * dropped was tried and reverted on 2026-09-21: the engine animates the
+ * sights DOWN as soon as the gate drops, so holding the frame shows exactly
+ * that - a beat of third person with the head still hidden, then a jump back
+ * to the eye. It traded a small artifact for a worse one.
+ */
+static uint64_t g_adsEdgeAt;    /* last time the gate changed hands */
+static int      g_adsEdgeSeen;
+
+static void AimEdge(const char *what) {
+    uint64_t now = GetTickCount64();
+
+    Log("aim: %s after %llu ms", what,
+        (unsigned long long)(g_adsEdgeSeen ? now - g_adsEdgeAt : 0));
+    g_adsEdgeAt = now;
+    g_adsEdgeSeen = 1;
+}
+
 /* Called from the camera manager's own frame, in the same
  * place the table hooks: the engine has just written the
  * position it computed, and this is the last moment at which
@@ -1211,9 +1245,11 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
      * then reveals it in one jump when the window closes.
      * That is a pull, and it was measured as one. */
     if (g_fp.skip[3]) {
+        if (g_bow != BOW_ADS) AimEdge("started");
         g_bow = BOW_ADS;
         return 0;
     }
+    if (g_bow == BOW_ADS) AimEdge("ended");
 
     /* The world checks are at the top of this function now: they have to
      * run whatever first person is doing, and this is the point past
