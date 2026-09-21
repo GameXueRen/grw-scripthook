@@ -1,4 +1,5 @@
 CC = x86_64-w64-mingw32-gcc
+CXX = x86_64-w64-mingw32-g++
 # -I. because a plugin source in plugins\<name>\ includes scripthook.h,
 # log.h and image.h from the repo root; MSVC gets the same through /I.
 CFLAGS = -O2 -Wall -Wextra -shared -static-libgcc -I.
@@ -228,6 +229,22 @@ $(GAMEDIR)/plugins/micfix/micfix.asi: plugins/micfix/micfix.c scripthook.h log.h
 
 libscripthook.a: $(GAMEDIR)/dinput8.dll
 
+# The menu overlay: Dear ImGui and the D3D11 overlay are C++,
+# so they compile with the C++ compiler into objects and link
+# in beside the C sources (which the CC driver keeps compiling
+# as C). libstdc++ is pulled static through a -Bstatic window,
+# so the DLL takes no C++ runtime DLL with it beside GRW.exe.
+IMGUI = third_party/imgui
+OVLFLAGS = -O2 -Wall -c -std=c++17 -I. -I$(IMGUI) -I$(IMGUI)/backends
+OVLOBJS = build/imgui.o build/imgui_draw.o build/imgui_tables.o \
+          build/imgui_widgets.o build/imgui_impl_dx11.o \
+          build/imgui_impl_win32.o build/scripthook_ovl.o
+vpath %.cpp $(IMGUI) $(IMGUI)/backends
+
+build/%.o: %.cpp
+	@mkdir -p build
+	$(CXX) $(OVLFLAGS) -o $@ $<
+
 $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c scripthook_tick.c \
                         scripthook_text.c \
                         scripthook_physics.c \
@@ -255,7 +272,8 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c scripthook
                         third_party/minhook/src/buffer.c \
                         third_party/minhook/src/hook.c \
                         third_party/minhook/src/trampoline.c \
-                        third_party/minhook/src/hde/hde64.c
+                        third_party/minhook/src/hde/hde64.c \
+                        $(OVLOBJS)
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_config.c scripthook_text.c scripthook_tick.c \
 		scripthook_physics.c scripthook_health.c \
@@ -282,10 +300,15 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c scripthook
 		third_party/minhook/src/trampoline.c \
 		third_party/minhook/src/hde/hde64.c \
 		-Ithird_party/minhook/include \
+		$(OVLOBJS) \
 		-ldinput8 -ldxguid -lgdi32 -luser32 \
+		-ld3d11 -ldxgi -ldwmapi -limm32 -lpsapi -ld3dcompiler_47 \
+		-Wl,-Bstatic -lstdc++ -lwinpthread -Wl,-Bdynamic \
 		-Wl,--out-implib,libscripthook.a
-	@if x86_64-w64-mingw32-objdump -p $@ | grep -q libwinpthread; then \
-		echo "dinput8.dll imports libwinpthread: the game cannot load it"; \
+	@match=$$(x86_64-w64-mingw32-objdump -p $@ | grep 'libwinpthread\|libstdc++-\|libgcc_s'); \
+	if [ -n "$$match" ]; then \
+		echo "dinput8.dll imports a runtime DLL: the game cannot load it"; \
+		echo "$$match"; \
 		rm -f $@; exit 1; fi
 
 $(GAMEDIR)/plugins/test_plugin/test_plugin.asi: plugins/test_plugin/test_plugin.c

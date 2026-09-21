@@ -187,7 +187,7 @@ extern void ShSceneTick(void);
 static volatile uint64_t g_qFn = 0;
 static uint64_t g_qArg[6];
 static volatile uint64_t g_qRet = 0;
-static volatile int g_qPending = 0;
+static volatile LONG g_qPending = 0;
 static volatile int g_qDone = 0;
 static volatile int g_qFloat = 0;
 static volatile int g_qSix = 0;
