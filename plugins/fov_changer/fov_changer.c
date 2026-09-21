@@ -1,12 +1,21 @@
 /* Field of view, changed from the menu and held every
  * frame by the ScriptHook's camera override.
  *
- * Two things share the one channel: the override, which widens the
- * first and third person view, and No zoom on iron sights, which keeps
- * the hip's own fov while the iron sights are up. The second is
- * independent of the first - it needs neither the override switch nor
- * the fov row. Both, and the fov itself, are kept in fov_changer.ini
- * beside the .asi and restored on the next launch.
+ * Five rows: the override switch, a fov for each view, the no-zoom switch,
+ * and the way back to the game's own value. A frame with no iron sight up
+ * carries its view's fov.
+ *
+ * No zoom on iron sights is the one part about the aiming camera rather
+ * than a view, and it holds in both views at once: what it keeps is the fov
+ * the frame already had, read from whichever view is on screen. With it off
+ * the engine's own aim value goes through untouched - the game's own small
+ * narrowing - and the magnified optics and the binoculars are left alone
+ * either way (their values are under 0.5 rad, which the framework passes
+ * through unless the pin is set, and the pin is only ever set for the iron
+ * sights).
+ *
+ * The two fovs and the two switches live in fov_changer.ini beside the .asi
+ * and are restored on the next launch.
  */
 /* Linked against the ScriptHook, so the API is called
  * directly. See src/README.md for how that works.
@@ -26,13 +35,33 @@
  * is the fallback if we never manage to read it.
  */
 #define FALLBACK    0.815f
+/* 30 to 120 in steps of one: the game's own value is about 47, and a step
+ * of one is what lets two rows be set to exactly the same number. */
 #define DEG_MIN     30.0f
-#define DEG_MAX     140.0f
-#define DEG_STEP    2.0f
+#define DEG_MAX     120.0f
+#define DEG_STEP    1.0f
 #define TICK_MS     500
 /* No zoom polls the fov faster than the menu's cadence: the sights come
  * up in a frame or two, not in half a second. */
 #define NOZOOM_MS   16
+/* A fov change is walked rather than snapped: about a sixth of a second
+ * from one value to the next, on the same beat No zoom uses. A hold has
+ * nothing to walk - its target is the value already on screen. */
+#define RAMP_MS     16
+#define RAMP_STEP   0.35f
+#define RAMP_MIN    0.002f     /* rad: close enough to settle on the target */
+/* While the override is on, which fov is in force depends on the view,
+ * so a switch between first and third person has to land at once rather
+ * than on the next slow tick. The same beat reads the view mode, and a
+ * poll that often is also what keeps the head measurement it is derived
+ * from alive.
+ */
+#define VIEW_MS     250
+/* How long after an aim the view is left alone. The framework reports first
+ * person for the engine's own aim camera on the head bone, and goes on doing
+ * it for a beat after the aim comes down; a reading inside that window is
+ * the hand over, not a view. */
+#define HANDOVER_MS 800
 /* Where an iron sight's fov sits. Measured live on the 2026-09 build,
  * the aim fov of every sight in the game: iron sights 0.69, 1x / 2.5x /
  * 3x 0.49, 2x 0.40 and 0.34, the 1x step of the dual lens 0.30, 3.5x
@@ -42,9 +71,24 @@
  * recognised by the value alone. That matters: the aim state a plugin
  * can read is not dependable, and the whole feature would sit idle on a
  * frame where it read wrong.
+ *
+ * Measured again with the override at 121 deg (2026-09-21): the engine's
+ * own values do not move with it - the hip still computes 0.81 rad and
+ * the iron sights 0.69 rad - because the replacement happens after the
+ * engine computes, at the store in scripthook_fov.c. The band above is
+ * therefore right as it stands; what an override changes is the camera
+ * alone, never what this reads.
  */
-#define SIGHT_LO    0.60f
+/* The hip's band, and the value an iron sight computes: the two things the
+ * aim detection below turns on. Measured live on the 2026-09 build, the
+ * iron sight is 0.69 and the hip about 0.81.
+ */
 #define SIGHT_HI    0.75f
+/* The framework's own line between a gameplay fov and a zoom optic
+ * (scripthook_fov.c passes anything under it straight through unless the
+ * pin is set). Narrower than this is a scope, and its magnification is not
+ * ours to take. */
+#define OPTIC_RAD   0.50f
 
 /* Config convention, the same every plugin follows: the .ini sits beside
  * the .asi and takes its base name, so fov_changer.asi pairs with
@@ -65,8 +109,30 @@ static volatile LONG  g_on = 0;      /* read by the tick, written by the menu */
 /* Set on unload. Only a flag: the release belongs to the tick thread, because
  * DllMain runs under the loader lock, where a framework call is forbidden. */
 static volatile LONG  g_stop = 0;
-static volatile float g_deg = 0.0f;
+/* One fov per view, in degrees. The aiming camera has no value of its own:
+ * it carries the view it was raised from (No zoom), or the engine's own.
+ */
+static volatile float g_fpDeg = 0.0f;
+static volatile float g_tpDeg = 0.0f;
 static volatile float g_defaultRad = 0.0f;
+/* Which view the frame is showing, refreshed on the tick. A LONG rather
+ * than an int because the tick writes it and the menu thread reads it;
+ * UNKNOWN until the first read, and every reader has to treat that as
+ * "not first person" (scripthook.h is explicit about why).
+ */
+static volatile LONG  g_view = SH_VIEW_UNKNOWN;
+/* The fov a frame with no iron sight up carries, in radians, and the value
+ * last handed to the camera - the ramp walks the second towards the first.
+ *
+ * No zoom holds the first of these rather than asking which view is on
+ * screen. It cannot ask: while an aim is up the framework reports first
+ * person for the engine's own aim camera, which sits on the head bone, so
+ * a third person aim would read the first person row. That is what was
+ * reported on 2026-09-21 - with the third person row set the sights still
+ * narrowed, while the first person row left alone behaved.
+ */
+static volatile float g_lookRad = 0.0f;
+static volatile float g_shown = 0.0f;
 /* What the ini asked for, applied once the menu exists. */
 static int g_initOverride = 0;
 static int g_initNozoom = 0;
@@ -116,13 +182,22 @@ static int IniInt(const char *key, int def) {
 }
 
 /* The settings are optional: with no file, or a key missing, the built-in
- * defaults stand. */
+ * defaults stand.
+ *
+ * A file written before the three rows existed carries one `fov` key: it
+ * seeds BOTH views, so a widened first person view stays as wide as it
+ * was, and the aiming row keeps following them. That is what makes an
+ * existing config run exactly as it ran before.
+ */
 static void LoadIni(void) {
-    int v;
+    int v, shared;
 
     if (!g_iniPath[0]) return;
-    v = IniInt("fov", 0);
-    if ((float)v >= DEG_MIN && (float)v <= DEG_MAX) g_deg = (float)v;
+    shared = IniInt("fov", 0);
+    v = IniInt("fov_fp", shared);
+    if ((float)v >= DEG_MIN && (float)v <= DEG_MAX) g_fpDeg = (float)v;
+    v = IniInt("fov_tp", shared);
+    if ((float)v >= DEG_MIN && (float)v <= DEG_MAX) g_tpDeg = (float)v;
     g_initOverride = IniInt("override", 0) ? 1 : 0;
     g_initNozoom = IniInt("nozoom", 0) ? 1 : 0;
 }
@@ -133,8 +208,10 @@ static void SaveIni(void) {
     if (!g_iniPath[0]) return;
     snprintf(buf, sizeof(buf), "%d", OverrideOn());
     WritePrivateProfileStringA("Settings", "override", buf, g_iniPath);
-    snprintf(buf, sizeof(buf), "%d", (int)(g_deg + 0.5f));
-    WritePrivateProfileStringA("Settings", "fov", buf, g_iniPath);
+    snprintf(buf, sizeof(buf), "%d", (int)(g_fpDeg + 0.5f));
+    WritePrivateProfileStringA("Settings", "fov_fp", buf, g_iniPath);
+    snprintf(buf, sizeof(buf), "%d", (int)(g_tpDeg + 0.5f));
+    WritePrivateProfileStringA("Settings", "fov_tp", buf, g_iniPath);
     snprintf(buf, sizeof(buf), "%d",
              InterlockedCompareExchange(&g_nozoom, 0, 0) ? 1 : 0);
     WritePrivateProfileStringA("Settings", "nozoom", buf, g_iniPath);
@@ -158,7 +235,8 @@ static void LearnDefault(void) {
     if (!ShGetCamera(&c)) return;
     if (c.fov > 0.05f && c.fov < 3.0f) {
         g_defaultRad = c.fov;
-        if (g_deg <= 0.0f) g_deg = c.fov * RAD2DEG;
+        if (g_fpDeg <= 0.0f) g_fpDeg = c.fov * RAD2DEG;
+        if (g_tpDeg <= 0.0f) g_tpDeg = c.fov * RAD2DEG;
         InterlockedExchange(&g_learned, 1);
     }
 }
@@ -167,24 +245,64 @@ static float DefaultRad(void) {
     return (g_defaultRad > 0.0f) ? g_defaultRad : FALLBACK;
 }
 
-/* What an aim has to keep: the player's own value when the override is on,
- * else the fov the hip had on the last wide frame.
+/* The fov of the view the frame is showing. Anything but FIRST_PERSON
+ * reads the third person row - including SH_VIEW_UNKNOWN, which the
+ * header says a consumer must treat as "not first person", and which is
+ * what a player who never turns the first person plugin on will see.
  */
-static float KeepRad(void) {
-    if (OverrideOn()) return g_deg * DEG2RAD;
-    return (g_hipRad > 0.0f) ? g_hipRad : DefaultRad();
+static float ViewRad(void) {
+    float deg;
+
+    if (InterlockedCompareExchange(&g_view, 0, 0) == SH_VIEW_FIRST_PERSON)
+        deg = g_fpDeg;
+    else
+        deg = g_tpDeg;
+    return (deg > 0.0f) ? deg * DEG2RAD : DefaultRad();
 }
 
-/* One call is enough: the ScriptHook reapplies it inside
- * the engine's own frame until it is released.
+/* What the next apply carries.
+ *
+ * The first branch is the frame with an aim up (see the tick, which applies
+ * nothing else while one is). With No zoom on, what it holds is the fov the
+ * frame had before the aim came up - recorded by the tick rather than read
+ * off the view, for the reason at g_lookRad - and in first person and third
+ * person alike that is a value that does not move, which is the whole of
+ * "does not zoom".
+ *
+ * With No zoom off it is the engine's own aim value instead, and the point
+ * of applying it rather than releasing the channel is that it is then
+ * walked to (see the tick's ramp) instead of arriving in one frame. A
+ * release handed the camera straight to a value the engine had already
+ * computed, so the aim was a snap - and in first person, where the fov is
+ * the only thing an aim moves, that was the whole of what the player saw.
+ */
+static float WantedRad(void) {
+    if (InterlockedCompareExchange(&g_aim, 0, 0)) {
+        float hold;
+
+        if (OverrideOn() && !InterlockedCompareExchange(&g_nozoom, 0, 0)) {
+            float e = ShFovEngine();
+
+            if (e > 0.05f && e < 3.0f) return e;
+        }
+        hold = g_lookRad;
+        if (hold > 0.05f && hold < 3.0f) return hold;
+        return (g_hipRad > 0.0f) ? g_hipRad : DefaultRad();
+    }
+    return ViewRad();
+}
+
+/* Whether there is a camera to change at all.
+ *
+ * This used to push a value here and now, and no longer does: every fov
+ * change is walked by the tick, so a row, a switch and a view all arrive
+ * the same way - and a value applied from a menu callback would land the
+ * jump the walking exists to avoid. What the menu still needs to know is
+ * whether the camera is up, which is what the status line reports; a
+ * switch turned on before a session simply waits for the tick.
  */
 static int Push(void) {
-    ShCameraOverride o;
-
-    memset(&o, 0, sizeof(o));
-    o.apply = SH_CAM_FOV;
-    o.fov = KeepRad();
-    return ShCameraApply(&o);
+    return ShCameraReady();
 }
 
 /* ---- text ---------------------------------------------------------
@@ -196,39 +314,37 @@ static int Push(void) {
 static const ShText kEn[] = {
     { "@fov.page",       "Field of view" },
     { "@fov.override",   "Override" },
-    { "@fov.vertical",   "Vertical fov" },
+    { "@fov.tp",         "Third person fov" },
+    { "@fov.fp",         "First person fov" },
     { "@fov.nozoom",     "No zoom on iron sights" },
     { "@fov.reset",      "Back to the game default" },
     { "@fov.status.on",  "%.0f deg, game default %.0f" },
     { "@fov.status.off", "off, game is %.0f deg" },
     { "@fov.status.both.on",
-      "fov %.0f deg (game %.0f)\niron sights: hold %.0f deg, engine %.2f, "
-      "camera %.2f" },
+      "fov %.0f deg (game %.0f)\niron sights: engine %.2f, camera %.2f" },
     { "@fov.status.both.off",
       "fov %.0f deg (game %.0f)\nno iron sights, engine %.2f, camera %.2f" },
     { "@fov.notready",   "the camera is not ready" },
-    { "@fov.hint",
-      "Widens the first and third person camera fov; the aiming camera is "
-      "not touched." }
+    { "@fov.hint",       "Widens the first and third person fov" }
 };
 
 static const ShText kZh[] = {
     { "@fov.page",       "延展视野范围" },
     { "@fov.override",   "覆盖游戏视野范围设置" },
-    { "@fov.vertical",   "调整垂直视野范围（度）" },
-    { "@fov.nozoom",     "机瞄开镜不缩放" },
+    { "@fov.tp",         "第三人称视野范围" },
+    { "@fov.fp",         "第一人称视野范围" },
+    { "@fov.nozoom",     "机瞄开镜不缩放视野" },
     { "@fov.reset",      "恢复游戏默认视野范围" },
     { "@fov.status.on",  "当前视野范围 %.0f 度，游戏默认 %.0f" },
     { "@fov.status.off", "已关闭，当前视野范围 %.0f 度" },
     { "@fov.status.both.on",
       "视野范围 %.0f 度（游戏默认 %.0f）\n"
-      "机瞄中：保持 %.0f 度，引擎 %.2f，相机 %.2f" },
+      "机瞄中：引擎 %.2f，相机 %.2f" },
     { "@fov.status.both.off",
       "视野范围 %.0f 度（游戏默认 %.0f）\n"
       "未在机瞄：引擎 %.2f，相机 %.2f" },
     { "@fov.notready",   "游戏视野尚未就绪" },
-    { "@fov.hint",
-      "延展第一/第三人称镜头的视野范围，不影响瞄准模式的镜头视野范围。" }
+    { "@fov.hint",       "延展第一/第三人称视野范围" }
 };
 
 static void FovText(void) {
@@ -244,6 +360,8 @@ static void FovText(void) {
 
 static void Report(void) {
     float defDeg = DefaultRad() * RAD2DEG;
+    float viewDeg = OverrideOn() ? ViewRad() * RAD2DEG : defDeg;
+
     if (InterlockedCompareExchange(&g_nozoom, 0, 0)) {
         /* The engine's own value and the camera's are both on the line
          * while the feature runs: equal means the replacement landed, and
@@ -251,15 +369,14 @@ static void Report(void) {
          * it after us. */
         if (InterlockedCompareExchange(&g_aim, 0, 0))
             ShMenuStatusF(g_menu, "@fov.status.both.on",
-                          OverrideOn() ? g_deg : defDeg, defDeg,
-                          KeepRad() * RAD2DEG, g_engRad, g_camRad);
+                          viewDeg, defDeg, g_engRad, g_camRad);
         else
             ShMenuStatusF(g_menu, "@fov.status.both.off",
-                          OverrideOn() ? g_deg : defDeg, defDeg,
+                          viewDeg, defDeg,
                           g_engRad, g_camRad);
     } else if (g_on) {
         ShMenuStatusF(g_menu, "@fov.status.on",
-                      g_deg, defDeg);
+                      viewDeg, defDeg);
     } else {
         ShMenuStatusF(g_menu, "@fov.status.off",
                       defDeg);
@@ -272,7 +389,10 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
 
     if (value) {
         LearnDefault();
-        if (g_deg <= 0.0f) g_deg = DefaultRad() * RAD2DEG;
+        /* A push needs a number for every view, including the case where
+         * nothing has been learned or typed yet. */
+        if (g_fpDeg <= 0.0f) g_fpDeg = DefaultRad() * RAD2DEG;
+        if (g_tpDeg <= 0.0f) g_tpDeg = DefaultRad() * RAD2DEG;
         InterlockedExchange(&g_on, 1);
         if (!Push()) {
             InterlockedExchange(&g_on, 0);
@@ -293,10 +413,19 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
     Report();
 }
 
-static void OnFov(uint32_t menu, uint32_t item, int value,
-                  void *user) {
+static void OnFp(uint32_t menu, uint32_t item, int value,
+                 void *user) {
     (void)menu; (void)item; (void)user;
-    g_deg = (float)value;
+    g_fpDeg = (float)value;
+    if (OverrideOn()) Push();
+    SaveIniSoon();
+    Report();
+}
+
+static void OnTp(uint32_t menu, uint32_t item, int value,
+                 void *user) {
+    (void)menu; (void)item; (void)user;
+    g_tpDeg = (float)value;
     if (OverrideOn()) Push();
     SaveIniSoon();
     Report();
@@ -321,9 +450,12 @@ static void OnNoZoom(uint32_t menu, uint32_t item, int value,
 static void OnReset(uint32_t menu, uint32_t item, int value,
                     void *user) {
     (void)menu; (void)item; (void)value; (void)user;
-    g_deg = DefaultRad() * RAD2DEG;
-    /* The number row shows the framework's copy, so it has to be told. */
-    ShMenuSetValue(g_menu, "@fov.vertical", (int)(g_deg + 0.5f));
+    g_fpDeg = DefaultRad() * RAD2DEG;
+    g_tpDeg = g_fpDeg;
+    /* The number rows show the framework's own copy, so they have to be
+     * told. */
+    ShMenuSetValue(g_menu, "@fov.fp", (int)(g_fpDeg + 0.5f));
+    ShMenuSetValue(g_menu, "@fov.tp", (int)(g_tpDeg + 0.5f));
     if (OverrideOn()) Push();
     SaveIniSoon();
     Report();
@@ -346,6 +478,8 @@ static void OnBlocked(int allowed, int blocked, void *user) {
  */
 static DWORD WINAPI TickThread(LPVOID p) {
     int held = 0;      /* the fov channel is ours right now */
+    DWORD viewAt = 0;  /* when the view mode was last read */
+    DWORD aimAt = 0;   /* when an aim was last up, of any kind */
     (void)p;
 
     while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
@@ -357,6 +491,32 @@ static DWORD WINAPI TickThread(LPVOID p) {
         int aim;
 
         LearnDefault();
+
+        /* Which view the frame is showing, which is what picks between the
+         * first and third person rows. Read on its own slow beat: the mode
+         * is derived from a head measurement that the read itself keeps
+         * alive, so a poll per tick would hold that measurement running for
+         * nothing, and the view does not change faster than this.
+         *
+         * Only a frame whose engine value is a plain hip is asked, and that
+         * is not an optimisation. With an aim up, and for a beat after it
+         * comes down, the framework reports first person for the engine's
+         * own aim camera sitting on the head bone - so taking the reading
+         * would hand a third person aim the first person row. That is the
+         * dip, the pause and the return reported on 2026-09-21, on the iron
+         * sights and on every scope alike.
+         *
+         * So an aim of any kind is remembered here - a scope's value is as
+         * much an aim as an iron sight's - and the view is only read once a
+         * beat has passed since the last one.
+         */
+        if (eng > 0.05f && eng < SIGHT_HI) aimAt = GetTickCount();
+        if ((DWORD)(GetTickCount() - viewAt) >= VIEW_MS) {
+            viewAt = GetTickCount();
+            if (eng >= SIGHT_HI && eng < 1.2f &&
+                (DWORD)(GetTickCount() - aimAt) >= HANDOVER_MS)
+                InterlockedExchange(&g_view, ShCameraViewMode());
+        }
 
         /* What the render camera really carries, beside the engine's own
          * value: the two together say whether a replacement landed. */
@@ -376,11 +536,31 @@ static DWORD WINAPI TickThread(LPVOID p) {
             g_hipRad = eng;
         g_engPrev = eng;
 
-        /* An iron sight is the only aim that lands in this band: the hip
-         * sits above it and every magnified optic below. Recognising it by
-         * the value keeps the feature independent of the aim state, which
-         * a plugin cannot depend on reading. */
-        aim = nz && eng > SIGHT_LO && eng < SIGHT_HI;
+        /* An aim, from the frame the engine starts pulling to the one it has
+         * let go of. The value alone says it, which keeps the feature
+         * independent of an aim state a plugin cannot depend on reading - and
+         * it is kept apart from the switch too, because the frame with No
+         * zoom off still has to know an aim is up: that is the frame the
+         * engine's own value is left alone on.
+         *
+         * Two edges on the one value: entering at the hip's own band, leaving
+         * a little above it, so the override and the engine do not trade the
+         * channel frame by frame at the boundary. Wider than the iron sight's
+         * own value on purpose - the engine walks its fov down through this
+         * range on the way to the sights, and recognising only the value at
+         * the end of that walk held the walk back and let only its tail land:
+         * a snap where the game has a transition (reported 2026-09-21, first
+         * person, where the fov is the only thing that moves).
+         *
+         * Never an optic: under the framework's line the camera keeps the
+         * engine's value and a scope's magnification is not ours to take.
+         */
+        {
+            int was = InterlockedCompareExchange(&g_aim, 0, 0) != 0;
+
+            aim = eng < (was ? SIGHT_HI + 0.06f : SIGHT_HI) &&
+                  eng >= OPTIC_RAD;
+        }
         InterlockedExchange(&g_aim, aim);
 
         if (!allowed || !in) {
@@ -389,25 +569,64 @@ static DWORD WINAPI TickThread(LPVOID p) {
              * taken again once the mode allows it. */
             if (held) { ShCameraReleaseFields(SH_CAM_FOV); held = 0; }
             ShFovPin(0);
-        } else if (OverrideOn() || aim) {
+        /* Both switches decide from here, and neither one is the whole of
+         * it: with the sights up it is No zoom that says whether the view
+         * is held, and with them down it is the override that says whether
+         * the view is ours at all. A frame that wants neither falls to the
+         * release below, which is what leaves the engine's own value - the
+         * game's small iron sight narrowing, and every magnified optic and
+         * the binoculars, whose values are under 0.5 rad and pass through
+         * unless the pin is set.
+         */
+        /* Applied while the override holds the view - and while No zoom holds
+         * the sights, which it does on its own, with the override off. With
+         * the override on and No zoom off an aim is applied to as well: what
+         * it is walked to there is the engine's own value (WantedRad), and
+         * releasing instead is what made that hand over a snap.
+         */
+        } else if (OverrideOn() || (aim && nz)) {
             ShCameraOverride o;
+            float want = WantedRad();
+
+            /* Walked towards the target, never snapped to it, and seeded
+             * from what the camera carries when nothing of ours is on the
+             * channel yet - so a switch just turned on walks up from the
+             * view on screen instead of jumping to its value. A hold has
+             * nothing to walk: its target is already on screen.
+             */
+            if (g_shown <= 0.05f && g_camRad > 0.05f && g_camRad < 3.0f)
+                g_shown = g_camRad;
+            if (g_shown > 0.05f && g_shown < 3.0f &&
+                fabsf(want - g_shown) > RAMP_MIN)
+                g_shown += (want - g_shown) * RAMP_STEP;
+            else
+                g_shown = want;
 
             memset(&o, 0, sizeof(o));
             o.apply = SH_CAM_FOV;
-            o.fov = KeepRad();
+            o.fov = g_shown;
             if (ShCameraApply(&o)) {
                 held = 1;
                 /* The sights' value is inside the gameplay range, so the
                  * engine would take the override on its own; the pin is
                  * what holds it there whatever a frame computes. */
                 ShFovPin(aim);
+                /* What a frame with no sights up carries - the value No
+                 * zoom hands back to them (g_lookRad). */
+                if (!aim) g_lookRad = g_shown;
             } else {
                 held = 0;
                 ShFovPin(0);
             }
         } else {
+            /* Nothing of ours is on the channel, so the engine's own fov is
+             * what a frame with no sights up carries. Recording it is what
+             * keeps the no-zoom hold right when the switch is turned on
+             * before the override is. */
+            if (!aim && eng > 0.05f && eng < 3.0f) g_lookRad = eng;
             if (held) { ShCameraReleaseFields(SH_CAM_FOV); held = 0; }
             ShFovPin(0);
+            g_shown = 0.0f;
         }
 
         /* One write per burst of changes, never one per slider notch. */
@@ -415,7 +634,15 @@ static DWORD WINAPI TickThread(LPVOID p) {
 
         /* The status line is only refreshed while somebody can read it. */
         if (ShMenuIsOpen()) Report();
-        Sleep(nz ? NOZOOM_MS : TICK_MS);
+        /* Fast while the sights are up, while a change is still being
+         * walked, and while the override is on as well: which fov is in
+         * force follows the view, and a change has to land on the next beat
+         * rather than half a second after the camera moved.
+         */
+        Sleep((g_shown > 0.05f && g_shown < 3.0f &&
+               fabsf(WantedRad() - g_shown) > RAMP_MIN)
+                  ? RAMP_MS
+                  : (nz ? NOZOOM_MS : (OverrideOn() ? VIEW_MS : TICK_MS)));
     }
 
     /* Unloading: an override left pushed would be one with no owner left to
@@ -430,15 +657,18 @@ static DWORD WINAPI TickThread(LPVOID p) {
  * plugin contract forbids. */
 static DWORD WINAPI InitThread(LPVOID p) {
     (void)p;
-    g_deg = FALLBACK * RAD2DEG;
+    g_fpDeg = FALLBACK * RAD2DEG;
+    g_tpDeg = g_fpDeg;
     ResolveIniPath(g_inst);
     LoadIni();
     FovText();
     g_menu = ShMenuCreate("@fov.page");
     if (!g_menu) return 0;          /* nothing to drive without a page */
     ShMenuToggle(g_menu, "@fov.override", g_initOverride, OnToggle, NULL);
-    ShMenuNumber(g_menu, "@fov.vertical", g_deg, DEG_MIN, DEG_MAX,
-                 DEG_STEP, OnFov, NULL);
+    ShMenuNumber(g_menu, "@fov.tp", g_tpDeg, DEG_MIN, DEG_MAX,
+                 DEG_STEP, OnTp, NULL);
+    ShMenuNumber(g_menu, "@fov.fp", g_fpDeg, DEG_MIN, DEG_MAX,
+                 DEG_STEP, OnFp, NULL);
     ShMenuToggle(g_menu, "@fov.nozoom", g_initNozoom, OnNoZoom, NULL);
     ShMenuHint(g_menu, "@fov.hint");
     ShMenuAction(g_menu, "@fov.reset", OnReset, NULL);
