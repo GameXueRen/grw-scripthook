@@ -148,7 +148,7 @@
  * docs/plugins.md says a plugin does not install a hook: anything that
  * patches code belongs to the framework, in front of an API, so two plugins
  * cannot tread on the same byte. This one carries MinHook of its own, like
- * skipintro, ModeExitProbe, ModeCallProbe and LastRites_dlcfix before it,
+ * skipintro, ModeExitProbe, ModeCallProbe and AllLanguages before it,
  * and it is the fifth entry on that list - not a licence to add a sixth.
  * What makes it defensible here: the targets are ole32 and system COM
  * objects, nothing in this process writes engine memory through them, and

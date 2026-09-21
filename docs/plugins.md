@@ -167,7 +167,7 @@ must be answered differently - a plugin registers with the layer that
 already owns those calls instead (@ref files).
 
 Five plugin sources still carry MinHook of their own, from before this
-rule: `skipintro`, `ModeExitProbe`, `ModeCallProbe`, `LastRites_dlcfix` and
+rule: `skipintro`, `ModeExitProbe`, `ModeCallProbe`, `AllLanguages` and
 `micfix`. Each is a convergence item, not a licence. `micfix` is the most
 recent one and the only one aimed outside the game: it hooks
 `ole32!CoCreateInstance` and patches the vtable slots of the DirectShow and

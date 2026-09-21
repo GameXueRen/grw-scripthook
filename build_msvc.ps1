@@ -58,11 +58,8 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 # Four left the tree entirely on 2026-09-20, at the request of the author whose
 # plugins they re-implemented: OpticalCamo, TimeWeatherControl, ammo_capacity
 # and NPCSpawner. Nothing of his is built, shipped or kept here any more. One
-# other plugin is out of the shipped set and still in the tree, for a reason of
-# its own:
-#
-#   LastRites_dlcfix  the 2026-09 game update fixed what it worked around,
-#                     so the shipped set is one hook smaller.
+# plugin is out of the shipped set and still in the tree, for a reason of its
+# own:
 #
 #   AmmoProbe         read-only evidence: it answered the question it was for
 #                     (docs\ammocapacity-reverse.md, section 9), so a plain
@@ -73,9 +70,12 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 # AmmoControl is IN the set: the capacity multiplier and the auto reload are
 # part of the release, and leaving it out of this list would quietly drop the
 # plugin from every beta build.
+#
+# AllLanguages is IN the set: the pair-shipped plugin set should be able to
+# give a RU/CN player the language list back.
 $betaSet = @(
     'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat', 'micfix',
-    'TimeWeatherControl', 'AmmoControl'
+    'TimeWeatherControl', 'AmmoControl', 'AllLanguages'
 )
 $script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
 $releaseBuild     = [bool]$Release
@@ -291,11 +291,11 @@ Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')
 Build-Plugin 'chaos'        'chaos.c'        @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib', 'winmm.lib')
 Build-Plugin 'fov_changer'  'fov_changer.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'skipintro'     'skipintro.c'    @($libPath, 'libscripthook.lib')
-# LastRites_dlcfix hooks the function's own entry point rather than the
+# AllLanguages hooks the function's own entry point rather than the
 # game's lookup of it, so the hook does not depend on being installed
 # before the game asks. That needs MinHook, which the framework already
 # carries; the plugin target picks up its four sources here.
-Build-Plugin -Name 'LastRites_dlcfix' -Source 'LastRites_dlcfix.c' -LinkArgs @() -ExtraSources @(
+Build-Plugin -Name 'AllLanguages' -Source 'AllLanguages.c' -LinkArgs @() -ExtraSources @(
     (Join-Path $root 'third_party/minhook/src/buffer.c'),
     (Join-Path $root 'third_party/minhook/src/hook.c'),
     (Join-Path $root 'third_party/minhook/src/trampoline.c'),

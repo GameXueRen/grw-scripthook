@@ -1,43 +1,38 @@
-/* The crash on entering the "Last Rite" DLC (August 2026 update), and
- * nothing else.
+/* The RU/CN build's language lock, and nothing else.
  *
- * Symptom: from the main menu, entering the new DLC starts loading and
- * the process dies. The community workaround is a proxy loader plus a
- * third-party unlocker whose only business hook is UPLAY_USER_IsOwned,
- * answered "owned" for everything. That points at where the fault is:
- * the game asks Uplay whether this content is owned, a region-locked
- * build is told no, and the load that follows walks a branch that
- * dereferences a null pointer. The global build is told yes and never
- * takes that branch.
+ * Symptom: the text language list of a RU/CN build offers Chinese and
+ * Russian, and nothing else - the players' ask is to be able to pick any
+ * of the languages the game carries.
  *
- * So this plugin answers that one call for that one id, and has
- * exactly one setting - on or off, off by default:
+ * The restriction is not missing files and not a different build: it is
+ * applied at run time from the ownership answers the game reads and caches
+ * at start up. One of those answers - the id below - is 0 on this build,
+ * and answering it 1 is what removes the restriction. The languages are in
+ * the install all along: with the answer at 1 the list is everything the
+ * install carries.
  *
- *   [Settings]
- *   enabled = 0   off: not one call is hooked, no log is written and
- *                      the game runs exactly as it would without this
- *                      plugin - the menu row is the one thing left,
- *                      because that row is where the switch is
- *   enabled = 1   on:  id 3718 alone is answered owned
+ * What was measured, 2026-09-21, on a RU/CN build:
+ *   - with the switch off the list is Chinese and Russian;
+ *   - with the switch on the list is every language the install carries;
+ *   - the engine's own answer for the id was 0 while this plugin answered
+ *     1, and no other id was touched.
+ *
+ * Where the id came from: it was found while fixing the crash on entering
+ * the "Last Rite" DLC that the 2026-08 game update introduced on this
+ * build - the load that follows the 0 faulted reading null + 0x340 at
+ * GRW.exe+0xE09DA51, on the same instruction every time. The same 0 is what
+ * shortens the language list. The official update of 2026-09 fixed the
+ * crash; the restriction is still there, which is what this plugin is for
+ * now.
  *
  * The id is a compile-time constant on purpose. There is no target to
- * configure and no list to edit, so this plugin cannot be pointed at
- * paid content, and every id but this one is answered with whatever
- * the game would have got anyway.
+ * configure and no list to edit, so this plugin cannot be pointed at paid
+ * content, and every id but this one is answered with whatever the game
+ * would have got anyway.
  *
- * What was measured on a region-locked build, 2026-09-11:
- *   - the game asks about forty-some ids at start up and caches the
- *     answers; entering the DLC asks nothing further. The answer has
- *     to be in force from the start, which is why the switch is read
- *     at launch and takes effect on the next one;
- *   - 3718 was answered 0 while its neighbour 3717 was owned, and the
- *     load that follows the 0 dies reading null + 0x340 at
- *     GRW.exe+0xE09DA51, on the same instruction every time;
- *   - answering 3718 owned makes the DLC load, and no other id is
- *     touched.
- * If another DLC ever needs the same treatment, that is the method:
- * log every query and its real answer, and the id answered 0 just
- * before the fault is the one to build in here.
+ * The answers are read and cached at start up - entering a menu asks
+ * nothing further - so the answer has to be in force from the start. That
+ * is why the switch is read at launch and takes effect on the next one.
  *
  * Where the call is intercepted: at the function itself.
  *
@@ -56,10 +51,17 @@
  * it, that pointer is to the entry point that was rewritten, so every
  * call lands here either way. Nothing about the game's timing matters.
  *
+ * Settings, in AllLanguages.ini beside the .asi:
+ *
+ *   [Settings]
+ *   enabled = 0   off: not one call is hooked, no log is written and the
+ *                      game runs exactly as it would without this plugin -
+ *                      the menu row is the one thing left, because that row
+ *                      is where the switch is
+ *   enabled = 1   on:  the id below alone is answered owned
+ *
  * Boundaries: single player only. Do not use it online - the game
- * carries EasyAntiCheat. This is a workaround for a bug in the game's
- * own load path, not a licence for anything else: turn it off and
- * delete the plugin folder once the game itself is patched.
+ * carries EasyAntiCheat.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -73,9 +75,9 @@
 #define TARGET_DLL "uplay_r1_loader64.dll"
 #define TARGET_FN  "UPLAY_USER_IsOwned"
 
-/* The one id this plugin knows about: the "Last Rite" update, a free
- * one, measured on 2026-09-11. Built in rather than configured so that
- * nothing can point this plugin at paid content. */
+/* The one id this plugin knows about - the entry this build answers 0 to,
+ * measured on 2026-09-11 and again on 2026-09-21. Built in rather than
+ * configured so that nothing can point this plugin at paid content. */
 #define TARGET_ID 3718
 
 /* Live state, written by the menu on the API's thread and read on
@@ -92,7 +94,7 @@ static int Enabled(void) {
 static FILE *g_log;
 static LONG  g_logBusy;
 
-static void DlcLog(const char *fmt, ...) {
+static void Log(const char *fmt, ...) {
     va_list ap;
     char line[512];
     SYSTEMTIME st;
@@ -129,10 +131,10 @@ static void OpenLog(void) {
     if (len + 5 >= (int)sizeof(path)) return;
     strcpy(path + len, "logs");
     CreateDirectoryA(path, NULL);
-    if (len + 27 < (int)sizeof(path))
-        strcpy(path + len, "logs\\LastRites_dlcfix.log");
+    if (len + 23 < (int)sizeof(path))
+        strcpy(path + len, "logs\\AllLanguages.log");
     else
-        strcpy(path + len, "LastRites_dlcfix.log");
+        strcpy(path + len, "AllLanguages.log");
     /* "w", not "a": the framework's own logs are per session, and a
      * diagnostic that only ever grows is a file that grows on the player's
      * disk forever. */
@@ -144,7 +146,7 @@ static void OpenLog(void) {
 static HINSTANCE g_inst = NULL;
 static char      g_iniPath[MAX_PATH];
 
-/* plugins\LastRites_dlcfix\LastRites_dlcfix.ini, from our module name. */
+/* plugins\AllLanguages\AllLanguages.ini, from our module name. */
 static void ResolveIniPath(void) {
     char mod[MAX_PATH];
     const char *dot;
@@ -199,8 +201,8 @@ static uint32_t HookIsOwned(const int aUplayId) {
         return real;
 
     if (InterlockedIncrement(&g_answered) == 1)
-        DlcLog("answer id=%d -> owned  (the game's own answer was %u)",
-               aUplayId, real);
+        Log("answer id=%d -> owned  (the game's own answer was %u)",
+            aUplayId, real);
     return 1u;
 }
 
@@ -217,8 +219,8 @@ static void InstallHook(void) {
 
     st = MH_Initialize();
     if (st != MH_OK) {
-        DlcLog("install: MH_Initialize failed (%d) - not one call is "
-               "touched, the game keeps its own answers", (int)st);
+        Log("install: MH_Initialize failed (%d) - not one call is "
+            "touched, the game keeps its own answers", (int)st);
         return;
     }
 
@@ -228,31 +230,31 @@ static void InstallHook(void) {
 
         if (!up) {
             if (i == 0)
-                DlcLog("waiting for %s to be loaded...", TARGET_DLL);
+                Log("waiting for %s to be loaded...", TARGET_DLL);
             Sleep(i < 240 ? 250 : 1000);
             continue;
         }
 
         fn = (LPVOID)GetProcAddress(up, TARGET_FN);
         if (!fn) {
-            DlcLog("install: %s has no %s export - not one call is "
-                   "touched, the game keeps its own answers",
-                   TARGET_DLL, TARGET_FN);
+            Log("install: %s has no %s export - not one call is "
+                "touched, the game keeps its own answers",
+                TARGET_DLL, TARGET_FN);
             MH_Uninitialize();
             return;
         }
         st = MH_CreateHook(fn, (LPVOID)HookIsOwned,
                            (LPVOID *)&g_realIsOwned);
         if (st != MH_OK) {
-            DlcLog("install: MH_CreateHook failed (%d) - not one call is "
-                   "touched, the game keeps its own answers", (int)st);
+            Log("install: MH_CreateHook failed (%d) - not one call is "
+                "touched, the game keeps its own answers", (int)st);
             MH_Uninitialize();
             return;
         }
         st = MH_EnableHook(fn);
         if (st != MH_OK) {
-            DlcLog("install: MH_EnableHook failed (%d) - not one call is "
-                   "touched, the game keeps its own answers", (int)st);
+            Log("install: MH_EnableHook failed (%d) - not one call is "
+                "touched, the game keeps its own answers", (int)st);
             /* Not a half-installed state: the trampoline goes with the
              * hook, and MinHook is shut down again. */
             MH_RemoveHook(fn);
@@ -261,13 +263,12 @@ static void InstallHook(void) {
             return;
         }
         g_hookedAt = fn;
-        DlcLog("install: %s!%s hooked at %p (original %p)",
-               TARGET_DLL, TARGET_FN, fn, (void *)g_realIsOwned);
-        DlcLog("install: id %d alone will be answered owned",
-               TARGET_ID);
+        Log("install: %s!%s hooked at %p (original %p)",
+            TARGET_DLL, TARGET_FN, fn, (void *)g_realIsOwned);
+        Log("install: id %d alone will be answered owned", TARGET_ID);
         return;
     }
-    DlcLog("gave up waiting for %s - not one call is touched", TARGET_DLL);
+    Log("gave up waiting for %s - not one call is touched", TARGET_DLL);
     MH_Uninitialize();
 }
 
@@ -278,14 +279,14 @@ typedef void (*MenuFn)(uint32_t menu, uint32_t item, int value, void *user);
 
 static uint32_t g_menu;
 
-static void OnFix(uint32_t menu, uint32_t item, int value, void *user) {
+static void OnUnlock(uint32_t menu, uint32_t item, int value, void *user) {
     (void)menu; (void)item; (void)user;
     InterlockedExchange(&g_enabled, value ? 1 : 0);
     /* A session that began with the switch off has no log open; turning
      * it on opens one, so the flip itself is on record. */
     if (Enabled()) OpenLog();
-    DlcLog("menu: fix=%s (takes effect on the next launch)",
-           Enabled() ? "on" : "off");
+    Log("menu: unlock=%s (takes effect on the next launch)",
+        Enabled() ? "on" : "off");
     SaveIni();
 }
 
@@ -300,16 +301,16 @@ typedef int (*LangDeclare_t)(const char *owner, const char *lang,
 static LangDeclare_t pLangDeclare;
 
 static const TextRow kEn[] = {
-    { "@lr.page", "DLC crash fix" },
-    { "@lr.fix",  "Fix the crash (takes effect after a restart)" },
-    { "@lr.hint", "A temporary fix. Turn it off and remove this plugin "
-                  "once the game itself is patched." }
+    { "@lu.page",   "Unlock all game languages" },
+    { "@lu.unlock", "Unlock all languages (takes effect after a restart)" },
+    { "@lu.hint",   "Removes the RU/CN build's restriction on the game's "
+                    "language choice." }
 };
 
 static const TextRow kZh[] = {
-    { "@lr.page", "《最后的仪式》闪退修复" },
-    { "@lr.fix",  "闪退修复（重启游戏后生效）" },
-    { "@lr.hint", "此为临时修复方案。若在未来官服修复此BUG，请关闭和移除此修复插件。" }
+    { "@lu.page",   "解锁游戏全部语言" },
+    { "@lu.unlock", "解锁全部语言（重启游戏后生效）" },
+    { "@lu.hint",   "解除 RU/CN 版本对游戏语言选择的限制" }
 };
 
 static void TextInit(void) {
@@ -323,9 +324,9 @@ static void TextInit(void) {
         *(FARPROC *)&pLangDeclare = GetProcAddress(mod, "ShLangDeclare");
     if (!pLangDeclare) return;
     done = 1;
-    pLangDeclare("LastRites_dlcfix", "en-US", kEn,
+    pLangDeclare("AllLanguages", "en-US", kEn,
                  (int)(sizeof(kEn) / sizeof(kEn[0])));
-    pLangDeclare("LastRites_dlcfix", "zh-CN", kZh,
+    pLangDeclare("AllLanguages", "zh-CN", kZh,
                  (int)(sizeof(kZh) / sizeof(kZh[0])));
 }
 
@@ -340,12 +341,12 @@ static void BuildMenu(HMODULE m) {
     if (!menuCreate || !menuToggle) return;
 
     TextInit();
-    g_menu = menuCreate("@lr.page");
-    menuToggle(g_menu, "@lr.fix",
-               Enabled(), OnFix, NULL);
+    g_menu = menuCreate("@lu.page");
+    menuToggle(g_menu, "@lu.unlock",
+               Enabled(), OnUnlock, NULL);
     if (menuHint)
-        menuHint(g_menu, "@lr.hint");
-    DlcLog("menu created");
+        menuHint(g_menu, "@lu.hint");
+    Log("menu created");
 }
 
 /* ---- startup ----------------------------------------------------------- */
@@ -365,10 +366,10 @@ static DWORD WINAPI InitThread(LPVOID p) {
      * where the switch lives. */
     if (Enabled()) {
         OpenLog();
-        DlcLog("--- LastRites_dlcfix: the \"Last Rite\" load crash ---");
-        DlcLog("build " __DATE__ " " __TIME__);
-        DlcLog("config: fix=on, id %d (built in), ini=%s",
-               TARGET_ID, g_iniPath[0] ? g_iniPath : "(none)");
+        Log("--- AllLanguages: the RU/CN language lock ---");
+        Log("build " __DATE__ " " __TIME__);
+        Log("config: unlock=on, id %d (built in), ini=%s",
+            TARGET_ID, g_iniPath[0] ? g_iniPath : "(none)");
 
         InstallHook();
     }
