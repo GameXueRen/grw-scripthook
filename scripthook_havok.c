@@ -21,11 +21,11 @@
 #define HK_ALLOC_LEN    5
 #define STUB_SLOT       0x800
 
-#define RB_VT_BASE      SH_IMG(0x3AD55D8)
-#define RB_VT_VEHICLE   SH_IMG(0x3AD7020)
-#define RB_VT_C         SH_IMG(0x39E7620)
-#define RB_VT_D         SH_IMG(0x38C88B0)
-#define RB_VT_E         SH_IMG(0x39979C8)
+#define RB_VT_BASE      SH_IMG(0x3AD54F8)
+#define RB_VT_VEHICLE   SH_IMG(0x3AD6F48)
+#define RB_VT_C         SH_IMG(0x39E74E0)
+#define RB_VT_D         SH_IMG(0x38C8820)
+#define RB_VT_E         SH_IMG(0x39977B8)
 
 #define RB_ENTITY       0x10
 

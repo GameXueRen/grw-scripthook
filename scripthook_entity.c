@@ -304,7 +304,7 @@ static int SetNodesHidden(uint64_t entity, int hidden, int *seen) {
 
 /* The head is a part group the camera owns for ADS. Its
  * controller is found by which render nodes it holds. */
-#define CTRL_VT     SH_IMG(0x3BCB3B8)
+#define CTRL_VT     SH_IMG(0x3BCB2A8)
 #define CTRL_NODES  0x40
 #define CTRL_COUNT  0x4A
 

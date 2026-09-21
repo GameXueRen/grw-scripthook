@@ -10,23 +10,23 @@
 #include "image.h"
 
 /* World and weather, from map-domino-world.md. */
-#define RVA_WORLD_GET     0x4969BF90
-#define RVA_ENV_GET       0x40D43530
-#define RVA_WEATHER_OF    0x4C744C10
-#define RVA_WETNESS_SET   0x4C901280
-#define RVA_LIGHTNING     0x54780750
-#define RVA_PLAYER_MODE   0x44B878C8
-#define RVA_EXPL_MGR      0x44BA0178
-#define RVA_EXPL_SET      0x4A501680
-#define RVA_EXPL_CLEAR    0x4A502AA0
+#define RVA_WORLD_GET     0x4F1AEF0
+#define RVA_ENV_GET       0x40D42CD0
+#define RVA_WEATHER_OF    0x4C4F3410
+#define RVA_WETNESS_SET   0x4C6A8C80
+#define RVA_LIGHTNING     0x54128530
+#define RVA_PLAYER_MODE   0x44B87948
+#define RVA_EXPL_MGR      0x44BA01F8
+#define RVA_EXPL_SET      0x4A8B9F30
+#define RVA_EXPL_CLEAR    0x4A8BAD20
 
 /* Entities, from map-domino-world.md and the spawn map. */
-#define RVA_VIS_ONE       0x4C6BEE90
-#define RVA_BODY_BEGIN    0x4C58BB70
-#define RVA_BODY_END      0x4C5ACA50
-#define RVA_BODY_ENABLE   0x40F859D0
-#define RVA_ATTACH        0x493A5130
-#define RVA_DETACH        0x493A6290
+#define RVA_VIS_ONE       0x4C46C6B0
+#define RVA_BODY_BEGIN    0x4C34FF40
+#define RVA_BODY_END      0x4C371990
+#define RVA_BODY_ENABLE   0x40F85650
+#define RVA_ATTACH        0x49B8DCC0
+#define RVA_DETACH        0x49B8F580
 
 
 /* The RVAs above are written as the map does, absolute

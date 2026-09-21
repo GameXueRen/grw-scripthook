@@ -15,15 +15,15 @@
 /* Inside FUN_154D38550, after its casts, where MOV RCX,RDI
  * has just put the projectile in RCX.
  */
-#define HIT_SITE      SH_IMG(0x14D387E3)
-#define HIT_ORIG_CALL SH_IMG(0x2B241F0)
+#define HIT_SITE      SH_IMG(0x14703F83)
+#define HIT_ORIG_CALL SH_IMG(0x29B4E00)
 
 /* Common damage-projectile trajectory update. FIRST/STEP are the two
  * verified sites inside the 2D shot-line generator, kept as the
  * documented alternate to the trail patch; the shipped feature patches
  * only TRAIL. These three are addresses of the 2026-09-15 title update
- * (build 25120584), ported from the Wildlands Immersion Suite - unlike
- * the hit site above, which still names the build before it. */
+ * (build 25120584), ported from the Wildlands Immersion Suite. The hit
+ * site above is of the same build, re-pinned with it. */
 #define VELOCITY_SITE_FIRST SH_IMG(0x147094E9)
 #define VELOCITY_SITE_STEP  SH_IMG(0x147095F3)
 #define VELOCITY_SITE_TRAIL SH_IMG(0x14756F1E)
