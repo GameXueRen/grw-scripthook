@@ -26,14 +26,16 @@
 #include "scripthook.h"
 #include "log.h"
 
-/* The Suite's own table, in metres. */
+/* The Suite's own table, names and values: Close shoulder, Tactical
+ * third person, Wide cinematic, Custom, SOCOM. In metres. */
 typedef struct { const char *label; float back, up; } Preset;
 static const Preset kPresets[] = {
     { "@cp.default", 0.0f,  0.0f  },   /* hands the camera back */
     { "@cp.close",   1.8f,  1.45f },
-    { "@cp.medium",  3.5f,  1.75f },
-    { "@cp.far",     7.0f,  2.6f  },
-    { "@cp.custom",  0.0f,  0.0f  }    /* the three rows below */
+    { "@cp.tactical",3.5f,  1.75f },
+    { "@cp.wide",    7.0f,  2.6f  },
+    { "@cp.custom",  0.0f,  0.0f  },   /* the three rows below */
+    { "@cp.socom",   3.2f,  2.2f  }
 };
 #define PRESET_N   ((int)(sizeof(kPresets) / sizeof(kPresets[0])))
 #define PRESET_CUSTOM (PRESET_N - 1)
@@ -235,10 +237,11 @@ static const ShText kEn[] = {
     { "@cp.hint",      "Presets for the chase camera, or a custom one with a shoulder offset" },
     { "@cp.preset",    "Camera preset" },
     { "@cp.default",   "Default (the game's own)" },
-    { "@cp.close",     "Close" },
-    { "@cp.medium",    "Medium" },
-    { "@cp.far",       "Far" },
+    { "@cp.close",     "Close shoulder" },
+    { "@cp.tactical",  "Tactical third person" },
+    { "@cp.wide",      "Wide cinematic" },
     { "@cp.custom",    "Custom" },
+    { "@cp.socom",     "SOCOM" },
     { "@cp.back",      "Custom distance (cm)" },
     { "@cp.up",        "Custom height (cm)" },
     { "@cp.side",      "Custom shoulder offset (cm)" },
@@ -251,10 +254,11 @@ static const ShText kZh[] = {
     { "@cp.hint",      "预设追尾相机，或自定义带肩部偏移的相机" },
     { "@cp.preset",    "相机预设" },
     { "@cp.default",   "默认（游戏自带）" },
-    { "@cp.close",     "近" },
-    { "@cp.medium",    "中" },
-    { "@cp.far",       "远" },
+    { "@cp.close",     "近距肩视" },
+    { "@cp.tactical",  "战术第三人称" },
+    { "@cp.wide",      "宽景电影" },
     { "@cp.custom",    "自定义" },
+    { "@cp.socom",     "SOCOM" },
     { "@cp.back",      "自定义距离（厘米）" },
     { "@cp.up",        "自定义高度（厘米）" },
     { "@cp.side",      "自定义肩部偏移（厘米）" },
