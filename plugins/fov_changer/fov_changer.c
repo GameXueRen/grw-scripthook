@@ -89,6 +89,20 @@
  * pin is set). Narrower than this is a scope, and its magnification is not
  * ours to take. */
 #define OPTIC_RAD   0.50f
+/* How far above the framework's 0.5 line the engine's value is followed.
+ * Only a magnified optic's pull reaches down here; an iron sight's 0.69 is
+ * well clear of it, which is what keeps the hold from being followed (and
+ * No zoom from showing the pull it exists to hide). */
+#define OPTIC_MARGIN 0.10f
+/* What counts as the sights being up: the engine's own value sitting inside
+ * the sights' band, within HOLD_CALM of where that run started, for
+ * HOLD_MS. Measured against the alternative - the engine's pull travels
+ * about 0.12 rad through this range in a couple of hundred milliseconds, so
+ * a traveller leaves HOLD_CALM within a tick or two whatever the cadence,
+ * while a held aim stays inside it (its own sway is a fraction of a
+ * degree). See the aim test in TickThread. */
+#define HOLD_CALM   0.02f
+#define HOLD_MS     120u
 
 /* Config convention, the same every plugin follows: the .ini sits beside
  * the .asi and takes its base name, so fov_changer.asi pairs with
@@ -473,6 +487,47 @@ static void OnBlocked(int allowed, int blocked, void *user) {
     } else if (OverrideOn()) Push();
 }
 
+/* ---- diagnostic log ----------------------------------------------------
+ *
+ * fov_changer.log, beside the framework's own logs: the engine's value, what
+ * the camera carries, what we pushed and the verdict that decided it - on
+ * every change, and once a second while it holds. The plugin went without a
+ * log until 2026-09-21, and the two symptoms that day (a hold that did not
+ * engage, a value that did not land) are exactly the kind that cannot be
+ * told apart from the outside: both look like "it still zooms".
+ *
+ * Written from the tick thread only, so no lock. Off unless [Settings]
+ * diag=1 asks for it - the same shape firstperson uses, and for the same
+ * reason: this is here for the next field report, not for every session.
+ */
+static FILE *g_diag;
+
+static void DiagOpen(void) {
+    typedef int (*LogPath_t)(const char *, char *, int);
+    HMODULE m = GetModuleHandleA("dinput8.dll");
+    LogPath_t lp = NULL;
+    char path[MAX_PATH];
+
+    if (g_diag) return;
+    if (!IniInt("diag", 0)) return;
+    if (m) *(FARPROC *)&lp = GetProcAddress(m, "ShLogPath");
+    if (lp && lp("fov_changer.log", path, (int)sizeof(path)))
+        g_diag = fopen(path, "w");
+}
+
+static void DiagState(float eng, float cam, float shown, float want,
+                      int aim, int hold, int held, int nz, int ovr) {
+    SYSTEMTIME st;
+
+    if (!g_diag) return;
+    GetLocalTime(&st);
+    fprintf(g_diag, "%02u:%02u:%02u.%03u  eng=%.3f cam=%.3f shown=%.3f "
+            "want=%.3f aim=%d hold=%d held=%d nz=%d ovr=%d\n",
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            eng, cam, shown, want, aim, hold, held, nz, ovr);
+    fflush(g_diag);
+}
+
 /* Entering a session reinstalls the camera hook, so the
  * override is pushed again to survive the transition.
  */
@@ -480,6 +535,13 @@ static DWORD WINAPI TickThread(LPVOID p) {
     int held = 0;      /* the fov channel is ours right now */
     DWORD viewAt = 0;  /* when the view mode was last read */
     DWORD aimAt = 0;   /* when an aim was last up, of any kind */
+    /* The hold detector, in time rather than in ticks: the engine's own
+     * value inside the sights' band, within HOLD_CALM of where that run
+     * started, for HOLD_MS. See the aim test - a value passing through the
+     * band is not an aim, and a per-tick delta cannot tell the two apart. */
+    static float    holdRef = 0.0f;
+    static uint64_t holdAt = 0;
+    static int      hold = 0;
     (void)p;
 
     while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
@@ -489,6 +551,7 @@ static DWORD WINAPI TickThread(LPVOID p) {
         ShCamera cam;
         float eng = ShFovEngine();
         int aim;
+        int quiet = 0;     /* the engine's own value did not move this tick */
 
         LearnDefault();
 
@@ -531,9 +594,26 @@ static DWORD WINAPI TickThread(LPVOID p) {
          * this band as well, and taking one as the hip is what left the
          * sights keeping a fov that was already narrowed: measured 0.76 rad
          * held against a hip of 0.81. */
-        if (eng >= SIGHT_HI && eng < 1.2f &&
-            fabsf(eng - g_engPrev) < 0.002f)
-            g_hipRad = eng;
+        quiet = fabsf(eng - g_engPrev) < 0.002f;
+        if (eng >= SIGHT_HI && eng < 1.2f && quiet) g_hipRad = eng;
+
+        /* Held in the sights' band, or only passing through it? Passing is
+         * what a magnified optic's pull does on its way to 0.49 and below.
+         * Time is what tells them apart, not a per-tick delta: a held aim
+         * sways by a hair from tick to tick, which the delta test read as
+         * movement - so the hold never engaged, the plugin kept following the
+         * engine, and No zoom did nothing (reported 2026-09-21). A run that
+         * stays within HOLD_CALM for HOLD_MS is a hold; a pull leaves that
+         * range within a tick or two, which restarts the run. */
+        if (eng >= OPTIC_RAD && eng < SIGHT_HI &&
+            fabsf(eng - holdRef) <= HOLD_CALM) {
+            if (!holdAt) holdAt = GetTickCount64();
+            hold = (GetTickCount64() - holdAt) >= HOLD_MS;
+        } else {
+            holdRef = eng;
+            holdAt = 0;
+            hold = 0;
+        }
         g_engPrev = eng;
 
         /* An aim, from the frame the engine starts pulling to the one it has
@@ -543,23 +623,31 @@ static DWORD WINAPI TickThread(LPVOID p) {
          * zoom off still has to know an aim is up: that is the frame the
          * engine's own value is left alone on.
          *
-         * Two edges on the one value: entering at the hip's own band, leaving
-         * a little above it, so the override and the engine do not trade the
-         * channel frame by frame at the boundary. Wider than the iron sight's
-         * own value on purpose - the engine walks its fov down through this
-         * range on the way to the sights, and recognising only the value at
-         * the end of that walk held the walk back and let only its tail land:
-         * a snap where the game has a transition (reported 2026-09-21, first
-         * person, where the fov is the only thing that moves).
+         * Entering needs the value to be HELD in the band, not merely to be
+         * passing through it. A magnified optic's pull sweeps this same range
+         * on its way to 0.49 and below (reported 2026-09-21: "why does it
+         * affect scopes?"): with the band test alone the plugin took the hold
+         * over halfway through the optic's pull, walked the fov back towards
+         * the hip, and then let go under the framework's 0.5 line - a jump in
+         * both directions that the optic's own zoom had never had. Iron
+         * sights are held inside the band (0.69) and an optic is never held
+         * in it, so the hold is what tells them apart from the value alone.
+         *
+         * Leaving keeps the wide edge it always had: with the sights up, the
+         * value walks back up through the band, and handing the channel over
+         * at the first moving frame would land the camera on the engine's
+         * narrow end and jump from there.
          *
          * Never an optic: under the framework's line the camera keeps the
-         * engine's value and a scope's magnification is not ours to take.
+         * engine's value and a scope's magnification is not ours to take -
+         * the hold test is what makes that true.
          */
         {
             int was = InterlockedCompareExchange(&g_aim, 0, 0) != 0;
 
             aim = eng < (was ? SIGHT_HI + 0.06f : SIGHT_HI) &&
-                  eng >= OPTIC_RAD;
+                  eng >= OPTIC_RAD &&
+                  (was || hold);
         }
         InterlockedExchange(&g_aim, aim);
 
@@ -587,20 +675,58 @@ static DWORD WINAPI TickThread(LPVOID p) {
         } else if (OverrideOn() || (aim && nz)) {
             ShCameraOverride o;
             float want = WantedRad();
-
-            /* Walked towards the target, never snapped to it, and seeded
-             * from what the camera carries when nothing of ours is on the
-             * channel yet - so a switch just turned on walks up from the
-             * view on screen instead of jumping to its value. A hold has
-             * nothing to walk: its target is already on screen.
+            /* The engine's own value while it is travelling through the
+             * optic range: a magnified optic's pull walks 0.81 down to 0.49,
+             * and the framework hands the channel back to the engine at its
+             * 0.5 line - so a value of ours parked above that line turns the
+             * handover into a step down (reported 2026-09-21: correct with
+             * the override off, wrong with it on). Following the engine
+             * while it moves makes that line a continuation instead - our
+             * value arrives at 0.5 from above, the engine's carries on from
+             * below - and the value the override asked for comes back the
+             * moment the engine's value is held (see the aim test: a hold,
+             * not a still tick - an aim that has arrived still sways a
+             * little, and reading that as travel kept the hold from ever
+             * engaging).
              */
-            if (g_shown <= 0.05f && g_camRad > 0.05f && g_camRad < 3.0f)
-                g_shown = g_camRad;
-            if (g_shown > 0.05f && g_shown < 3.0f &&
-                fabsf(want - g_shown) > RAMP_MIN)
-                g_shown += (want - g_shown) * RAMP_STEP;
-            else
-                g_shown = want;
+            /* ... and only close to the framework's line, which is the one
+             * place a step can land: an iron sight lives at 0.69 and never
+             * goes near 0.5, so following it there buys nothing and costs
+             * the thing No zoom is for - the pull stays visible as a dip and
+             * a return (reported 2026-09-21: "the view shrinks, then comes
+             * back"). With No zoom off there is nothing to hide, so the
+             * whole range is followed and the game's own pull shows through.
+             */
+            int nearLine = eng < OPTIC_RAD + OPTIC_MARGIN;
+
+            int follow = !hold && eng > 0.05f && eng < SIGHT_HI &&
+                         (nearLine || !nz);
+
+            if (follow) {
+                /* Ramped, not copied: entering the follow at its own top
+                 * would drop the camera onto the engine's value in a single
+                 * frame - the step this exists to remove, moved up from the
+                 * framework's line. What the ramp costs at the line itself
+                 * is a fraction of a degree. */
+                if (g_shown > 0.05f && g_shown < 3.0f)
+                    g_shown += (eng - g_shown) * RAMP_STEP;
+                else
+                    g_shown = eng;
+            } else {
+                /* Walked towards the target, never snapped to it, and seeded
+                 * from what the camera carries when nothing of ours is on
+                 * the channel yet - so a switch just turned on walks up from
+                 * the view on screen instead of jumping to its value. A hold
+                 * has nothing to walk: its target is already on screen.
+                 */
+                if (g_shown <= 0.05f && g_camRad > 0.05f && g_camRad < 3.0f)
+                    g_shown = g_camRad;
+                if (g_shown > 0.05f && g_shown < 3.0f &&
+                    fabsf(want - g_shown) > RAMP_MIN)
+                    g_shown += (want - g_shown) * RAMP_STEP;
+                else
+                    g_shown = want;
+            }
 
             memset(&o, 0, sizeof(o));
             o.apply = SH_CAM_FOV;
@@ -613,7 +739,13 @@ static DWORD WINAPI TickThread(LPVOID p) {
                 ShFovPin(aim);
                 /* What a frame with no sights up carries - the value No
                  * zoom hands back to them (g_lookRad). */
-                if (!aim) g_lookRad = g_shown;
+                /* Only a plain hip is recorded here. A frame that is
+                 * following the engine mid-pull carries the optic's own
+                 * narrowing value, and taking that as "what the hip had" is
+                 * what made No zoom hold the sight's own fov - the feature
+                 * doing exactly nothing (measured 2026-09-21: want=0.688,
+                 * the engine's own aim value, with the hold engaged). */
+                if (!aim && !follow && eng >= SIGHT_HI) g_lookRad = g_shown;
             } else {
                 held = 0;
                 ShFovPin(0);
@@ -623,10 +755,29 @@ static DWORD WINAPI TickThread(LPVOID p) {
              * what a frame with no sights up carries. Recording it is what
              * keeps the no-zoom hold right when the switch is turned on
              * before the override is. */
-            if (!aim && eng > 0.05f && eng < 3.0f) g_lookRad = eng;
+            /* A plain hip only, for the reason at the recording above: this
+             * is what No zoom hands back when the sights come up. */
+            if (!aim && eng >= SIGHT_HI && eng < 3.0f) g_lookRad = eng;
             if (held) { ShCameraReleaseFields(SH_CAM_FOV); held = 0; }
             ShFovPin(0);
             g_shown = 0.0f;
+        }
+
+        /* The decision, on every change and once a second while it holds. */
+        DiagOpen();
+        {
+            static int lastAim = -1, lastHold = -1;
+            static DWORD lastAt;
+            DWORD now = GetTickCount();
+
+            if (aim != lastAim || hold != lastHold ||
+                (DWORD)(now - lastAt) >= 1000) {
+                lastAt = now;
+                lastAim = aim;
+                lastHold = hold;
+                DiagState(eng, g_camRad, g_shown, WantedRad(), aim, hold,
+                          held, nz, OverrideOn());
+            }
         }
 
         /* One write per burst of changes, never one per slider notch. */
