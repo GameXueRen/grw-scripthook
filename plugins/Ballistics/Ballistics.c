@@ -39,9 +39,11 @@ static char     g_ini[MAX_PATH];
 static char     g_name[64];
 static uint32_t g_menu;
 
-/* The menu thread writes these; the worker thread reads them. */
+/* The menu thread writes these; the worker thread reads them. The
+ * built-in start is the game's own numbers: nothing is scaled until
+ * the switch is flipped (and then written to the ini). */
 static volatile LONG g_enabled;          /* 1 = scale new shots */
-static volatile LONG g_percent = 300;    /* 10..300, 100 = vanilla */
+static volatile LONG g_percent = 100;    /* 10..300, 100 = vanilla */
 
 /* The worker thread alone writes these; the status line reads them. */
 static int  g_hooked;                    /* the trajectory patch is in */
@@ -61,8 +63,8 @@ static void SaveInt(const char *key, LONG value) {
 static void LoadSettings(void) {
     LONG enabled, percent;
 
-    enabled = (LONG)GetPrivateProfileIntA("Settings", "enabled", 1, g_ini);
-    percent = (LONG)GetPrivateProfileIntA("Settings", "percent", 300, g_ini);
+    enabled = (LONG)GetPrivateProfileIntA("Settings", "enabled", 0, g_ini);
+    percent = (LONG)GetPrivateProfileIntA("Settings", "percent", 100, g_ini);
     if (percent < 10) percent = 10;
     if (percent > 300) percent = 300;
 
