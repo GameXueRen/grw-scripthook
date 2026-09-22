@@ -119,6 +119,11 @@ static volatile LONG     g_lookCount;
  * count per object and the API reads the rounds off the hottest of them. Only
  * eight slots, a linear scan and one increment on the engine's own path: no
  * lock, no allocation, nothing that can block it. */
+/* A call about an object newer than this is "the engine is asking about it
+ * now": the switch window this file has to survive, and the one the mover tier
+ * cannot see through. Same length as the mover window below. */
+#define ASK_FRESH_MS 2000ULL
+
 /* As many as the call trace holds, because the two are about the same set:
  * every distinct weapon the engine asks about. Eight was not enough - the
  * player's own weapon was pushed out of the table by the ones other entities
@@ -141,6 +146,13 @@ typedef struct {
     uint32_t          last;      /* the rounds it carried on the last read */
     int               seeded;    /* 0 until `last` has one reading in it */
     uint64_t          moved;     /* tick of the last time those rounds moved */
+    /* When the engine last asked about this object. This is what a weapon
+     * switch needs: the weapon coming up is asked within a frame or two (the
+     * HUD redraws its number, a shot asks), and the one just stowed stops
+     * being asked - so the most recently asked object that passes the owner
+     * test is the weapon in hand, for the moment where nothing has moved yet
+     * (see RecentOwnedObject and the tier it feeds). */
+    uint64_t          askedAt;   /* tick of the last call about this object */
 } LookSlot;
 
 static LookSlot g_look[LOOK_SLOTS];
@@ -180,7 +192,7 @@ static void TraceCall(uint64_t obj) {
  * given. The coldest slot is given up when the table is full, so the eight
  * never become a permanent set: an object that stops being called stops being
  * counted, and the API ages what is left. */
-static void NoteCall(uint64_t obj) {
+static void NoteCall(uint64_t obj, uint64_t now) {
     int i, freeSlot = -1, lowSlot = 0;
     LONG low = 0x7FFFFFFF;
 
@@ -190,6 +202,7 @@ static void NoteCall(uint64_t obj) {
 
         if (o == obj) {
             if (g_look[i].n < 0x7FFFFFFF) g_look[i].n++;
+            g_look[i].askedAt = now;
             return;
         }
         if (!o) {
@@ -201,6 +214,13 @@ static void NoteCall(uint64_t obj) {
     i = (freeSlot >= 0) ? freeSlot : lowSlot;
     g_look[i].n = 1;
     g_look[i].obj = obj;
+    /* The slot changes hands here: the reading below belongs to the object
+     * that used to be in it, so it starts over rather than being compared
+     * against the new object's rounds. */
+    g_look[i].stateObj = 0;
+    g_look[i].seeded = 0;
+    g_look[i].moved = 0;
+    g_look[i].askedAt = now;
 }
 
 static int CapDetour(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
@@ -213,7 +233,7 @@ static int CapDetour(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
     g_lookRaw = (uint32_t)ret & CAP_MAX;
     g_lookTick = (uint64_t)GetTickCount64();
     InterlockedIncrement(&g_lookCount);
-    NoteCall(a1);
+    NoteCall(a1, g_lookTick);
     TraceCall(a1);
     return ScaleValue(ret);
 }
@@ -430,6 +450,8 @@ SH_API int ShAmmoScaleActive(void) {
 static uint64_t g_lastObj;              /* the object the last call carried */
 static uint64_t g_handObj;              /* the weapon firing last vouched for */
 static uint64_t g_handLogged;           /* the last weapon reported as in hand */
+static uint64_t g_roundsObj;            /* the object the last reading was about */
+static uint64_t g_recentLogged;         /* the last weapon the recency tier named */
 static DWORD    g_diagAt;               /* when the hot list was last logged */
 
 /* A magazine holds rounds, not kilobytes: the protected-int decode can come
@@ -529,6 +551,53 @@ static uint64_t LastOwnedCall(void) {
         if (OwnedByPlayer(obj)) return obj;
     }
     return 0;
+}
+
+/* The object the engine asked about most recently that is the player's own:
+ * the weapon in hand, for the moment after a switch where nothing has moved
+ * yet.
+ *
+ * This is the tier a weapon switch needs, and the reason it exists is measured:
+ * HandObject answers from "what moved", and the weapon that just moved is the
+ * one being stowed - its motion is still inside the two second window - so it
+ * answered for the weapon that had just left. The number stayed on the old
+ * magazine until the new one was fired or refilled, which is exactly what the
+ * player saw (logs\AmmoControl.log 2026-09-22 13:39-13:40: 50 -> 19 -> 20 -> 4
+ * -> 0 with every wrong value on the frame a weapon changed hands).
+ *
+ * The engine asks about the weapon coming up within a frame or two of the
+ * switch - the HUD redraws its number, and a shot asks - while the one that
+ * went down stops being asked, so RECENCY of the calls is what tells the two
+ * apart. That is the same evidence ShGetAmmoCalls records, taken from every
+ * call rather than only the ones that changed which object was asked about.
+ *
+ * Ownership is what makes it safe: the table is full of other entities'
+ * magazines and their calls are just as recent, but the test that resolves
+ * +0x250 to the player passes for his own weapons (measured 2026-09-20
+ * 17:37:40 in logs\AmmoProbe.log: one of the eight weapons asked about in one
+ * burst resolved to the player, the rest are other entities').
+ *
+ * Nothing is cached: the object's rounds are read live. A caller that gets 0
+ * falls through to the tiers that were there before, so a loadout where the
+ * owner test never passes behaves exactly as it did. */
+static uint64_t RecentOwnedObject(uint32_t *out) {
+    uint64_t best = 0, bestAt = 0, now = (uint64_t)GetTickCount64();
+    int i;
+
+    for (i = 0; i < LOOK_SLOTS; i++) {
+        uint64_t obj = g_look[i].obj;
+        uint64_t at = g_look[i].askedAt;
+        uint32_t v;
+
+        if (!obj || !at || at > now || now - at > ASK_FRESH_MS) continue;
+        if (at <= bestAt) continue;
+        if (!OwnedByPlayer(obj)) continue;
+        if (!RoundsAt(obj, &v)) continue;
+        best = obj;
+        bestAt = at;
+        if (out) *out = v;
+    }
+    return best;
 }
 
 /* Age the counts once a second: what was asked in the last few seconds is
@@ -684,25 +753,49 @@ SH_API int ShGetAmmoRounds(int *rounds) {
         }
     }
 
-    /* Four steps, most specific first: the weapon that just moved, then the
+    /* Five steps, most specific first: the weapon the engine is asking about
+     * right now that is his own, then the weapon that just moved, then the
      * weapon that last moved (the one he was holding), then the last weapon
      * the engine asked about that is his own, then the last call.
      *
-     * The second step is what makes this stable. Every one of the player's
-     * weapons answers the ownership test, so asking the engine which object it
-     * asked about last picks between them at random - and it asks about
-     * several at every switch (logs\scripthook_ammocap.log, 2026-09-21
-     * 00:47-00:48: the number flapped 20 -> 44 -> 20 inside five seconds with
-     * nothing fired). What firing proved is kept instead: after a switch the
-     * number stays on the weapon that was in hand, until firing says
-     * otherwise. */
-    obj = HandObject(&v);
+     * The first step is the one a weapon switch needs, and it is measured
+     * rather than reasoned: with the mover tier first, a switch showed the
+     * magazine of the weapon being STOWED - its last move is still inside the
+     * two second window, so it answered as the weapon in hand until the new
+     * one was fired or refilled (logs\AmmoControl.log 2026-09-22 13:39-13:40,
+     * 50 -> 19 -> 20 -> 4 -> 0 with every wrong value on the frame a weapon
+     * changed hands). The engine asks about the weapon coming up within a frame
+     * or two and stops asking about the one going down, so the newest call that
+     * passes the owner test is the one in hand. Whenever that test does not
+     * answer, this falls through to the tiers below, which is what keeps the
+     * old behaviour on a loadout where it never does.
+     *
+     * The third step is what makes this stable between switches. What firing
+     * proved is kept instead: after a switch the number stays on the weapon
+     * that was in hand, until firing says otherwise. */
+    obj = RecentOwnedObject(&v);
     if (obj) {
         tier = 1;
         g_handObj = obj;
-        if (obj != g_handLogged) {         /* one line per weapon, not per shot */
+        g_roundsObj = obj;
+        if (obj != g_recentLogged) {       /* one line per weapon, not per shot */
+            g_recentLogged = obj;
             g_handLogged = obj;
-            Log("ammo: in hand %016llX, %u rounds", (unsigned long long)obj, v);
+            Log("ammo: in hand (asked) %016llX, %u rounds",
+                (unsigned long long)obj, v);
+        }
+    }
+    if (tier != 1) {
+        obj = HandObject(&v);
+        if (obj) {
+            tier = 1;
+            g_handObj = obj;
+            g_roundsObj = obj;
+            if (obj != g_handLogged) {     /* one line per weapon, not per shot */
+                g_handLogged = obj;
+                Log("ammo: in hand %016llX, %u rounds",
+                    (unsigned long long)obj, v);
+            }
         }
     }
     if (tier == 1) {
@@ -712,14 +805,17 @@ SH_API int ShGetAmmoRounds(int *rounds) {
         *rounds = (int)v;
         ok = 1;
         tier = 1;
+        g_roundsObj = g_handObj;
     } else if ((obj = LastOwnedCall()) != 0 && RoundsAt(obj, &v)) {
         *rounds = (int)v;
         ok = 1;
         tier = 2;
+        g_roundsObj = obj;
     } else if (RoundsAt(g_lastObj, &v)) {
         *rounds = (int)v;
         ok = 1;
         tier = 3;
+        g_roundsObj = g_lastObj;
     }
 
     /* The hot list is the evidence for a fallback. While the first tier
@@ -730,6 +826,23 @@ SH_API int ShGetAmmoRounds(int *rounds) {
         LogHottest();
     }
     if (!ok) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
+    ShSetError(SH_OK);
+    return 1;
+}
+
+/* Which object the last reading was about.
+ *
+ * The rounds alone cannot say that the weapon in hand changed - two weapons
+ * read the same number all the time, and the number a switch shows is the one
+ * this file had been reporting a moment before - so a plugin that has to notice
+ * a switch needs the object. Set by ShGetAmmoRounds on every answer, whatever
+ * tier produced it; it changes within a frame or two of a switch, when the
+ * engine first asks about the weapon coming up. */
+SH_API int ShGetAmmoObject(uint64_t *obj) {
+    if (!obj) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    LogOnce();
+    if (!g_roundsObj) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
+    *obj = g_roundsObj;
     ShSetError(SH_OK);
     return 1;
 }

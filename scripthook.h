@@ -2570,8 +2570,24 @@ SH_API int  ShGetAmmoLook(ShAmmoLook *out);
  *  round or switching a weapon makes it do - so the capacity hook has to be
  *  installed (asking for 1/1 alone installs nothing: see ShSetAmmoScale).
  *  SH_ERR_BAD_ARG for a NULL out. This is the magazine, not the reserve:
- *  reloading puts it back to the capacity that ShSetAmmoScale scales. */
+ *  reloading puts it back to the capacity that ShSetAmmoScale scales.
+ *
+ *  A weapon switch is followed within a frame or two: the engine asks about
+ *  the weapon coming up (the HUD redraws its number, a shot asks) and stops
+ *  asking about the one that went down, and the reading follows the newest of
+ *  those calls that is the player's own before it follows anything else.
+ *  ShGetAmmoObject names the object the answer came from. */
 SH_API int  ShGetAmmoRounds(int *rounds);
+
+/** Which weapon the last ShGetAmmoRounds reading was about.
+ *
+ *  The rounds alone cannot say that the weapon in hand changed - two weapons
+ *  read the same number often, and the value a switch shows is the one the
+ *  plugin was just told - so this is what a caller watches to notice that the
+ *  magazine it was following has been put away. Set by ShGetAmmoRounds, which
+ *  has to have answered at least once: 0 with SH_ERR_NO_CANDIDATE until then,
+ *  and SH_ERR_BAD_ARG for a NULL out. */
+SH_API int  ShGetAmmoObject(uint64_t *obj);
 
 /** One entry of the call trace: what the engine asked a capacity about, and
  *  when. */
