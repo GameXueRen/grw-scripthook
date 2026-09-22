@@ -23,10 +23,14 @@ extern void ShSetError(int err);
 #define CRASH_FILE     "scripthook_crash.log"
 /* This is the one log that is appended across sessions rather than reopened
  * per session, so it is the one that would grow without bound on a player's
- * disk. Past this size it starts a new file; the note it writes first says
- * so and carries the build. A session writes at most 24 reports of 4 KB, so
- * this holds several sessions of history. */
+ * disk. Past this size the file is rotated aside - the run before this one is
+ * kept as scripthook_crash.log.1, and the one before that as .2 - and a new
+ * file starts, with the note below as its first line. A session writes at most
+ * 24 reports of 4 KB, so the three files together hold about ten sessions of
+ * history: the newest crashes are the ones a report is about, and none of them
+ * is dropped whole the way this used to drop them. */
 #define CRASH_FILE_MAX (512 * 1024)
+#define CRASH_KEEP     2                /* .1 and .2 beside the current file */
 
 /* Resolved once at startup: the report has to work from an
  * exception handler, where building a path is too much. */
@@ -55,9 +59,32 @@ static int      g_haveFirst = 0;
 extern void ShFileOwn(int on);
 
 static const char g_trimNote[] =
-    "\n=== the crash log reached its size limit; older entries were "
-    "dropped ===\n"
+    "\n=== the crash log reached its size limit; the run before this one is "
+    "kept as scripthook_crash.log.1, and the one before that as .2 ===\n"
     "=== GRW ScriptHook " SH_VERSION ", built " __DATE__ " " __TIME__ "\n";
+
+/* Rotates the crash log aside: the oldest generation is dropped, the rest move
+ * up one name, and the live file is left for the caller to start again.
+ *
+ * Renames, not copies, and the caller has already marked this thread's I/O as
+ * the framework's own (ShFileOwn), so the file interception layer passes them
+ * straight through - a detour re-entering the code that faulted would lose the
+ * report with it. Three files at most, so about 1.5 MB. */
+static void CrashRotate(const char *path) {
+    char from[MAX_PATH], to[MAX_PATH];
+    int i;
+
+    for (i = CRASH_KEEP; i >= 2; i--) {
+        if (snprintf(to, sizeof(to), "%s.%d", path, i) >= (int)sizeof(to)) return;
+        if (snprintf(from, sizeof(from), "%s.%d", path, i - 1) >=
+            (int)sizeof(from))
+            return;
+        if (i == CRASH_KEEP) DeleteFileA(to);   /* the name that goes */
+        MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING);
+    }
+    if (snprintf(to, sizeof(to), "%s.1", path) < (int)sizeof(to))
+        MoveFileExA(path, to, MOVEFILE_REPLACE_EXISTING);
+}
 
 static void Emit(const char *text, int len) {
     const char *path = g_crashPath[0] ? g_crashPath : CRASH_FILE;
@@ -72,14 +99,16 @@ static void Emit(const char *text, int len) {
         ShFileOwn(0);
         return;
     }
-    /* A report must not be the thing that fills the disk. Start a new file
-     * instead, and let the header be written again, so it carries the base
-     * address of the process crashing now rather than of some old one. */
+    /* A report must not be the thing that fills the disk. The file is rotated
+     * aside rather than thrown away - see CrashRotate, which keeps the previous
+     * runs - and the header is written again, so it carries the base address of
+     * the process crashing now rather than of some old one. */
     size.QuadPart = 0;
     if (GetFileSizeEx(f, &size) && size.QuadPart > CRASH_FILE_MAX) {
         CloseHandle(f);
+        CrashRotate(path);
         f = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
-                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (f == INVALID_HANDLE_VALUE) {
             ShFileOwn(0);
             return;

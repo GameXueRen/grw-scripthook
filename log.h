@@ -177,29 +177,208 @@ static int LogFallbackPath(char *buf, size_t n, const char *name) {
  * drive, a scanner holding the folder - the file goes to the game folder
  * instead and says so in its first line. Before this, that failure was
  * completely silent: a session with no logs and nothing anywhere saying why,
- * which is the hardest kind of report to act on. */
-/* Keeps the log the last session left as one slot: <name>.prev.
+ * which is the hardest kind of report to act on.
  *
- * Its old contents are replaced every time, so the folder gains one file
- * rather than a growing set, and nothing here touches the session's own
- * log. Only the loader's own log is kept this way: every other file is a
- * module's or a plugin's diagnostics, and a .prev for each of them would
- * double a folder that is long already.
+ * The session argument is LogRotate's: see the sessions note below for what it
+ * decides, and why the file a previous run left is renamed rather than thrown
+ * away. */
+/* ---- sessions -----------------------------------------------------------
  *
- * A rename, not a copy. Failure is ignored on purpose - not being able to
- * keep the previous log is not a reason to refuse to start one now - and
- * this runs on the attach path, before the file interception layer has a
- * single rule (its hooks go up with the first one), so no rule of ours
- * can see the call.
+ * Every file here belongs to one session, and a few sessions are kept.
+ *
+ * A log is read for the run that went wrong - a crash, a freeze, a mod that
+ * misbehaved - and that run is nearly always the one that just ended, so a log
+ * thrown away at start up throws the evidence away. The mainstream shape
+ * (logrotate's `create`, spdlog's rotating sink, Docker's max-file) is the one
+ * used here: the session running now keeps the plain name a support request
+ * asks for, and the session before it is renamed aside, dated with the moment
+ * it started. Nothing is rewritten in place - a rename is metadata - so a file
+ * that is still being appended to, or tailed by a player, never sees a torn or
+ * half-copied log.
+ *
+ * What says "this file is someone else's" is its first line: every file opens
+ * with a session marker, and the marker carries the process start time as well
+ * as the pid, so two runs cannot be confused even when the pid comes round
+ * again. That check needs no shared state, which is what makes it possible
+ * here: log.h is compiled into every translation unit, and each has its own
+ * copy of everything below. A file written before markers existed has none and
+ * is kept the same way - and it is the one most likely to hold the crash
+ * somebody is asking about, so it is the one that must not be dropped.
+ *
+ * Kept per name: the session in progress and LOG_SESSIONS - 1 before it, so a
+ * folder gains files rather than unbounded space. The archives sort by name,
+ * so the oldest is the one that goes.
  */
-static void LogKeepPrevious(const char *path) {
-    char prev[MAX_PATH];
+#define LOG_SESSIONS 3                  /* the run in progress plus two */
 
-    if (snprintf(prev, sizeof(prev), "%s.prev", path) < 0) return;
-    MoveFileExA(path, prev, MOVEFILE_REPLACE_EXISTING);
+/* The process start time, which together with the pid names this session: a
+ * later run can be given the same pid after enough uptime, and the pair cannot
+ * repeat. Asked once, and a unit that never opens a log never asks. */
+static unsigned long long LogSession(void) {
+    static unsigned long long cached;
+    FILETIME created, exited, kernel, user;
+
+    if (cached) return cached;
+    if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
+        cached = ((unsigned long long)created.dwHighDateTime << 32) |
+                 created.dwLowDateTime;
+    if (!cached) cached = 1;            /* cached even when it cannot be had */
+    return cached;
 }
 
-static FILE *LogOpen(const char *name, const char *path) {
+/* "pid=1234 start=1F2A3B4C5D6E7F80": what a session's marker is recognised by.
+ * Built once per translation unit, and a race that builds it twice builds the
+ * same string. */
+static const char *LogIdentity(void) {
+    static char id[64];
+
+    if (!id[0])
+        snprintf(id, sizeof(id), "pid=%lu start=%016llX",
+                 (unsigned long)GetCurrentProcessId(),
+                 (unsigned long long)LogSession());
+    return id;
+}
+
+/* The first line of every file: what it is, when the run began, and which
+ * session wrote it, so the file a player sends says all three by itself. */
+static void LogMarker(FILE *f) {
+    SYSTEMTIME st;
+
+    GetLocalTime(&st);
+    fprintf(f, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] === session "
+               "%04u-%02u-%02u %02u:%02u:%02u, %s ===\n",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+            st.wMilliseconds,
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+            LogIdentity());
+    fflush(f);
+}
+
+/* Is the file on disk the one the session running now is writing? Its first
+ * line carries the marker. An empty file, an unreadable one, and one from
+ * before markers existed are all "not ours" - the last two on purpose: the
+ * caller then tries to move it aside, and if it cannot, appends to it rather
+ * than truncating evidence it could not read. */
+static int LogIsOurs(const char *path) {
+    char line[192];
+    FILE *f = fopen(path, "r");
+    int ours;
+
+    if (!f) return 0;
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return 0; }
+    ours = strstr(line, LogIdentity()) != NULL;
+    fclose(f);
+    return ours;
+}
+
+/* When the file on disk was created - the moment the session that wrote it
+ * began, which is what its archive is named after. */
+static int LogCreated(const char *path, SYSTEMTIME *out) {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    FILETIME local;
+
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) return 0;
+    if (!FileTimeToLocalFileTime(&fa.ftCreationTime, &local)) return 0;
+    return FileTimeToSystemTime(&local, out);
+}
+
+/* 1 for "<stem>-YYYYMMDD-HHMMSS.log" and nothing else. The strictness is what
+ * keeps the pruning below from ever touching a file that is not an archive of
+ * this log. */
+static int LogIsArchive(const char *name, const char *stem) {
+    size_t n = strlen(stem);
+    int i;
+
+    if (strlen(name) != n + 20) return 0;
+    if (strncmp(name, stem, n) != 0 || name[n] != '-') return 0;
+    for (i = 0; i < 8; i++)
+        if (name[n + 1 + i] < '0' || name[n + 1 + i] > '9') return 0;
+    if (name[n + 9] != '-') return 0;
+    for (i = 0; i < 6; i++)
+        if (name[n + 10 + i] < '0' || name[n + 10 + i] > '9') return 0;
+    return strcmp(name + n + 16, ".log") == 0;
+}
+
+/* Drops the oldest archives of this name until LOG_SESSIONS - 1 are left. One
+ * at a time, found in the folder itself, so nothing has to be held in memory
+ * and a folder that already holds more than this build makes is settled in a
+ * few passes. The names sort, so the smallest is the oldest. */
+static void LogPrune(const char *dir, const char *stem) {
+    int passes = 0;
+
+    for (;;) {
+        WIN32_FIND_DATAA fd;
+        char pat[MAX_PATH], oldest[MAX_PATH];
+        HANDLE h;
+        int n = 0;
+
+        oldest[0] = 0;
+        if (snprintf(pat, sizeof(pat), "%s\\%s-*.log", dir, stem) >=
+            (int)sizeof(pat))
+            return;
+        h = FindFirstFileA(pat, &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (!LogIsArchive(fd.cFileName, stem)) continue;
+            n++;
+            if (!oldest[0] || strcmp(fd.cFileName, oldest) < 0)
+                snprintf(oldest, sizeof(oldest), "%s", fd.cFileName);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+        /* A delete that keeps failing must not spin here. */
+        if (n <= LOG_SESSIONS - 1 || !oldest[0] || ++passes > 64) return;
+        if (snprintf(pat, sizeof(pat), "%s\\%s", dir, oldest) <
+            (int)sizeof(pat))
+            DeleteFileA(pat);
+    }
+}
+
+/* Moves the session before this one aside as "<stem>-<date>.log" and settles
+ * the folder to the kept set. Returns 1 when what is on disk is this session's
+ * own file or nothing at all, 0 when it is another session's and could not be
+ * moved - the caller then appends rather than truncates, because a rename that
+ * failed must not become the loss of a log.
+ *
+ * A rename, not a copy, and failure is not fatal for the same reason: not being
+ * able to keep the previous log is no reason to refuse to start one now. The
+ * loader's first call runs on the attach path, before the file interception
+ * layer holds a single rule (its hooks go up with the first one), so no rule of
+ * ours can see the call; later opens are the game's own file APIs like any
+ * other. */
+static int LogRotate(const char *name, const char *path) {
+    char dir[MAX_PATH], stem[MAX_PATH], arc[MAX_PATH];
+    const char *slash, *dot;
+    SYSTEMTIME st;
+    size_t dn, sn;
+
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) return 1;
+    if (LogIsOurs(path)) return 1;      /* this session's file already */
+
+    slash = strrchr(path, '\\');
+    dn = slash ? (size_t)(slash - path) : 0;
+    if (dn == 0 || dn >= sizeof(dir)) return 0;   /* no folder: leave it alone */
+    memcpy(dir, path, dn);
+    dir[dn] = 0;
+
+    dot = strrchr(name, '.');
+    sn = dot ? (size_t)(dot - name) : strlen(name);
+    if (sn >= sizeof(stem)) return 0;
+    memcpy(stem, name, sn);
+    stem[sn] = 0;
+
+    if (!LogCreated(path, &st))
+        GetLocalTime(&st);              /* a name that is merely close is fine */
+    if (snprintf(arc, sizeof(arc), "%s\\%s-%04u%02u%02u-%02u%02u%02u.log",
+                 dir, stem, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
+                 st.wSecond) < (int)sizeof(arc))
+        MoveFileExA(path, arc, MOVEFILE_REPLACE_EXISTING);
+    LogPrune(dir, stem);
+    /* Gone means it was moved, and the caller may start a new one. */
+    return GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES;
+}
+
+static FILE *LogOpen(const char *name, const char *path, int fresh) {
     /* scripthook.log has more than one writer, and they do not share a file
      * pointer: the loader owns this handle, and every module whose own log
      * the level dropped appends to the same file (the floor branch of
@@ -214,12 +393,20 @@ static FILE *LogOpen(const char *name, const char *path) {
      *
      * So: truncate with "w", then write with "a" like every other writer,
      * which is the one mode where the OS itself puts each write at the end
-     * of the file whatever the other handles are doing. */
-    FILE *trunc;
+     * of the file whatever the other handles are doing.
+     *
+     * `fresh` is LogRotate's answer: 1 means this session's own file, which is
+     * started here and given the session marker as its first line, 0 means
+     * another session's file that could not be moved aside - and that is
+     * appended to, never truncated, so a failed rename cannot cost a log. */
+    FILE *f;
 
-    if (strcmp(name, "scripthook.log") != 0) return fopen(path, "w");
-    trunc = fopen(path, "w");
-    if (trunc) fclose(trunc);
+    if (!fresh) return fopen(path, "a");
+    f = fopen(path, "w");
+    if (!f) return NULL;
+    LogMarker(f);                       /* the line that names this session */
+    if (strcmp(name, "scripthook.log") != 0) return f;
+    fclose(f);
     return fopen(path, "a");
 }
 
@@ -248,15 +435,13 @@ static void LogInitMode(const char *name, int always) {
     if (g_logFile && strcmp(g_logName, name) == 0) return;
     if (g_logFile) LogClose();
     if (!LogPath(path, sizeof(path), name)) return;
-    /* The one file a session always rewrites, and the one a report is
-     * asked for: last session's copy is kept beside it rather than
-     * overwritten, so restarting the game no longer throws the record of
-     * the run that just ended away. */
-    if (strcmp(name, "scripthook.log") == 0) LogKeepPrevious(path);
-    f = LogOpen(name, path);
+    /* The run before this one keeps its own file rather than being overwritten
+     * - see the sessions note above - and the folder is settled to the kept
+     * set on the way past. */
+    f = LogOpen(name, path, LogRotate(name, path));
     if (!f) {
         if (!LogFallbackPath(path, sizeof(path), name)) return;
-        f = LogOpen(name, path);
+        f = LogOpen(name, path, LogRotate(name, path));
         if (!f) return;
         fprintf(f, "[note] logs\\ could not be written to; this file is "
                    "beside the game executable instead\n");
