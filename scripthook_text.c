@@ -42,10 +42,12 @@ static const ShText kEnUS[] = {
 
     /* the root menu's top-right credits. Framework text like the rest, so
      * a lang.ini can override either line; the build line formats the
-     * version in (%s), which is SH_VERSION and not a number typed here. */
+     * version in (%s), which is SH_VERSION and not a number typed here.
+     * The group is on the About page only: the corner is two short lines
+     * and the second one is the build, which is what a report names. */
     { "@ui.credit.author",    "Original: Phiality \xC2\xB7 "
                               "modded by GameXueRen" },
-    { "@ui.credit.build",     "Version: %s \xC2\xB7 QQ group: 299177445" },
+    { "@ui.credit.build",     "Version: %s" },
 
     /* the settings tree */
     { "@settings.page",       "ScriptHook settings" },
@@ -203,7 +205,7 @@ static const ShText kZhCN[] = {
     { "@menu.footer.pos",     "第 %d / %d 行" },
 
     { "@ui.credit.author",    "原作者：Phiality · 魔改：GameXueRen" },
-    { "@ui.credit.build",     "版本：%s · Q群：299177445" },
+    { "@ui.credit.build",     "版本：%s" },
 
     { "@settings.page",       "ScriptHook 设置" },
     { "@settings.load",       "加载插件（总开关）" },
@@ -220,7 +222,7 @@ static const ShText kZhCN[] = {
 
     { "@about.page",          "关于" },
     { "@about.version",       "版本：%s" },
-    { "@about.api",           "接口版本：%s" },
+    { "@about.api",           "API版本：%s" },
     { "@about.build.ok",      "游戏构建：%s（已验证）" },
     { "@about.build.new",     "游戏构建：%s（未验证 —— 见日志）" },
     { "@about.author",        "原作者：Phiality" },

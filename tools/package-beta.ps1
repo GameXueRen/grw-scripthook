@@ -35,9 +35,13 @@ param(
     # The plugins that ship. Everything else under plugins\ is left out.
     # Keep this in step with $betaSet in build_msvc.ps1: that one decides what
     # a -Beta / -Release build deploys, this one what the package carries.
+    # AmmoControl (2026-09-21) and TimeWeatherControl (re-added 2026-09-20) are
+    # the framework's own implementations and they ship. Ballistics stays out of
+    # the set that CameraPresets joined on 2026-09-22.
     [string[]]$Plugins = @(
         'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat',
-        'micfix', 'TimeWeatherControl'
+        'micfix', 'AllLanguages', 'CameraPresets', 'AmmoControl',
+        'TimeWeatherControl'
     ),
 
     # Also produce a .zip beside the tree.

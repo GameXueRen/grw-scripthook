@@ -57,9 +57,14 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 #
 # Four left the tree entirely on 2026-09-20, at the request of the author whose
 # plugins they re-implemented: OpticalCamo, TimeWeatherControl, ammo_capacity
-# and NPCSpawner. Nothing of his is built, shipped or kept here any more. One
-# plugin is out of the shipped set and still in the tree, for a reason of its
-# own:
+# and NPCSpawner. Nothing of his is built, shipped or kept here any more - and
+# that is what the set below is about. TimeWeatherControl came back the same day
+# as an implementation of the framework's own, AmmoControl is new on 2026-09-21,
+# and BOTH ARE IN the set: neither is his, and a README that points a player at
+# the author's builds of what those four did is not a reason to hold back the
+# framework's own work.
+#
+# Two plugins have a reason of their own:
 #
 #   AmmoProbe         read-only evidence: it answered the question it was for
 #                     (docs\ammocapacity-reverse.md, section 9), so a plain
@@ -67,15 +72,18 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 #                     moves its folder out of plugins\ like any other plugin
 #                     that is not in the set below.
 #
-# AmmoControl is IN the set: the capacity multiplier and the auto reload are
-# part of the release, and leaving it out of this list would quietly drop the
-# plugin from every beta build.
+#   Ballistics        out of the set in the 2026-09-22 decision that put
+#                     CameraPresets in: a plain run builds and deploys it, a
+#                     -Beta leaves it aside, and its own verification pass is
+#                     what would move it in.
 #
-# AllLanguages is IN the set: the pair-shipped plugin set should be able to
-# give a RU/CN player the language list back.
+# AllLanguages is IN the set: a RU/CN player should get the language list back
+# (it is the renamed LastRites_dlcfix). CameraPresets is IN the set: the aim
+# yield and the preset names it carries are player facing, and it is the PR #2
+# plugin that ships.
 $betaSet = @(
     'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat', 'micfix',
-    'TimeWeatherControl', 'AmmoControl', 'AllLanguages'
+    'AllLanguages', 'CameraPresets', 'AmmoControl', 'TimeWeatherControl'
 )
 $script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
 $releaseBuild     = [bool]$Release
