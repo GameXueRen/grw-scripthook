@@ -133,6 +133,7 @@ static const ShText kEn[] = {
     { "@fp.hint",
       "If the head is not hidden by itself, aim with the right mouse "
       "button or switch first person off and on again." },
+    { "@fp.say.enabled", "View change toast" },
     { "@fp.say.on",
       "First person on (aim or toggle again if the head shows)" },
     { "@fp.say.off", "Third person on" }
@@ -170,6 +171,7 @@ static const ShText kZh[] = {
       "已开启，视角由引擎接管（%s）[%s %+.0f %+.0f %+.0f]" },
     { "@fp.hint",
       "头部若未自动隐藏，请按右键瞄准或重新切换解决。" },
+    { "@fp.say.enabled",   "启用切换提示" },
     { "@fp.say.on",
       "第一人称已开启（头部若未隐藏，请按右键瞄准或重切一次）" },
     { "@fp.say.off", "第三人称已开启" }
@@ -579,6 +581,12 @@ enum {
 static volatile int      g_said = SAY_NONE;
 static uint32_t          g_toastId = 0;
 
+/* Whether a change of view says anything on screen: the row under the hotkey,
+ * on by default - which is exactly how this behaved before the row existed.
+ * A line across the top is not everyone's idea of help, and all it does is
+ * confirm a flip the player can see for himself in the view. */
+static volatile LONG     g_sayOn = 1;
+
 /* Green once it is done, amber while something is being waited
  * for, plain white for a plain change of view. */
 #define SAY_RGB_BUSY  0xFFD24Au
@@ -590,6 +598,9 @@ static void Say(int state, const char *text, uint32_t rgb,
                 uint32_t ms) {
     if (g_said == state) return;
     g_said = state;
+    /* The state is remembered even when the line is switched off, so turning
+     * it back on does not replay the states of the last minute. */
+    if (!g_sayOn) return;
     if (!g_toastEx) return;
     /* Same line again rather than a second one: a state that
      * moves on must not stack up. A line whose time is up is
@@ -670,6 +681,32 @@ static void OnHotKey(uint32_t menu, uint32_t item, int value,
     (void)menu; (void)item; (void)user;
     if (value >= 0 && value < HOTKEYS) g_hotKey = value;
     SaveIni();
+}
+
+/* Say row (the one under the hotkey): whether a change of view says anything
+ * on screen. Only the two toasts go through it - the menu's own status line
+ * keeps telling the truth either way - so this is the whole of what the row
+ * does, and "off" is exactly the plugin before the row existed, minus the
+ * line. */
+static void OnSayToggle(uint32_t menu, uint32_t item, int value,
+                        void *user) {
+    int on = value ? 1 : 0;
+
+    (void)menu; (void)item; (void)user;
+    InterlockedExchange(&g_sayOn, on);
+    SaveIni();
+    Diag("toast: %s", on ? "on" : "off");
+    if (!on) return;
+    /* Switched back on: say where the view stands, so the row is visibly in
+     * force instead of something taken on trust. */
+    {
+        int fp = InterlockedCompareExchange(&g_on, 0, 0) ? 1 : 0;
+
+        g_said = SAY_NONE;
+        Say(fp ? SAY_FP_ON : SAY_TP,
+            SetText(fp ? "@fp.say.on" : "@fp.say.off"),
+            SAY_RGB_PLAIN, SH_TOAST_MS_DEFAULT);
+    }
 }
 
 /* Each category owns its own three sliders; user carries the
@@ -1284,6 +1321,10 @@ static void LoadIni(void) {
     }
     g_hotKey = IniInt(g_iniPath, "hotkey_key", g_hotKey);
     if (g_hotKey < 0 || g_hotKey >= HOTKEYS) g_hotKey = 0;
+    /* The say row: default on, which is how this behaved before the row
+     * existed - a session that never touches it keeps its line. */
+    InterlockedExchange(&g_sayOn,
+                        IniBool(g_iniPath, "switch_toast", 1) ? 1 : 0);
 }
 
 /* A slider row fires on every change, and SaveIni is about thirty-six
@@ -1329,6 +1370,9 @@ static void SaveIni(void) {
                                g_iniPath);
     snprintf(buf, sizeof(buf), "%d", g_hotKey);
     WritePrivateProfileStringA("Settings", "hotkey_key", buf,
+                               g_iniPath);
+    snprintf(buf, sizeof(buf), "%d", (int)g_sayOn);
+    WritePrivateProfileStringA("Settings", "switch_toast", buf,
                                g_iniPath);
     snprintf(buf, sizeof(buf), "%d", g_diagOn);
     WritePrivateProfileStringA("Settings", "diag", buf,
@@ -1477,6 +1521,8 @@ static DWORD WINAPI BindThread(LPVOID p) {
     if (menuList)
         menuList(g_menu, "@fp.hotkey", g_hotName,
                  HOTKEYS, g_hotKey, OnHotKey, NULL);
+    /* Under it: whether a change of view says anything on screen. */
+    menuToggle(g_menu, "@fp.say.enabled", (int)g_sayOn, OnSayToggle, NULL);
     /* Which set of offsets is in force: Auto follows what the
      * player is doing, a preset holds one set regardless. */
     if (menuList) {
