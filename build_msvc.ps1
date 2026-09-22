@@ -416,7 +416,10 @@ Build-Plugin -Name 'micfix' -Source 'micfix.c' `
 # them and no .asi to load, which reads as "the plugin is broken" rather than
 # "the plugin was never built".
 Build-Plugin 'Ballistics'    'Ballistics.c'    @($libPath, 'libscripthook.lib')
-Build-Plugin 'CameraPresets' 'CameraPresets.c' @($libPath, 'libscripthook.lib')
+# user32: CameraPresets polls the aim key with GetAsyncKeyState, and MinGW links
+# user32 into everything by default while MSVC links only what is named.  The
+# Makefile never had to say so; this line does.
+Build-Plugin 'CameraPresets' 'CameraPresets.c' @($libPath, 'libscripthook.lib', 'user32.lib')
 
 # A plugin's own files are seeded next to its .asi the first time only:
 # a later build must never overwrite settings changed in game, and never
