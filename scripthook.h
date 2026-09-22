@@ -507,6 +507,19 @@ SH_API int  ShTeleportPlayerHops(const ShVec3 *pos,
  *  link in the parent chain. Verified both ways.
  */
 SH_API int  ShIsInVehicle(void);
+/** True while the local player is actively swimming. Read from the
+ *  locomotion component's state byte, held across its brief
+ *  transitions; see ShGetOccupiedVehicle for the vehicle side. */
+SH_API int  ShIsSwimming(void);
+
+/* ---- player accuracy (ported from the Wildlands Immersion Suite) ---- */
+/** Pin the player's spread to zero while enabled. Installs three
+ *  verified mid-function hooks; 1 once they are in. The Active call
+ *  pauses the effect without uninstalling, so a mode blacklist can
+ *  hand the spread back frame by frame. */
+SH_API int      ShSetSuperAccuracy(int enabled);
+SH_API int      ShGetSuperAccuracy(void);
+SH_API void     ShSetSuperAccuracyActive(int active);
 
 /** @} */
 /** @defgroup entities Entities
@@ -636,6 +649,25 @@ typedef struct {
 SH_API int ShVehicleCount(void);
 SH_API const ShVehicle *ShVehicleAt(int index);
 SH_API const char *ShVehicleName(uint32_t vehicleId);
+
+enum {
+    SH_VEHICLE_NONE = 0,
+    SH_VEHICLE_GROUND = 1,
+    SH_VEHICLE_AIR = 2,
+    SH_VEHICLE_WATER = 3,
+    SH_VEHICLE_UNKNOWN = 4
+};
+typedef struct {
+    uint64_t entity;
+    uint32_t id;
+    int vehicleClass;
+    int identified;
+    char name[64];
+} ShOccupiedVehicle;
+/** Resolve the vehicle currently containing the local player. The class
+ *  comes from the stable vehicle catalogue rather than a camera-distance
+ *  fallback; identified says the id/name came from that catalogue. */
+SH_API int ShGetOccupiedVehicle(ShOccupiedVehicle *out);
 
 /** Spawn a vehicle and return its ENTITY, or 0 on failure.
  *  Blocks until it exists, usually a frame or two.
@@ -965,6 +997,26 @@ typedef void (*ShHitFn)(const ShHit *hit, void *user);
 /** Install the hook. Needed before any hit is reported. */
 SH_API int  ShHitHookInstall(void);
 SH_API int  ShHitHookReady(void);
+
+/** Bullet physics: scale the muzzle velocity the engine stores into
+ *  each round it fires, tracer and authoritative round alike. 1.0 is
+ *  the game's own number; clamped to 0.10..10.0 and applied to shots
+ *  fired after the call. Takes effect once ShBallisticsHookInstall
+ *  has installed the trajectory patch. */
+SH_API int  ShSetProjectileVelocityMultiplier(float multiplier);
+/** The gravity half of the same idea, 0.0..10.0 (1.0 = vanilla). */
+SH_API int  ShSetProjectileDropMultiplier(float multiplier);
+SH_API float ShGetProjectileVelocityMultiplier(void);
+SH_API float ShGetProjectileDropMultiplier(void);
+/** How many trajectory steps the alternate sites have scaled. The
+ *  shipped feature patches the trail, so this stays 0. */
+SH_API uint32_t ShGetProjectileVelocityHookCount(void);
+/** How many tracers the trail patch has scaled this session - the
+ *  live proof the patch is running. */
+SH_API uint32_t ShGetProjectileTrailHookCount(void);
+/** Install the trajectory patch on its own; 1 once it is in (or
+ *  already was). Independent of the hit hook above. */
+SH_API int  ShBallisticsHookInstall(void);
 
 /** Flags on the subscription. 0 delivers every event. */
 /** MINE_ONLY depends on the shooter field, which some
@@ -1666,6 +1718,10 @@ SH_API int  ShCanMove(uint64_t entity);
 
 SH_API uint64_t ShHavokWorld(void);
 SH_API uint32_t ShGetBodyId(uint64_t entity);
+/** Enumerates only entities backed by a mapped Havok rigid body,
+ *  within `radius` metres of the player, nearest first not
+ *  guaranteed. Returns the count written. */
+SH_API int  ShFindPhysicsEntities(float radius, ShEntity *out, int max);
 SH_API int  ShHavokScan(int *bodies, int *owners, int *mapped);
 
 /** @} */
@@ -1760,6 +1816,9 @@ SH_API int  ShGetCamera(ShCamera *out);
  */
 SH_API int  ShSetCamera(const ShVec3 *pos);
 SH_API int  ShCameraOrbit(float back, float up);
+/** The same orbit with a sideways axis: metres along the camera's
+ *  right vector, which is what an over-the-shoulder offset is. */
+SH_API int  ShCameraOrbitAdvanced(float back, float right, float up);
 
 /** Free camera. Radians, yaw 0 faces +y, pitch up positive.
  *  ShCameraAngles reads the current view to start from.
@@ -2376,6 +2435,16 @@ SH_API int  ShGroundHeight(float x, float y, float *outZ);
  */
 SH_API int  ShGroundHeightFrom(float x, float y, float nearZ,
                                float *outZ);
+typedef struct {
+    ShVec3   hitPos;
+    uint32_t hits;
+    uint8_t  record[128];
+} ShSurfaceProbe;
+/** Casts the ScriptHook-owned downward ray and copies its first
+ *  collision record before the physics scratch storage can be
+ *  reused. */
+SH_API int  ShProbeSurface(float x, float y, float nearZ,
+                           ShSurfaceProbe *out);
 SH_API int  ShTeleportPlayerToGround(float x, float y,
                                      float clearance);
 
@@ -2820,6 +2889,9 @@ SH_API int      ShKeyState(int vk);
 SH_API int      ShGameSceneActive(const char *name);
 /** Comma separated names drawn last frame; the count. */
 SH_API int      ShGameScenes(char *buf, int n);
+/** Show or suppress the game-owned HUD_* scenes. Framework and menu
+ *  scenes remain visible either way. */
+SH_API int      ShGameHudShow(int visible);
 
 /** @} */
 /** @defgroup widgets The engine's widget tree

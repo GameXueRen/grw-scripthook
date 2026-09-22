@@ -67,7 +67,7 @@
  * a slot at five separate sites - four of them agree on it, and that is what
  * POP_MGR below is. It is still taken only if it looks like an engine
  * object, because that call has crashed the game twice. */
-#define RVA_POOL         0x4D89000
+#define RVA_POOL         0x4D89080
 /* The population manager, decoded off the engine's own register calls rather
  * than guessed - see PopManager(). */
 #define RVA_POP_MGR      0x4B98FA8
@@ -81,7 +81,7 @@
 #define RVA_CONTEXT      0x4B98F98
 #define RVA_REGISTRY     0x4BC1878
 #define RVA_ARCH_DESC    0x42C2570
-#define RVA_NULL_BLOCK   0x4D88FE8
+#define RVA_NULL_BLOCK   0x4D89068
 #define NPC_SPEC_VTABLE  SH_IMG(0x394A4E0)
 
 #define COMMIT_MODE      7

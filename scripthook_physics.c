@@ -193,7 +193,7 @@ extern void ShSceneTick(void);
 static volatile uint64_t g_qFn = 0;
 static uint64_t g_qArg[6];
 static volatile uint64_t g_qRet = 0;
-static volatile int g_qPending = 0;
+static volatile LONG g_qPending = 0;
 static volatile int g_qDone = 0;
 static volatile int g_qFloat = 0;
 static volatile int g_qSix = 0;
@@ -803,6 +803,30 @@ SH_API int ShGroundHeightFrom(float x, float y, float nearZ,
     if (!ProbeDown(x, y, nearZ + PROBE_UP, PROBE_UP + PROBE_DOWN,
                    outZ))
         return ShFailPhys(SH_ERR_NO_GROUND);
+    ShSetError(SH_OK);
+    return 1;
+}
+
+/* The full record of the first collision, not just its height (ported
+ * from the Wildlands Immersion Suite). */
+SH_API int ShProbeSurface(float x, float y, float nearZ,
+                          ShSurfaceProbe *out) {
+    float z;
+    uint16_t hits;
+    if (!out) return ShFailPhys(SH_ERR_BAD_ARG);
+    memset(out, 0, sizeof(*out));
+    if (!ShRequireInGame()) return 0;
+    if (!EnsurePhysics()) return 0;
+    if (!InStreamRange(x, y)) return ShFailPhys(SH_ERR_NOT_STREAMED);
+    /* Character/render and physics space differ by roughly ten metres in
+     * Wildlands. A local 24 m window covers that offset without selecting
+     * unrelated collision high above the player. */
+    if (!ProbeDown(x, y, nearZ + 16.0f, 24.0f, &z))
+        return ShFailPhys(SH_ERR_NO_GROUND);
+    hits = *(uint16_t *)(g_hitArr + 0x1a);
+    out->hitPos.x = x; out->hitPos.y = y; out->hitPos.z = z;
+    out->hits = hits;
+    memcpy(out->record, g_recs, sizeof(out->record));
     ShSetError(SH_OK);
     return 1;
 }

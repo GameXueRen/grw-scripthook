@@ -108,6 +108,7 @@ static volatile uint64_t g_uiAt = 0;
 
 static ShVec3 g_absPos;
 static volatile float g_back = 0.0f;
+static volatile float g_right = 0.0f;
 static volatile float g_up = 0.0f;
 static volatile float g_yaw = 0.0f;
 static volatile float g_pitch = 0.0f;
@@ -168,9 +169,9 @@ static void ApplyOrbit(float *m) {
 
     if (!ShGetPlayerPosition(&p)) return;
     WritePos(m,
-             p.x - m[4] * g_back,
-             p.y - m[5] * g_back,
-             p.z - m[6] * g_back + g_up);
+             p.x - m[4] * g_back + m[0] * g_right,
+             p.y - m[5] * g_back + m[1] * g_right,
+             p.z - m[6] * g_back + m[2] * g_right + g_up);
 }
 
 /* Game basis: x right, y forward, z up. Rebuilt absolutely
@@ -244,6 +245,39 @@ static void ApplyPose(float *m, float fov) {
     (void)fov;
 }
 
+/* First person sits centimetres from the weapon and arms, but the
+ * engine's near plane is tuned for its third-person chase camera, so
+ * gun geometry inside it is sliced and the multi-kilometre far plane
+ * leaves almost no depth precision on weapon parts. Pull it in only
+ * while the first person path owns the eye, never tighter than the
+ * engine's own value (zoom optics can run closer), and write the
+ * remembered stock plane back once on release. */
+#define CAM_NEAR_FP 0.02f
+static float g_nearStock = 0.0f;
+static int   g_nearStockValid = 0;
+
+static void NearRestore(void) {
+    if (!g_nearStockValid) return;
+    if (g_cam && ShReadableAddr(g_cam + CAM_NEAR, 4))
+        *(float *)(uintptr_t)(g_cam + CAM_NEAR) = g_nearStock;
+    g_nearStockValid = 0;
+}
+
+/* Whether first person owns the eye this frame. The head claim alone
+ * is not enough: a frame the engine path declines - an aim, a menu,
+ * the drone - is a frame the engine's own camera carries the view,
+ * and its near plane is the one it tuned. So the claim has to be
+ * armed AND the eye actually placed, measured the way the rest of
+ * this file measures it: g_headWroteAt, the stamp ShFp2PlaceEye's
+ * success refreshes every frame it takes the camera. The same
+ * window the view state lends (FP_LIVE_MS) covers a frame or two
+ * the placement has to sit out. */
+static int FpEyeOwned(void) {
+    return (g_apply & CAM_HEAD_BIT) != 0
+        && g_headWroteAt != 0
+        && GetTickCount64() - g_headWroteAt <= FP_LIVE_MS;
+}
+
 /* Skew and mode belong to the render camera, so they stay
  * on the camera build. Position, rotation and fov are all
  * taken further up, at their own source. */
@@ -254,6 +288,17 @@ static void ApplyFields(uint64_t cam) {
     }
     if (g_apply & SH_CAM_MODE)
         *(int *)(uintptr_t)(cam + CAM_MODE) = g_modeSet;
+    if (FpEyeOwned()) {
+        float nearPlane = *(const float *)(uintptr_t)(cam + CAM_NEAR);
+        /* Capture the stock plane once, from a plausible gameplay value;
+         * a scope already engaged must not become the restore target. */
+        if (!g_nearStockValid && nearPlane >= 0.05f && nearPlane < 5.0f) {
+            g_nearStock = nearPlane;
+            g_nearStockValid = 1;
+        }
+        if (g_nearStockValid && nearPlane > CAM_NEAR_FP)
+            *(float *)(uintptr_t)(cam + CAM_NEAR) = CAM_NEAR_FP;
+    }
 }
 
 /* Runs on the engine's own thread, immediately before the
@@ -273,6 +318,12 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
 
     g_cam = rcx;
     g_calls++;
+    /* The near plane first person pulled in goes back on the first
+     * frame the eye is not owned. Every way the claim can be
+     * dropped - the plugin's switch, a release, the engine path
+     * declining frame after frame - ends in this callback next,
+     * so this one place retires it for all of them. */
+    if (!FpEyeOwned()) NearRestore();
     /* When we last owned the eye, for the hand over grace in
      * ShCameraViewMode. */
     if (g_apply & CAM_HEAD_BIT) g_headHeldAt = GetTickCount64();
@@ -779,6 +830,23 @@ SH_API int ShSetCamera(const ShVec3 *pos) {
 SH_API int ShCameraOrbit(float back, float up) {
     if (!ShCameraHookInstall()) return 0;
     g_back = back;
+    g_up = up;
+    (void)InterlockedAnd((volatile LONG *)&g_apply,
+                         (LONG)~CAM_HEAD_BIT);
+    (void)InterlockedOr((volatile LONG *)&g_apply,
+                        (LONG)(SH_CAM_POS | CAM_ORBIT_BIT));
+    ShSetError(SH_OK);
+    return 1;
+}
+
+/* The same orbit with a third axis: metres sideways along the camera's
+ * right vector, which is what an over-the-shoulder offset is. Ported
+ * from the Wildlands Immersion Suite, whose ApplyOrbit carried the
+ * right term from the start. */
+SH_API int ShCameraOrbitAdvanced(float back, float right, float up) {
+    if (!ShCameraHookInstall()) return 0;
+    g_back = back;
+    g_right = right;
     g_up = up;
     (void)InterlockedAnd((volatile LONG *)&g_apply,
                          (LONG)~CAM_HEAD_BIT);

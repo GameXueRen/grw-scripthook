@@ -933,6 +933,135 @@ SH_API int ShIsInVehicle(void) {
     return ShInVehicleOf(p.entity);
 }
 
+/* ---- swimming + occupied vehicle (ported from the Wildlands
+ * Immersion Suite) ---- */
+
+SH_API int ShIsSwimming(void) {
+    static volatile LONG64 lastConfirmedAt = 0;
+    ShPlayer p;
+    uint64_t component;
+    uint8_t state = 0;
+    ULONGLONG now = GetTickCount64();
+    ULONGLONG last;
+
+    if (ShGetPlayer(&p) && p.entity) {
+        component = ShFindComponent(p.entity, 0x568EA9F4u);
+        if (component && ShReadBytes(component + 0x5E, &state, 1) &&
+            state == 87) {
+            InterlockedExchange64(&lastConfirmedAt, (LONG64)now);
+            return 1;
+        }
+    }
+    /* Locomotion briefly leaves state 87 when transitioning from treading
+     * water into forward/fast swimming. Keep the confirmed state across
+     * that animation gap so the camera cannot flash back. */
+    last = (ULONGLONG)InterlockedCompareExchange64(&lastConfirmedAt,0,0);
+    return last && now >= last && now - last <= 900;
+}
+
+static int VehicleNameHas(const char *name, const char *word) {
+    size_t i, j, nl, wl;
+    if (!name || !word) return 0;
+    nl = strlen(name); wl = strlen(word);
+    if (!wl || wl > nl) return 0;
+    for (i = 0; i + wl <= nl; i++) {
+        for (j = 0; j < wl; j++) {
+            char a = name[i + j], b = word[j];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+            if (b >= 'A' && b <= 'Z') b = (char)(b + ('a' - 'A'));
+            if (a != b) break;
+        }
+        if (j == wl) return 1;
+    }
+    return 0;
+}
+
+static int VehicleClassFromName(const char *name) {
+    static const char *air[] = {"helicopter","gunship","plane","airplane","cossna"};
+    static const char *water[] = {"boat","dinghy","yacht"};
+    int i;
+    for (i = 0; i < (int)(sizeof(air)/sizeof(air[0])); i++)
+        if (VehicleNameHas(name, air[i])) return SH_VEHICLE_AIR;
+    for (i = 0; i < (int)(sizeof(water)/sizeof(water[0])); i++)
+        if (VehicleNameHas(name, water[i])) return SH_VEHICLE_WATER;
+    return SH_VEHICLE_GROUND;
+}
+
+/* The occupied vehicle's catalogue id is not stored once: it is
+ * referenced repeatedly through the entity's own runtime graph. Scan
+ * the entity and its component blocks for dwords that match catalogue
+ * ids, and keep the id that shows up most. */
+static uint32_t VehicleIdAt(uint64_t entity) {
+    ShComponent components[96];
+    uint8_t block[0x2000];
+    unsigned short hits[512] = {0};
+    int count, c, b, off, v, best = -1, bestHits = 0, vn = ShVehicleCount();
+    if (vn > (int)(sizeof(hits) / sizeof(hits[0])))
+        vn = (int)(sizeof(hits) / sizeof(hits[0]));
+    count = ShGetComponents(entity, components, 96);
+    for (c = -1; c < count; c++) {
+        uint64_t bases[2]; int nb;
+        if (c < 0) { bases[0] = entity; nb = 1; }
+        else { bases[0] = components[c].component; bases[1] = components[c].dataBlock; nb = 2; }
+        for (b = 0; b < nb; b++) {
+            int bytes = (int)sizeof(block);
+            if (!bases[b]) continue;
+            if (!ShReadBytes(bases[b], block, (uint32_t)bytes)) {
+                bytes = 0x400;
+                if (!ShReadBytes(bases[b], block, (uint32_t)bytes)) continue;
+            }
+            for (off = 0; off < bytes; off += 4) {
+                uint32_t value = 0;
+                memcpy(&value, block + off, 4);
+                for (v = 0; v < vn; v++) {
+                    const ShVehicle *entry = ShVehicleAt(v);
+                    if (entry && value == entry->id && hits[v] != 0xFFFFu)
+                        hits[v]++;
+                }
+            }
+        }
+    }
+    /* A single catalogue-looking dword is common in unrelated component
+     * state. The occupied vehicle id is the one referenced repeatedly. */
+    for (v = 0; v < vn; v++) {
+        if ((int)hits[v] > bestHits) { bestHits = (int)hits[v]; best = v; }
+    }
+    if (best >= 0 && bestHits >= 2) {
+        const ShVehicle *entry = ShVehicleAt(best);
+        return entry ? entry->id : 0;
+    }
+    return 0;
+}
+
+SH_API int ShGetOccupiedVehicle(ShOccupiedVehicle *out) {
+    static uint64_t cachedEntity = 0;
+    static ShOccupiedVehicle cached;
+    ShPlayer p; uint64_t cur, vehicle = 0; uint32_t type = 0, id; const char *name;
+    int n;
+    if (!out) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    memset(out, 0, sizeof(*out));
+    if (!ShGetPlayer(&p) || !p.entity) return 0;
+    cur = p.entity;
+    for (n = 0; n < 16; n++) {
+        uint64_t next = ShParentOfT(cur, &type);
+        if (!next) break;
+        if (type == 1) { vehicle = next; break; }
+        cur = next;
+    }
+    if (!vehicle) { cachedEntity = 0; memset(&cached, 0, sizeof(cached)); return 0; }
+    if (vehicle == cachedEntity) { *out = cached; return 1; }
+    out->entity = vehicle;
+    id = VehicleIdAt(vehicle);
+    name = id ? ShVehicleName(id) : NULL;
+    out->id = id;
+    out->identified = id && name;
+    out->vehicleClass = name ? VehicleClassFromName(name) : SH_VEHICLE_UNKNOWN;
+    snprintf(out->name, sizeof(out->name), "%s", name ? name : "Unknown vehicle");
+    cachedEntity = vehicle;
+    cached = *out;
+    return 1;
+}
+
 /* Place an entity and confirm THAT entity moved. The
  * player mirror lags and sits metres off in a vehicle.
  */

@@ -21,11 +21,11 @@
 #define HK_ALLOC_LEN    5
 #define STUB_SLOT       0x800
 
-#define RB_VT_BASE      SH_IMG(0x3AD55D8)
-#define RB_VT_VEHICLE   SH_IMG(0x3AD7020)
-#define RB_VT_C         SH_IMG(0x39E7620)
-#define RB_VT_D         SH_IMG(0x38C88B0)
-#define RB_VT_E         SH_IMG(0x39979C8)
+#define RB_VT_BASE      SH_IMG(0x3AD54F8)
+#define RB_VT_VEHICLE   SH_IMG(0x3AD6F48)
+#define RB_VT_C         SH_IMG(0x39E74E0)
+#define RB_VT_D         SH_IMG(0x38C8820)
+#define RB_VT_E         SH_IMG(0x39977B8)
 
 #define RB_ENTITY       0x10
 
@@ -488,4 +488,43 @@ SH_API int ShShove(uint64_t entity, const ShVec3 *dir, float strength,
     ShAddAngularVelocity(entity, &spin);
     ShSetError(SH_OK);
     return 1;
+}
+/* Physics-backed entities within `radius` metres of the player (ported
+ * from the Wildlands Immersion Suite, adapted to the published map).
+ * Dedup happens against the OUTPUT only: the map may list an entity
+ * several times through its bodies, and the output is capped by the
+ * caller anyway. */
+SH_API int ShFindPhysicsEntities(float radius, ShEntity *out, int max) {
+    ShVec3 player, pos;
+    float radius2;
+    int i, j, n = 0;
+
+    if (!out || max <= 0 || radius <= 0.0f ||
+        !ShGetPlayerPosition(&player))
+        return 0;
+    if (!g_mapN || GetTickCount64() - g_mapAt > MAP_AGE_MS) RebuildMap();
+    radius2 = radius * radius;
+    AcquireSRWLockShared(&g_mapLock);
+    for (i = 0; i < g_mapN && n < max; i++) {
+        uint64_t ent = g_map[i].ent;
+        float yaw = 0, pitch = 0, roll = 0, dx, dy, dz, d2;
+        int duplicate = 0;
+
+        for (j = 0; j < n; j++)
+            if (out[j].entity == ent) { duplicate = 1; break; }
+        if (duplicate || !ShGetEntityTransform(ent, &pos, &yaw, &pitch, &roll))
+            continue;
+        dx = pos.x - player.x; dy = pos.y - player.y; dz = pos.z - player.z;
+        d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > radius2) continue;
+        memset(&out[n], 0, sizeof(out[n]));
+        out[n].entity = ent;
+        out[n].pos = pos;
+        out[n].distance = sqrtf(d2);
+        out[n].kind = ShGetEntityKind(ent);
+        strncpy(out[n].name, "Physics Prop", sizeof(out[n].name) - 1);
+        n++;
+    }
+    ReleaseSRWLockShared(&g_mapLock);
+    return n;
 }

@@ -8,24 +8,24 @@
 #include "image.h"
 #include "log.h"
 
-#define F_ALLOC_CTX     SH_IMG(0xE4094B0)
+#define F_ALLOC_CTX     SH_IMG(0xe410100)
 #define F_ALLOC         SH_IMG(0x674F1A0)
-#define G_POOL          SH_IMG(0x4D78D00)
+#define G_POOL          SH_IMG(0x4D78D80)
 #define F_SCENE_CTOR    SH_IMG(0x32EE140)
 #define F_SCENE_DTOR    SH_IMG(0x32EE1C0)
-#define F_SCENE_TICK    SH_IMG(0x16B9A730)
-#define F_SCENE_FLIP    SH_IMG(0x16B99DC0)
-#define F_SCENE_RENDER  SH_IMG(0x16B9B8C0)
-#define F_SCENE_RESIZE  SH_IMG(0x16B99570)
-#define F_SCENE_SETCTX  SH_IMG(0x173F9930)
-#define F_SCENE_SETRES  SH_IMG(0x173F9160)
-#define F_ATTACH        SH_IMG(0x32F4D00)
-#define F_FREE          SH_IMG(0xF93CA90)
-#define F_LOCK          SH_IMG(0x36206D0)
-#define F_UNLOCK        SH_IMG(0x3287730)
-#define RENDER_THUNK    SH_IMG(0x32EEFB0)
-#define G_UIMGR         SH_IMG(0x4D58560)
-#define VT_GAME_RESOLVER SH_IMG(0x3A05AA0)
+#define F_SCENE_TICK    SH_IMG(0x16b9bb20)
+#define F_SCENE_FLIP    SH_IMG(0x16b9b440)
+#define F_SCENE_RENDER  SH_IMG(0x16b99a30)
+#define F_SCENE_RESIZE  SH_IMG(0x16b98d80)
+#define F_SCENE_SETCTX  SH_IMG(0x16B9A730)
+#define F_SCENE_SETRES  SH_IMG(0x16B99DC0)
+#define F_ATTACH        SH_IMG(0x32F4230)
+#define F_FREE          SH_IMG(0xE4F8110)
+#define F_LOCK          SH_IMG(0x3621550)
+#define F_UNLOCK        SH_IMG(0x3286FF0)
+#define RENDER_THUNK    SH_IMG(0x32EE4A0)
+#define G_UIMGR         SH_IMG(0x4D585E0)
+#define VT_GAME_RESOLVER SH_IMG(0x3A05A00)
 
 /* scene private */
 #define SP_STATE     0x368
@@ -402,6 +402,16 @@ SH_API int ShGameScenes(char *buf, int n) {
     return count;
 }
 
+/* Show or suppress the game-owned HUD_* scenes. Framework and menu
+ * scenes remain visible either way (ported from the Wildlands
+ * Immersion Suite). */
+static volatile LONG g_gameHudVisible = 1;
+
+SH_API int ShGameHudShow(int visible) {
+    InterlockedExchange(&g_gameHudVisible, visible ? 1 : 0);
+    return 1;
+}
+
 static void PassEnded(uint64_t last) {
     if (last && g_nEndsNext < MAX_PASS && !InList(g_endsNext, g_nEndsNext, last))
         g_endsNext[g_nEndsNext++] = last;
@@ -439,6 +449,12 @@ static int32_t *__attribute__((ms_abi)) RenderHook(uint64_t scene,
     NoteActive(scene);
     /* under the game: before each pass's first scene */
     if (passStart && renderer) RenderOurs(renderer, 1);
+    /* Preserve scene tracking, but suppress the game's HUD layers on
+     * request; framework and menu scenes still draw (ShGameHudShow). */
+    if (!g_gameHudVisible && strncmp(SceneName(scene), "HUD_", 4) == 0) {
+        if (res) *res = 0;
+        r = res;
+    } else
     r = ((Scene3)F_SCENE_RENDER)(scene, res, renderer);
     g_prevCall = scene;
     /* over the game: after each pass's last scene */
