@@ -165,6 +165,36 @@ $c = @(
 )
 if ($releaseBuild) { $c += '/DSH_RELEASE=1' }
 
+# ---- the version resource --------------------------------------------------
+# What Windows shows in dinput8.dll's Properties, compiled from scripthook.rc.
+# The version comes from scripthook.h and is not typed again anywhere: that one
+# string is also what the loader's start up line, the crash report header, the
+# About page and the package folder name carry, so a second copy could only
+# disagree with it. "1.0-beta4" becomes file version 1.0.0.4 - the beta number
+# in the fourth field - and a plain "1.0.3" would be 1.0.3.0. StringFileInfo
+# keeps the letters, so the dialog reads "1.0-beta4".
+$shVer = ''
+$shVer4 = '1,0,0,0'
+$shFlags = '0'
+$shVerLine = Select-String -Path (Join-Path $root 'scripthook.h') `
+                           -Pattern '^\s*#define\s+SH_VERSION\s+"([^"]+)"' |
+             Select-Object -First 1
+if (-not $shVerLine) { throw 'SH_VERSION not found in scripthook.h' }
+$shVer = $shVerLine.Matches[0].Groups[1].Value
+if ($shVer -match '^(\d+)\.(\d+)(?:\.(\d+))?(?:-beta(\d+))?$') {
+    $shVer4 = '{0},{1},{2},{3}' -f $matches[1], $matches[2],
+              $(if ($matches[3]) { $matches[3] } else { 0 }),
+              $(if ($matches[4]) { $matches[4] } else { 0 })
+}
+# A beta says so in the file's own flags as well as in the version string.
+if ($shVer -match 'beta') { $shFlags = 'VS_FF_PRERELEASE' }
+$shRes = Join-Path $tmp 'scripthook.res'
+& rc /nologo "/fo$shRes" `
+      "/dSH_FILEVER=$shVer4" "/dSH_VERSTR=$shVer" "/dSH_FILEFLAGS=$shFlags" `
+      (Join-Path $root 'scripthook.rc')
+if ($LASTEXITCODE -ne 0) { throw 'rc failed for scripthook.rc' }
+Write-Host "version resource: $shVer, file version $shVer4 ($shFlags)"
+
 # The framework DLL and the import library plugins link.
 function Invoke-FrameworkBuild {
     param(
@@ -265,7 +295,10 @@ $fwLink = @("$tmp\guard_pad.obj") + $cppObjs + @(
     'dinput8.lib', 'dxguid.lib', 'gdi32.lib', 'user32.lib',
     'd3d11.lib', 'dxgi.lib', 'dwmapi.lib'
 )
-Invoke-FrameworkBuild -Sources $fwSources -LinkArgs $fwLink
+# The version resource rides in with the sources: cl hands a .res straight to
+# the linker, and nothing about it touches the export table (proxy.def still
+# decides what this DLL exports, and the game still loads it by name).
+Invoke-FrameworkBuild -Sources ($fwSources + $shRes) -LinkArgs $fwLink
 Write-Host "built $out"
 
 # ---- plugins

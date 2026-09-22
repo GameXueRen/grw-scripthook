@@ -1,5 +1,13 @@
 CC = x86_64-w64-mingw32-gcc
 CXX = x86_64-w64-mingw32-g++
+# The version resource (scripthook.rc) wants the same values build_msvc.ps1
+# passes, and it reads them from the same place: SH_VERSION in scripthook.h.
+# "1.0-beta4" is file version 1,0,0,4 - the beta number in the fourth field -
+# and the string form keeps the letters.
+WINDRES = x86_64-w64-mingw32-windres
+SH_VER   := $(shell sed -n 's/^\#define SH_VERSION "\(.*\)"/\1/p' scripthook.h)
+SH_VER4  := $(shell echo '$(SH_VER)' | sed -E 's/^([0-9]+)\.([0-9]+)(\.([0-9]+))?(-beta([0-9]+))?$$/\1 \2 \4 \6/' | awk '{ printf "%s,%s,%s,%s", $$1, $$2, ($$3 == "" ? 0 : $$3), ($$4 == "" ? 0 : $$4) }')
+SH_FLAGS := $(if $(findstring beta,$(SH_VER)),VS_FF_PRERELEASE,0)
 # -I. because a plugin source in plugins\<name>\ includes scripthook.h,
 # log.h and image.h from the repo root; MSVC gets the same through /I.
 CFLAGS = -O2 -Wall -Wextra -shared -static-libgcc -I.
@@ -255,6 +263,15 @@ build/%.o: %.cpp
 	@mkdir -p build
 	$(CXX) $(OVLFLAGS) -o $@ $<
 
+# The version resource, compiled from the same file the MSVC build compiles with
+# rc.exe. It is a link input like an object file, so the dinput8 target below
+# lists it in both places.
+build/scripthook.res: scripthook.rc scripthook.h
+	@mkdir -p build
+	$(WINDRES) -O coff -i scripthook.rc -o $@ \
+		-D SH_FILEVER=$(SH_VER4) -D SH_VERSTR=$(SH_VER) \
+		-D SH_FILEFLAGS=$(SH_FLAGS)
+
 $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c scripthook_tick.c \
                         scripthook_text.c \
                         scripthook_physics.c \
@@ -283,7 +300,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c scripthook
                         third_party/minhook/src/hook.c \
                         third_party/minhook/src/trampoline.c \
                         third_party/minhook/src/hde/hde64.c \
-                        $(OVLOBJS)
+                        build/scripthook.res $(OVLOBJS)
 	$(CC) $(CFLAGS) -o $@ loader.c scripthook_api.c \
 		scripthook_config.c scripthook_text.c scripthook_tick.c \
 		scripthook_physics.c scripthook_health.c \
@@ -310,7 +327,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c scripthook
 		third_party/minhook/src/trampoline.c \
 		third_party/minhook/src/hde/hde64.c \
 		-Ithird_party/minhook/include \
-		$(OVLOBJS) \
+		build/scripthook.res $(OVLOBJS) \
 		-ldinput8 -ldxguid -lgdi32 -luser32 \
 		-ld3d11 -ldxgi -ldwmapi -limm32 -lpsapi -ld3dcompiler_47 \
 		-Wl,-Bstatic -lstdc++ -lwinpthread -Wl,-Bdynamic \
@@ -327,6 +344,7 @@ $(GAMEDIR)/plugins/test_plugin/test_plugin.asi: plugins/test_plugin/test_plugin.
 
 clean:
 	rm -f $(GAMEDIR)/dinput8.dll
+	rm -f build/scripthook.res
 	rm -rf $(GAMEDIR)/logs $(GAMEDIR)/plugins
 
 # The Immersion Suite's third person camera presets over
