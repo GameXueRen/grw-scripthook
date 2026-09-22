@@ -14,7 +14,7 @@
  *   Weather              engine default, or the framework's six
  *   Hour (24h) / Minute  0..23 and 0..59
  *   Apply the set time   one action: ShSetTime(hour + minute / 60)
- *   Clock rate           one rate for the whole day, 0.00x to 50.00x
+ *   Dawn / Day / Dusk / Night rate   the clock rate of each window
  *
  * Three things the settings ask for, and three different moments they are sent
  * at - which is the whole design of the loop below:
@@ -22,13 +22,15 @@
  *   Time of day   written only when the player presses Enter on that one action
  *                 row - nothing else moves the world's clock, not the switch
  *                 going on, not a load, not the tick. Writing it every second
- *                 would pin the world at that hour; writing it anywhere else
- *                 would move the clock for a reason the player did not give.
- *   Clock rate    written once a second, the one rate the row holds. The
- *                 engine keeps the last rate it was given, so the once a
- *                 second write is not for the engine - it is what puts the
- *                 row's rate back after a session load restored the
- *                 engine's own.
+ *                 would pin the world at that hour, and a pinned world never
+ *                 crosses a window, so four rates could never be more than one
+ *                 of them; writing it anywhere else would move the clock for a
+ *                 reason the player did not give.
+ *   Clock rate    computed and written once a second from the hour the engine
+ *                 reports: 05-07 dawn, 07-18 day, 18-20 dusk, 20-05 night,
+ *                 night wrapping past midnight. Hard switching at the edges -
+ *                 which is what the page this replaces did, and what its four
+ *                 row labels say.
  *   Weather       written only when the engine's own type no longer matches
  *                 the row. That write is what arms the blend, so repeating it
  *                 every second would restart the transition every second.
@@ -80,13 +82,13 @@ static const char *kMinPtr[MINS_N];
 
 /* The four windows, in the order the page shows them. Night wraps past
  * midnight - from > to is the flag for that, not an error. */
-typedef struct { const char *name; float from, to; } Phase;
+typedef struct { const char *label; const char *name; float from, to; } Phase;
 
 static const Phase kPhases[] = {
-    { "@tw.p.dawn",   5.0f,  7.0f },
-    { "@tw.p.day",    7.0f, 18.0f },
-    { "@tw.p.dusk",  18.0f, 20.0f },
-    { "@tw.p.night", 20.0f,  5.0f }
+    { "@tw.dawn",  "@tw.p.dawn",   5.0f,  7.0f },
+    { "@tw.day",   "@tw.p.day",    7.0f, 18.0f },
+    { "@tw.dusk",  "@tw.p.dusk",  18.0f, 20.0f },
+    { "@tw.night", "@tw.p.night", 20.0f,  5.0f }
 };
 #define PHASES_N ((int)(sizeof(kPhases) / sizeof(kPhases[0])))
 
@@ -114,7 +116,8 @@ static const Phase kPhases[] = {
 static char        kSpeedOpts[SPEED_N][8];
 static const char *kSpeedPtr[SPEED_N];
 static float       kSpeedVal[SPEED_N];
-#define SPEED_KEY "speed"
+static const char *kSpeedKeys[PHASES_N] = { "dawn_speed", "day_speed",
+                                            "dusk_speed", "night_speed" };
 
 /* Weather: index 0 hands the weather back to the engine (the old page's
  * "engine default"), 1..6 are the framework's enum from SH_WEATHER_SUNNY up. */
@@ -139,7 +142,7 @@ static uint32_t g_menu;
 static volatile LONG g_on;
 static volatile LONG g_hour;
 static volatile LONG g_minute;
-static volatile LONG g_speed;
+static volatile LONG g_speed[PHASES_N];
 static volatile LONG g_weather;
 
 /* One line per problem, not one per second. A refusal that repeats is the same
@@ -180,6 +183,10 @@ static const ShText kEn[] = {
     { "@tw.applied",    "time set" },
     { "@tw.apply.off",  "the switch is off - nothing was sent" },
     { "@tw.apply.fail", "the engine refused that change - see the plugin log" },
+    { "@tw.dawn",       "Dawn speed (05:00-07:00)" },
+    { "@tw.day",        "Day speed (07:00-18:00)" },
+    { "@tw.dusk",       "Dusk speed (18:00-20:00)" },
+    { "@tw.night",      "Night speed (20:00-05:00)" },
     { "@tw.p.dawn",     "Dawn" },
     { "@tw.p.day",      "Day" },
     { "@tw.p.dusk",     "Dusk" },
@@ -208,6 +215,10 @@ static const ShText kZh[] = {
     { "@tw.applied",    "已按设定时间跳转" },
     { "@tw.apply.off",  "开关未打开，未下发" },
     { "@tw.apply.fail", "引擎拒绝了这项改动 —— 见插件日志" },
+    { "@tw.dawn",       "黎明时间流速（05:00-07:00）" },
+    { "@tw.day",        "白天时间流速（07:00-18:00）" },
+    { "@tw.dusk",       "黄昏时间流速（18:00-20:00）" },
+    { "@tw.night",      "夜晚时间流速（20:00-05:00）" },
     { "@tw.p.dawn",     "黎明" },
     { "@tw.p.day",      "白天" },
     { "@tw.p.dusk",     "黄昏" },
@@ -310,6 +321,7 @@ static LONG IniSpeedIndex(const char *key) {
 
 static void LoadSettings(void) {
     LONG on, hour, minute, weather;
+    int i;
 
     on      = (LONG)GetPrivateProfileIntA("Settings", "on", 0, g_ini);
     hour    = (LONG)GetPrivateProfileIntA("Settings", "hour", 12, g_ini);
@@ -324,18 +336,8 @@ static void LoadSettings(void) {
     InterlockedExchange(&g_hour, hour);
     InterlockedExchange(&g_minute, minute);
     InterlockedExchange(&g_weather, weather);
-    {
-        char probe[32];
-
-        /* An older ini carries the four per-window rates. The one row this
-         * page has now takes its starting point from the old day rate, so a
-         * carried configuration does not read as a reset. */
-        GetPrivateProfileStringA("Settings", SPEED_KEY, "", probe,
-                                 sizeof(probe), g_ini);
-        InterlockedExchange(&g_speed, probe[0]
-                            ? IniSpeedIndex(SPEED_KEY)
-                            : IniSpeedIndex("day_speed"));
-    }
+    for (i = 0; i < PHASES_N; i++)
+        InterlockedExchange(&g_speed[i], IniSpeedIndex(kSpeedKeys[i]));
 }
 
 static void SaveInt(const char *key, LONG value) {
@@ -393,21 +395,21 @@ static int PhaseOf(float hours) {
     return 1;                     /* in a gap, which cannot happen: day */
 }
 
-/* One rate for the whole day. The engine holds the last rate it was
- * given, so this is less a stream than a once-a-second re-assert: it is
- * what puts the row's rate back after a session load restored the
- * engine's own. */
+/* The rate of the window the world is in right now. Reading the hour every
+ * second is what makes the four rows one behaviour instead of four switches:
+ * the player sets them once, and the world crosses them on its own. */
 static void ApplyRate(void) {
-    float speed;
-    int idx = (int)g_speed;
+    float hours, speed;
+    int ph = ShGetTime(&hours) ? PhaseOf(hours) : 1;
+    int idx = (int)g_speed[ph];
 
     if (idx < 0 || idx >= SPEED_N) idx = SPEED_1X;
     speed = kSpeedVal[idx];
     if (ShSetTimeSpeed(speed)) {
         LogWorked(WHY_RATE);
     } else {
-        LogRefused(WHY_RATE, "twc: rate %.2f refused (%08x)",
-                   (double)speed, ShLastError());
+        LogRefused(WHY_RATE, "twc: rate %.2f (%s) refused (%08x)",
+                   (double)speed, kPhases[ph].label, ShLastError());
     }
 }
 
@@ -563,16 +565,22 @@ static void OnRow(uint32_t menu, uint32_t item, int value, void *user) {
         ShMenuStatus(g_menu, ApplyTime() ? "@tw.applied" : "@tw.apply.fail");
         break;
 
-    case ROW_SPEED:
+    default: {
+        int ph = which - ROW_SPEED;
+
+        if (ph < 0 || ph >= PHASES_N) break;
         if (value < 0 || value >= SPEED_N) break;
-        InterlockedExchange(&g_speed, value);
-        SaveSpeed(SPEED_KEY, value);
+        InterlockedExchange(&g_speed[ph], value);
+        SaveSpeed(kSpeedKeys[ph], value);
         if (g_on) ApplyRate();
         break;
+    }
     }
 }
 
 static void BuildMenu(void) {
+    int i;
+
     ShMenuHint(g_menu, "@tw.hint");
     ShMenuToggle(g_menu, "@tw.on", (int)g_on, OnRow, (void *)(intptr_t)ROW_ON);
     ShMenuList(g_menu, "@tw.weather", kWeatherOpts, WEATHER_N, (int)g_weather,
@@ -582,8 +590,10 @@ static void BuildMenu(void) {
     ShMenuList(g_menu, "@tw.minute", kMinPtr, MINS_N, (int)g_minute, OnRow,
                (void *)(intptr_t)ROW_MINUTE);
     ShMenuAction(g_menu, "@tw.apply", OnRow, (void *)(intptr_t)ROW_APPLY);
-    ShMenuList(g_menu, "@tw.speed", kSpeedPtr, SPEED_N, (int)g_speed,
-               OnRow, (void *)(intptr_t)ROW_SPEED);
+    for (i = 0; i < PHASES_N; i++)
+        ShMenuList(g_menu, kPhases[i].label, kSpeedPtr, SPEED_N,
+                   (int)g_speed[i], OnRow,
+                   (void *)(intptr_t)(ROW_SPEED + i));
     ShMenuStatus(g_menu, "@tw.st.none");
 }
 
@@ -615,7 +625,7 @@ static void RefreshStatus(void) {
     }
 
     if (!ShGetTimeSpeed(&speed))
-        speed = kSpeedVal[(int)g_speed];
+        speed = kSpeedVal[g_speed[ph]];
 
     if (!ShGetWeather(&weather) || weather < 0 || weather >= 6)
         label = ShLangText(g_name, "@tw.w.default");
