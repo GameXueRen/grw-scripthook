@@ -102,14 +102,17 @@ extern void ShForgeStartup(void);
  * stay together and nothing from the game root is touched.
  * plugins\ is created if this is a fresh install.
  *
- * A plugin loads only when the one thing that can say so says so: a
- * [plugins] line reading 1 - written by hand, or by the mod menu's
- * Plugins page. No line means off, and that goes for a plugin this
- * mod ships and for a third-party .asi dropped in here alike: the
- * scan writes the line it found missing (0), so the ini ends up
- * listing every folder it saw, and deleting that file is the reset -
- * a fresh default with every plugin off, which is what a player who
- * has just broken something wants to be able to do.
+ * A plugin loads unless a [plugins] line says otherwise: NO LINE MEANS ON, so
+ * a plugin that was just added - dropped in by the player, or shipped by an
+ * update - works without a trip to the menu first, which is the case that used
+ * to cost the most (a plugin folder that is there and silently doing nothing
+ * reads as a broken plugin). The scan writes the line a folder was missing (a
+ * 1), so the ini ends up naming every folder it saw; turning one off in the mod
+ * menu's Plugins page writes a 0 there, and that line is what keeps it off.
+ *
+ * Deleting scripthook.ini is still the reset, and what it resets to is now
+ * "everything in plugins\ loads" - what ruling a plugin out really takes is the
+ * menu switch, or taking its folder away.
  */
 #define PLUGIN_SCAN_MAX 64
 
@@ -259,24 +262,25 @@ static void LoadASIPlugins(void) {
         }
     }
 
-    /* Phase two: decide, and give a folder with no line of its own the
-     * line it is missing. -1 is "no line at all" (ShConfigGetBool
-     * cannot tell that apart from a 0, which is why this asks for an
-     * int), and the value is always 0: nothing is loaded until a line
-     * - or the menu - says 1. A write that fails is logged and changes
-     * nothing: the decision is made either way. */
+    /* Phase two: decide, and give a folder with no line of its own the line it
+     * is missing. -1 is "no line at all" (ShConfigGetInt cannot tell that apart
+     * from a 0, which is why this asks for an int), and a folder with no line
+     * is ON: a plugin that was just added works without a trip to the menu
+     * first. A 0 written by the Plugins page is what keeps one off from then
+     * on. A write that fails is logged and changes nothing: the decision is
+     * made either way. */
     for (i = 0; i < count; i++) {
         const char *name = names[i];
         int on = ShConfigGetInt("plugins", name, -1);
 
         if (on < 0) {
-            on = 0;
-            if (ShConfigSetInt("plugins", name, 0)) {
-                Log("plugins\\%s: no [plugins] line, wrote %s=0 (off by "
-                    "default; switch it on in the mod menu)", name, name);
+            on = 1;
+            if (ShConfigSetInt("plugins", name, 1)) {
+                Log("plugins\\%s: no [plugins] line, wrote %s=1 (on by "
+                    "default; switch it off in the mod menu)", name, name);
                 nAdded++;
             } else {
-                Log("plugins\\%s: no [plugins] line, off by default "
+                Log("plugins\\%s: no [plugins] line, on by default "
                     "(writing it back failed)", name);
             }
         }

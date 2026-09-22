@@ -48,37 +48,19 @@ file's reference, to be copied out by hand.
 `scripthook.ini` is the main config, parsed before any plugin
 loads. The loader reads `[loader] load_plugins` and one
 `[plugins] <name>` line per plugin, and **a plugin with no line
-there is not loaded** - the same for a plugin this mod ships and
-for a third-party `.asi` dropped into `plugins\`. Write
-`<name>=1` to load it, or switch it on in the mod menu's Plugin
-switches page; both take effect on the next launch. The first scan writes
-the line a folder is missing (`=0`), so the list ends up naming
-every plugin it found. Deleting `scripthook.ini` is the reset: a
-fresh default is written with every plugin off, which is how a
-player rules plugins out after something breaks - but the file
-also holds the `[loader]` CPU dials and the language, so those
-come back as defaults too. Future framework features will take
-their switches from the same file.
-
-**What you need of the API.** A plugin that calls something the API
-only grew later declares it once, outside every function:
-
-```c
-SH_REQUIRES_API(2);   /* I call ShGetAmmoObject */
-```
-
-Name the last thing you use, not the header you happened to build
-against: a plugin that only calls older entry points stays loadable
-on older frameworks, and the loader refuses on "needs more than this
-one offers" and nothing else. The declaration is read out of the file
-before the plugin's code runs at all, and a plugin that needs more is
-refused - a line in `logs\scripthook.log`, and a toast once the
-overlay is up. A plugin that writes nothing declares nothing and
-loads exactly as it always did: silence is "no requirement", never
-"whatever is newest", and one that is switched off in
-`scripthook.ini` is not even read. The framework's own number is on
-the About page; `SH_API_VERSION` in `scripthook.h` carries the note
-for each version that changed it, and it only ever goes up by one.
+there is loaded** - the same for a plugin this mod ships and for a
+third-party `.asi` dropped into `plugins\`. That is the case that
+used to cost the most: a folder that is there and silently doing
+nothing reads as a broken plugin. The first scan writes the line a
+folder was missing (`=1`), so the list ends up naming every plugin
+it found; switching one off in the mod menu's Plugin switches page
+writes a `0` there, and that line is what keeps it off. Both take
+effect on the next launch. Deleting `scripthook.ini` is still the
+reset, and what it resets to is "everything in `plugins\` loads" -
+so ruling a plugin out means the menu switch, or taking its folder
+away. The file also holds the `[loader]` CPU dials and the
+language, so those come back as defaults too. Future framework
+features will take their switches from the same file.
 
 What deleting it does **not** touch is the text: the compiled-in tables
 (the framework's in `scripthook_text.c`, each plugin's own) carry English
@@ -145,6 +127,26 @@ if (g_setBlur) g_setBlur(0);
 ```
 
 ## Rules that hold across the API
+
+**What you need of the API.** A plugin that calls something the API
+only grew later declares it once, outside every function:
+
+```c
+SH_REQUIRES_API(2);   /* I call ShGetAmmoObject */
+```
+
+Name the last thing you use, not the header you happened to build
+against: a plugin that only calls older entry points stays loadable
+on older frameworks, and the loader refuses on "needs more than this
+one offers" and nothing else. The declaration is read out of the file
+before the plugin's code runs at all, and a plugin that needs more is
+refused - a line in `logs\scripthook.log`, and a toast once the
+overlay is up. A plugin that writes nothing declares nothing and
+loads exactly as it always did: silence is "no requirement", never
+"whatever is newest", and one that is switched off in
+`scripthook.ini` is not even read. The framework's own number is on
+the About page; `SH_API_VERSION` in `scripthook.h` carries the note
+for each version that changed it, and it only ever goes up by one.
 
 **Return values.** Every `int` function returns 1 on success and
 0 on failure. On failure `ShLastError()` returns the reason as
