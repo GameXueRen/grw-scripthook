@@ -410,6 +410,14 @@ Build-Plugin -Name 'micfix' -Source 'micfix.c' `
     (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 )
 
+# Ballistics and CameraPresets came in with PR #2 (R4333).  They were wired into
+# the MinGW Makefile only, and the MSVC build is the one that ships here: without
+# these two lines the plugin folders would be deployed with an ini seeded beside
+# them and no .asi to load, which reads as "the plugin is broken" rather than
+# "the plugin was never built".
+Build-Plugin 'Ballistics'    'Ballistics.c'    @($libPath, 'libscripthook.lib')
+Build-Plugin 'CameraPresets' 'CameraPresets.c' @($libPath, 'libscripthook.lib')
+
 # A plugin's own files are seeded next to its .asi the first time only:
 # a later build must never overwrite settings changed in game, and never
 # a lang.ini that was edited in place. Both sit in the plugin's source
