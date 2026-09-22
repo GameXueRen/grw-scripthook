@@ -33,8 +33,10 @@
 
 static const ShText kEnUS[] = {
     /* menu furniture */
+    /* One line, kept as short as the Chinese it mirrors: the panel does not
+     * wrap, so a line that runs past it is a line read in halves. */
     { "@menu.root.hint",
-      "F4 toggles the menu, Enter confirms, ESC back; "
+      "F4 menu, Enter confirm; Esc / Backspace back; "
       "\xE2\x86\x91 \xE2\x86\x93 select, \xE2\x86\x90 \xE2\x86\x92 adjust" },
     { "@menu.on",             "on" },
     { "@menu.off",            "off" },
@@ -58,11 +60,12 @@ static const ShText kEnUS[] = {
     { "@settings.hint",
       "Plugin switches and CPU scheduling take effect on the next start." },
     { "@settings.order",      "Menu order" },
+    /* One line, and about the length of the Chinese it translates. The
+     * English this replaces explained when a move is saved and what happens
+     * to a plugin that is switched off - useful, but it ran to four lines
+     * where the Chinese is one sentence, and a hint is read at a glance. */
     { "@settings.order.hint",
-      "Left / right moves the highlighted page one place.\n"
-      "Every move is saved at once and the root menu\n"
-      "follows it; a plugin switched off keeps the place\n"
-      "it will come back to." },
+      "Menu order: \xE2\x86\x90 \xE2\x86\x92 moves the row up / down." },
     { "@settings.order.empty", "No plugin menu to order yet." },
     { "@settings.order.saved", "Order saved" },
 
@@ -115,13 +118,13 @@ static const ShText kEnUS[] = {
      * anything that asks. */
     { "@settings.mode.none",  "no mode" },
     { "@settings.plugins.note",
-      "No [plugins] line means off. Switch it on here; deleting "
-      "scripthook.ini resets every plugin to off." },
+      "No [plugins] line means the plugin is loaded. Switch it off here; "
+      "deleting scripthook.ini resets every plugin to loaded." },
+    { "@settings.plugins.empty", "No plugin folders in plugins\\ yet." },
     { "@menu.offnow",         "Off now" },
     { "@cpu.now",             "Now: %s - cores %s - priority %s" },
     { "@cpu.hint",
-      "Processor set and priority for each start up stage; changes take "
-      "effect on the next start." },
+      "Cores and priority per start up stage; restart to apply." },
     { "@cpu.hint.ecore.na",   "E-cores off: not applicable on this CPU." },
     { "@cpu.hint.ecore.none", "E-cores off: this CPU has no E-cores." },
     { "@cpu.hint.ecore.failed", "E-cores off: detection failed." },
@@ -199,7 +202,7 @@ static const ShText kEnUS[] = {
 
 static const ShText kZhCN[] = {
     { "@menu.root.hint",
-      "F4 开关菜单，Enter 确认，ESC 返回；↑ ↓ 上下选择，← → 左右调整" },
+      "F4 菜单，Enter 确认；Esc / Backspace 返回；↑ ↓ 上下选择，← → 左右调整" },
     { "@menu.on",             "开" },
     { "@menu.off",            "关" },
     { "@menu.footer.pos",     "第 %d / %d 行" },
@@ -247,8 +250,9 @@ static const ShText kZhCN[] = {
     { "@settings.mode",       "游玩模式" },
     { "@settings.mode.none",  "no mode" },
     { "@settings.plugins.note",
-      "没有 [plugins] 行即为关闭。在这里打开；删除 scripthook.ini 会把所有"
-      "插件重置为关闭。" },
+      "没有 [plugins] 行即为加载。在这里关闭；删除 scripthook.ini 会把所有"
+      "插件重置为加载。" },
+    { "@settings.plugins.empty", "plugins\\ 里还没有插件。" },
     { "@menu.offnow",         "当前不可用" },
     { "@cpu.now",             "当前：%s - 核心 %s - 优先级 %s" },
     { "@cpu.hint",

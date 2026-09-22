@@ -640,6 +640,7 @@ static char g_blLast[96];
 
 static void SetPluginHint(void) {
     char notice[96], text[384];
+    size_t used;
     int n;
 
     /* One line, by decision of 2026-09-17: the switches page says when its
@@ -650,8 +651,19 @@ static void SetPluginHint(void) {
      * explanation, it is which plugins the mode in play has taken away. */
     ShPluginBlacklistNotice(notice, sizeof(notice));
     n = snprintf(text, sizeof(text), "%s", ShLang("@settings.restart"));
-    if (notice[0] && n > 0 && (size_t)n + 2 < sizeof(text))
-        snprintf(text + n, sizeof(text) - (size_t)n, "\n%s", notice);
+    used = n > 0 ? (size_t)n : 0;
+    /* One exception to that single line: a list with nothing in it. The rows
+     * are the plugins the loader found, so with plugins\ empty the page is
+     * blank - and a blank page reads as a menu that stopped working, which is
+     * what it looked like on 2026-09-23. Said here rather than as a row,
+     * because a row in that list would read as a plugin. */
+    if (g_nplugins == 0 && used + 2 < sizeof(text)) {
+        n = snprintf(text + used, sizeof(text) - used, "\n%s",
+                     ShLang("@settings.plugins.empty"));
+        if (n > 0) used += (size_t)n;
+    }
+    if (notice[0] && used + 2 < sizeof(text))
+        snprintf(text + used, sizeof(text) - used, "\n%s", notice);
     ShMenuHint(g_pluginMenu, text);
 }
 

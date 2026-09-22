@@ -502,12 +502,29 @@ static void Navigate(void) {
     int upHeld, dnHeld, lfHeld, rtHeld;
     int navDown, navDir, valDown, valDir, r;
 
-    if (!m || m->count == 0) return;
+    if (!m) return;
     /* The page itself can be one the mode has taken away: step out of it
      * before a key lands anywhere. */
     BackOutOfHiddenPage(m);
     m = MenuOf(g_current);
-    if (!m || VisibleCount(m) == 0) return;
+    if (!m) return;
+
+    /* Leaving comes first, and it works on a page with nothing on it: the
+     * plugin list with plugins\ empty, or a page whose every row the mode has
+     * taken away. This used to sit below a "nothing to navigate" return, so on
+     * such a page Back and ESC did nothing at all and only F4 - which is not
+     * part of navigation - closed the menu. Reported 2026-09-23 against the
+     * Plugin switches page with no plugins installed. */
+    if (Pressed(VK_BACK) || Pressed(VK_ESCAPE)) {
+        HoldReset();
+        if (m->parent) g_current = m->parent;
+        else g_open = 0;
+        return;
+    }
+
+    if (m->count == 0) return;
+    /* A page whose rows are all hidden has nothing to move to either. */
+    if (VisibleCount(m) == 0) return;
     /* The arrows navigate and nothing else does. WASD used to navigate as
      * well, which is why the menu had to hide the whole keyboard while it
      * was open; giving it back is what lets the player keep playing. Each
@@ -567,11 +584,6 @@ static void Navigate(void) {
         } else {
             Fire(g_current, m->sel, it);
         }
-    }
-    if (Pressed(VK_BACK) || Pressed(VK_ESCAPE)) {
-        HoldReset();
-        if (m->parent) g_current = m->parent;
-        else g_open = 0;
     }
 }
 
