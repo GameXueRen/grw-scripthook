@@ -23,6 +23,7 @@
 #include <stdarg.h>
 
 #include "scripthook.h"
+#include "log.h"
 
 /* The mode switches on a keypress, so the walk has to keep
  * up with it. 250 left the camera held far too long. */
@@ -226,7 +227,6 @@ typedef int (*MenuIsOpen_t)(void);
  * read with GetAsyncKeyState and that reports the PHYSICAL key. */
 typedef int (*GameFocused_t)(void);
 typedef int (*MenuHint_t)(uint32_t, const char *);
-typedef int (*LogPath_t)(const char *, char *, int);
 
 /* The engine side of the view. Optional: a ScriptHook without
  * them has no first person at all, and the plugin says so
@@ -243,8 +243,6 @@ typedef void     (*Fp2HeadShow_t)(int);
 typedef int      (*Fp2Bow_t)(void);
 typedef uint32_t (*Fp2Age_t)(void);
 typedef int      (*PluginAllowed_t)(void);
-
-static LogPath_t    g_logPath;
 
 /* Config convention, shared by every plugin: the .ini sits
  * beside the .asi and takes its base name, so
@@ -369,13 +367,12 @@ static volatile int g_hotKey = 0;   /* index into g_hotVk, 0 = off */
 
 /* Diagnostic log: firstperson.log beside the game log folder. Written from
  * the tick thread and from the two that only react to a key or a bind, so
- * three threads share these statics - which is why the first open below is
- * guarded by an exchange: two of them entering together opened the file
- * twice and leaked the handle the first one had just made. */
-static FILE *g_diag = NULL;
-static char  g_diagPath[MAX_PATH];
+ * three threads share these statics - and the log below is opened through the
+ * framework's writer, which is idempotent for the name already open, so the
+ * exchange that used to guard the hand-rolled open (two threads entering
+ * together opened the file and leaked one handle) is gone with the open. */
 static int   g_diagOn = 0;      /* [Settings] diag, default off */
-static volatile LONG g_diagMade;
+static volatile LONG g_logMade;
 
 /* Set by the slider rows, written by the tick thread - see SaveIni. Declared
  * here because the tick loop reaches it long before SaveIni is defined. */
@@ -386,70 +383,31 @@ static void SaveIniSoon(void);
  * helpers below. */
 static const char *SetText(const char *id);
 
-/* This plugin's log is its own diagnostics, and the level's job here is
- * only to be able to turn all of it off: the file is written at every
- * level except none, unlike the framework's module logs, which need info.
- * The line that matters most in a plugin's log is usually the one about
- * something not working - exactly the line a quiet session would drop.
- * Bound on first use and optional - a framework that does not carry
- * ShLogLevel leaves the log ungated, which is what this did before.
- * The diag switch in the plugin's own ini still has to be on as well:
- * this is the outer gate, that one is the inner. */
-static int LogWanted(void) {
-    typedef int (*LevelFn)(void);
-    static LevelFn fn;
-    static int tried;
-
-    if (!tried) {
-        HMODULE di;
-
-        tried = 1;
-        di = GetModuleHandleA("dinput8.dll");
-        if (di) *(FARPROC *)&fn = GetProcAddress(di, "ShLogLevel");
-    }
-    return !fn || fn() > SH_LOG_NONE;
-}
-
+/* This plugin's log is its own diagnostics, written through the framework's
+ * writer so that it lands in logs\ with the other logs, obeys [Settings]
+ * LogLevel the way a plugin's log does (written at every level except none -
+ * the line a plugin's log is read for is usually the one about something not
+ * working, which a quiet session would drop) and is kept for the runs before
+ * this one instead of being truncated at start up: log.h renames the previous
+ * run's file aside as firstperson-<date>.log.
+ *
+ * The diag switch in the plugin's own ini still has to be on as well: that is
+ * the outer gate, and this is where the file is opened the first time a line
+ * is actually wanted. LogInit opens a file, so one thread does it and the rest
+ * go straight to Logv, which drops the line while it is still being opened. */
 static void Diag(const char *fmt, ...) {
-    char buf[256];
     va_list ap;
-    SYSTEMTIME st;
 
     /* Diagnostics are opt-in ([Settings] diag=1): the beat line
      * alone used to write+flush once a second for the whole
      * process lifetime, which is where the megabyte logs came
      * from. */
-    if (!g_diagOn || !LogWanted()) return;
-    if (!g_diagPath[0]) {
-        /* One thread resolves and opens it; the others drop this line
-         * rather than race for the same two statics. */
-        if (InterlockedExchange(&g_diagMade, 1)) return;
-        if (g_logPath &&
-            g_logPath("firstperson.log", g_diagPath,
-                      sizeof(g_diagPath))) {
-        } else {
-            GetModuleFileNameA(NULL, g_diagPath,
-                               sizeof(g_diagPath));
-            { char *s = strrchr(g_diagPath, '\\');
-              if (s) s[1] = 0; }
-            /* Bound the append: an exe path near MAX_PATH
-             * used to strcat past the buffer. */
-            if (strlen(g_diagPath) + 16 < sizeof(g_diagPath))
-                strcat(g_diagPath, "firstperson.log");
-            else
-                return;
-        }
-        g_diag = fopen(g_diagPath, "w");
-    }
-    if (!g_diag) return;
-    GetLocalTime(&st);
+    if (!g_diagOn) return;
+    if (!g_logMade && InterlockedCompareExchange(&g_logMade, 1, 0) == 0)
+        LogInitAlways("firstperson.log");
     va_start(ap, fmt);
-    _vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    Logv(fmt, ap);
     va_end(ap);
-    buf[sizeof(buf) - 1] = 0;
-    fprintf(g_diag, "[%02u:%02u:%02u.%03u] %s\n",
-            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
-    fflush(g_diag);
 }
 
 /* ---- the camera ------------------------------------------- */
@@ -1398,7 +1356,6 @@ static DWORD WINAPI BindThread(LPVOID p) {
         m = GetModuleHandleA("dinput8.dll");
         if (!m) Sleep(500);
     }
-    *(FARPROC *)&g_logPath = GetProcAddress(m, "ShLogPath");
     *(FARPROC *)&g_inGame = GetProcAddress(m, "ShIsInGame");
     *(FARPROC *)&g_state = GetProcAddress(m, "ShGetGameState");
     *(FARPROC *)&g_fp = GetProcAddress(m, "ShCameraFirstPerson");

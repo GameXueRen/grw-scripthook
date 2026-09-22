@@ -58,6 +58,7 @@
 #include <string.h>
 
 #include "third_party/minhook/include/MinHook.h"
+#include "log.h"
 
 /* The plugin binds every framework entry point by name, so only the
  * menu callback type has to be declared the same way. */
@@ -98,57 +99,36 @@ static MenuStatus_t      pMenuStatus;
 
 static HINSTANCE g_inst;
 static uint32_t  g_menu;
-static FILE     *g_log;
-static volatile LONG g_logBusy;
 static uint64_t  g_base;
 
 #define SLOT_MAX   17
 #define METH_MAX   256
 #define DICT_MAX   24000
 
-/* ---- logging ------------------------------------------------------- */
+/* ---- logging ------------------------------------------------------------
+ *
+ * Through the framework's writer, so the file lands in logs\ with the others
+ * (the plugin's own folder made plugins\<name>\logs once, which is not where
+ * a report looks) and obeys [Settings] LogLevel.
+ *
+ * It is no longer append-only: a mode switch restarts the client, so the old
+ * file accumulated one process after another forever. Each run now gets its
+ * own file, the runs before are kept beside it as <name>-<date>.log, and the
+ * session marker line log.h writes carries the pid and the start time the
+ * per-line pid stamp used to carry.
+ *
+ * LogInit opens a file, so one thread does it and the rest go straight to
+ * Logv, which drops the line while it is still being opened. */
+static volatile LONG g_logMade;
 
-static void LogOpen(void) {
-    char path[MAX_PATH];
-    char dir[MAX_PATH];
-    char *slash;
-
-    /* The main module is GRW.exe, so its folder is the game dir and
-     * logs\ lands next to the other logs. The plugin's own folder is
-     * the wrong place: it made plugins\<name>\logs once. */
-    if (!GetModuleFileNameA(NULL, path, MAX_PATH)) return;
-    strncpy(dir, path, sizeof(dir) - 1);
-    dir[sizeof(dir) - 1] = 0;
-    slash = strrchr(dir, '\\');
-    if (!slash) return;
-    slash[1] = 0;
-    if (strlen(dir) + 24 >= sizeof(dir)) return;
-    strcat(dir, "logs");
-    CreateDirectoryA(dir, NULL);
-    snprintf(path, sizeof(path), "%s\\ModeCallProbe.log", dir);
-    g_log = fopen(path, "a");
-}
-
-/* One line per event, stamped with the process id: a mode switch
- * restarts the client, so one file holds several processes. */
 static void PLog(const char *fmt, ...) {
     va_list ap;
-    char line[1024];
-    SYSTEMTIME st;
 
+    if (!g_logMade && InterlockedCompareExchange(&g_logMade, 1, 0) == 0)
+        LogInitAlways("ModeCallProbe.log");
     va_start(ap, fmt);
-    vsnprintf(line, sizeof(line), fmt, ap);
+    Logv(fmt, ap);
     va_end(ap);
-    if (!g_log) return;
-    while (InterlockedExchange(&g_logBusy, 1)) Sleep(1);
-    if (g_log) {
-        GetLocalTime(&st);
-        fprintf(g_log, "%02u:%02u:%02u.%03u [%lu] %s\n",
-                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-                (unsigned long)GetCurrentProcessId(), line);
-        fflush(g_log);
-    }
-    InterlockedExchange(&g_logBusy, 0);
 }
 
 /* ---- the name hash -------------------------------------------------
@@ -361,7 +341,6 @@ static void DumpAll(const char *why) {
     int i, st;
 
     if (!pGameFlow) return;
-    if (!g_log) LogOpen();
     if (pGetGameState) st = pGetGameState(); else st = -1;
     if (pGetGameStateName) pGetGameStateName(stname, (int)sizeof(stname));
 
@@ -1438,7 +1417,6 @@ static DWORD WINAPI InitThread(LPVOID arg) {
         waited += 200;
     }
 
-    LogOpen();
     PLog("ModeCallProbe start base=%llX", (unsigned long long)g_base);
 
     pGetGameState     = (GetGameState_t)Bind(m, "ShGetGameState");

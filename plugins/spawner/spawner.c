@@ -12,6 +12,7 @@
 #include <math.h>
 
 #include "scripthook.h"
+#include "log.h"
 
 #define AHEAD  6.0f
 #define LIFT   1.0f
@@ -30,59 +31,25 @@ typedef int (*MenuHint_t)(uint32_t, const char *);
 
 /* This plugin had no log at all, which made the one failure it can have -
  * an export this dinput8 does not carry - look like a submenu that simply
- * never appeared. One file, opened on first use, with the same directory
- * rule the other plugins use. */
-static FILE *g_log;
-
-/* This plugin's log is its own diagnostics, and the level's job here is
- * only to be able to turn all of it off: the file is written at every
- * level except none, unlike the framework's module logs, which need info.
- * The line that matters most in a plugin's log is usually the one about
- * something not working - exactly the line a quiet session would drop.
- * Bound on first use and optional - a framework that does not carry
- * ShLogLevel leaves the log ungated, which is what this did before. */
-static int LogWanted(void) {
-    typedef int (*LevelFn)(void);
-    static LevelFn fn;
-    static int tried;
-
-    if (!tried) {
-        HMODULE di;
-
-        tried = 1;
-        di = GetModuleHandleA("dinput8.dll");
-        if (di) *(FARPROC *)&fn = GetProcAddress(di, "ShLogLevel");
-    }
-    return !fn || fn() > SH_LOG_NONE;
-}
+ * never appeared. One file, opened on first use, through the framework's own
+ * writer: it lands in logs\ with the other logs, it obeys [Settings] LogLevel
+ * the way a plugin's log does - written at every level except none, because
+ * the line a plugin's log is read for is usually the one about something not
+ * working - and it is kept for the runs before this one instead of being wiped
+ * at start up (log.h renames the previous run's file aside).
+ *
+ * LogInit opens a file, so one thread does it and the rest go straight to
+ * Logv, which drops the line while it is still being opened. */
+static volatile LONG g_logMade;
 
 static void SpLog(const char *fmt, ...) {
-    char path[MAX_PATH];
-    char *s;
     va_list ap;
-    SYSTEMTIME st;
 
-    if (!g_log) {
-        if (!LogWanted()) return;
-        if (!GetModuleFileNameA(NULL, path, MAX_PATH)) return;
-        s = strrchr(path, '\\');
-        if (!s) return;
-        s[1] = 0;
-        if (strlen(path) + 5 < sizeof(path)) strcat(path, "logs");
-        CreateDirectoryA(path, NULL);
-        if (strlen(path) + 13 < sizeof(path)) strcat(path, "\\spawner.log");
-        else return;
-        g_log = fopen(path, "w");
-    }
-    if (!g_log) return;
-    GetLocalTime(&st);
+    if (!g_logMade && InterlockedCompareExchange(&g_logMade, 1, 0) == 0)
+        LogInitAlways("spawner.log");
     va_start(ap, fmt);
-    fprintf(g_log, "[%02u:%02u:%02u.%03u] ",
-            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    vfprintf(g_log, fmt, ap);
+    Logv(fmt, ap);
     va_end(ap);
-    fputc('\n', g_log);
-    fflush(g_log);
 }
 
 static Count_t      g_count;

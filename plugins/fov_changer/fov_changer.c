@@ -27,6 +27,7 @@
 #include <math.h>
 
 #include "scripthook.h"
+#include "log.h"
 
 #define DEG2RAD     0.01745329252f
 #define RAD2DEG     57.2957795f
@@ -489,43 +490,41 @@ static void OnBlocked(int allowed, int blocked, void *user) {
 
 /* ---- diagnostic log ----------------------------------------------------
  *
- * fov_changer.log, beside the framework's own logs: the engine's value, what
- * the camera carries, what we pushed and the verdict that decided it - on
- * every change, and once a second while it holds. The plugin went without a
- * log until 2026-09-21, and the two symptoms that day (a hold that did not
- * engage, a value that did not land) are exactly the kind that cannot be
- * told apart from the outside: both look like "it still zooms".
+ * The engine's value, what the camera carries, what we pushed and the verdict
+ * that decided it - on every change, and once a second while it holds. The
+ * plugin went without a log until 2026-09-21, and the two symptoms that day (a
+ * hold that did not engage, a value that did not land) are exactly the kind
+ * that cannot be told apart from the outside: both look like "it still zooms".
  *
- * Written from the tick thread only, so no lock. Off unless [Settings]
- * diag=1 asks for it - the same shape firstperson uses, and for the same
- * reason: this is here for the next field report, not for every session.
- */
-static FILE *g_diag;
+ * Written from the tick thread only, so no lock. Off unless [Settings] diag=1
+ * asks for it - the same shape firstperson uses, and for the same reason: this
+ * is here for the next field report, not for every session.
+ *
+ * Through the framework's writer, so the file lands in logs\ with the others,
+ * obeys [Settings] LogLevel and is kept for the runs before this one - log.h
+ * renames the previous run's file aside rather than truncating it. */
+static volatile LONG g_diagOn = -1;     /* -1 = not asked yet, 0 = off, 1 = on */
+static volatile LONG g_diagMade;
 
 static void DiagOpen(void) {
-    typedef int (*LogPath_t)(const char *, char *, int);
-    HMODULE m = GetModuleHandleA("dinput8.dll");
-    LogPath_t lp = NULL;
-    char path[MAX_PATH];
+    /* Asked once and cached: GetPrivateProfileIntA is file I/O, and this runs
+     * on the tick path. */
+    if (g_diagOn < 0) {
+        LONG on = IniInt("diag", 0) ? 1 : 0;
 
-    if (g_diag) return;
-    if (!IniInt("diag", 0)) return;
-    if (m) *(FARPROC *)&lp = GetProcAddress(m, "ShLogPath");
-    if (lp && lp("fov_changer.log", path, (int)sizeof(path)))
-        g_diag = fopen(path, "w");
+        InterlockedCompareExchange(&g_diagOn, on, -1);
+    }
+    if (g_diagOn != 1) return;
+    if (!g_diagMade && InterlockedCompareExchange(&g_diagMade, 1, 0) == 0)
+        LogInitAlways("fov_changer.log");
 }
 
 static void DiagState(float eng, float cam, float shown, float want,
                       int aim, int hold, int held, int nz, int ovr) {
-    SYSTEMTIME st;
-
-    if (!g_diag) return;
-    GetLocalTime(&st);
-    fprintf(g_diag, "%02u:%02u:%02u.%03u  eng=%.3f cam=%.3f shown=%.3f "
-            "want=%.3f aim=%d hold=%d held=%d nz=%d ovr=%d\n",
-            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-            eng, cam, shown, want, aim, hold, held, nz, ovr);
-    fflush(g_diag);
+    if (g_diagOn != 1) return;
+    Log("eng=%.3f cam=%.3f shown=%.3f want=%.3f aim=%d hold=%d held=%d "
+        "nz=%d ovr=%d",
+        eng, cam, shown, want, aim, hold, held, nz, ovr);
 }
 
 /* Entering a session reinstalls the camera hook, so the

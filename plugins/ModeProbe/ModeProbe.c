@@ -55,6 +55,7 @@
 #include <wchar.h>
 
 #include "scripthook.h"
+#include "log.h"
 
 /* ---- late bound framework ---------------------------------- */
 
@@ -183,51 +184,30 @@ static int  g_uiFindCount;
 
 static const int kSlots = 17;        /* GameFlow sub objects 0..16  */
 
-/* ---- the log, append only ---------------------------------- */
+/* ---- the log ------------------------------------------------------------
+ *
+ * Through the framework's writer: the file lands in logs\ with the others and
+ * obeys [Settings] LogLevel.
+ *
+ * It is no longer append-only. A mode switch restarts the client, so the old
+ * file accumulated one process after another forever; now the run before this
+ * one is kept aside as <name>-<date>.log and the session marker line log.h
+ * writes carries the pid and the start time that the per-line pid stamp used
+ * to carry - which is the same information, on the line that says which run
+ * the rest of the file belongs to.
+ *
+ * LogInit opens a file, so one thread does it and the rest go straight to
+ * Logv, which drops the line while it is still being opened. */
+static volatile LONG g_logMade;
 
-static FILE *g_log;
-static volatile LONG g_logBusy;
-
-static void OpenLog(void) {
-    char dir[MAX_PATH];
-    char path[MAX_PATH];
-    char *slash;
-    size_t n;
-
-    if (g_log) return;
-    /* The main module is GRW.exe, so its folder is the game dir. */
-    if (!GetModuleFileNameA(NULL, dir, MAX_PATH)) return;
-    slash = strrchr(dir, '\\');
-    if (!slash) return;
-    slash[1] = 0;
-    n = strlen(dir);
-    if (n + 24 >= sizeof(dir)) return;
-    strcpy(dir + n, "logs");
-    CreateDirectoryA(dir, NULL);
-    snprintf(path, sizeof(path), "%s\\ModeProbe.log", dir);
-    g_log = fopen(path, "a");
-}
-
-/* One line per event, stamped with the process id: a mode switch
- * restarts the client, so one file holds several processes. */
 static void PLog(const char *fmt, ...) {
     va_list ap;
-    char line[1024];
-    SYSTEMTIME st;
 
+    if (!g_logMade && InterlockedCompareExchange(&g_logMade, 1, 0) == 0)
+        LogInitAlways("ModeProbe.log");
     va_start(ap, fmt);
-    vsnprintf(line, sizeof(line), fmt, ap);
+    Logv(fmt, ap);
     va_end(ap);
-    if (!g_log) return;
-    while (InterlockedExchange(&g_logBusy, 1)) Sleep(1);
-    if (g_log) {
-        GetLocalTime(&st);
-        fprintf(g_log, "%02u:%02u:%02u.%03u [%lu] %s\n",
-                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-                (unsigned long)GetCurrentProcessId(), line);
-        fflush(g_log);
-    }
-    InterlockedExchange(&g_logBusy, 0);
 }
 
 /* ---- settings file ----------------------------------------- */
@@ -1400,7 +1380,6 @@ static DWORD WINAPI InitThread(LPVOID p) {
     HMODULE m = NULL;
     (void)p;
 
-    OpenLog();
     ResolveIniPath();
 
     PLog("--- ModeProbe: the play mode, from the outside ---");

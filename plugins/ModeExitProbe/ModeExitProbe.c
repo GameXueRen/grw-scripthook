@@ -74,6 +74,7 @@
 #include <string.h>
 
 #include "third_party/minhook/include/MinHook.h"
+#include "log.h"
 
 /* How many frames of the calling stack to record. The first two are
  * usually the runtime's own doexit/ExitProcess path. */
@@ -132,57 +133,30 @@ static int Enabled(void) {
     return InterlockedCompareExchange(&g_enabled, 0, 0) ? 1 : 0;
 }
 
-/* ---- logging ---------------------------------------------------------- */
-
-static FILE *g_log;
-static LONG  g_logBusy;
+/* ---- logging ------------------------------------------------------------
+ *
+ * Through the framework's writer, so the file lands in logs\ with the others
+ * and obeys [Settings] LogLevel.
+ *
+ * This probe is about the process going away, and the old file was append-only
+ * to keep the run that exited and the run that replaced it in one place. Now
+ * each run gets its own file and the run before it stays beside it as
+ * <name>-<date>.log, so the two halves of a relaunch are two files whose names
+ * say which came first - and the session marker line log.h writes carries the
+ * pid and the start time the per-line pid stamp used to carry.
+ *
+ * LogInit opens a file, so one thread does it and the rest go straight to
+ * Logv, which drops the line while it is still being opened. */
+static volatile LONG g_logMade;
 
 static void ProbeLog(const char *fmt, ...) {
     va_list ap;
-    char line[512];
-    SYSTEMTIME st;
 
+    if (!g_logMade && InterlockedCompareExchange(&g_logMade, 1, 0) == 0)
+        LogInitAlways("ModeExitProbe.log");
     va_start(ap, fmt);
-    vsnprintf(line, sizeof(line), fmt, ap);
+    Logv(fmt, ap);
     va_end(ap);
-    if (!g_log) return;
-
-    while (InterlockedExchange(&g_logBusy, 1)) Sleep(1);
-    if (g_log) {
-        GetLocalTime(&st);
-        /* The process id is on every line: the game relaunches itself
-         * (or is relaunched), so one log file holds several processes
-         * and the events have to be told apart. */
-        fprintf(g_log, "%02u:%02u:%02u.%03u  [%lu] %s\n",
-                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-                (unsigned long)GetCurrentProcessId(), line);
-        fflush(g_log);
-    }
-    InterlockedExchange(&g_logBusy, 0);
-}
-
-static void OpenLog(void) {
-    char path[MAX_PATH];
-    char *slash;
-    int len;
-
-    if (g_log) return;
-
-    /* The main module is GRW.exe, so its folder is the game dir. */
-    if (!GetModuleFileNameA(NULL, path, MAX_PATH)) return;
-    slash = strrchr(path, '\\');
-    if (!slash) return;
-    slash[1] = 0;
-
-    len = (int)strlen(path);
-    if (len + 5 >= (int)sizeof(path)) return;
-    strcpy(path + len, "logs");
-    CreateDirectoryA(path, NULL);
-    if (len + 26 < (int)sizeof(path))
-        strcpy(path + len, "logs\\ModeExitProbe.log");
-    else
-        strcpy(path + len, "ModeExitProbe.log");
-    g_log = fopen(path, "a");
 }
 
 /* ---- naming an address ------------------------------------------------ */
@@ -460,7 +434,6 @@ static void InstallHooks(void) {
 
 static DWORD WINAPI InitThread(LPVOID p) {
     (void)p;
-    OpenLog();
     ResolveIniPath();
     LoadConfig();
 
