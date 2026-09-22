@@ -69,11 +69,18 @@ static const ShText kEnUS[] = {
      * cannot name a build other than the one drawing it */
     { "@about.page",          "About" },
     { "@about.version",       "Version: %s" },
+    { "@about.api",           "API: %s" },
     { "@about.build.ok",      "Game build: %s (verified)" },
     { "@about.build.new",     "Game build: %s (not verified - see the log)" },
     { "@about.author",        "Original author: Phiality" },
     { "@about.modder",        "Modded by: GameXueRen" },
     { "@about.qq",            "QQ group: 299177445" },
+
+    /* A plugin that asks for an API newer than this framework (SH_REQUIRES_API)
+     * is refused and this is what says so on screen; loader.c holds the line
+     * back until the overlay is drawing, or nobody would ever see it. */
+    { "@toast.api.refused",
+      "Plugin not loaded: %s needs API %d, this one is %d" },
 
     /* the Forge page. "(experimental)" is part of the label the root menu
      * shows: the feature serves mod bytes without touching the archives,
@@ -213,11 +220,15 @@ static const ShText kZhCN[] = {
 
     { "@about.page",          "关于" },
     { "@about.version",       "版本：%s" },
+    { "@about.api",           "接口版本：%s" },
     { "@about.build.ok",      "游戏构建：%s（已验证）" },
     { "@about.build.new",     "游戏构建：%s（未验证 —— 见日志）" },
     { "@about.author",        "原作者：Phiality" },
     { "@about.modder",        "魔改版：GameXueRen" },
     { "@about.qq",            "QQ群：299177445" },
+
+    { "@toast.api.refused",
+      "插件未加载：%s 需要 API %d，当前框架是 %d" },
 
     { "@forge.page",          "Forge资源侧载（实验功能）" },
     { "@forge.hint",

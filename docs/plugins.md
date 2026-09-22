@@ -60,6 +60,26 @@ also holds the `[loader]` CPU dials and the language, so those
 come back as defaults too. Future framework features will take
 their switches from the same file.
 
+**What you need of the API.** A plugin that calls something the API
+only grew later declares it once, outside every function:
+
+```c
+SH_REQUIRES_API(2);   /* I call ShGetAmmoObject */
+```
+
+Name the last thing you use, not the header you happened to build
+against: a plugin that only calls older entry points stays loadable
+on older frameworks, and the loader refuses on "needs more than this
+one offers" and nothing else. The declaration is read out of the file
+before the plugin's code runs at all, and a plugin that needs more is
+refused - a line in `logs\scripthook.log`, and a toast once the
+overlay is up. A plugin that writes nothing declares nothing and
+loads exactly as it always did: silence is "no requirement", never
+"whatever is newest", and one that is switched off in
+`scripthook.ini` is not even read. The framework's own number is on
+the About page; `SH_API_VERSION` in `scripthook.h` carries the note
+for each version that changed it, and it only ever goes up by one.
+
 What deleting it does **not** touch is the text: the compiled-in tables
 (the framework's in `scripthook_text.c`, each plugin's own) carry English
 and Chinese on their own, and any `lang.ini` - `plugins\<name>\lang.ini`

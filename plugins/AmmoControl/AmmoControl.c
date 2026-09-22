@@ -48,6 +48,16 @@
 #include "scripthook.h"
 #include "log.h"
 
+/* What this plugin needs of the framework, declared once and outside every
+ * function: ShGetAmmoObject, which the API only grew at version 2 (see
+ * SH_API_VERSION). It is a direct call and this plugin links the framework's
+ * import library, so on an older ScriptHook the .asi would not load at all -
+ * and this declaration is what turns that into a named refusal instead, in
+ * logs\scripthook.log and on screen. Name the last thing you use, not the
+ * header you happened to build against, so a plugin that only calls older
+ * entry points stays loadable on older frameworks. */
+SH_REQUIRES_API(2);
+
 /* ---- the capacity steps ---------------------------------------------- */
 
 /* 0.20x to 2.00x in 0.20x steps, 1.00x being the game's own numbers. Integer

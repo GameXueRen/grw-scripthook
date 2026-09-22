@@ -28,7 +28,56 @@ extern "C" {
  *  Errors, versioning and the shared types.
  *  @{ */
 
-#define SH_API_VERSION 1
+/** The plugin API's own version, apart from SH_VERSION: this one is only about
+ *  what a plugin may call, and it goes up by one whenever that changes in a way
+ *  a plugin can tell. A plugin declares the lowest version it can run against
+ *  (SH_REQUIRES_API) and the loader refuses it on anything older, with a line
+ *  in logs\scripthook.log and a toast on screen.
+ *
+ *  The rule for the number, so it stays usable:
+ *
+ *    - a new export, or a field added at the end of a struct, is +1 - it is
+ *      what a plugin that wants it has to name;
+ *    - a changed meaning, a changed unit or argument order, a field inserted
+ *      in the middle of a struct, or a removed export, is +1 as well, and
+ *      those are the ones that break: say so in the note;
+ *    - a fix inside the framework that a plugin cannot tell apart from the
+ *      outside, a log line, a comment, documentation: no change to this
+ *      number;
+ *    - it only ever goes up, by one, and a number is never reused.
+ *
+ *  1  1.0-beta3 and before: everything up to and including ShGetAmmoRounds.
+ *  2  ShGetAmmoObject: the weapon a rounds reading is about.
+ */
+#define SH_API_VERSION 2
+
+/** What a plugin needs of the framework, declared once and outside every
+ *  function:
+ *
+ *      SH_REQUIRES_API(2);                // only what version 2 added
+ *      SH_REQUIRES_API(SH_API_VERSION);   // whatever this header is
+ *
+ *  Name the last thing you use, not the header you happened to build against:
+ *  a plugin that only calls older entry points should stay loadable on older
+ *  frameworks, and the loader refuses on "needs more than this one offers" and
+ *  nothing else.
+ *
+ *  The loader reads this BEFORE the plugin's own code runs at all - it maps
+ *  the image and reads the export without initialising it - so a plugin that
+ *  needs more than the framework in front of it offers is refused instead of
+ *  starting and failing somewhere inside itself. A plugin that does not write
+ *  this declares nothing: silence means "no requirement", never "whatever is
+ *  newest", so every plugin that predates this macro loads exactly as it did,
+ *  and one that is switched off in scripthook.ini is not even read.
+ *
+ *  The export is a number, so anything else that loads .asi files can read it
+ *  out of the file too. */
+#define SH_REQUIRES_API(v) \
+    __declspec(dllexport) uint32_t ShRequiresApi = (uint32_t)(v)
+
+/** Whether this framework offers what version `v` added, for a plugin that was
+ *  not loaded by this loader and would rather check for itself. */
+#define SH_API_IS(v) (ShGetVersion() >= (int)(v))
 
 /** The build's own version, in one place. The loader's start up line, the
  *  crash report header and the About page all carry this same string, so a
@@ -55,8 +104,21 @@ extern "C" {
  *  matched against what the menu can actually show: the exact code, else the
  *  same language in another variant (zh-TW for zh-CN, en-GB for en-US), else
  *  English. The pick is written back to scripthook.ini, which is what makes
- *  it a first run only and what a player deletes to have it picked again. */
-#define SH_VERSION "1.0-beta3"
+ *  it a first run only and what a player deletes to have it picked again.
+ *
+ *  1.0-beta4 (2026-09-22 night): the magazine stops being guessed at.
+ *  AmmoControl reads the number the HUD is showing - found by its shape (the
+ *  count that stops at the separator, beside the reserve), remembered by its
+ *  place in the widget tree, one property read per poll and nothing read or
+ *  searched outside play - with the capacity call kept as the fallback for when
+ *  that number cannot be read. The framework grew ShGetAmmoObject, which is
+ *  what lets a reading follow a weapon switch by the object it is about rather
+ *  than by who moved last. The plugin API grew a version of its own
+ *  (SH_API_VERSION 2, see SH_REQUIRES_API): a plugin that needs more of the API
+ *  than the framework in front of it offers is refused by name in the log and
+ *  on screen, instead of starting and failing somewhere inside itself. And
+ *  firstperson gained the row that switches its view change toast on and off. */
+#define SH_VERSION "1.0-beta4"
 
 /** Where this build's source lives, in one place for the same reason the
  *  version is: the About page formats it in rather than typing it, so a

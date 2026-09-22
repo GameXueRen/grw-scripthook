@@ -113,11 +113,84 @@ extern void ShForgeStartup(void);
  */
 #define PLUGIN_SCAN_MAX 64
 
+/* ---- the API a plugin asks for --------------------------------------
+ *
+ * SH_REQUIRES_API (scripthook.h) is published as an exported number, and it is
+ * read here with the image mapped but NOT initialised: with
+ * DONT_RESOLVE_DLL_REFERENCES the loader maps the file and leaves its exports
+ * readable without calling DllMain - no threads, nothing of the plugin has run
+ * yet, which is the only way to refuse one before it starts. The probe is
+ * unmapped again immediately, so the real LoadLibrary below is a fresh load
+ * that does start it.
+ *
+ * A plugin that declares nothing reads 0 here and is loaded as it always was:
+ * silence means "no requirement", never "whatever is newest". A plugin that is
+ * switched off in scripthook.ini never reaches this at all - the check sits
+ * after that gate, so a plugin the player turned off is not probed, not
+ * counted against anything and not announced.
+ */
+static uint32_t PluginNeedsApi(const char *path) {
+    HMODULE mod;
+    uint32_t *p;
+    uint32_t need = 0;
+
+    mod = LoadLibraryExA(path, NULL, DONT_RESOLVE_DLL_REFERENCES);
+    if (!mod) return 0;
+    p = (uint32_t *)GetProcAddress(mod, "ShRequiresApi");
+    if (p) need = *p;
+    FreeLibrary(mod);
+    return need;
+}
+
+/* The refusals, kept until something can be seen: plugins load long before the
+ * overlay draws, and a toast lives for seconds, so a line put up here would
+ * have expired before the first frame of anything was on screen. */
+#define API_REFUSED_MAX 8
+
+static struct {
+    char     name[64];
+    uint32_t need;
+} g_refusedApi[API_REFUSED_MAX];
+static volatile LONG g_refusedApiN;
+
+static void RefusedApiAdd(const char *name, uint32_t need) {
+    LONG i = InterlockedIncrement(&g_refusedApiN) - 1;
+
+    if (i < 0 || i >= API_REFUSED_MAX) return;
+    snprintf(g_refusedApi[i].name, sizeof(g_refusedApi[i].name), "%s", name);
+    g_refusedApi[i].need = need;
+}
+
+/* Said once the screen can show it: ShDrawReady is the overlay saying it is
+ * attached and drawing, and before that a toast is a line nobody sees. The
+ * wait is bounded, so a build with no overlay leaves no thread sleeping. */
+static DWORD WINAPI RefusedApiNotice(LPVOID p) {
+    LONG n, i;
+    int waited;
+
+    (void)p;
+    for (waited = 0; waited < 240 && !ShDrawReady(); waited++) Sleep(500);
+    n = InterlockedCompareExchange(&g_refusedApiN, 0, 0);
+    if (n > API_REFUSED_MAX) n = API_REFUSED_MAX;
+    for (i = 0; i < n; i++) {
+        const char *en = ShTextEnUS(NULL, "@toast.api.refused");
+        const char *tr = ShLang("@toast.api.refused");
+        char asi[80], line[256];
+
+        snprintf(asi, sizeof(asi), "%s.asi", g_refusedApi[i].name);
+        ShTextFormat(line, sizeof(line), en ? en : tr, tr, asi,
+                     (int)g_refusedApi[i].need, ShGetVersion());
+        ShToastEx(line, 0xFFD24Au, 8000);
+    }
+    return 0;
+}
+
 static void LoadASIPlugins(void) {
     char pluginsDir[MAX_PATH], pat[MAX_PATH], full[MAX_PATH];
     static char names[PLUGIN_SCAN_MAX][MAX_PATH];
     WIN32_FIND_DATAA fd;
     HANDLE h;
+    uint32_t need;
     int n = 0, nSkipped = 0, nAdded = 0, count = 0, i, j;
 
     if (!ShPluginsDir(pluginsDir, sizeof(pluginsDir))) {
@@ -215,6 +288,20 @@ static void LoadASIPlugins(void) {
 
         snprintf(full, sizeof(full), "%s%s\\%s.asi",
                  pluginsDir, name, name);
+
+        /* What this plugin asks of the framework, read without running any of
+         * it. Nothing declared is 0, and 0 is loaded as it always was. */
+        need = PluginNeedsApi(full);
+        if (need > (uint32_t)ShGetVersion()) {
+            Log("plugins\\%s: REFUSED - it needs API %u and this framework is "
+                "%u (SH_API_VERSION); load a newer ScriptHook, or an older "
+                "build of this plugin", name, (unsigned)need,
+                (unsigned)ShGetVersion());
+            RefusedApiAdd(name, need);
+            nSkipped++;
+            continue;
+        }
+
         n++;
         Log("loading plugin: plugins\\%s\\%s.asi", name, name);
         {
@@ -224,6 +311,14 @@ static void LoadASIPlugins(void) {
             else
                 Log("  FAILED (error %lu)", GetLastError());
         }
+    }
+    /* One toast per refused plugin, put up once the screen can show it. The
+     * log already carries the reason; this is so the player who switched a
+     * plugin on is told why nothing came of it. */
+    if (InterlockedCompareExchange(&g_refusedApiN, 0, 0) > 0) {
+        HANDLE t = CreateThread(NULL, 0, RefusedApiNotice, NULL, 0, NULL);
+
+        if (t) CloseHandle(t);
     }
     LogAlways("plugin scan done: %d loaded, %d skipped, %d line(s) written back",
               n, nSkipped, nAdded);

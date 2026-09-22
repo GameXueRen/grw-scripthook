@@ -868,8 +868,16 @@ static void BuildAboutMenu(void) {
     if (!g_aboutMenu) return;
     ShMenuClear(g_aboutMenu);
     AboutRow(g_aboutMenu, "@about.version", SH_VERSION);
-    /* Under the version, because it is the other half of "which build is
-     * this": the framework's own string, then the game's. */
+    /* Under the version: the API's own version, which is the number a plugin is
+     * refused for (SH_REQUIRES_API). A player told that a plugin needs a newer
+     * ScriptHook reads here what this one offers. */
+    {
+        char api[16];
+
+        snprintf(api, sizeof(api), "%d", SH_API_VERSION);
+        AboutRow(g_aboutMenu, "@about.api", api);
+    }
+    /* Then the other half of "which build is this": the game's. */
     known = ShGameBuildText(build, (int)sizeof(build));
     if (known >= 0)
         AboutRow(g_aboutMenu,
