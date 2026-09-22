@@ -14,6 +14,12 @@
 #include "scripthook.h"
 #include "log.h"
 
+/* What this plugin needs of the framework: nothing newer than the first
+ * version of the plugin API, so any ScriptHook that carries the API at all can
+ * load this (see SH_REQUIRES_API). Name the last thing you use, not the header
+ * you happened to build against. */
+SH_REQUIRES_API(1);
+
 #define AHEAD  6.0f
 #define LIFT   1.0f
 

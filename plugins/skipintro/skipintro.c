@@ -118,6 +118,12 @@
  * worse than an unresolved symbol. */
 #include "scripthook.h"
 
+/* What this plugin needs of the framework: nothing newer than the first
+ * version of the plugin API, so any ScriptHook that carries the API at all can
+ * load this (see SH_REQUIRES_API). Name the last thing you use, not the header
+ * you happened to build against. */
+SH_REQUIRES_API(1);
+
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 #define NAME_MAX     64
 

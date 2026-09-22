@@ -70,6 +70,14 @@
 #include <string.h>
 
 #include "third_party/minhook/include/MinHook.h"
+#include "scripthook.h"
+
+/* What this plugin needs of the framework: nothing newer than the first
+ * version of the plugin API, so any ScriptHook that carries the API at all can
+ * load this (see SH_REQUIRES_API). The header is included for that declaration
+ * and for the shared types; this plugin still binds every entry point it calls
+ * by name at run time, so including it imports nothing. */
+SH_REQUIRES_API(1);
 
 /* The module and the one export that answers "is this owned". */
 #define TARGET_DLL "uplay_r1_loader64.dll"

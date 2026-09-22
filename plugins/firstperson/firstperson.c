@@ -25,6 +25,12 @@
 #include "scripthook.h"
 #include "log.h"
 
+/* What this plugin needs of the framework: nothing newer than the first
+ * version of the plugin API, so any ScriptHook that carries the API at all can
+ * load this (see SH_REQUIRES_API). Name the last thing you use, not the header
+ * you happened to build against. */
+SH_REQUIRES_API(1);
+
 /* The mode switches on a keypress, so the walk has to keep
  * up with it. 250 left the camera held far too long. */
 #define TICK_MS     60
