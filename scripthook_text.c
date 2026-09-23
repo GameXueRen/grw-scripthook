@@ -92,14 +92,16 @@ static const ShText kEnUS[] = {
      * which is proven, but the shape of what it accepts is still moving -
      * so the page says so where a player reads it, not only in the docs. */
     { "@forge.page",          "Forge Mod Loader (experimental)" },
+    /* The Chinese below is the author's own wording, and this is its
+     * translation: what the loader does today (replace data that is already
+     * there), that the new file must not be larger than the original, and how
+     * a mod file is named. The layout under mods\, the '~' prefix and the
+     * number-prefix rule are in the [forgemod] comments of scripthook.ini. */
     { "@forge.hint",
-      "Loads loose files from mods\\ over existing\n"
-      ".forge entries without touching the archives.\n"
-      "Lay them out as mods\\<archive>\\<file> or\n"
-      "mods\\<mod name>\\<archive>\\<file>.\n"
-      "'~' disables a mod folder, and\n"
-      "'<n>_-_<name>.data' names the entry.\n"
-      "Changes need a restart." },
+      "mods\\ files replace .forge data, not game files.\n"
+      "Replacement only for now, and never larger than the\n"
+      "original. Name it xxx_-_NAME.data or by its original\n"
+      "name; what does not fit or cannot be overlaid is refused." },
     { "@forge.enabled",       "Enabled" },
     { "@forge.dryrun",        "Dry run" },
     { "@forge.status.off",    "Off ([forgemod] enabled=0)." },
@@ -237,7 +239,9 @@ static const ShText kZhCN[] = {
 
     { "@forge.page",          "Forge资源侧载（实验功能）" },
     { "@forge.hint",
-      "把 mods\\ 下的文件覆盖到已有 .forge 游戏文件上。此项开关改变需下次启动生效。" },
+      "mods\\ 里的文件替换 .forge 文件的数据，不修改游戏文件。\n"
+      "目前仅实现替换原数据文件功能，且新文件大小需不超过原文件。\n"
+      "按 xxx_-_NAME.data 或原名命名，放不下或无法覆盖会被拒绝。" },
     { "@forge.enabled",       "启用" },
     { "@forge.dryrun",        "仅验证能否覆盖成功，不实际应用" },
     { "@forge.status.off",    "已关闭（[forgemod] enabled=0）。" },
