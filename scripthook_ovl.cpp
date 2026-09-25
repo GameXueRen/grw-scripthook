@@ -12,14 +12,17 @@
 //     menu thread knows the overlay can actually show the menu
 //     before it starts swallowing the keyboard.
 //
-// Hook technique: create a dummy D3D11 device+swapchain, read the
-// shared IDXGISwapChain vtable, patch Present (index 8) and
-// ResizeBuffers (index 13). All swapchains of the same driver
-// share that vtable, so the game's swapchain is hooked too.
+// Hook technique: capture the swapchain the game creates for itself (route 1,
+// below), then give that swapchain - and only that one - a table of its own
+// with Present (index 8) and ResizeBuffers (index 13) replaced. The driver's
+// shared table is never written to, so no other swapchain in the process ends
+// up in this file's path; the old dummy-device route survives only as the
+// fallback for a session where no swapchain is ever captured.
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <dxgi1_2.h>    // IDXGIFactory2, for the swapchain capture
+#include <dxgi1_4.h>    // IDXGISwapChain3, for the interface-table check
 #include <stdio.h>      // snprintf, for the font path list
 #include <string.h>
 #include <imm.h>
@@ -37,6 +40,7 @@
 #include "scripthook_tick.h"
 #include "scripthook_draw.h"
 #include "log.h"
+#include "third_party/minhook/include/MinHook.h"   // dxgi's Present, in code
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -106,11 +110,53 @@ extern "C" void ShOvlAllow(int on)
 // hooked swapchain methods
 // ---------------------------------------------------------------------------
 typedef HRESULT(STDMETHODCALLTYPE* PresentFn)(IDXGISwapChain*, UINT, UINT);
+typedef HRESULT(STDMETHODCALLTYPE* Present1Fn)(IDXGISwapChain1*, UINT, UINT,
+                                               const DXGI_PRESENT_PARAMETERS*);
 typedef HRESULT(STDMETHODCALLTYPE* ResizeFn)(IDXGISwapChain*, UINT, UINT, UINT,
                                              DXGI_FORMAT, UINT);
 
-static PresentFn g_origPresent = nullptr;
-static ResizeFn  g_origResize = nullptr;
+/* One body serves both present slots, and the slot decides which original it
+ * hands the call on to. The form they are called through is the one every
+ * forwarder in this project uses: the wider signature, with the extra
+ * argument passed on - the three-argument form ignores it, exactly the way
+ * the proxy in loader.c forwards exports without guessing at prototypes. */
+typedef HRESULT(STDMETHODCALLTYPE* PresentAnyFn)(IDXGISwapChain*, UINT, UINT,
+                                                 const void*);
+
+static PresentFn  g_origPresent  = nullptr;
+static Present1Fn g_origPresent1 = nullptr;
+static ResizeFn   g_origResize   = nullptr;
+
+/* The swapchain this file hooked: kept so a present arriving from anywhere can
+ * say whether it is the same object (see the present line) and so the table it
+ * carries can be watched for a while after the install. */
+static void* volatile g_swapPtr = nullptr;
+
+/* Which module owns an address, for the log: dxgi.dll, nvspcap64.dll, this
+ * file's own module, or "private" - the last being what a hook in a heap block
+ * looks like, and worth knowing about for exactly that reason. */
+static const char* OwnerName(const void* p, char* buf, int cap)
+{
+    wchar_t w[MAX_PATH];
+    HMODULE m = nullptr;
+    char*   leaf;
+
+    if (!p) return "none";
+    buf[0] = '\0';
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)p, &m) || !m)
+        return "private";
+    if (GetModuleFileNameW(m, w, MAX_PATH) <= 0) return "?";
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, cap, NULL, NULL) <= 0)
+    {
+        buf[0] = '\0';
+        return "?";
+    }
+    leaf = strrchr(buf, '\\');
+    if (leaf) memmove(buf, leaf + 1, strlen(leaf + 1) + 1);
+    return buf;
+}
 
 static ID3D11Device*        g_pd3dDevice = nullptr;
 static ID3D11DeviceContext* g_pd3dContext = nullptr;
@@ -122,6 +168,10 @@ static ID3D11RenderTargetView* g_backRtv = nullptr;
 static HWND   g_hwnd = nullptr;
 static WNDPROC g_origWndProc = nullptr;
 static volatile LONG g_ready = 0;
+/* One line, once: the first frame that went through the overlay. Written at
+ * floor level, because everything else after it in a log is a session that
+ * really was rendering - which is what tells a hang from a slow start. */
+static volatile LONG g_firstFrameSaid = 0;
 
 /* Set once per frame by HookPresent: is any plugin drawer registered?
  * The window subclass reads it to decide whether the mouse should be fed
@@ -2144,6 +2194,162 @@ static void MenuFontTick()
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Which window is ours
+ *
+ * The game's start up has two windows of its own and both are swapchains: the
+ * splash screen comes first and the render window follows. They are told
+ * apart by the same two features the framework reads elsewhere
+ * (scripthook_corefix.c, docs/cpu-scheduling.md): the class the game gives
+ * them - "ScimitarSplashScreenWindow" against "ScimitarEngineWindowClass" -
+ * and the title, where the registered mark of the splash comes through
+ * mis-encoded ("Ghost Recon?Wildlands") while the render window has it right
+ * ("Ghost Recon(R) Wildlands"). The class is asked first, because a class
+ * name is structural where the mark is an encoding accident; the title is
+ * what is left for a build that renames its windows.
+ *
+ * Two places have to agree on it, and neither of them did:
+ *
+ *  - the window scan must never settle on the splash. Attaching ImGui to a
+ *    window that is gone once the intro ends is drawing into a dead
+ *    swapchain, and the splash is a swapchain too, so it looks like one;
+ *  - Present must not draw for a swapchain that is not on our window at all.
+ *    A swapchain vtable is the driver's and every swapchain in the process
+ *    shares it, so a second window's frame - the game's own splash, or
+ *    another module's overlay UI - arrives in these hooks as well. Building
+ *    ImGui on that device and painting into that back buffer is how a
+ *    foreign Present gets taken apart.
+ *
+ * Measured on the field machine of 2026-09-25: two swapchains captured inside
+ * the same millisecond, the second window gone 0.6 s later, and the game
+ * frozen with no frame of its own ever having reached the hook.
+ *
+ * [loader] window_title replaces the built-in title test with a substring of
+ * the player's own; empty - the default - leaves the rule above in force.
+ * ------------------------------------------------------------------------- */
+static const wchar_t kRenderClass[] = L"ScimitarEngineWindowClass";
+static const wchar_t kSplashClass[] = L"ScimitarSplashScreenWindow";
+static const wchar_t kTitleMark[]   = L"Wildlands";   /* in both titles */
+
+static char          g_titleWant[96];
+static volatile LONG g_titleWantRead = 0;
+
+static void TitleWant(void)
+{
+    if (InterlockedCompareExchange(&g_titleWantRead, 1, 0) == 0)
+    {
+        g_titleWant[0] = '\0';
+        ShConfigGetStr("loader", "window_title", "", g_titleWant,
+                       (int)sizeof g_titleWant);
+    }
+}
+
+/* The title says which of the two this is: the splash lost its registered
+ * mark to an ANSI title call and carries a '?' where the sign should be, and
+ * only the game's own windows carry the mark's word at all. */
+static int TitleIsRender(const wchar_t* t)
+{
+    if (!t || !*t) return 0;
+    if (!wcsstr(t, kTitleMark)) return 0;
+    return wcschr(t, L'?') == NULL;
+}
+
+static int TitleHasWant(const wchar_t* t)
+{
+    wchar_t want[96];
+    int n;
+
+    if (!t || !*t || !g_titleWant[0]) return 0;
+    /* The setting is bytes: UTF-8 as an editor that knows better writes it,
+     * or CP_ACP as a plain Chinese one does. Either spelling counts. */
+    n = MultiByteToWideChar(CP_UTF8, 0, g_titleWant, -1, want,
+                            (int)(sizeof want / sizeof want[0]));
+    if (n > 0 && wcsstr(t, want)) return 1;
+    n = MultiByteToWideChar(CP_ACP, 0, g_titleWant, -1, want,
+                            (int)(sizeof want / sizeof want[0]));
+    if (n > 0 && wcsstr(t, want)) return 1;
+    return 0;
+}
+
+/* The window the overlay belongs to: the game's own render window, and never
+ * the splash. A class name we know answers it outright; anything else is
+ * judged by its title. */
+static int WindowIsOurs(HWND h)
+{
+    wchar_t cls[64], t[192];
+    int hasCls, hasTitle;
+
+    if (!h || !IsWindow(h)) return 0;
+
+    hasCls = GetClassNameW(h, cls, 64) > 0;
+    if (hasCls && _wcsicmp(cls, kSplashClass) == 0) return 0;
+    if (hasCls && _wcsicmp(cls, kRenderClass) == 0) return 1;
+
+    /* No title to judge by: this build's windows are named some way this
+     * file does not know, and it gets the behaviour it had before rather
+     * than no overlay at all. The splash is already answered by its class,
+     * so nothing is lost by being generous here. Read on the init thread
+     * only - the render thread never asks for a title. */
+    hasTitle = GetWindowTextW(h, t, 192) > 0;
+    if (!hasTitle) return 1;
+
+    TitleWant();
+    if (g_titleWant[0]) return TitleHasWant(t);
+    return TitleIsRender(t);
+}
+
+/* The window a swapchain presents into, or null when it cannot be read. */
+static HWND SwapWindow(IDXGISwapChain* s)
+{
+    DXGI_SWAP_CHAIN_DESC d;
+
+    if (!s) return nullptr;
+    memset(&d, 0, sizeof d);
+    if (FAILED(s->GetDesc(&d))) return nullptr;
+    return d.OutputWindow;
+}
+
+/* A frame that is not on our window, named once: which window it was is what
+ * tells a report from the field that this is what happened.
+ *
+ * The class goes in with it, because "which module's second swapchain was
+ * that" is the next question a report asks and the class is what answers it -
+ * another module's overlay UI carries a class of its own, a second window of
+ * the game's own carries one of the engine's. GetWindowThreadProcessId and
+ * GetClassName both read without sending a message, so they are safe on a
+ * window of any process - and a swapchain's window may not be ours. */
+static void SwapNotOurs(HWND on, const char* who)
+{
+    static volatile LONG said;
+    DWORD pid = 0;
+    char  cls[80] = "";
+
+    if (InterlockedExchange(&said, 1)) return;
+    if (on)
+    {
+        GetWindowThreadProcessId(on, &pid);
+        if (!GetClassNameA(on, cls, (int)sizeof cls)) cls[0] = '\0';
+    }
+    OvlLogFloor("%s: window %llx (pid %lu, class '%s') is not the render "
+                "window (%llx) - passed through, no ImGui on it",
+                who, (unsigned long long)(uintptr_t)on, (unsigned long)pid,
+                cls, (unsigned long long)(uintptr_t)g_hwnd);
+}
+
+/* A window's title for a log line: UTF-8, cut short, never a reason to fail. */
+static const char* TitleForLog(HWND h)
+{
+    static char buf[128];
+    wchar_t t[192];
+
+    buf[0] = '\0';
+    if (!h || GetWindowTextW(h, t, 192) <= 0) return buf;
+    if (WideCharToMultiByte(CP_UTF8, 0, t, -1, buf, (int)sizeof buf - 1,
+                            NULL, NULL) <= 0)
+        buf[0] = '\0';
+    return buf;
+}
+
 // ---------------------------------------------------------------------------
 // Present hook
 // ---------------------------------------------------------------------------
@@ -2152,8 +2358,55 @@ static void MenuFontTick()
  * measures covers that tail, so the frame before is the one it reports. */
 static int g_oursUs = 0;
 
-static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, UINT flags)
+/* The game presents through one of two slots: Present (8) on IDXGISwapChain,
+ * or Present1 (18) on IDXGISwapChain1. Both go into the table this file
+ * installs, and which one arrives is written down once - a build that presents
+ * through Present1 reached neither hook until Present1 was hooked as well
+ * (2026-09-25: a session ran all the way to the main menu with Present never
+ * called once, and the menu never appeared on screen). Everything from here on
+ * is the same for both; only the original the call is handed on to differs. */
+static HRESULT STDMETHODCALLTYPE PresentBody(IDXGISwapChain* pSwap, UINT sync,
+                                             UINT flags, PresentAnyFn orig,
+                                             const void* params, const char* via)
 {
+    /* Which entry point the game uses, said once - the first thing a "the menu
+     * never appears" report needs, and one compare a frame. The object and its
+     * table go in with it: a session where this file's own swapchain was never
+     * the one presenting is told apart from one where it was, and from one
+     * where the object carries somebody else's table again. */
+    {
+        static volatile LONG saidVia;
+
+        if (InterlockedExchange(&saidVia, 1) == 0)
+        {
+            void*  hooked = (void*)InterlockedCompareExchangePointer(&g_swapPtr,
+                                                                     nullptr, nullptr);
+            void** vt = *(void***)pSwap;
+            char   own[64];
+
+            OvlLogFloor("present: the game came in through %s (swap %p, table "
+                        "%p in %s%s, sync %u flags %u)", via, (void*)pSwap,
+                        (void*)vt,
+                        OwnerName((const void*)vt, own, (int)sizeof own),
+                        (void*)pSwap == hooked ? ", our captured swapchain"
+                                               : ", NOT the one we captured",
+                        sync, flags);
+        }
+    }
+
+    /* Our window, or nothing - see the note on which window is ours. Taken
+     * before any bookkeeping, so the frame pacing below stays a picture of
+     * the game's own frames and not of whoever else presents. */
+    {
+        HWND on = SwapWindow(pSwap);
+
+        if (!on || !g_hwnd || on != g_hwnd)
+        {
+            SwapNotOurs(on, "present");
+            return orig(pSwap, sync, flags, params);
+        }
+    }
+
     /* Taken here and read at the bottom: only what is in between is ours. */
     uint64_t hookAt = ShTickNow();
 
@@ -2200,14 +2453,25 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
              * work, that layer, and the framework's own threads. All of it
              * is paid only on a hitch. */
             ShTickReport(threads, (int)sizeof threads, now);
-            OvlLog("%s: %d ms (state %d ui %04X menu %d draw %d file %u "
-                   "decide %dus ours %dus%s)",
-                   gap < 3000 ? "frame hitch" : "frame stall",
-                   gap, ShGetGameState(),
-                   (unsigned)ShGetUiState(),
-                   ShMenuIsOpen() ? 1 : 0, ShDrawWantFrame() ? 1 : 0,
-                   (unsigned)(calls - lastCalls), decideUs, g_oursUs,
-                   threads);
+            /* A hitch is this module's own bookkeeping and stays in its log.
+             * A stall is the shape a hang leaves behind, and the level a
+             * released package runs at drops this file - so the stall goes to
+             * the session's floor too, where a report from a player who never
+             * raised the level can still show it. */
+            if (gap >= 3000)
+                OvlLogFloor("frame stall: %d ms (state %d ui %04X menu %d "
+                            "draw %d file %u decide %dus ours %dus%s)",
+                            gap, ShGetGameState(), (unsigned)ShGetUiState(),
+                            ShMenuIsOpen() ? 1 : 0, ShDrawWantFrame() ? 1 : 0,
+                            (unsigned)(calls - lastCalls), decideUs, g_oursUs,
+                            threads);
+            else
+                OvlLog("frame hitch: %d ms (state %d ui %04X menu %d draw %d "
+                       "file %u decide %dus ours %dus%s)",
+                       gap, ShGetGameState(), (unsigned)ShGetUiState(),
+                       ShMenuIsOpen() ? 1 : 0, ShDrawWantFrame() ? 1 : 0,
+                       (unsigned)(calls - lastCalls), decideUs, g_oursUs,
+                       threads);
         }
         lastCalls = calls;
         lastPresent = now;
@@ -2225,10 +2489,10 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
         if (!g_hwnd || !IsWindow(g_hwnd))
         {
             static int noted;
-            if (!noted) { noted = 1; OvlLog("present hooked before the render "
-                                            "window is chosen - not starting "
-                                            "ImGui yet"); }
-            return g_origPresent(pSwap, sync, flags);
+            if (!noted) { noted = 1; OvlLogFloor("present hooked before the "
+                                            "render window is chosen - not "
+                                            "starting ImGui yet"); }
+            return orig(pSwap, sync, flags, params);
         }
         if (retryAt && (int)(now - retryAt) < 1000) {
             /* fall through: skip re-init attempts this frame */
@@ -2304,7 +2568,7 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                             ? 1 : 0;
                 InterlockedExchange(&g_ready, 1);
                 retryAt = 0;
-                OvlLog("imgui ready: hwnd=%llx device=%llx font=%p",
+                OvlLogFloor("imgui ready: hwnd=%llx device=%llx font=%p",
                        (unsigned long long)g_hwnd,
                        (unsigned long long)g_pd3dDevice,
                        (void*)ImGui::GetFont());
@@ -2330,6 +2594,15 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
         }
         }
     }
+
+    /* The first frame past the init: everything a report shows after this
+     * line is a session that really was rendering. At floor level, so a
+     * player who left the log level alone still has the marker - and a log
+     * that ends before it says the hang was in the overlay's own start up. */
+    if (g_ready && InterlockedExchange(&g_firstFrameSaid, 1) == 0)
+        OvlLogFloor("first frame through the overlay (%s, hwnd %llx, device %llx)",
+                    via, (unsigned long long)g_hwnd,
+                    (unsigned long long)g_pd3dDevice);
 
     {
         bool drawMenu = ShMenuIsOpen() ? true : false;
@@ -2390,7 +2663,7 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
                 desc.BufferDesc.Height == 0)
             {
                 g_oursUs = ShTickUsSince(hookAt);
-                return g_origPresent(pSwap, sync, flags);
+                return orig(pSwap, sync, flags, params);
             }
             if (g_backRtv)
             {
@@ -2496,7 +2769,145 @@ static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, U
     }
 
     g_oursUs = ShTickUsSince(hookAt);
-    return g_origPresent(pSwap, sync, flags);
+    return orig(pSwap, sync, flags, params);
+}
+
+/* One frame, one pass through this file.
+ *
+ * There are three ways into the body below: the table's two present slots and
+ * dxgi's own Present. They chain into each other - a table hook hands the call
+ * to the original this file recorded, and that original is the very function
+ * the code hook sits on - so one call can arrive twice on one thread. The work
+ * has to happen once: two NewFrame calls for a single frame is a corrupted
+ * ImGui frame, and which entry point fires depends on the machine (the field
+ * machine of 2026-09-25 went through the code hook alone; the development
+ * machine went through the table), so both have to survive. A thread already
+ * inside forwards to the original and does nothing else. */
+static __declspec(thread) int g_inPresent = 0;
+
+/* The guard doing its job, said once - and said out loud rather than left to be
+ * worked out: the second door into one frame arrives here and hands the call
+ * on instead of doing the work twice. That this happens is knowable without the
+ * line (the install record has the table's original and the code hook on the
+ * same address), but "it happens" is the difference between a frame drawn once
+ * and a corrupted ImGui frame, so the log says which door came second. */
+static void OvlSaidForwarded(const char *door)
+{
+    static volatile LONG said;
+
+    if (InterlockedExchange(&said, 1) == 0)
+        OvlLogFloor("present: %s arrived while this thread was already inside - "
+                    "handed straight on, the frame is done once", door);
+}
+
+static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* pSwap, UINT sync, UINT flags)
+{
+    HRESULT hr;
+
+    if (g_inPresent)
+    {
+        OvlSaidForwarded("Present");
+        return g_origPresent(pSwap, sync, flags);
+    }
+
+    g_inPresent = 1;
+    hr = PresentBody(pSwap, sync, flags, (PresentAnyFn)g_origPresent, nullptr,
+                     "Present");
+    g_inPresent = 0;
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain1* pSwap, UINT sync,
+                                              UINT flags,
+                                              const DXGI_PRESENT_PARAMETERS* params)
+{
+    HRESULT hr;
+
+    if (g_inPresent)
+    {
+        OvlSaidForwarded("Present1");
+        return g_origPresent1(pSwap, sync, flags, params);
+    }
+
+    g_inPresent = 1;
+    hr = PresentBody(pSwap, sync, flags, (PresentAnyFn)g_origPresent1, params,
+                     "Present1");
+    g_inPresent = 0;
+    return hr;
+}
+
+/* ---------------------------------------------------------------------------
+ * The present hook that cannot be routed around
+ *
+ * The table hooks cover the swapchain this file captured - and that is not
+ * enough on every machine. The field log of 2026-09-25 21:34 is the one that
+ * says so: the frame arrived with the object carrying this file's own table
+ * (`table … in DINPUT8.dll, our captured swapchain`) and still never passed
+ * through a table slot, because the caller (a platform overlay's own hook, in
+ * all likelihood) calls the function by an address it saved earlier. Only a
+ * hook in dxgi's code sees that call, and that is what this is.
+ *
+ * Its address is the one the live table handed over - whose it is, the install
+ * line writes down - so there is no RVA to hunt and nothing to verify: it is
+ * the function the game would have called. PresentBody is shared with the table
+ * hooks, so the overlay draws for whichever swapchain is on the game's window,
+ * and the first present line says which object arrived and how.
+ * ------------------------------------------------------------------------- */
+static PresentFn     g_codeTramp     = nullptr;
+static volatile LONG g_codeHookTried = 0;
+
+static HRESULT STDMETHODCALLTYPE PresentCodeHook(IDXGISwapChain* pSwap, UINT sync,
+                                                 UINT flags)
+{
+    HRESULT hr;
+
+    if (g_inPresent)
+    {
+        OvlSaidForwarded("Present (code hook in dxgi)");
+        return g_codeTramp(pSwap, sync, flags);
+    }
+
+    g_inPresent = 1;
+    hr = PresentBody(pSwap, sync, flags, (PresentAnyFn)g_codeTramp, nullptr,
+                     "Present (code hook in dxgi)");
+    g_inPresent = 0;
+    return hr;
+}
+
+static void InstallPresentCodeHook(void)
+{
+    MH_STATUS s;
+
+    if (InterlockedExchange(&g_codeHookTried, 1)) return;
+    if (!g_origPresent) return;
+
+    s = MH_Initialize();
+    if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED)
+    {
+        OvlLogFloor("present code hook: MH_Initialize failed (%s) - the table "
+                    "hooks are all that is left", MH_StatusToString(s));
+        return;
+    }
+    s = MH_CreateHook((LPVOID)g_origPresent, (LPVOID)PresentCodeHook,
+                      (LPVOID*)&g_codeTramp);
+    if (s != MH_OK)
+    {
+        OvlLogFloor("present code hook: MH_CreateHook on %p failed (%s) - the "
+                    "table hooks are all that is left", (void*)g_origPresent,
+                    MH_StatusToString(s));
+        return;
+    }
+    s = MH_EnableHook((LPVOID)g_origPresent);
+    if (s != MH_OK)
+    {
+        OvlLogFloor("present code hook: MH_EnableHook failed (%s) - backing off",
+                    MH_StatusToString(s));
+        MH_RemoveHook((LPVOID)g_origPresent);
+        g_codeTramp = nullptr;
+        return;
+    }
+    OvlLogFloor("present code hook installed on %p - every present in this "
+                "process lands here from now on", (void*)g_origPresent);
 }
 
 // ---------------------------------------------------------------------------
@@ -2506,6 +2917,30 @@ static HRESULT STDMETHODCALLTYPE HookResizeBuffers(IDXGISwapChain* pSwap, UINT b
                                                    UINT w, UINT h, DXGI_FORMAT f,
                                                    UINT flags)
 {
+    /* Nothing here belongs to a swapchain that is not on our window: dropping
+     * our view and rebuilding ImGui's device objects against another window's
+     * swapchain is the same mistake Present is guarded against - see the note
+     * on which window is ours. */
+    {
+        HWND on = SwapWindow(pSwap);
+
+        if (!on || !g_hwnd || on != g_hwnd)
+        {
+            SwapNotOurs(on, "resize");
+            return g_origResize(pSwap, bc, w, h, f, flags);
+        }
+    }
+
+    /* The game's own swapchain resizing is the plainest proof that the table
+     * this file installed is the one in use: said once, at floor level. */
+    {
+        static volatile LONG said;
+
+        if (InterlockedExchange(&said, 1) == 0)
+            OvlLogFloor("resize: our swapchain came through the hooks "
+                        "(back buffer %ux%u)", w, h);
+    }
+
     /* ResizeBuffers refuses to run while a view of the back buffer is
      * still alive, so drop ours first - it is rebuilt on the next frame. */
     if (g_backRtv) { g_backRtv->Release(); g_backRtv = nullptr; }
@@ -2540,26 +2975,217 @@ static volatile LONG  g_vtablePatched = 0;  /* Present/ResizeBuffers are ours */
 static volatile LONG  g_captured      = 0;  /* route 1 fired */
 static PVOID volatile g_capturedHwnd  = nullptr;  /* its swapchain's window */
 
-/* Patch the shared swapchain vtable: Present=8, ResizeBuffers=13. Idempotent
- * - every swapchain of the same driver shares one vtable, so the first call
- * is the one that matters and the rest only record the window. */
+/* Hook this swapchain: Present=8, ResizeBuffers=13, in a table of its own -
+ * see the note above the copy below. Idempotent: the table is built once, and
+ * a swapchain that comes later is simply pointed at the same one. */
+/* ---------------------------------------------------------------------------
+ * Two diagnostic switches
+ *
+ * The overlay is three things at once: it patches the factory's vtable (so
+ * every swapchain the game makes is seen), it patches the swapchain's vtable
+ * (so Present runs through this file), and it subclasses the game's window.
+ * When a session freezes before the first frame there is nothing in the log
+ * that says which of the three a machine objects to, so each half can be left
+ * out on its own, from [loader], and the run itself says which:
+ *
+ *   overlay_hook=0        no Present and no ResizeBuffers: a captured
+ *                         swapchain is still logged and still remembered, its
+ *                         vtable is left alone, and the probe-device route is
+ *                         skipped as well - so nothing in the process hooks a
+ *                         swapchain. The menu cannot open: nothing draws.
+ *   overlay_subclass=0    the game's window procedure is left alone: no
+ *                         keyboard for the menu, and the IME work has no
+ *                         target.
+ *
+ * Both default to on, which is the overlay as it has always been. A session
+ * with either turned off is a diagnostic, not a way to play.
+ *
+ * Read on the init thread, once: the loader has loaded the config before it
+ * lets that thread off its wait. */
+static int g_hookOn     = -1;   /* -1: not read yet */
+static int g_subclassOn = -1;
+
+static void OvlReadSwitches(void)
+{
+    if (g_hookOn < 0)
+        g_hookOn = ShConfigGetBool("loader", "overlay_hook", 1) ? 1 : 0;
+    if (g_subclassOn < 0)
+        g_subclassOn = ShConfigGetBool("loader", "overlay_subclass", 1) ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * One swapchain, one table
+ *
+ * Present and ResizeBuffers used to be written into the swapchain's vtable in
+ * place, and that table is the driver's: every swapchain in the process shares
+ * it. So writing it put this file into the present path of every swapchain in
+ * the process - another module's overlay UI, the game's own second window,
+ * and (measured on the field machine of 2026-09-25) NVIDIA's present
+ * interception, which keeps a swapchain of its own on a window classed
+ * "InvisibleWindowClassNvPresent", created 0.3 s behind the game's on every
+ * start. On that machine a session with the shared table patched froze before
+ * its first frame and one with the patch left out did not, over four runs.
+ *
+ * A table of our own is the fix: the shared array is not written to at all, a
+ * copy is made once, and only the swapchains that are on the game's own window
+ * are pointed at it. Nothing else in the process is then in this file's path -
+ * not merely left alone, never reached - and a swapchain that is not ours
+ * cannot be disturbed by the fact that the overlay is up.
+ *
+ * The copy is read through VirtualQuery rather than assumed: a vtable sits in
+ * a read-only section whose end is not marked, and the entries past the
+ * interface's own size are not ours to read.
+ */
+#define OVL_VTBL_MAX 48
+static void* g_swapVtbl[OVL_VTBL_MAX];
+static int   g_swapVtblN = 0;
+
+static int VtblCopy(void** from, void** to)
+{
+    MEMORY_BASIC_INFORMATION mi;
+    uint64_t start = (uint64_t)(uintptr_t)from, room, i;
+
+    if (!from) return 0;
+    if (!VirtualQuery(from, &mi, sizeof mi)) return 0;
+    if (mi.State != MEM_COMMIT) return 0;
+    room = ((uint64_t)(uintptr_t)mi.BaseAddress + (uint64_t)mi.RegionSize -
+            start) / sizeof(void*);
+    if (room > (uint64_t)OVL_VTBL_MAX) room = (uint64_t)OVL_VTBL_MAX;
+    for (i = 0; i < room; i++) to[i] = from[i];
+    return (int)room;
+}
+
+/* Which table each of the swapchain's later interfaces answers through, and
+ * whether it is the copy this file installed. DXGI is free to hand a later
+ * interface a different array, and a game that presents through one this file
+ * never touched would look exactly like a game that never presented at all -
+ * one session of 2026-09-25 did, and the log was the only way to tell the two
+ * apart. Written once, at install time. */
+static void LogInterfaceTables(IDXGISwapChain* swap)
+{
+    char buf[224] = "";
+    const IID* iids[3] = { &__uuidof(IDXGISwapChain1),
+                           &__uuidof(IDXGISwapChain2),
+                           &__uuidof(IDXGISwapChain3) };
+    const char* names[3] = { "1", "2", "3" };
+
+    for (int i = 0; i < 3; i++)
+    {
+        IUnknown* p = nullptr;
+
+        if (SUCCEEDED(swap->QueryInterface(*iids[i], (void**)&p)) && p)
+        {
+            void** vt = *(void***)p;
+            snprintf(buf + strlen(buf), sizeof buf - strlen(buf),
+                     "%s=%p%s ", names[i], (void*)vt,
+                     vt == (void**)g_swapVtbl ? "(ours)" : "(not ours)");
+            p->Release();
+        }
+    }
+    OvlLogFloor("swapchain tables: installed=%p %s", (void*)g_swapVtbl, buf);
+}
+
+/* The swapchain this file hooked, watched for a few seconds after the install.
+ *
+ * The table pointer is written once and something outside this file can write
+ * it again: an overlay or a driver that wraps a swapchain does exactly that,
+ * and the session that follows looks like one where Present was never called
+ * at all. That is what the report of 2026-09-25 21:12 was - the game ran to
+ * its main menu, all three later interfaces answered through this file's table
+ * at install time, and neither present slot was ever entered. So the pointer
+ * is re-read for ten seconds, and any change is written down with the module
+ * that owns the new table. The answer either way is written down, so a quiet
+ * log cannot be mistaken for a check that never ran.
+ *
+ * g_swapPtr itself is declared with the other hook state, above the Present
+ * body: the present line reads it too. */
+static DWORD WINAPI VtableWatchThread(LPVOID)
+{
+    for (int i = 0; i < 20; i++)
+    {
+        void* s = (void*)InterlockedCompareExchangePointer(&g_swapPtr, nullptr,
+                                                           nullptr);
+
+        if (s)
+        {
+            void** now = *(void***)s;
+
+            if (now != (void**)g_swapVtbl)
+            {
+                char own[64];
+
+                OvlLogFloor("swapchain table changed after install: now %p (%s), "
+                            "ours was %p - whatever wrapped it is in front of the "
+                            "hooks", (void*)now,
+                            OwnerName(now, own, (int)sizeof own),
+                            (void*)g_swapVtbl);
+                return 0;
+            }
+        }
+        Sleep(500);
+    }
+    OvlLogFloor("swapchain table is still ours after 10 s (nothing wrapped it)");
+    return 0;
+}
+
 static bool PatchSwapChainVtable(IDXGISwapChain* swap, const char* how)
 {
     void** vtbl = *(void***)swap;
-    DWORD oldProtect = 0;
     bool patched = false;
 
-    if (InterlockedCompareExchange(&g_vtablePatched, 0, 0))
-        return g_origPresent != nullptr;
-
-    g_origPresent = (PresentFn)vtbl[8];
-    g_origResize  = (ResizeFn)vtbl[13];
-    if (VirtualProtect(&vtbl[8], sizeof(void*) * 6, PAGE_READWRITE, &oldProtect))
+    /* Watched, not hooked - see the switch note above. Nothing is written,
+     * and g_origPresent stays null, so the init thread's two routes both see
+     * an unhooked swapchain and leave it that way. */
+    OvlReadSwitches();
+    if (!g_hookOn)
     {
-        vtbl[8]  = (void*)&HookPresent;
-        vtbl[13] = (void*)&HookResizeBuffers;
-        VirtualProtect(&vtbl[8], sizeof(void*) * 6, oldProtect, &oldProtect);
+        OvlLogFloor("hooks NOT installed (%s): [loader] overlay_hook=0 - the "
+                    "swapchain is watched, its vtable is left alone", how);
+        return false;
+    }
+
+    if (InterlockedCompareExchange(&g_vtablePatched, 0, 0))
+    {
+        /* Already ours: a swapchain that came later is pointed at the same
+         * copy, so the overlay stays on it too. */
+        *(void***)swap = g_swapVtbl;
+        return g_origPresent != nullptr;
+    }
+
+    g_origPresent  = (PresentFn)vtbl[8];
+    g_origPresent1 = (Present1Fn)vtbl[18];
+    g_origResize   = (ResizeFn)vtbl[13];
+
+    /* The shared table is left alone - see the note above the copy. Slot 18
+     * (Present1) is the last one this needs, so a table that cannot be read
+     * that far is not hooked at all rather than half hooked. */
+    g_swapVtblN = VtblCopy(vtbl, g_swapVtbl);
+    if (g_swapVtblN > 18)
+    {
+        g_swapVtbl[8]  = (void*)&HookPresent;       /* IDXGISwapChain::Present   */
+        g_swapVtbl[18] = (void*)&HookPresent1;      /* IDXGISwapChain1::Present1 */
+        g_swapVtbl[13] = (void*)&HookResizeBuffers;
+        *(void***)swap = g_swapVtbl;    /* this swapchain, and no other */
         patched = true;
+        LogInterfaceTables(swap);
+        /* And the code hook, for the presents this table never sees - see the
+         * note above InstallPresentCodeHook. Armed here because this is where
+         * the address it needs comes from. */
+        InstallPresentCodeHook();
+        /* Watched for a while: see the note on the watch thread. Started
+         * once, on the first swapchain hooked - which is the one whose
+         * presents are wanted. */
+        InterlockedExchangePointer(&g_swapPtr, swap);
+        {
+            static volatile LONG watchStarted;
+
+            if (InterlockedExchange(&watchStarted, 1) == 0)
+            {
+                HANDLE t = CreateThread(nullptr, 0, VtableWatchThread, nullptr,
+                                        0, nullptr);
+                if (t) CloseHandle(t);
+            }
+        }
     }
     else
     {
@@ -2570,30 +3196,54 @@ static bool PatchSwapChainVtable(IDXGISwapChain* swap, const char* how)
     }
     if (patched)
         InterlockedExchange(&g_vtablePatched, 1);
-    OvlLogFloor("hooks installed (%s): origPresent=%llx origResize=%llx ok=%d",
-           how,
-           (unsigned long long)(uintptr_t)g_origPresent,
-           (unsigned long long)(uintptr_t)g_origResize,
-           patched ? 1 : 0);
+    {
+        char ownP[64], ownR[64];
+
+        OvlLogFloor("hooks installed (%s): origPresent=%llx (%s) origResize=%llx "
+               "(%s) ok=%d - own table of %d entries, the shared one untouched",
+               how,
+               (unsigned long long)(uintptr_t)g_origPresent,
+               OwnerName((const void*)g_origPresent, ownP, (int)sizeof ownP),
+               (unsigned long long)(uintptr_t)g_origResize,
+               OwnerName((const void*)g_origResize, ownR, (int)sizeof ownR),
+               patched ? 1 : 0, g_swapVtblN);
+    }
     return patched && g_origPresent != nullptr;
 }
 
-/* A swapchain the game just created: patch its vtable and remember which
- * window it is on, so the init thread subclasses the window the renderer
- * actually draws into instead of guessing by size. */
+/* A swapchain the game just created: hook it when it is on the game's own
+ * window, and remember that window, so the init thread subclasses the window
+ * the renderer actually draws into instead of guessing by size.
+ *
+ * A swapchain that is on some other window - another module's overlay UI, the
+ * game's own second window - is logged and otherwise left entirely alone: not
+ * hooked, and it does not become the window to attach to. That is what keeps
+ * another module's swapchain out of this file's path altogether, together with
+ * the table of our own in PatchSwapChainVtable. A swapchain with no window at
+ * all (an offscreen one) is hooked, because nothing tells it apart from the
+ * game's; the Present guard passes its frames through untouched. */
 static void OnSwapChainSeen(IDXGISwapChain* swap, const char* how)
 {
     DXGI_SWAP_CHAIN_DESC d = {};
+    char cls[80] = "";
+    HWND on = nullptr;
+    int  ours;
 
     if (!swap) return;
-    if (SUCCEEDED(swap->GetDesc(&d)) && d.OutputWindow)
-        InterlockedExchangePointer(&g_capturedHwnd, (PVOID)d.OutputWindow);
-    InterlockedExchange(&g_captured, 1);
-    PatchSwapChainVtable(swap, how);
-    OvlLogFloor("swapchain captured (%s): hwnd=%llx buffer %ux%u windowed=%d",
-           how, (unsigned long long)(uintptr_t)d.OutputWindow,
+    if (SUCCEEDED(swap->GetDesc(&d))) on = d.OutputWindow;
+    if (on && !GetClassNameA(on, cls, (int)sizeof cls)) cls[0] = '\0';
+    ours = !on || WindowIsOurs(on);
+    if (ours)
+    {
+        if (on) InterlockedExchangePointer(&g_capturedHwnd, (PVOID)on);
+        InterlockedExchange(&g_captured, 1);
+        PatchSwapChainVtable(swap, how);
+    }
+    OvlLogFloor("swapchain captured (%s): hwnd=%llx class '%s' buffer %ux%u "
+           "windowed=%d%s", how, (unsigned long long)(uintptr_t)on, cls,
            (unsigned)d.BufferDesc.Width, (unsigned)d.BufferDesc.Height,
-           d.Windowed ? 1 : 0);
+           d.Windowed ? 1 : 0,
+           ours ? "" : " - not our window, left alone");
 }
 
 typedef HRESULT(STDMETHODCALLTYPE* FactoryCreateSwapChainFn)(
@@ -2766,19 +3416,12 @@ static HRESULT STDMETHODCALLTYPE HookFactoryCreateSwapChainForHwnd(
         return E_FAIL;
     }
     hr = h->origForHwnd(self, dev, hwnd, desc, fs, restrict, out);
+    /* One place decides what to do with a new swapchain, whichever call made
+     * it: OnSwapChainSeen hooks it only when it is on the game's own window,
+     * and logs what it was. It reads the desc back, so the milestone line
+     * carries the same fields on both paths. */
     if (SUCCEEDED(hr) && out && *out)
-    {
-        InterlockedExchangePointer(&g_capturedHwnd, (PVOID)hwnd);
-        InterlockedExchange(&g_captured, 1);
-        PatchSwapChainVtable(*out, "CreateSwapChainForHwnd");
-        /* A milestone like the rest: at warn this is the line that says which
-         * window the game renders into, and it used to be info-only. */
-        OvlLogFloor("swapchain captured (CreateSwapChainForHwnd): hwnd=%llx "
-               "%ux%u format %u buffers %u",
-               (unsigned long long)(uintptr_t)hwnd, (unsigned)desc->Width,
-               (unsigned)desc->Height, (unsigned)desc->Format,
-               (unsigned)desc->BufferCount);
-    }
+        OnSwapChainSeen(*out, "CreateSwapChainForHwnd");
     return hr;
 }
 
@@ -2798,12 +3441,35 @@ static bool InstallFactoryCapture()
 
     PatchFactoryVtable(*(void***)f1, false);            // IDXGIFactory1: slot 10
     {
+        /* Every interface version, not just the two that were measured to
+         * share one array: a game that creates its swapchain through, say,
+         * IDXGIFactory4 would otherwise do it on an array this file never
+         * patched, and a swapchain nobody captured is a swapchain nothing
+         * hooks (2026-09-25: a game that ran to its main menu with neither
+         * present slot ever entered). The rows are deduplicated by the array
+         * pointer, so an interface answering through the same array as
+         * another costs one compare. */
         IDXGIFactory2* f2 = nullptr;
+        IDXGIFactory3* f3 = nullptr;
+        IDXGIFactory4* f4 = nullptr;
+
         if (SUCCEEDED(f1->QueryInterface(__uuidof(IDXGIFactory2), (void**)&f2))
             && f2)
         {
             PatchFactoryVtable(*(void***)f2, true);     // + ForHwnd (15) / ForCoreWindow (16)
             f2->Release();
+        }
+        if (SUCCEEDED(f1->QueryInterface(__uuidof(IDXGIFactory3), (void**)&f3))
+            && f3)
+        {
+            PatchFactoryVtable(*(void***)f3, true);     // an array of its own, if dxgi says so
+            f3->Release();
+        }
+        if (SUCCEEDED(f1->QueryInterface(__uuidof(IDXGIFactory4), (void**)&f4))
+            && f4)
+        {
+            PatchFactoryVtable(*(void***)f4, true);
+            f4->Release();
         }
     }
     f1->Release();
@@ -2891,22 +3557,27 @@ static bool InstallSwapChainHooksProbe()
 // ---------------------------------------------------------------------------
 // find the game's render window
 //
-// Three answers, in the order they can be trusted:
+// Two answers, in the order they can be trusted:
 //   1. the window of a swapchain the game itself created (route 1 above) -
 //      by definition the window the renderer draws into;
-//   2. a visible window of the engine's render class;
-//   3. only once the budget is spent: the largest visible window, which is
-//      the old behaviour and is logged as the fallback it is.
+//   2. a visible window of the engine's render class, titled like the game.
 //
-// It used to be (3) after exactly 60 s, taking whatever it had found - and a
-// default install plays its intro in full (~47 s), so on the field machine of
-// 2026-09-17 the scan expired during the intro, the 466x310 splash window was
-// subclassed, and a second D3D11 device was created while the engine was
-// starting its own renderer. Waiting for the right window is what removes
-// both halves of that.
+// Both are "the game's own render window", and nothing else is ever taken -
+// there is no third answer and no budget. The window is waited for however
+// long it takes, because the splash window comes first and can sit there for
+// minutes, and settling on it is a subclass on a window that is gone once the
+// intro ends.
+//
+// It used to be a timed scan - 60 s, then the largest visible window it had
+// found. A default install plays its intro in full (~47 s), so on the field
+// machine of 2026-09-17 the scan expired during the intro, the 466x310 splash
+// window was subclassed, and a second D3D11 device was created while the
+// engine was starting its own renderer. Waiting for the right window is what
+// removes both halves of that.
 // ---------------------------------------------------------------------------
-static const wchar_t kRenderClass[] = L"ScimitarEngineWindowClass";
-static const DWORD   kWindowBudgetMs = 180000;   /* 3 minutes, not 60 s */
+/* kRenderClass and the splash class live above the Present hook: the swapchain
+ * test reads them as well, and both places must agree on which window is
+ * ours. */
 static const DWORD   kProbeGraceMs   = 20000;    /* after the window is up */
 static const DWORD   kSettleMs       = 1500;
 
@@ -2944,23 +3615,19 @@ static BOOL CALLBACK FindWindowCb(HWND h, LPARAM lp)
     int w = rc.right - rc.left, ht = rc.bottom - rc.top;
     if (w < 64 || ht < 64)
         return TRUE;
-    int byClass = IsRenderClass(h);
-
-    /* A window of the render class wins outright; a plain one is only kept
-     * while no render-class window has been seen, and is what the fallback
-     * budget ends up using. */
-    if (byClass && (!g_foundByClass || w * ht > g_foundW * g_foundH))
+    /* Only the game's own render window is a candidate - the splash carries a
+     * class of its own and a title whose registered mark is mis-encoded, and
+     * the overlay must never hang off it, not even when it is the only window
+     * there is. Nothing else is recorded: there is no fallback left to fill,
+     * and the init thread waits for this one window however long the splash
+     * sits there. See the note on which window is ours. */
+    if (IsRenderClass(h) && WindowIsOurs(h) &&
+        (!g_foundByClass || w * ht > g_foundW * g_foundH))
     {
         g_foundWindow = h;
         g_foundW = w;
         g_foundH = ht;
         g_foundByClass = 1;
-    }
-    else if (!g_foundByClass && (!g_foundWindow || w * ht > g_foundW * g_foundH))
-    {
-        g_foundWindow = h;
-        g_foundW = w;
-        g_foundH = ht;
     }
     return TRUE; // keep scanning for a better one
 }
@@ -2987,7 +3654,7 @@ static DWORD WINAPI InitThread(LPVOID)
 {
     DWORD start = GetTickCount();
     HWND  w = nullptr;
-    int   choseByClass = 0, choseByCapture = 0;
+    int   choseByCapture = 0;
 
     if (!g_imeLockReady) {
         InitializeCriticalSection(&g_imeLock);
@@ -3022,9 +3689,11 @@ static DWORD WINAPI InitThread(LPVOID)
 
         /* The captured window is the game's own render window, so it is
          * taken as soon as it is one - but not when it is the splash
-         * window, which is a swapchain too and comes first. */
+         * window, which is a swapchain too and comes first. WindowIsOurs
+         * says which of the two this is; the size test stays for the build
+         * whose windows are neither (see the note on which window is ours). */
         w = CapturedWindow();
-        if (w && IsWindow(w))
+        if (w && IsWindow(w) && WindowIsOurs(w))
         {
             RECT rc = {};
             int ww = 0, hh = 0;
@@ -3034,56 +3703,71 @@ static DWORD WINAPI InitThread(LPVOID)
                 g_hwnd = w;
                 choseByCapture = 1;
                 OvlLogFloor("init thread: render window %llx is the captured "
-                       "swapchain's (%dx%d)", (unsigned long long)(uintptr_t)w,
-                       ww, hh);
+                       "swapchain's (%dx%d, title '%s')",
+                       (unsigned long long)(uintptr_t)w, ww, hh,
+                       TitleForLog(w));
                 break;
             }
         }
         if (FindGameWindow() && g_foundByClass)
         {
             g_hwnd = g_foundWindow;
-            choseByClass = 1;
-            OvlLogFloor("init thread: render window %llx by class, client %dx%d",
-                   (unsigned long long)(uintptr_t)g_hwnd, g_foundW, g_foundH);
+            OvlLogFloor("init thread: render window %llx by class, client "
+                   "%dx%d, title '%s'",
+                   (unsigned long long)(uintptr_t)g_hwnd, g_foundW, g_foundH,
+                   TitleForLog(g_hwnd));
             break;
         }
-        if (waited >= kWindowBudgetMs)
-        {
-            g_hwnd = g_foundWindow ? g_foundWindow : w;
-            OvlLogFloor("init thread: no render window in %lu s - falling back to "
-                   "the largest visible window (%llx, %dx%d), which is the "
-                   "pre-2026-09-17 behaviour",
-                   (unsigned long)(waited / 1000),
-                   (unsigned long long)(uintptr_t)g_hwnd, g_foundW, g_foundH);
-            break;
-        }
+        /* No budget and no fallback: the game's own window is waited for
+         * however long it takes. The splash comes first and can sit there for
+         * minutes, and settling on it is what the old budget used to do - a
+         * subclass on a window that is gone once the intro ends. A machine
+         * whose window never appears gets no overlay; the line below says what
+         * was being waited for. */
         if ((waited % 5000) < 500)
             OvlLog("waiting for the render window (%lu s; captured=%llx, "
-                   "largest=%llx %dx%d%s)",
+                   "found=%llx %dx%d)",
                    (unsigned long)(waited / 1000),
                    (unsigned long long)(uintptr_t)w,
                    (unsigned long long)(uintptr_t)g_foundWindow, g_foundW,
-                   g_foundH, g_foundByClass ? " by class" : "");
+                   g_foundH);
         Sleep(500);
-    }
-
-    if (!g_hwnd || !IsWindow(g_hwnd))
-    {
-        OvlLogFloor("overlay: no usable window - the game runs untouched and F4 "
-               "does nothing");
-        return 0;
     }
 
     /* Subclass, so ImGui gets the keyboard and the IME work has a target.
      * Route 1 already hooked Present on the game's own swapchain, so there
-     * is no device to create and nothing to race here. */
-    g_origWndProc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC,
-                                               (LONG_PTR)SubWndProc);
-    OvlLogFloor("init thread: subclass %s (previous proc %llx) (%s)",
-           g_origWndProc ? "installed" : "NOT installed",
-           (unsigned long long)(uintptr_t)g_origWndProc,
-           choseByCapture ? "captured swapchain"
-                          : (choseByClass ? "render class" : "fallback"));
+     * is no device to create and nothing to race here.
+     *
+     * The loop above only ever leaves with the game's own render window in
+     * hand, so there is no "no window" case left to handle: a window that
+     * died between those two lines makes SetWindowLongPtrW fail, which is
+     * logged as NOT installed, and the Present guard then keeps the overlay
+     * off the screen - see the note on which window is ours. */
+    OvlReadSwitches();
+    if (g_subclassOn)
+    {
+        g_origWndProc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC,
+                                                   (LONG_PTR)SubWndProc);
+        OvlLogFloor("init thread: subclass %s (previous proc %llx) (%s)",
+               g_origWndProc ? "installed" : "NOT installed",
+               (unsigned long long)(uintptr_t)g_origWndProc,
+               choseByCapture ? "captured swapchain" : "render class");
+    }
+    else
+        OvlLogFloor("init thread: subclass NOT installed ([loader] "
+               "overlay_subclass=0) - the keyboard stays the game's (diagnostic)");
+
+    /* Observe only: no Present hook and no probe device, so nothing in this
+     * process is in the swapchain's path at all. Everything up to here - the
+     * factory patch, the window, the capture log - still ran, which is the
+     * point: what a freeze reports is then the half that was turned off. */
+    if (!g_hookOn)
+    {
+        OvlLogFloor("overlay: observe only ([loader] overlay_hook=0) - nothing "
+               "hooks the swapchain, the game runs untouched and F4 does "
+               "nothing (diagnostic)");
+        return 0;
+    }
 
     if (InterlockedCompareExchange(&g_captured, 0, 0) &&
         g_origPresent != nullptr)

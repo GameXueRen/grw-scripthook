@@ -398,10 +398,28 @@ static FILE *LogOpen(const char *name, const char *path, int fresh) {
      * `fresh` is LogRotate's answer: 1 means this session's own file, which is
      * started here and given the session marker as its first line, 0 means
      * another session's file that could not be moved aside - and that is
-     * appended to, never truncated, so a failed rename cannot cost a log. */
+     * appended to, never truncated, so a failed rename cannot cost a log.
+     *
+     * A session that appends says so with the same marker, so the lines that
+     * follow can be told apart from the ones already in the file. This is not
+     * hypothetical: a launch runs GRW.exe as two processes (a wrapper and the
+     * game, seconds apart), the second one finds the first one's file still
+     * open and holds a handle that a rename cannot move, and without the marker
+     * its block reads as the first process's - the 2026-09-25 22:07 session in
+     * logs\scripthook_ovl.log showed one banner and a doubled "overlay: off"
+     * line until the second process's own line in logs\scripthook.log
+     * (loader: attach pid=22320) explained it.
+     *
+     * Not for scripthook.log: every module whose own log the level dropped
+     * appends to it, and it would fill with markers. */
     FILE *f;
 
-    if (!fresh) return fopen(path, "a");
+    if (!fresh)
+    {
+        f = fopen(path, "a");
+        if (f && strcmp(name, "scripthook.log") != 0) LogMarker(f);
+        return f;
+    }
     f = fopen(path, "w");
     if (!f) return NULL;
     LogMarker(f);                       /* the line that names this session */
