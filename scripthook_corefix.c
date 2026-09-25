@@ -245,7 +245,7 @@ static volatile LONG g_winMismatch;         /* the class/title clash was reporte
 static volatile LONG g_sawMain;             /* the main window has been up */
 static volatile LONG g_pastFront;           /* the front end has been reached */
 static volatile LONG g_stateSeen;           /* the state machine has answered */
-static volatile LONG g_stageFloor;          /* a watchdog moved the stage on */
+static volatile LONG g_stageFloor;          /* the state watchdog moved it on */
 static ShCpuStatus g_status;
 static volatile LONG g_installed = 0;
 
@@ -1785,12 +1785,18 @@ void ShCoreFixStartup(void)
  * the moment the player reaches the front end, and the dials for them stop
  * being in force with it.
  *
- * Two watchdogs keep a missing signal from freezing a stage forever: the
- * logo one for a build whose two windows are renamed or re-titled, and the
- * front end one
- * for a build where the state hook never armed. Both raise the floor the
- * stage is read through rather than returning a stage for one tick, so
- * progress is monotone even then. */
+ * One watchdog keeps a missing signal from freezing a stage forever: the
+ * front end one, for a build where the state hook never armed. It raises the
+ * floor the stage is read through rather than returning a stage for one tick,
+ * so progress is monotone even then.
+ *
+ * The logo stage has no watchdog and no budget: the game's own window is
+ * waited for as long as it takes. The splash screen comes first and can sit
+ * there for minutes, and moving the stage on under it would put the window
+ * dial in force during the logo - the one thing these stages exist to avoid.
+ * A session whose windows are never recognised keeps the logo dial, which is
+ * visible in the menu's stage line, rather than being handed a dial that was
+ * chosen for a window that never appeared. */
 typedef struct {
     int      logo;              /* a window the class or title calls the logo */
     int      main;              /* ... and the game's own window              */
@@ -1813,21 +1819,32 @@ typedef struct {
     wchar_t  mmCls[64];
 } WinProbe;
 
-/* The two windows, matched loosely on the part of the class name that says
- * what the window is: "ScimitarSplashScreenWindow" and
- * "ScimitarEngineWindowClass" are what has been seen on this build, and the
- * exact class of each goes into the log every session, so a rename shows up
- * there before it can matter. A class matching neither votes for nothing
- * and leaves the title deciding, which is how this worked before classes
- * were read at all. */
+/* The two class names, matched whole: the same two names scripthook_ovl.cpp
+ * matches exactly for the window it hangs the overlay on, so the two files
+ * cannot disagree about which window this is. The class each window really
+ * carries goes into the log every session, so a rename shows up there on the
+ * first start rather than being guessed at here. A class matching neither
+ * votes for nothing and leaves the title deciding, which is how this worked
+ * before classes were read at all.
+ *
+ * Whole names, rather than the "contains Splash / contains Engine" this used
+ * to do, and that costs nothing: the overlay has matched
+ * "ScimitarEngineWindowClass" whole and found the window on every machine for
+ * as long as it has had a class test at all. Where a build names them
+ * differently, both features still fall back to the title - a class this file
+ * does not know is not a window this file guesses at - and the class the
+ * windows really carry is already in the log. */
+static const wchar_t kSplashCls[] = L"ScimitarSplashScreenWindow";
+static const wchar_t kEngineCls[] = L"ScimitarEngineWindowClass";
+
 static int ClsIsSplash(const wchar_t *cls)
 {
-    return wcsstr(cls, L"Splash") != NULL;
+    return _wcsicmp(cls, kSplashCls) == 0;
 }
 
 static int ClsIsEngine(const wchar_t *cls)
 {
-    return wcsstr(cls, L"Engine") != NULL;
+    return _wcsicmp(cls, kEngineCls) == 0;
 }
 
 static BOOL CALLBACK WinEnumProc(HWND h, LPARAM l)
@@ -1973,8 +1990,8 @@ static int StageFromNow(void)
          * menu and every lobby in one bucket, which is why a lobby is not a
          * stage of its own - or the world being up, which proves the front
          * end was passed even when the menu was never caught. A state that
-         * cannot be read leaves the stage where it is: the thread's second
-         * watchdog is what moves it on then, not a guess here. */
+         * cannot be read leaves the stage where it is: the state watchdog is
+         * what moves it on then, not a guess here. */
         if (!g_pastFront) {
             int s = ShGetGameState();
 
@@ -2009,17 +2026,21 @@ static int StageFromNow(void)
  * dials: "leave alone" and "all cores" differ only in whether the system's
  * own trimming is undone, so the step itself is the event.
  *
- * Two 120 second guards, for the two signals that could never arrive: a
- * build whose windows no longer match the logo probe, and one where
- * the state module failed to hook. Each raises the floor the stage is read
- * through and says so - a dial stuck in force for a whole session would be
- * worse than one that starts a little early - and each counts within its
- * own stage, so neither can cut the other short. The second only runs while
- * the state machine has never answered: where it does answer, the front end
- * signal is real and the stage waits for it however long the first load
- * takes. */
-#define STAGE_POLL_MS   250
-#define STAGE_STATE_MS  120000
+ * One 120 second guard, for the one signal that could never arrive: the
+ * game's own state, where the state module failed to hook. It raises the floor
+ * the stage is read through and says so - a dial stuck in force for a whole
+ * session would be worse than one that starts a little early - and it counts
+ * within its own stage.
+ *
+ * It only runs while the state machine has never answered at all: where it
+ * does answer, the front end signal is real and the stage waits for it however
+ * long the first load takes. The window signal has no guard, by design: the
+ * game's own window is waited for as long as it takes, and the logo dial stays
+ * in force until it arrives - a splash screen can sit there for minutes, and
+ * moving the stage on under it would put the window dial in force during the
+ * logo. See the note on the two windows above StageFromNow. */
+#define STAGE_POLL_MS      250
+#define STAGE_NOSTATE_MS   120000
 
 static DWORD WINAPI StageThread(LPVOID p)
 {
@@ -2031,21 +2052,14 @@ static DWORD WINAPI StageThread(LPVOID p)
 
         ShTickPing(SH_TICK_COREFIX);
 
-        if (stage == STAGE_BOOT &&
-            GetTickCount64() - stageAt >= STAGE_STATE_MS) {
-            InterlockedExchange(&g_stageFloor, STAGE_WINDOW);
-            stage = STAGE_WINDOW;
-            Log("corefix: the main window never came up after %lu s - the "
-                "logo stage is over anyway",
-                (unsigned long)(STAGE_STATE_MS / 1000));
-        } else if (stage == STAGE_WINDOW && !g_stateSeen &&
-                   GetTickCount64() - stageAt >= STAGE_STATE_MS) {
+        if (stage == STAGE_WINDOW && !g_stateSeen &&
+            GetTickCount64() - stageAt >= STAGE_NOSTATE_MS) {
             InterlockedExchange(&g_stageFloor, STAGE_PLAY);
             stage = STAGE_PLAY;
             Log("corefix: the game's state has never been readable after %lu "
                 "s in the window stage - the play stage takes over, since "
                 "nothing here can tell the front end apart without it",
-                (unsigned long)(STAGE_STATE_MS / 1000));
+                (unsigned long)(STAGE_NOSTATE_MS / 1000));
         }
         if (stage != g_stage) {
             ApplyDial(stage);
