@@ -7,8 +7,10 @@
  * through ShMenuCaptureView and draws it with Dear ImGui inside
  * the game's Present call, using the same look and interaction
  * as the original native-UI menu. The overlay declares itself
- * ready via ShMenuSetOverlayReady; until then the menu never
- * swallows the keyboard. */
+ * ready via ShMenuSetOverlayReady; until then the menu does not
+ * open at all - neither the hotkey nor ShMenuOpen - which is
+ * what keeps the keyboard, and every plugin that asks
+ * ShMenuIsOpen(), out of a menu nobody can see. */
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
@@ -995,15 +997,31 @@ static DWORD WINAPI MenuThread(LPVOID p) {
          * could block: the toggle must never depend on the
          * menu having rendered. */
         if (Pressed(g_key)) {
-            g_open = !g_open;
-            HoldReset();   /* opened or closed: nothing is held now */
-            if (g_open) {
-                /* A plugin's text box (the Chinese chat box is one)
-                 * yields the keyboard by itself: it polls
-                 * ShMenuIsOpen() and closes, which releases the
-                 * capture - the menu only has to take the keys from
-                 * here, not hand them over. */
-                OpenRoot();
+            /* The overlay is what draws the menu, and it only comes up on the
+             * game's first Present. Before that there is nothing to draw, and
+             * opening the model anyway would tell every plugin that asks
+             * ShMenuIsOpen() that a menu is on screen while the screen shows
+             * none of it - their own hotkeys go dead and the player has no way
+             * to see why. So the press is dropped. Once the overlay is up,
+             * which is a second or two into the loading screen, the next press
+             * works; one line records the dropped one. */
+            if (!g_ovlReady) {
+                static volatile LONG said;
+
+                if (InterlockedExchange(&said, 1) == 0)
+                    Log("menu: hotkey pressed before the overlay is up - "
+                        "ignored, there is nothing to draw with yet");
+            } else {
+                g_open = !g_open;
+                HoldReset();   /* opened or closed: nothing is held now */
+                if (g_open) {
+                    /* A plugin's text box (the Chinese chat box is one)
+                     * yields the keyboard by itself: it polls
+                     * ShMenuIsOpen() and closes, which releases the
+                     * capture - the menu only has to take the keys from
+                     * here, not hand them over. */
+                    OpenRoot();
+                }
             }
         }
 
@@ -1012,9 +1030,10 @@ static DWORD WINAPI MenuThread(LPVOID p) {
             continue;
         }
 
-        /* Open but not yet renderable: the overlay initialises
-         * on the first Present. Hand the keys back and wait;
-         * F4 keeps polling meanwhile. */
+        /* The net under the guard above: nothing opens the menu before the
+         * overlay is up, so this is here for an overlay that goes away again
+         * (a device loss would call ShMenuSetOverlayReady(0)). A menu that is
+         * wanted but has nothing to render it must hide nothing at all. */
         if (!g_ovlReady) {
             MenuCapture(0);
             continue;
@@ -1351,6 +1370,10 @@ SH_API int ShMenuIsShowing(uint32_t menu) {
 
 SH_API void ShMenuOpen(int open) {
     EnsureMenu();
+    /* Same rule as the hotkey: a menu that nothing can draw yet is worse than
+     * no menu, because the plugins that ask ShMenuIsOpen() act on it. Closing
+     * is always allowed - only opening has to wait for the overlay. */
+    if (open && !g_ovlReady) return;
     g_open = open ? 1 : 0;
     if (g_open) OpenRoot();
 }
