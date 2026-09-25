@@ -922,6 +922,85 @@ SH_API int ShNpcPlanFormation(int formation, int count, float distance,
     return n;
 }
 
+/* ---- the layout policy -------------------------------------------
+ *
+ * Where a batch lands and which way it looks are the request's own
+ * business - until someone wants to look at a batch. With the player
+ * standing still every call lands on the same spot, and a spawn that
+ * faces the player is a spawn whose reaction cannot be told from its
+ * patience. So a caller may leave a policy here instead: each batch a
+ * step further round the player than the last, and a heading drawn by
+ * one of the modes in scripthook.h.
+ *
+ * It is deliberately not a field of ShNpcSpawnRequest: that struct is
+ * shared with plugins and with jobs that are already running, and a
+ * caller that never installs a policy has to see exactly what it saw
+ * before.
+ */
+static volatile LONG g_layoutOn = 0;
+static volatile LONG g_spreadTick = 0;
+static float g_spreadStepDeg = 0.0f;               /* degrees, as given */
+static float g_spreadStep = 0.0f;                  /* radians */
+static int   g_facingMode = SH_NPC_FACING_MODE_PLAYER;
+static float g_facingAngle = 0.0f;                 /* radians */
+
+SH_API int ShNpcSpawnSetLayout(const ShNpcSpawnLayout *layout) {
+    if (!layout) {
+        InterlockedExchange(&g_layoutOn, 0);
+        ShSetError(SH_OK);
+        return 1;
+    }
+    if (layout->facing_mode < SH_NPC_FACING_MODE_PLAYER ||
+        layout->facing_mode > SH_NPC_FACING_MODE_SPIN) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+
+    /* A step that did not change is not a new walk. The caller this
+     * exists for re-installs its policy before every batch, and
+     * resetting the count here would pin every batch to the same
+     * bearing - the very thing the spread is for. */
+    if (g_spreadStepDeg != layout->spread_step_deg) {
+        g_spreadStepDeg = layout->spread_step_deg;
+        g_spreadStep = layout->spread_step_deg * (NPC_PI_F / 180.0f);
+        InterlockedExchange(&g_spreadTick, 0);
+    }
+    g_facingMode = layout->facing_mode;
+    g_facingAngle = layout->facing_angle_deg * (NPC_PI_F / 180.0f);
+    InterlockedExchange(&g_layoutOn, 1);
+    ShSetError(SH_OK);
+    return 1;
+}
+
+SH_API int ShNpcSpawnGetLayout(ShNpcSpawnLayout *out) {
+    if (!out) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+
+    if (!InterlockedCompareExchange(&g_layoutOn, 0, 0)) {
+        out->spread_step_deg = 0.0f;
+        out->facing_mode = SH_NPC_FACING_MODE_PLAYER;
+        out->facing_angle_deg = 0.0f;
+    } else {
+        out->spread_step_deg = g_spreadStepDeg;
+        out->facing_mode = g_facingMode;
+        out->facing_angle_deg = g_facingAngle * (180.0f / NPC_PI_F);
+    }
+    ShSetError(SH_OK);
+    return 1;
+}
+
+/* A heading for one spawn that no policy fixed, in radians. Xorshift
+ * over an interlocked counter: no seeding, no library state, safe
+ * from any thread. */
+static float NextFacingJitter(void) {
+    static volatile LONG s = 0x1F123BB5;
+    unsigned x = (unsigned)InterlockedIncrement(&s) * 2654435761u;
+
+    x ^= x >> 13;
+    x *= 0x5bd1e995u;
+    x ^= x >> 15;
+    return (float)x * (NPC_TAU_F / 4294967296.0f);
+}
+
 /* ---- one batch --------------------------------------------------- */
 
 /* Runs on whichever thread calls it. progress, when it is not
@@ -956,6 +1035,18 @@ static int SpawnBatch(const ShNpcSpawnRequest *req, uint64_t *out,
         !ShGetEntityTransform(pl.entity, &tmp, &yaw, &pitch, &roll)) {
         ShSetError(SH_ERR_NO_POSITION);
         return 0;
+    }
+
+    /* The layout policy, when one is installed: each batch goes one
+     * step further round the player than the last, so a run of them
+     * spreads out instead of stacking on one spot. The first batch
+     * keeps the straight-ahead heading the planner has always given
+     * it. */
+    if (InterlockedCompareExchange(&g_layoutOn, 0, 0)) {
+        float step = g_spreadStep;
+
+        if (step != 0.0f)
+            yaw += (float)(InterlockedIncrement(&g_spreadTick) - 1) * step;
     }
 
     n = ShNpcPlanFormation(req->formation, count, req->distance, &pp, yaw,
@@ -1000,11 +1091,32 @@ static int SpawnBatch(const ShNpcSpawnRequest *req, uint64_t *out,
         out[got++] = e;
         if (progress) InterlockedExchange(progress, got);
 
-        if (req->facing == SH_NPC_FACING_PLAYER) {
-            /* Turn it to look at the player, in radians. */
-            float dx = pp.x - pos[i].x;
-            float dy = pp.y - pos[i].y;
-            ShQueueTransform(e, &pos[i], atan2f(dy, dx), 0.0f, 0.0f);
+        {
+            /* Which way it looks: the policy when one is installed,
+             * the request's own facing field when not. FORWARD is the
+             * one mode that writes nothing - the spawn already
+             * carries the player's heading. */
+            int   mode = InterlockedCompareExchange(&g_layoutOn, 0, 0)
+                       ? g_facingMode : -1;
+            int   want = 0;
+            float face = 0.0f;
+
+            if (mode == SH_NPC_FACING_MODE_PLAYER ||
+                (mode < 0 && req->facing == SH_NPC_FACING_PLAYER)) {
+                want = 1;
+                face = atan2f(pp.y - pos[i].y, pp.x - pos[i].x);
+            } else if (mode == SH_NPC_FACING_MODE_RANDOM) {
+                want = 1;
+                face = NextFacingJitter();
+            } else if (mode == SH_NPC_FACING_MODE_FIXED) {
+                want = 1;
+                face = g_facingAngle;
+            } else if (mode == SH_NPC_FACING_MODE_SPIN) {
+                want = 1;
+                face = g_facingAngle * (float)got;
+            }
+
+            if (want) ShQueueTransform(e, &pos[i], face, 0.0f, 0.0f);
         }
     }
 

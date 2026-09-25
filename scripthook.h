@@ -48,8 +48,10 @@ extern "C" {
  *
  *  1  1.0-beta3 and before: everything up to and including ShGetAmmoRounds.
  *  2  ShGetAmmoObject: the weapon a rounds reading is about.
+ *  3  ShNpcSpawnSetLayout / ShNpcSpawnGetLayout: how a batch is turned and
+ *     which way it looks.
  */
-#define SH_API_VERSION 2
+#define SH_API_VERSION 3
 
 /** What a plugin needs of the framework, declared once and outside every
  *  function:
@@ -949,6 +951,57 @@ SH_API int ShNpcSpawnCancel(uint32_t job);
  *  stop first, so the caller polls until done and calls again.
  *  The job id is dead afterwards. */
 SH_API int ShNpcSpawnEnd(uint32_t job);
+
+/* ---- the layout a caller may ask for ----------------------------
+ *
+ * A batch is placed ahead of the player and left facing the way the
+ * request says. That is all a plugin needs to spawn a wave, but it is
+ * not enough to *look at* one: with the player standing still every
+ * batch lands on the same spot, and a spawn that faces the player is
+ * one whose reaction cannot be told apart from its patience.
+ *
+ * So a caller may install a policy instead. It is deliberately not a
+ * field of ShNpcSpawnRequest: that struct is shared with plugins and
+ * with jobs already running, and a caller that never installs a
+ * policy has to see exactly what it saw before.
+ */
+
+/** Which way the spawns of a batch are made to look. */
+enum ShNpcFacingMode {
+    /** Facing the player, which is what SH_NPC_FACING_PLAYER means. */
+    SH_NPC_FACING_MODE_PLAYER = 0,
+    /** Left as spawned, so it carries the player's own heading. */
+    SH_NPC_FACING_MODE_FORWARD,
+    /** A different heading each, drawn where the spawn is placed. */
+    SH_NPC_FACING_MODE_RANDOM,
+    /** Every one turned to facing_angle_deg, in degrees, world axes. */
+    SH_NPC_FACING_MODE_FIXED,
+    /** Spun round: the i-th looks along facing_angle_deg * i, so a
+     *  batch covers the circle in as many steps as it has members. */
+    SH_NPC_FACING_MODE_SPIN
+};
+
+/** The policy ShNpcSpawnSetLayout installs. */
+typedef struct {
+    /** Every batch is placed this much further round the player than
+     *  the last, in degrees. 0 leaves them all straight ahead, which
+     *  is what the planner has always done; 40 puts nine batches
+     *  round the circle. */
+    float spread_step_deg;
+    /** An ShNpcFacingMode. */
+    int   facing_mode;
+    /** The fixed heading, or the step of the spin, in degrees. */
+    float facing_angle_deg;
+} ShNpcSpawnLayout;
+
+/** Install the policy every later batch obeys, until it is replaced.
+ *  NULL clears it, returning the batch to the request's own fields
+ *  (and to the straight-ahead placement). Refuses a facing_mode that
+ *  is not one of the enum's, and returns 0 there. */
+SH_API int ShNpcSpawnSetLayout(const ShNpcSpawnLayout *layout);
+
+/** Read back what is installed, all zero when nothing is. */
+SH_API int ShNpcSpawnGetLayout(ShNpcSpawnLayout *out);
 
 /** @} */
 /** @addtogroup player
