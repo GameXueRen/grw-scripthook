@@ -974,10 +974,58 @@ static uint64_t HeadPtr(void) {
     return a;
 }
 
+/* Why the last frame placed nothing, said where it happens.
+ *
+ * A frame that is neither ours nor one of the deliberate handovers is a frame
+ * the engine's own camera draws - which is what a flicker in the view IS. The
+ * plugin polls this state every 60 ms and cannot see a one-frame value at all,
+ * and the field report of 2026-09-26 ("aiming, and one frame of something else
+ * flashes past") is exactly that shape. Written only when the value on either
+ * side of the change is one of those frames, so the line is never about the
+ * ordinary walk between ours, ads, menu and drone.
+ *
+ * This runs at the top of the camera frame, before the placement of the same
+ * frame, so what it compares is last frame's answer. */
+static int BowBad(int v) {
+    /* OFF is in here too: it is what a frame is called when first person is not
+     * asked for ON THAT FRAME, so the switch flickering for one frame is an
+     * engine-camera frame like any other. The ordinary case - the player has
+     * first person off for the whole session - then reads as a line at each end
+     * of it, which is the price of catching the flicker. */
+    return v == BOW_STALE || v == BOW_ARG || v == BOW_BAD || v == BOW_OFF;
+}
+
+static const char *BowName(int v) {
+    switch (v) {
+    case BOW_NONE:  return "ours";
+    case BOW_OFF:   return "off";
+    case BOW_MENU:  return "menu";
+    case BOW_DRONE: return "drone";
+    case BOW_ADS:   return "ads";
+    case BOW_STALE: return "stale";
+    case BOW_ARG:   return "no-argument";
+    case BOW_BAD:   return "not-a-position";
+    }
+    return "?";
+}
+
 /* The camera frame, whether first person runs or not: hold the
  * head down while first person has it, and restate "visible"
  * through the show window after a handover. */
 void ShFp2HeadFrame(void) {
+    {
+        static int last = -1;
+
+        if (g_bow != last) {
+            int was = last;
+
+            last = g_bow;
+            if (BowBad(g_bow) || BowBad(was))
+                Log("bow: %s -> %s (a frame the engine's own camera drew)",
+                    BowName(was), BowName(g_bow));
+        }
+    }
+
     if (g_headShow) {
         if (g_showUntil) {
             if (GetTickCount64() < g_showUntil) HeadVis(0);
@@ -1182,6 +1230,80 @@ static void AimEdge(const char *what) {
  * Returns 1 when the position was taken over. Anything else
  * leaves the frame alone, and the caller falls back.
  */
+/* ---- the frame-to-frame jump trace ---------------------------------------
+ *
+ * A flash that lasts one frame IS a discontinuity, and this is where one can be
+ * seen without a per-frame log: a sprint moves the camera about 0.13 m per
+ * frame, so a quarter of a metre between two frames is either a handover the
+ * design makes on purpose - ours to the engine's aim camera, and back - or the
+ * thing a report calls "one frame of something else". Both are written, with
+ * the values on either side and who owned the frame they came from, so the
+ * deliberate ones are read past in a glance and anything else is the flash.
+ *
+ * The engine's value is what it hands in (before this function writes over it),
+ * ours is what it was given. Nothing here changes anything: it is a compare and
+ * a line, and only on a jump. Reported 2026-09-26: "with first person on,
+ * aiming, sometimes one frame of another picture flashes past".
+ */
+#define TRACE_JUMP_M 0.25f
+
+/* Engine fov values under this are a zoom optic at work - the line the fov
+ * module itself uses (see scripthook_fov.c): a gameplay fov is 0.78 to 0.83
+ * radians, and a magnified optic computes far below it. ShFp2PlaceEye reads it
+ * to decide whether an aim's frame has to stay with the engine's own camera. */
+#define FOV_ZOOM_RAD 0.5f
+static float g_trEng[3], g_trOurs[3];
+static int   g_trEngHave, g_trOursHave;
+
+/* The aim's last frame, read off that trace.
+ *
+ * The engine's own aim camera is not ours to sit in: over an aim it travels
+ * about 1.8 m (measured 2026-09-26), the eye sits about 0.36 m from where it
+ * started, and the frame the aim ends on used to cut from one to the other - a
+ * jump of a metre and a half, one frame long, which is the flash the field
+ * reports as "one frame of another picture".
+ *
+ * What removes it is the handover itself, and two attempts at softening it were
+ * made and taken out the same day (2026-09-26), because both of them show the
+ * player something worse than the cut:
+ *
+ *   - a latch that kept the frame with the engine for a moment after the gate
+ *     cleared. The engine starts its own way out of the aim the instant the
+ *     gate clears, so those frames are the THIRD person one - headless, with the
+ *     whole exit animation - and the player who has just let go is looking
+ *     straight at it.
+ *
+ *   - easing the eye back from where the engine's camera was. Its first frame
+ *     is that camera, which the log shows 1.85 m from the eye, so it opens on a
+ *     third-person headless frame and then glides home: the same fault, spread
+ *     over 150 ms instead of one frame.
+ *
+ * Both were driven by the same wrong idea - that the engine's aim camera is a
+ * place to come from. It is not: it is the place the player was already
+ * looking through, and the only frame that can follow it without showing
+ * anything new is the one the eye is in. So: the cut, which is one frame, and
+ * nothing else.
+ */
+
+static void TraceJump(const char *what, const float *now, float *last,
+                      int *have) {
+    if (*have) {
+        float dx = now[0] - last[0];
+        float dy = now[1] - last[1];
+        float dz = now[2] - last[2];
+
+        if (dx * dx + dy * dy + dz * dz > TRACE_JUMP_M * TRACE_JUMP_M)
+            Log("fp: %s jumped %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f (last frame "
+                "was %s)", what, last[0], last[1], last[2],
+                now[0], now[1], now[2], BowName(g_bow));
+    } else {
+        *have = 1;
+    }
+    last[0] = now[0];
+    last[1] = now[1];
+    last[2] = now[2];
+}
+
 int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
     /* The table's own buffer is 32 bytes and the store into
      * it is an aligned one, so ours is too: a 16 byte array
@@ -1223,11 +1345,22 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
     }
     if (!g_fp.want)   { g_bow = BOW_OFF;   return 0; }
 
+    /* Past this point the frame is first person's business, so this is where
+     * the engine's own camera is read for the trace - before any of the
+     * handovers below replace it with nothing. See TraceJump. */
+    TraceJump("the engine's camera", p, g_trEng, &g_trEngHave);
+
     /* Gates that bow out of placing the eye. The head is none
      * of these branches' business: it does what ShFp2HeadWant
      * said, at the top of this function, every frame. */
-    if (g_fp.skip[0]) { g_bow = BOW_MENU;  return 0; }
-    if (g_fp.skip[1]) { g_bow = BOW_DRONE; return 0; }
+    /* The menu and the drone take the frame for as long as they last - a menu
+     * is minutes - so the remembered capture's window is stamped here for the
+     * same reason as the aim's below: an expired one has nothing to place on
+     * the frame we come back, and that frame is the engine's own camera. The
+     * log of 2026-09-26 00:47:28 has it as the one "menu -> stale" line of the
+     * session, on the frame the menu closed. */
+    if (g_fp.skip[0]) { g_pickHoldAt = GetTickCount64(); g_bow = BOW_MENU;  return 0; }
+    if (g_fp.skip[1]) { g_pickHoldAt = GetTickCount64(); g_bow = BOW_DRONE; return 0; }
 
     /* While first person holds the camera the head goes, and
      * it goes every frame: the engine reasserts its own idea
@@ -1244,12 +1377,55 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
      * it does not blend anything, it hides the transition and
      * then reveals it in one jump when the window closes.
      * That is a pull, and it was measured as one. */
-    if (g_fp.skip[3]) {
-        if (g_bow != BOW_ADS) AimEdge("started");
-        g_bow = BOW_ADS;
-        return 0;
+    /* The aim: tracked, and no longer handed over.
+     *
+     * Until 2026-09-26 the frame went to the engine's own aim camera for the
+     * whole aim - that being the only way its aim transition is seen - and the
+     * price was a cut at each end, 0.36 m going in and 1.8 m coming out (see
+     * the trace above), which is the flash the field reports. Two attempts at
+     * softening those cuts were tried and taken out the same day, both because
+     * they showed the player the third-person camera instead. This is the third
+     * and it goes the other way: keep the eye, and let the engine animate what
+     * it animates without owning the camera - the weapon coming up and the fov
+     * zooming are its own work and do not need the camera to be. The note that
+     * used to be here warned that writing over the aim was measured as a pull,
+     * so this is the experiment of 2026-09-26 and it comes straight back out if
+     * the player reads it as worse.
+     *
+     * The aim's two edges stay in the log (the plugin's report is read from
+     * them), and g_bow stays BOW_NONE through an aim that is kept - which is the
+     * truth: nothing was handed over.
+     *
+     * A magnified optic is the exception, and the engine's own answer draws the
+     * line: an engine fov under FOV_ZOOM_RAD means a zoom optic is at work (the
+     * line the fov module uses - a gameplay fov is 0.78 to 0.83, an optic
+     * computes far below it). That case keeps the frame with the engine's aim
+     * camera, because the optic's glass and the projection that carries it are
+     * computed from it: with the eye kept there instead, its lens came adrift
+     * and stayed at the side of the screen for every aim after it (reported
+     * 2026-09-26, right after this behaviour went in). Iron sights and 1x optics
+     * have no such glass, and they keep the new behaviour. */
+    {
+        static int aiming;
+
+        if ((g_fp.skip[3] ? 1 : 0) != aiming) {
+            aiming = g_fp.skip[3] ? 1 : 0;
+            AimEdge(aiming ? "started" : "ended");
+        }
     }
-    if (g_bow == BOW_ADS) AimEdge("ended");
+    if (g_fp.skip[3]) {
+        float f;
+
+        /* The remembered capture's window is stamped here as it was: an aim can
+         * last minutes, and an expired hold is a frame with nothing to place. */
+        g_pickHoldAt = GetTickCount64();
+
+        f = ShFovEngine();
+        if (f > 0.0f && f < FOV_ZOOM_RAD) {
+            g_bow = BOW_ADS;
+            return 0;                   /* the engine's aim camera, as before */
+        }
+    }
 
     /* The world checks are at the top of this function now: they have to
      * run whatever first person is doing, and this is the point past
@@ -1455,6 +1631,7 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
         out[1] += m[1] * ox + fy * oy;
         out[2] += m[2] * ox + oz;
     }
+
     if (out[0] != out[0] || out[1] != out[1] || out[2] != out[2]) {
         g_bow = BOW_BAD;
         return 0;
@@ -1474,6 +1651,7 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
     p[2] = out[2];
     p[3] = 0.0f;
 
+    TraceJump("the eye", out, g_trOurs, &g_trOursHave);
     g_fp.placedAt = GetTickCount64();
     g_bow = BOW_NONE;
     return 1;
