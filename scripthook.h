@@ -44,14 +44,19 @@ extern "C" {
  *    - a fix inside the framework that a plugin cannot tell apart from the
  *      outside, a log line, a comment, documentation: no change to this
  *      number;
- *    - it only ever goes up, by one, and a number is never reused.
+ *    - it only ever goes up, by one, and a number is never reused - with one
+ *      exception, taken on purpose: while the line that carries an addition is
+ *      unreleased, the addition may stay under the number it is already on.
+ *      The cost of that is written down here so it is not discovered later: a
+ *      caller that names the same number for both additions has to read a NULL
+ *      export as "this framework predates my feature", never as an error.
  *
  *  1  1.0-beta3 and before: everything up to and including ShGetAmmoRounds.
  *  2  ShGetAmmoObject: the weapon a rounds reading is about.
- *  3  ShNpcSpawnSetLayout / ShNpcSpawnGetLayout: how a batch is turned and
- *     which way it looks.
+ *     ShNpcSpawnSetLayout / ShNpcSpawnGetLayout: how a batch is turned and
+ *     which way it looks (see the exception above).
  */
-#define SH_API_VERSION 3
+#define SH_API_VERSION 2
 
 /** What a plugin needs of the framework, declared once and outside every
  *  function:
