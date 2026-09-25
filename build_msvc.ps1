@@ -252,6 +252,7 @@ $fwSources = @(
     'scripthook_reflect.c', 'scripthook_ui.c',
     'scripthook_scene.c', 'scripthook_uiprop.c',
     'scripthook_uiinput.c', 'scripthook_dinput.c',
+    'scripthook_frame.c',
     'scripthook_hud.c', 'scripthook_menu.c',
     'scripthook_draw.c', 'guard.c',
     'scripthook_corefix.c', 'scripthook_modsettings.c',
@@ -417,6 +418,12 @@ Build-Plugin 'EnemyReinforce' 'EnemyReinforce.c' @()
 # the PVP entity names) into logs\ModeProbe.log so the play mode can
 # be pinned to a field. It late-binds and hooks nothing.
 Build-Plugin 'ModeProbe'    'ModeProbe.c'    @('user32.lib')
+# FrameProbe is the frame hook's own evidence tool: it registers one frame
+# callback and counts the calls a second in logs\FrameProbe.log, so "the
+# hook is in" is a number and not an impression. Late binds and hooks
+# nothing itself - the framework installs the hook when it registers.
+# Not in the beta set: it ships to nobody.
+Build-Plugin 'FrameProbe'   'FrameProbe.c'   @()
 # ModeCallProbe dumps the method tables of the front end objects (the
 # GameFlow machine, its sub objects, the HybridMenu) and names as many
 # entries as a crc32 dictionary resolves, so the function behind the

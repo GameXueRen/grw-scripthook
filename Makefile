@@ -27,7 +27,7 @@ GAMEDIR = ../..
 # is what the loader scans for. Logs go into <gamedir>/logs at runtime.
 
 .PHONY: all roulette fling spawner timeweather ammocontrol ammoprobe enemyreinforce \
-        modeprobe modecallprobe blacklistsample filewatchsample drawsample \
+        frameprobe modeprobe modecallprobe blacklistsample filewatchsample drawsample \
         cnchat crazycars freecam fov fps chaos sample skipintro micfix \
         ballistics camerapresets docs clean
 
@@ -42,6 +42,14 @@ ammoprobe: $(GAMEDIR)/plugins/AmmoProbe/AmmoProbe.asi
 $(GAMEDIR)/plugins/AmmoProbe/AmmoProbe.asi: plugins/AmmoProbe/AmmoProbe.c scripthook.h libscripthook.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/AmmoProbe/AmmoProbe.c -L. -lscripthook
+
+# The frame hook's own evidence tool: one callback, a count a second in
+# logs\FrameProbe.log. Late binds, so it takes no import library.
+frameprobe: $(GAMEDIR)/plugins/FrameProbe/FrameProbe.asi
+
+$(GAMEDIR)/plugins/FrameProbe/FrameProbe.asi: plugins/FrameProbe/FrameProbe.c scripthook.h log.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ plugins/FrameProbe/FrameProbe.c
 
 # The magazine capacity multiplier and a reload that happens when the magazine
 # runs dry. Every change goes through the framework's own engine calls
@@ -290,6 +298,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c scripthook
                         scripthook_reflect.c scripthook_ui.c \
                         scripthook_scene.c scripthook_uiprop.c \
                         scripthook_uiinput.c scripthook_dinput.c \
+                        scripthook_frame.c \
                         scripthook_hud.c scripthook_menu.c \
                         scripthook_draw.c \
                         guard.c scripthook.h log.h \
@@ -317,6 +326,7 @@ $(GAMEDIR)/dinput8.dll: loader.c scripthook_api.c scripthook_config.c scripthook
 		scripthook_reflect.c scripthook_ui.c \
 		scripthook_scene.c scripthook_uiprop.c \
 		scripthook_uiinput.c scripthook_dinput.c \
+		scripthook_frame.c \
 		scripthook_hud.c scripthook_menu.c \
 		scripthook_draw.c guard.c \
 		scripthook_corefix.c scripthook_modsettings.c \

@@ -29,6 +29,22 @@
 #define PROBE_UP        30.0f
 #define PROBE_DOWN      80.0f
 
+/* A cast answers with the nearest surface, and the nearest surface is not
+ * always the ground: a canopy, a balcony or a roof over the point gets there
+ * first, and a point laid on one of those is an NPC dropped out of the sky.
+ * So a probe steps past what it found and asks again from just below it.
+ *
+ * The step has to be worth taking, though, and that is what PROBE_DROP is
+ * for. A ray started a metre under a real surface comes back a metre or two
+ * lower at most - that is the surface's own thickness - and taking that for a
+ * finding walks the point underground a step at a time. A canopy is the other
+ * way round: it sits well clear of whatever is beneath it. Measured on live
+ * landing probes, ground answered 1.5 to 2.3 m lower and canopies 8 to 11 m
+ * lower, so a threshold between the two tells them apart cleanly. */
+#define PROBE_PASSES    2
+#define PROBE_CLEAR     1.0f
+#define PROBE_DROP      3.0f
+
 /* How long to wait for the hook to see a live cast. */
 #define CTX_WAIT_MS     3000
 
@@ -76,6 +92,37 @@ static HANDLE ProbeEvent(void) {
         g_probeEv = CreateEventA(NULL, FALSE, FALSE, NULL);
     return g_probeEv;
 }
+
+/* ---- the cast, made from the frame callback --------------------------
+ *
+ * The ray callback is a hook on the engine's own cast, so it runs *inside*
+ * one. A cast asked for from there is one thread taking the physics lock a
+ * second time, and that is the freeze: the game thread sat at stage 6 and
+ * never came back, five times on 2026-09-24, every one of them a ground
+ * probe. The frame callback runs on the game thread as well, but between
+ * frames instead of inside a cast, so the same engine call is safe there.
+ *
+ * The request is a slot, like the spawn pump's: the prober leaves an origin
+ * and a direction and waits, the frame callback sees it, casts, and fills
+ * in the answer.
+ *
+ * A second, separate set of buffers on purpose - a physics callback may now
+ * arrive on a worker thread while this is mid-cast, and sharing g_hitArr
+ * with it would be a race.
+ */
+static SH_ALIGNED(16) uint8_t g_pgHit[0x880];
+static SH_ALIGNED(16) uint8_t g_pgRecs[REC_COUNT * REC_STRIDE];
+static SH_ALIGNED(16) uint8_t g_pgDesc[0x80];
+static SH_ALIGNED(16) float   g_pgOrg[4];
+static SH_ALIGNED(16) float   g_pgDir[4];
+
+static volatile LONG  g_pgWanted = 0;   /* a cast is waiting to be made */
+static volatile LONG  g_pgDone = 0;
+static volatile LONG  g_pgArmed = 0;    /* the frame hook is up */
+static volatile int   g_pgOk = 0;
+static volatile float g_pgZ = 0.0f;
+
+extern int ShRegisterFrameCallback(void (*fn)(void *), void *user);
 
 /* Written by the hook on the game thread and polled by
  * callers, so the compiler must reload them each spin.
@@ -157,26 +204,71 @@ static void ResolveWorld(uint64_t ctx) {
     }
 }
 
-static void BuildDescriptor(void) {
+/* Built into a caller supplied descriptor rather than always into the ray
+ * hook's own: the frame callback's probe uses a separate one, because a
+ * physics callback may arrive on a worker thread while the frame callback
+ * is in the middle of a cast and the two must not share the buffer. */
+static void BuildDescriptorAt(const float *org, const float *dir,
+                              uint8_t *desc) {
     uint16_t all = 0xFFFF;
     uint32_t two = 2, mask = 0, i;
     const uint32_t BIG = 0x7F7FFFEEu;
     float inv[4];
 
-    memset(g_desc, 0, sizeof(g_desc));
-    memcpy(g_desc + 0x10, &all, 2);
-    memcpy(g_desc + 0x20, &two, 4);
-    memcpy(g_desc + 0x30, g_org, 16);
-    memcpy(g_desc + 0x40, g_dir, 16);
+    memset(desc, 0, 0x80);
+    memcpy(desc + 0x10, &all, 2);
+    memcpy(desc + 0x20, &two, 4);
+    memcpy(desc + 0x30, org, 16);
+    memcpy(desc + 0x40, dir, 16);
     for (i = 0; i < 4; i++) {
-        float d = g_dir[i];
+        float d = dir[i];
         if (d == 0.0f) memcpy(&inv[i], &BIG, 4);
         else inv[i] = 1.0f / d;
         if (d >= 0.0f) mask |= (1u << i);
     }
-    memcpy(g_desc + 0x50, inv, 16);
+    memcpy(desc + 0x50, inv, 16);
     mask = (mask & 7u) | 0x3F000000u;
-    memcpy(g_desc + 0x5C, &mask, 4);
+    memcpy(desc + 0x5C, &mask, 4);
+}
+
+static void BuildDescriptor(void) {
+    BuildDescriptorAt(g_org, g_dir, g_desc);
+}
+
+/* The probe's cast, made from the frame hook: on the game thread, but
+ * between frames rather than inside a cast. See the note on the buffers
+ * above for why it cannot be made from RayHookCallback. */
+static void GroundProbeFrame(void *user) {
+    uint16_t hits;
+
+    (void)user;
+
+    if (!InterlockedExchange(&g_pgWanted, 0)) return;
+    if (!WorldValid()) { InterlockedExchange(&g_pgDone, 1); return; }
+
+    g_pgOk = 0;
+    memset(g_pgHit, 0, sizeof(g_pgHit));
+    memset(g_pgRecs, 0, sizeof(g_pgRecs));
+    *(void **)(g_pgHit + 0x10) = g_pgRecs;
+    *(uint32_t *)(g_pgHit + 0x18) = 0x00008010u;
+    *(uint64_t *)(g_pgHit + 0x860) = LAYER_MASK;
+
+    BuildDescriptorAt(g_pgOrg, g_pgDir, g_pgDesc);
+    ((CastRay_t)CAST_RAY_FN)(g_pgHit, (void *)g_B, g_pgDesc, 0, 0, 0, 0);
+
+    hits = *(uint16_t *)(g_pgHit + 0x1a);
+    if (hits) {
+        float p[3];
+        memcpy(p, g_pgRecs, 12);
+        g_pgZ = p[2];
+        g_pgOk = 1;
+        /* A ray that only ever goes down cannot hit above where it started.
+         * A value up there is not a surface, and handing it up as one is
+         * how an NPC ends up dropped from the sky. */
+        if (g_pgZ > g_pgOrg[2]) g_pgOk = 0;
+    }
+
+    InterlockedExchange(&g_pgDone, 1);
 }
 
 /* Game thread dispatcher. Lock taking engine calls
@@ -477,18 +569,81 @@ static void FinishPrevious(void) {
         memcpy(&r->hitPos, (const void *)(uintptr_t)recs, 12);
 }
 
+/* Which stage of the ray callback is running right now.
+ *
+ * When the game freezes, every log simply stops: the frame rate goes to
+ * zero, waves time out three seconds later, and nothing says where the
+ * game thread is sitting. This is three words that answer it. The callback
+ * is on the game thread, so a watcher on another thread can still read
+ * them after the game thread has stopped - and the stage number it reads
+ * is the call the game thread never came back from. The call counter tells
+ * the two cases apart: a stage that has not moved with g_cbIn above zero
+ * means the game thread is inside the callback, and one that has not moved
+ * with g_cbIn at zero means the callback is not being called at all, so
+ * the game thread stopped somewhere else entirely.
+ */
+static volatile LONG g_cbStage = 0;
+static volatile LONG g_cbIn = 0;
+static volatile LONG g_cbSeq = 0;
+static volatile LONG g_stallWatched = 0;
+
+static DWORD WINAPI StallWatchThread(LPVOID p) {
+    LONG lastStage = -1, lastIn = -1, lastSeq = -1;
+    int still = 0;
+
+    (void)p;
+    if (!g_logFile) LogInit("scripthook_physics.log");
+    for (;;) {
+        LONG stage, in, seq;
+
+        Sleep(2000);
+        stage = g_cbStage;
+        in = g_cbIn;
+        seq = g_cbSeq;
+
+        /* The counter moving means the game thread is alive, whatever the
+         * stage happened to be caught at. */
+        if (seq == lastSeq && in == lastIn && stage == lastStage) {
+            still++;
+            if (still == 2) {           /* four seconds without a call */
+                if (in > 0)
+                    Log("physics: the game thread has been inside the ray "
+                        "callback for %d s - stage %ld is where it stopped",
+                        still * 2, (long)stage);
+                else
+                    Log("physics: no ray callback for %d s and none in "
+                        "flight - the game thread stopped elsewhere",
+                        still * 2);
+            }
+        } else {
+            still = 0;
+        }
+        lastStage = stage;
+        lastIn = in;
+        lastSeq = seq;
+    }
+    return 0;
+}
+
 /* Runs on the game thread inside a live physics call. */
 static void __attribute__((ms_abi))
 RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
+    InterlockedIncrement(&g_cbIn);
+    InterlockedIncrement(&g_cbSeq);
     g_ctx = rcx;
     if (g_probeEv) SetEvent(g_probeEv);
+    g_cbStage = 1;
     FinishPrevious();
     RecordRay(rdx, r8);
 
+    g_cbStage = 2;
     ShSpawnPump();
+    g_cbStage = 3;
     ShNpcPump();
+    g_cbStage = 4;
     ShSceneTick();
 
+    g_cbStage = 5;                    /* the queued engine call */
     if (g_qPending && g_qFn) {
         uint64_t f = g_qFn;
         uint64_t a0 = g_qArg[0], a1 = g_qArg[1];
@@ -512,30 +667,20 @@ RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
         }
         g_qDone = 1;
     }
-    if (!g_req || g_busy || !g_B) return;
-
-    g_busy = 1;
-    g_req = 0;
-    memset(g_hitArr, 0, sizeof(g_hitArr));
-    memset(g_recs, 0, sizeof(g_recs));
-    *(void **)(g_hitArr + 0x10) = g_recs;
-    *(uint32_t *)(g_hitArr + 0x18) = 0x00008010u;
-    *(uint64_t *)(g_hitArr + 0x860) = LAYER_MASK;
-
-    BuildDescriptor();
-    ((CastRay_t)CAST_RAY_FN)(g_hitArr, (void *)g_B, g_desc, 0, 0, 0, 0);
-
-    if (*(uint16_t *)(g_hitArr + 0x1a)) {
-        float p[3];
-        memcpy(p, g_recs, 12);
-        g_hitZ = p[2];
-        g_hitOk = 1;
-    } else {
-        g_hitOk = 0;
-    }
-    g_done = 1;
-    g_busy = 0;
-    if (g_probeEv) SetEvent(g_probeEv);
+    /* No cast is made here any more, and that is the fix. This callback is
+     * a hook on the engine's own cast, so it runs inside one - and asking
+     * for another cast from here was one thread taking the physics lock a
+     * second time, which is exactly where the game froze: five times on
+     * 2026-09-24, the game thread stopped at stage 6 and never came back,
+     * once per "spawn wave" pressed from the overlay menu.
+     *
+     * The probe's cast now lives in GroundProbeFrame, which the frame hook
+     * calls between frames rather than inside a cast. Nothing on this path
+     * calls an engine function any more: the pump and the queued calls
+     * above are the only work left, and they are the reason the hook is
+     * here at all. */
+    g_cbStage = 0;
+    InterlockedDecrement(&g_cbIn);
 }
 
 /* CAST_RAY_FN is called straight through, so it is the one pin in this
@@ -749,12 +894,56 @@ void ShPhysicsOnEnterPlaying(void) {
     g_A = 0;
     g_B = 0;
     if (!InstallHook()) return;
+
+    /* The stall watcher, once. It lives outside the game thread on purpose:
+     * it has to keep running after the game thread stops, because that is
+     * the case it exists to report. */
+    if (InterlockedCompareExchange(&g_stallWatched, 1, 0) == 0) {
+        HANDLE w = CreateThread(NULL, 0, StallWatchThread, NULL, 0, NULL);
+
+        if (w) CloseHandle(w);
+        else InterlockedExchange(&g_stallWatched, 0);
+    }
+
+    /* The ground probe's cast runs from the frame hook rather than from the
+     * ray callback - see GroundProbeFrame for why. Once, and a failure is
+     * worth a line: without it every probe would time out. */
+    if (InterlockedCompareExchange(&g_pgArmed, 1, 0) == 0) {
+        if (!ShRegisterFrameCallback(GroundProbeFrame, NULL))
+            Log("physics: no frame hook - ground probes cannot be serviced");
+    }
+
     if (InterlockedCompareExchange(&g_warmRunning, 1, 0)) return;
     h = CreateThread(NULL, 0, WorldWarmThread, NULL, 0, NULL);
     if (!h) InterlockedExchange(&g_warmRunning, 0);
     else CloseHandle(h);
 }
 
+
+/* Live play only.
+ *
+ * The ray callback answers a query by running the engine's own cast, and
+ * that cast does not come back in the pause menu: the world is loaded
+ * enough for every read to keep working - which is exactly why
+ * ShIsInGame() says yes there - but the physics side is not ticking, so
+ * the engine sits inside the cast forever. The session of 2026-09-24
+ * froze this way five times, every one of them when the player pressed
+ * "spawn wave" from the menu: four seconds later the watcher reported the
+ * game thread stopped at stage 6, the cast.
+ *
+ * Drone, binoculars and cinematics are live play and are allowed; menu,
+ * load screens and the game over card are not, and a caller told "no
+ * ground" there can fall back or give up with the game still alive. */
+extern int ShGetGameState(void);
+extern uint32_t ShGetUiState(void);
+extern int ShMenuIsOpen(void);
+
+static int LivePlay(void) {
+    int s = ShGetGameState();
+
+    return s == SH_STATE_INGAME || s == SH_STATE_DRONE ||
+           s == SH_STATE_BINOCULAR || s == SH_STATE_CINEMATIC;
+}
 
 /* Collision streams in around the player, so a query
  * outside that radius can never hit anything.
@@ -770,27 +959,68 @@ static int InStreamRange(float x, float y) {
          <= (SH_STREAM_RADIUS * SH_STREAM_RADIUS);
 }
 
-/* Cast down from startZ for `span` metres. */
+/* Cast down from startZ for `span` metres.
+ *
+ * The cast itself belongs to GroundProbeFrame - on the game thread, but
+ * outside any cast. This leaves the request and waits for the answer; see
+ * the note above that function for why it is not made here. */
 static int ProbeDown(float x, float y, float startZ, float span,
                      float *outZ) {
-    HANDLE ev;
     ULONGLONG deadline;
 
-    g_org[0] = x; g_org[1] = y; g_org[2] = startZ; g_org[3] = 0.0f;
-    g_dir[0] = 0.0f; g_dir[1] = 0.0f;
-    g_dir[2] = -span; g_dir[3] = 1.0f;
+    g_pgOrg[0] = x; g_pgOrg[1] = y; g_pgOrg[2] = startZ; g_pgOrg[3] = 0.0f;
+    g_pgDir[0] = 0.0f; g_pgDir[1] = 0.0f;
+    g_pgDir[2] = -span; g_pgDir[3] = 1.0f;
 
-    g_hitOk = 0;
-    g_done = 0;
-    g_req = 1;
-    ev = ProbeEvent();
+    g_pgOk = 0;
+    InterlockedExchange(&g_pgDone, 0);
+    InterlockedExchange(&g_pgWanted, 1);
+
     deadline = GetTickCount64() + PROBE_WAIT_MS;
-    while (!g_done && GetTickCount64() < deadline) {
-        if (ev) WaitForSingleObject(ev, 1);
-        else Sleep(1);
+    while (!InterlockedCompareExchange(&g_pgDone, 0, 0) &&
+           GetTickCount64() < deadline)
+        Sleep(1);
+
+    if (!InterlockedCompareExchange(&g_pgDone, 0, 0) || !g_pgOk) {
+        /* Say why it did not come back, once per call site: a probe that
+         * never answered is otherwise indistinguishable from one that hit
+         * nothing, and the state at that moment is what a report needs. */
+        InterlockedExchange(&g_pgWanted, 0);
+        LogFirst("scripthook_physics.log",
+                 "probe: no answer in %d ms - state %d, ui 0x%X, menu open "
+                 "%d, done %d ok %d, frame hook %d",
+                 PROBE_WAIT_MS, ShGetGameState(), (unsigned)ShGetUiState(),
+                 ShMenuIsOpen(),
+                 (int)InterlockedCompareExchange(&g_pgDone, 0, 0),
+                 (int)g_pgOk,
+                 (int)InterlockedCompareExchange(&g_pgArmed, 0, 0));
+        return 0;
     }
-    if (!g_done || !g_hitOk) return 0;
-    *outZ = g_hitZ;
+    *outZ = g_pgZ;
+    return 1;
+}
+
+/* Cast down from startZ for `span` metres, and go on past the surface it
+ * finds until the ground is the answer - see PROBE_PASSES.
+ *
+ * A surface that really is the ground answers the next ray with itself, or
+ * with nothing at all because that ray starts inside it, and the point
+ * stands. A canopy does neither: the ray starts clear underneath it and
+ * travels on. */
+static int ProbeSurface(float x, float y, float startZ, float span,
+                        float *outZ) {
+    float z, below;
+    int i;
+
+    if (!ProbeDown(x, y, startZ, span, &z)) return 0;
+
+    for (i = 0; i < PROBE_PASSES; i++) {
+        if (!ProbeDown(x, y, z - PROBE_CLEAR, span, &below)) break;
+        if (z - below < PROBE_DROP) break;
+        z = below;
+    }
+
+    *outZ = z;
     return 1;
 }
 
@@ -798,10 +1028,11 @@ SH_API int ShGroundHeightFrom(float x, float y, float nearZ,
                               float *outZ) {
     if (!outZ) return ShFailPhys(SH_ERR_BAD_ARG);
     if (!ShRequireInGame()) return 0;
+    if (!LivePlay()) return ShFailPhys(SH_ERR_NOT_IN_GAME);
     if (!EnsurePhysics()) return 0;
     if (!InStreamRange(x, y)) return ShFailPhys(SH_ERR_NOT_STREAMED);
-    if (!ProbeDown(x, y, nearZ + PROBE_UP, PROBE_UP + PROBE_DOWN,
-                   outZ))
+    if (!ProbeSurface(x, y, nearZ + PROBE_UP, PROBE_UP + PROBE_DOWN,
+                      outZ))
         return ShFailPhys(SH_ERR_NO_GROUND);
     ShSetError(SH_OK);
     return 1;
@@ -838,12 +1069,13 @@ SH_API int ShGroundHeight(float x, float y, float *outZ) {
 
     if (!outZ) return ShFailPhys(SH_ERR_BAD_ARG);
     if (!ShRequireInGame()) return 0;
+    if (!LivePlay()) return ShFailPhys(SH_ERR_NOT_IN_GAME);
     if (!EnsurePhysics()) return 0;
     if (!InStreamRange(x, y)) return ShFailPhys(SH_ERR_NOT_STREAMED);
     if (ShGetPlayerPosition(&here) && here.z + SWEEP_ABOVE > start)
         start = here.z + SWEEP_ABOVE;
 
-    if (!ProbeDown(x, y, start, SWEEP_SPAN, outZ))
+    if (!ProbeSurface(x, y, start, SWEEP_SPAN, outZ))
         return ShFailPhys(SH_ERR_NO_GROUND);
     ShSetError(SH_OK);
     return 1;

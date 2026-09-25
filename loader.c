@@ -619,10 +619,28 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         if (!IsGRW()) return TRUE;
         LogInit("scripthook.log");
+        /* Which process and thread is calling, and nothing else - none of
+         * these three calls may touch the loader, the heap or the
+         * environment, since this runs behind the loader lock.
+         *
+         * The pid is what a start up report gets read for, because a second
+         * start up in the same log is not a second load: the session of
+         * 2026-09-25 01:38 carried the whole sequence twice, four seconds
+         * apart, out of the launcher's process and the game's - a different
+         * pid each time, where a second image of this dll would have to show
+         * the same one. The module base rides on the banner for the same
+         * question and is the weaker half of it: two processes started the
+         * same way were measured to get the SAME base (00007FFB31560000
+         * both), so the address cannot tell them apart on its own. The
+         * thread id is what says which thread inside the process got here. */
+        LogAlways("loader: attach pid=%lu tid=%lu",
+                  (unsigned long)GetCurrentProcessId(),
+                  (unsigned long)GetCurrentThreadId());
         /* The two lines a report is always asked for, so they are written
          * whatever [Settings] LogLevel says - including none. */
-        LogAlways("GRW ScriptHook " SH_VERSION);
+        LogAlways("GRW ScriptHook " SH_VERSION " at %p", (void *)inst);
         LogAlways("built " __DATE__ " " __TIME__);
+
         /* Armed first, so a crash during our own start up
          * is reported too.
          */

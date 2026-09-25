@@ -71,30 +71,53 @@
 /* The population manager, decoded off the engine's own register calls rather
  * than guessed - see PopManager(). */
 #define RVA_POP_MGR      0x4B98FA8
-/* Retired: 4B98F98 was pinned as "the context the spawn takes camp and job
- * from" off the one site in the image that reads +0x1B4 and +0x1B8 out of a
- * loaded slot. The pin is probably right and the meaning was wrong: the two
- * values that slot holds in the campaign are float bit patterns (0.4f and
- * 5.0f). Writing them into the spec's +0x2D0 - a 64 bit pointer field the
- * engine fills itself - is what crashed the game. Nothing reads it now; the
- * address is kept so the next round does not re-derive it. */
-#define RVA_CONTEXT      0x4B98F98
+/* The context the spawn takes its Camp and Job from: two 32 bit ids at
+ * +0x1B4 and +0x1B8, and what makes a spawn an agent of the faction the
+ * engine is playing rather than a body standing in the world. It was
+ * carried as 0x4B98F98 once, where the readings came back as float bit
+ * patterns (0.4f, 5.0f); that was taken for the meaning being wrong and
+ * the slot was retired. The slot was what was wrong. GhostHook (the NPC
+ * spawner author's own framework, TU25) and the upstream September port
+ * both carry 0x4B90288 for it, and it reads back small integers. */
+#define RVA_CONTEXT      0x4B90288
 #define RVA_REGISTRY     0x4BC1878
 #define RVA_ARCH_DESC    0x42C2570
 #define RVA_NULL_BLOCK   0x4D89068
 #define NPC_SPEC_VTABLE  SH_IMG(0x394A4E0)
 
 #define COMMIT_MODE      7
+/* The second argument of SPAWN. SPAWN stores it in the spec itself
+ * (spec+0x148 comes back holding it verbatim) and passes it on to the
+ * engine's create call (990B130 "mov r8d, esi" feeding the VM entry at
+ * A99A97C), where it picks which set of behaviour functions the spec gets
+ * wired to - spec+0x68, +0x78 and +0x1D8 all move with it.
+ *
+ * It is not an "is it hostile" switch: 0, 1 and 2 all produce a spec, and
+ * both 0 and 1 were observed with NPCs that engage. 1 is the value every
+ * build that worked has used, so it stays. See ModeProbe for how the three
+ * were compared, and spec+0x14C for the field that is NOT this one: it is
+ * the constant 0x16, already set by the engine by the time SPAWN returns. */
 #define SPAWN_MODE       1
 #define NPC_CATEGORY     3
 #define NPC_MAX          1024
-/* How far above the probed surface a formation point is placed. Small on
- * purpose: the NPC materialises and settles on its own, and all the lift
- * has to do is keep the replacement from starting inside the ground. */
-#define NPC_GROUND_LIFT  0.5f
+/* A camp and a job are small ids. Anything larger read at those offsets
+ * is a different slot talking, not a camp, and is refused. */
+#define CAMP_JOB_MAX     0xFFFFu
+/* How far above the probed surface a formation point is placed, in
+ * centimetres, settable from [npc] ground_lift_cm in scripthook.ini.
+ *
+ * The probe is the engine's own ray, so what it returns is the surface
+ * itself; the lift only has to keep the odd point from starting a
+ * centimetre inside it - a flat foot on a slope, a ray that lands on the
+ * near edge of a step. It was a flat 0.5 m, and that read as "the NPC is
+ * dropped in from the air" rather than placed, so it is 10 cm now and 0 is
+ * allowed for anyone who wants the point exactly on the surface. */
+#define NPC_GROUND_LIFT_CM_DEF  10
+#define NPC_GROUND_LIFT_CM_MAX  100
 
 extern int ShReadableAddr(uint64_t addr, size_t len);
 extern uint64_t ShReadQ(uint64_t addr);
+extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern void ShSetError(int err);
 extern int ShRequireInGame(void);
 extern const void *ShSpawnBuildMatrix(const ShVec3 *pos);
@@ -159,6 +182,7 @@ static void NpcWhy(const char *why, uint64_t a, uint64_t b) {
     LogFirst("scripthook_npc.log", "npc: %s (%llX %llX)", why,
              (unsigned long long)a, (unsigned long long)b);
 }
+
 
 static void ListOnGameThread(void) {
     ArchList hdr;
@@ -309,8 +333,95 @@ static uint64_t PopManager(void) {
     return 0;
 }
 
+/* ---- what SPAWN's second argument means --------------------------------
+ *
+ * SPAWN passes it straight through to the engine's own create call
+ * (990B130 "mov r8d, esi" feeding Core(mgr, ctx, mode) at A99A97C), and that
+ * call is a VM entry - so the meaning is not in the image to be read. The
+ * engine's own spawn points do not settle it either: one passes 0 outright
+ * (AB30B8 "xor edx, edx"), one passes a value it just computed (47A62F),
+ * and an internal wrapper uses 2 (A99AA13 "mov r8d, 2").
+ *
+ * So ask the engine instead: one context, spawned three times with the
+ * argument at 0, 1 and 2, each returned spec snapshotted, the three compared
+ * word by word. A field that the argument actually drives shows up as a
+ * column that differs, and no guess about which field is "the faction" is
+ * needed to find it.
+ *
+ * Nothing is committed, registered or written into any of the three, so a
+ * run leaves no NPC behind - only three specs the engine handed out and was
+ * never told to place. It runs once per session, behind [npc] mode_probe in
+ * scripthook.ini, and is off by default.
+ */
+#define PROBE_SPAN 0x2E0
+
+/* [npc] ground_lift_cm, read once. The value is in centimetres because the
+ * config API has no float reader, and 10 cm is fine enough for a step that
+ * the eye has to notice. */
+static float NpcGroundLift(void) {
+    static volatile LONG got;
+    static float lift;
+    int cm;
+
+    if (InterlockedCompareExchange(&got, 0, 0)) return lift;
+    cm = ShConfigGetInt("npc", "ground_lift_cm", NPC_GROUND_LIFT_CM_DEF);
+    if (cm < 0) cm = 0;
+    if (cm > NPC_GROUND_LIFT_CM_MAX) cm = NPC_GROUND_LIFT_CM_MAX;
+    lift = (float)cm / 100.0f;
+    InterlockedExchange(&got, 1);
+    return lift;
+}
+
+static void ModeProbe(uint64_t cs, const void *mtx) {
+    static volatile LONG done;
+    uint8_t snap[3][PROBE_SPAN];
+    uint64_t spec[3];
+    int i, off, differ = 0;
+
+    if (InterlockedExchange(&done, 1)) return;
+
+    if (!g_logFile) LogInit("scripthook_npc.log");
+    Log("probe: mode 0/1/2 on context %llX, matrix %llX - nothing committed",
+        (unsigned long long)cs, (unsigned long long)(uintptr_t)mtx);
+
+    memset(snap, 0, sizeof snap);
+    memset(spec, 0, sizeof spec);
+    for (i = 0; i < 3; i++) {
+        spec[i] = ((Spawn_t)ImgAddr(RVA_SPAWN))(cs, i, mtx);
+        if (!spec[i]) {
+            Log("probe: mode %d -> no spec (refused)", i);
+            continue;
+        }
+        if (!ShReadableAddr(spec[i], PROBE_SPAN) ||
+            !ShReadMem(spec[i], snap[i], PROBE_SPAN)) {
+            Log("probe: mode %d -> spec %llX unreadable", i,
+                (unsigned long long)spec[i]);
+            continue;
+        }
+        Log("probe: mode %d -> spec %llX, vtable %llX", i,
+            (unsigned long long)spec[i],
+            (unsigned long long)ShReadQ(spec[i]));
+    }
+
+    /* Only the lines that differ: the answer is the column that moves. */
+    for (off = 0; off < PROBE_SPAN; off += 8) {
+        uint64_t a = *(uint64_t *)(uintptr_t)(snap[0] + off);
+        uint64_t b = *(uint64_t *)(uintptr_t)(snap[1] + off);
+        uint64_t c = *(uint64_t *)(uintptr_t)(snap[2] + off);
+
+        if (a == b && b == c) continue;
+        differ++;
+        Log("probe: +%03X  m0=%016llX  m1=%016llX  m2=%016llX", off,
+            (unsigned long long)a, (unsigned long long)b,
+            (unsigned long long)c);
+    }
+    Log("probe: %d of %d word(s) differ across 0/1/2 (span %X)",
+        differ, PROBE_SPAN / 8, PROBE_SPAN);
+}
+
 static void SpawnOnGameThread(uint64_t id, const void *mtx) {
-    uint64_t mgr, arch, archBlk, csBlk, cs, spec, old, pop;
+    uint64_t mgr, arch, archBlk, csBlk, cs, spec, old, ctx, pop;
+    static volatile LONG campJobSaid = 0;
 
     g_pendErr = SH_ERR_NO_CANDIDATE;
     archBlk = ArchetypeBlock(id);
@@ -331,7 +442,26 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
         return;
     }
 
+    /* Off by default and once a session: [npc] mode_probe in scripthook.ini.
+     * It spawns three specs that are never committed, which is what makes
+     * the meaning of SPAWN's second argument visible without having to guess
+     * at a field. See ModeProbe. */
+    if (ShConfigGetBool("npc", "mode_probe", 0)) ModeProbe(cs, mtx);
+
+    /* Step markers, on the game thread. A spawn that never returns leaves
+     * no trace at all - the frame rate goes to zero and the only thing the
+     * log shows is the wave that asked for it, seconds earlier. These say
+     * which of the three engine calls it went into, so the next freeze is
+     * a diagnosis instead of a guess. Each one is one flushed line; the
+     * order they stop in is the answer. */
+    /* The log has to be open before the first marker: it used to be opened
+     * at the end of this function, which the markers would be written
+     * before - and the one that matters is the line before a freeze. */
+    if (!g_logFile) LogInit("scripthook_npc.log");
+    Log("npc: step SPAWN  in  (cs %llX mode %d)", (unsigned long long)cs,
+        SPAWN_MODE);
     spec = ((Spawn_t)ImgAddr(RVA_SPAWN))(cs, SPAWN_MODE, mtx);
+    Log("npc: step SPAWN  out (%llX)", (unsigned long long)spec);
     if (!spec) { NpcWhy("spawn() gave back nothing", cs, SPAWN_MODE); return; }
     /* Everything below writes through this pointer, so it is checked as a
      * spec before any of it: a stale SPAWN would otherwise have us write
@@ -352,27 +482,54 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
 
     ((SetI_t)ImgAddr(RVA_SET_174))(spec, 0);
 
-    /* The context is read for the log only, and deliberately not copied into
-     * the spec.
+    /* Camp and Job: the two ids that make this spawn an agent of the
+     * faction the engine is playing. They are what "its AI runs like a
+     * native spawn" has always meant in scripthook.h, and they live at
+     * +0x1B4 and +0x1B8 of the context RVA_CONTEXT names.
      *
-     * Those two fields used to be written to spec+0x2D0 and +0x2D4 as two 32
-     * bit ids, on the reading that the context's camp and job belong there.
-     * The engine says otherwise: both places in the image that write those
-     * offsets store a 64 bit pointer - 48 89 91 D0 02 00 00, mov
-     * [rcx+0x2D0], rdx - so the spec was being handed two float bit patterns
-     * where it wanted a pointer, and the register function walked one of
-     * them into a fault. The engine fills those fields itself as the spawn
-     * settles, so they are left alone here.
+     * They were written here once and then dropped, because the values
+     * that came back read as 0.4f and 5.0f and the write was blamed for
+     * a crash. The slot was the problem. Float bit patterns are what a
+     * WRONG slot reads as, not what a camp id reads as; 0x4B98F98 is
+     * not the context. Both GhostHook (the NPC spawner author's own
+     * framework, TU25) and the upstream September port carry 0x4B90288
+     * for it, and that one reads back small integers.
      *
-     * RVA_CONTEXT is not read here any more either: the values that slot
-     * holds in the campaign are float bit patterns, so the camp/job reading
-     * of those fields was wrong and the numbers were only noise. */
+     * Written as two 32 bit ids, exactly as GhostHook writes them. The
+     * range guard is the part that is ours: this is the field the crash
+     * was blamed on, and a camp or a job is a small number, so anything
+     * else means the slot moved again - refused, and said once, rather
+     * than handed to the register function. */
+    ctx = ShReadQ(ImgAddr(RVA_CONTEXT));
+    if (ctx && ShReadableAddr(ctx + 0x1B4, 8)) {
+        uint32_t camp = *(volatile uint32_t *)(uintptr_t)(ctx + 0x1B4);
+        uint32_t job  = *(volatile uint32_t *)(uintptr_t)(ctx + 0x1B8);
+
+        if (camp <= CAMP_JOB_MAX && job <= CAMP_JOB_MAX) {
+            *(volatile uint32_t *)(uintptr_t)(spec + 0x2D0) = camp;
+            *(volatile uint32_t *)(uintptr_t)(spec + 0x2D4) = job;
+            Log("npc: camp %u job %u (ctx %llX)", camp, job,
+                (unsigned long long)ctx);
+        } else if (InterlockedExchange(&campJobSaid, 1) == 0) {
+            Log("npc: camp/job read as %u/%u at ctx %llX, which is not a "
+                "camp and a job - nothing was written, the slot has moved",
+                camp, job, (unsigned long long)ctx);
+        }
+    } else if (InterlockedExchange(&campJobSaid, 1) == 0) {
+        Log("npc: no context to take camp/job from (ctx %llX)",
+            (unsigned long long)ctx);
+    }
+
     pop = PopManager();
+    Log("npc: step REG    in  (pop %llX)", (unsigned long long)pop);
     if (pop) ((Reg_t)ImgAddr(RVA_POP_REGISTER))(pop, spec);
     else NpcWhy("no usable population manager; registration skipped", 0,
                 ImgAddr(RVA_POP_REGISTER));
+    Log("npc: step REG    out");
 
+    Log("npc: step COMMIT in");
     ((Commit_t)ImgAddr(RVA_COMMIT))(mgr, COMMIT_MODE, spec);
+    Log("npc: step COMMIT out");
     g_pendSpec = spec;
     g_pendErr = 0;
     /* Written per spawn, not once: which data slot answered, and whether the
@@ -411,31 +568,46 @@ static void DespawnOnGameThread(uint64_t entity) {
     g_killOk = 1;
 }
 
-/* Called from the physics hook, next to ShSpawnPump. */
+/* Called from the physics hook, next to ShSpawnPump.
+ *
+ * Every slot is taken with an interlocked exchange rather than read
+ * and then cleared. The September updates put the physics callbacks on
+ * worker threads, so this pump can be entered by two of them at once -
+ * and with a read-then-clear both would see the same request. For a
+ * spawn that means two SpawnOnGameThread calls with the SAME matrix:
+ * two NPCs stacked on one point, the archetype's refcount taken twice
+ * and the spec's fields written twice over each other, which is a
+ * batch that arrives overlapping and half wired up. An exchange makes
+ * it one request, one spawn. g_pendMtx is deliberately still a plain
+ * read: the publisher fills it (and the spec) before the id, and the
+ * id is what claims the request. */
 void ShNpcPump(void) {
     int did = 0;
+    uint64_t e = (uint64_t)InterlockedExchange64(
+        (volatile LONG64 *)&g_killEnt, 0);
 
-    if (g_killEnt) {
-        uint64_t e = g_killEnt;
-        g_killEnt = 0;
+    if (e) {
         DespawnOnGameThread(e);
         g_killDone = 1;
         did = 1;
     }
 
-    if (g_listWanted) {
-        g_listWanted = 0;
+    if (InterlockedExchange((volatile LONG *)&g_listWanted, 0)) {
         ListOnGameThread();
         g_listDone = 1;
         did = 1;
     }
-    if (g_pendId) {
-        uint64_t id = g_pendId;
-        const void *mtx = g_pendMtx;
-        g_pendId = 0;
-        if (mtx) SpawnOnGameThread(id, mtx);
-        g_pendDone = 1;
-        did = 1;
+    {
+        uint64_t id = (uint64_t)InterlockedExchange64(
+            (volatile LONG64 *)&g_pendId, 0);
+
+        if (id) {
+            const void *mtx = g_pendMtx;
+
+            if (mtx) SpawnOnGameThread(id, mtx);
+            g_pendDone = 1;
+            did = 1;
+        }
     }
     if (did) {
         HANDLE ev = GetPumpEvent();
@@ -816,7 +988,7 @@ static int SpawnBatch(const ShNpcSpawnRequest *req, uint64_t *out,
                    (uint64_t)(unsigned)i, (uint64_t)(unsigned)n);
             continue;
         }
-        pos[i].z = gz + NPC_GROUND_LIFT;
+        pos[i].z = gz + NpcGroundLift();
 
         e = ShSpawnNpc(req->id, &pos[i]);
         if (!e) continue;

@@ -65,6 +65,19 @@ BLUR_MATCH          14E7625C  -> 1485806C   interior; live (blur site matched)
 VIS_SITE            14393508  -> 13BEAC48   interior; bytes confirmed, not used yet
 FOV_SITE            7E889A2   -> 81E0C22    interior; bytes confirmed, not used yet
 FLOW_METHODS        483B650   -> 483B920    matched off the engine call sites; live (ok)
+FRAME_RVA           (none)    -> BF42B60    Ai::SpawningManagerUpdate, the per frame site
+#                                             scripthook_frame.c hooks (6 bytes stolen, the rest
+#                                             replayed by its stub). Not re-pinned by this fork's
+#                                             own tool: the address and the stolen bytes come from
+#                                             GhostHook (the NPC spawner author's framework), which
+#                                             used them on the same build. Guarded at run time
+#                                             instead - 30 bytes of the prologue are compared before
+#                                             anything is written, and a mismatch is a logged
+#                                             refusal, not a jump into whatever moved there. Only
+#                                             installed once a plugin registers a frame callback.
+#                                             Measured call rate: ~1 per frame in play (60-81/s),
+#                                             bursts up to 532/s while the world streams, so it is
+#                                             not strictly once per frame.
 
 # pinned for the 2026-09 build, the whole UI and scene block (body 84-100%)
 F_ALLOC_CTX         E064390   -> E4094B0
@@ -138,9 +151,14 @@ RVA_REGISTRY        4BC17F8   -> 4BC1878    decoded off two engine call sites; l
 RVA_ARCH_DESC       42C2560   -> 42C2570    shared id and 16 tail bytes identical; live
 RVA_POOL            4D89000                never verified; the spawn path no longer uses it
 RVA_POPMGR          4B98F18                wrong even before the update - retired
-RVA_CONTEXT         4B98F08   -> 4B98F98    decode was right, meaning was wrong: the slot holds float
-#                                             bit patterns, so "camp/job" was never those fields.
-#                                             Retired; nothing reads it.
+RVA_CONTEXT         4B98F08   -> 4B90288    the spawn's Camp and Job, at +0x1B4/+0x1B8. 4B98F98 was
+#                                             this fork's own derivation and it is not the context:
+#                                             it reads as float bit patterns (0.4f, 5.0f), which is
+#                                             what a WRONG slot looks like, not what a camp id looks
+#                                             like. GhostHook (the NPC spawner author's framework,
+#                                             TU25) and the upstream 2026-09-23 port both carry
+#                                             4B90288. Live again: camp/job are written before the
+#                                             commit, behind a range guard.
 RVA_POP_MGR         (none)    -> 4B98FA8    the population manager: four of the register call's five
 #                                             sites (775B74D, 9202385, 9EAB00D, 13053BBB) load this
 #                                             slot with mov rcx,[rip+disp32]; the fifth (718E325)

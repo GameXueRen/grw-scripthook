@@ -38,8 +38,18 @@ static uint64_t RQ(uint64_t a) {
     return v;
 }
 
+/* The image this build actually loaded - not the one the RVAs were
+ * pinned against. The 2026-09-23 title update replaced GRW.exe with a
+ * rebuild whose SizeOfImage is 0x185BA000, where the old bound here
+ * still said 0x18B09000: an address up to 5 MB past the end of the
+ * image therefore still read as "inside" it, and a property table
+ * walk that followed a stale pointer there would have dereferenced
+ * whatever is mapped next instead of refusing. loader.c's
+ * kKnownBuilds carries both sizes. image.h's ShInImage reads
+ * SizeOfImage out of the PE header at run time and is the better test
+ * if this is ever touched again. */
 static int InImage(uint64_t a) {
-    return a >= SH_IMG(0) && a < SH_IMG(0x18B09000);
+    return a >= SH_IMG(0) && a < SH_IMG(0x185BA000);
 }
 
 /* RTTI: vtable, then object locator, then type descriptor,

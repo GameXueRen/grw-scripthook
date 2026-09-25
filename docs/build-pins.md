@@ -23,6 +23,7 @@
 | `scripthook_spawn.c` | `SPEC_VTABLE`（学习式） | 先按形状走，学到的 vtable 与钉值对照打印 | 仍能找到对象，只多出误报，日志给出真值 |
 | `scripthook_weather.c` | `WX_RECORD` / `ENV_VTABLE` / `TIME_MGR` | 结构判定（可读 vtable、时钟落在 `[0,24)`）+ 学到值对照钉值 | 记 `the env vtable is not the pinned one …`，并给出要重新定址的值 |
 | `scripthook_reflect.c` | `FLOW_METHODS` `0x483B920` | 门 + 由 `state.c` 每 100 ms 汇报判定与真值 | 静默拒绝，但判定与真值仍会进日志 |
+| `scripthook_frame.c` | `FRAME_RVA` `0xBF42B60`（`Ai::SpawningManagerUpdate`） | 30 字节函数序言签名，打补丁前比对 | 拒绝打补丁，日志一行，`ShRegisterFrameCallback` 返回 0（**只在有人注册时才装 hook**） |
 | `scripthook_fov.c` / `scripthook_camera.c` / `scripthook_blur.c` / `scripthook_havok.c` | `FOV_SITE` `0x81E0C22`(6) / `MGR_SITE` `0x81E0B7E`(5) / `BLUR_MATCH` `0x1485806C`(5+16) / `HK_ALLOC_BODY` `0x163CA8C0`(5) | 有长度常量，位于同类比对路径上（**本次盘点未逐行核对比较代码**，下次触碰这四个模块时确认后再写死结论） | 按各模块实现，预期为拒绝改动 + 日志 |
 
 ## 二、裸钉（无机器可判护栏）
