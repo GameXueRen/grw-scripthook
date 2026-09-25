@@ -26,6 +26,13 @@
  *      left, and a weapon that is already at the threshold would otherwise
  *      inherit them and not reload in time.
  *
+ *      Two things are read off the count, and neither of them is the threshold:
+ *      it went UP, so the press worked and nothing is held off afterwards; it
+ *      has never been higher than it is now, so the magazine is as full as it
+ *      gets and wants nothing. A magazine that holds one round sits AT a
+ *      threshold of one, where a threshold test says "reload" forever and
+ *      "came back" never - and that is the whole of the 2026-09-25 report.
+ *
  * Reading the rounds needs the capacity hook to be installed, because that hook
  * is what sees the engine ask for a capacity, and that call is what says which
  * weapon is in hand. So switching auto reload ON asks for a scale and puts the
@@ -111,6 +118,16 @@ static int           g_hooked;          /* the capacity hook is installed */
 static int           g_applied = -1;    /* the step actually written */
 static int           g_waiting;         /* asked for a reload, waiting for it */
 static DWORD         g_pressedAt;
+static int           g_pressedRounds = -1;  /* the magazine when the press went out */
+/* The fullest this weapon's magazine has been read at. It is what says the
+ * magazine is full: "rounds > threshold" cannot say it for a magazine whose
+ * capacity is at or below the threshold - see AutoReload. -1 = nothing read
+ * yet, and it is cleared on a weapon switch. */
+static int           g_seenMax = -1;
+/* The last press that brought nothing back (no reserve left). Only those hold
+ * the next attempt off: a reload that DID come back must not, or a weapon
+ * fires one round at a time waits out a backoff between every shot. */
+static DWORD         g_noReserveAt;
 /* The weapon the rounds reading was about, as the framework names it
  * (ShGetAmmoObject).  A change here is the one signal that the weapon in hand
  * is not the one this plugin was following - see SwitchWatch. */
@@ -207,9 +224,21 @@ static void ApplyWatch(void) {
 /* ---- the reload ------------------------------------------------------ */
 
 /* Press once when the magazine is down to the threshold, then wait for the
- * magazine to come back. A weapon with no reserve left never comes back, so
- * after that wait the next attempt is held off - rather than clicking away on
- * every poll.
+ * magazine to come back. What says it came back is the count itself - it moved
+ * up - and not the threshold: a magazine whose capacity is at or below the
+ * threshold can never read above it, so judging by that read called every
+ * reload of a grenade launcher "no reserve left".
+ *
+ * What says the magazine wants nothing is the fullest it has been read at
+ * (g_seenMax): at or above that there is nothing to reload, whatever the
+ * threshold is set to. That is the same rule seen from the other side, and the
+ * reason a full magazine sitting at the threshold no longer presses at all.
+ *
+ * A weapon with no reserve left never comes back, so after that wait the next
+ * attempt is held off for RELOAD_BACKOFF - rather than clicking away on every
+ * poll. Only that outcome is held off: a reload that did come back leaves the
+ * next press free, or a weapon fired one round at a time waits out a backoff
+ * between every shot.
  *
  * 3500 ms rather than 2500: a normal reload lands about 2.8 s after the press
  * in the sessions of 2026-09-21, so the shorter wait reported every reload as
@@ -251,6 +280,9 @@ static void SwitchWatch(void) {
             (unsigned long long)obj);
         g_waiting = 0;
         g_pressedAt = 0;                /* no backoff: it belonged to the other */
+        g_pressedRounds = -1;
+        g_seenMax = -1;                 /* the fullest was the other's magazine */
+        g_noReserveAt = 0;              /* and so was "no reserve left" */
     }
     g_lastWeapon = obj;
 }
@@ -562,8 +594,19 @@ static void HudLoadAnchor(void) {
         g_hudAnchorX, g_hudAnchorY);
 }
 
-static void HudLock(int i, const char *why) {
+static void HudLock(int i, int hookRounds, const char *why) {
     const HudCand *c = &g_hudCand[i];
+    char note[48] = "";
+
+    /* The hook's own answer goes beside the label's whenever the two disagree.
+     * That is the line that was missing on 2026-09-26: a lock landed on the
+     * reserve label, the lock line read "43" while the magazine was empty, and
+     * what said so was a reading eight seconds later. A disagreement is not a
+     * fault on its own - right after a switch or a refill the hook is the one
+     * that is behind - but a lock that keeps disagreeing is a lock on the wrong
+     * label, and this is where that is visible. */
+    if (hookRounds >= 0 && hookRounds != c->value)
+        snprintf(note, sizeof(note), ", the hook says %d", hookRounds);
 
     g_hudLabel = c->widget;
     g_hudLastVal = c->value;
@@ -573,9 +616,9 @@ static void HudLock(int i, const char *why) {
     g_hudTries = 0;                     /* a fresh label searches at full speed */
     InterlockedExchange(&g_hudRounds, c->value >= 0 ? c->value : -1);
     Log("ac: hud: the magazine label is at (%.0f,%.0f) in %s, \"%d\" (shown %d) "
-        "- %s; reading it from here on", c->x, c->y,
+        "- %s%s; reading it from here on", c->x, c->y,
         (c->scene >= 0 && c->scene < g_hudNameN) ? g_hudNames[c->scene] : "?",
-        c->value, c->vis, why);
+        c->value, c->vis, why, note);
     HudSaveAnchor(c);
 }
 
@@ -694,7 +737,17 @@ static void HudTick(int hookRounds, int playing, int sameWeapon) {
                 c->value = -1;
                 continue;               /* not drawn now, or not a number */
             }
-            if (shot < 0 && c->value >= 0 && v == c->value - 1 &&
+            /* The shape matters here too (c->mag), and that is not a detail: a
+             * reload takes a round out of the RESERVE as well, so within the
+             * shot's window the reserve label drops by one exactly like the
+             * magazine does - and without the shape it is locked as the
+             * magazine. Reported 2026-09-26: with 0/3 in a grenade launcher the
+             * status line read "3 [hud]", the auto reload saw 3 above its
+             * threshold and never fired, and the log shows why - the label was
+             * locked at (121,-176), which is where the HUD draws the reserve
+             * (the magazine is at (121,-201)), with the reason "it dropped by
+             * one with the shot the hook saw". */
+            if (shot < 0 && c->mag && c->value >= 0 && v == c->value - 1 &&
                 g_hudShotAt && (DWORD)(now - g_hudShotAt) <= HUD_LINK_MS)
                 shot = i;
             if (c->mag) {
@@ -726,15 +779,16 @@ static void HudTick(int hookRounds, int playing, int sameWeapon) {
         /* The shot first - it is what the hook can vouch for - then the
          * remembered place, then the shape anywhere in whatever was walked. */
         if (shot >= 0)
-            HudLock(shot, "it dropped by one with the shot the hook saw");
+            HudLock(shot, hookRounds,
+                    "it dropped by one with the shot the hook saw");
         else if (anchor >= 0)
-            HudLock(anchor, anchorVis
+            HudLock(anchor, hookRounds, anchorVis
                 ? "it is where the label was last found, the number up to the "
                   "separator"
                 : "it is where the label was last found, and its text is there "
                   "even though the HUD has not shown it yet");
         else if (shape >= 0)
-            HudLock(shape, shapeVis
+            HudLock(shape, hookRounds, shapeVis
                 ? "it is the number up to the separator, the shape the HUD "
                   "draws beside the reserve"
                 : "it is the only number up to a separator on the HUD");
@@ -766,19 +820,59 @@ static void AutoReload(void) {
     if (!g_auto || rounds < 0) return;
     if (!ShPluginAllowed()) return;
     if (ShGetGameState() != SH_STATE_INGAME) return;
+
+    /* The fullest this weapon has read is what says the magazine is full.
+     * "rounds > threshold" cannot say it for a magazine whose capacity is at
+     * or below the threshold: a grenade launcher holds one round, the default
+     * threshold is one, so a FULL magazine reads as one that wants reloading. */
+    if (rounds > g_seenMax) g_seenMax = rounds;
+
     if (rounds > (int)g_thresh) { g_waiting = 0; return; }
 
     if (g_waiting) {
+        if (rounds < g_pressedRounds) {
+            /* A shot in the middle of the wait: the magazine is being fired,
+             * not filled. Wait again from here, and let what the count does
+             * after that judge the reload - the press that started this is
+             * neither a "came back" nor a "no reserve left". */
+            g_pressedRounds = rounds;
+            g_pressedAt = now;
+            return;
+        }
+        if (rounds > g_pressedRounds) {
+            /* It came back. Nothing is held off: the next shot may press the
+             * moment the magazine drops. */
+            g_waiting = 0;
+            Log("ac: the reload came back: %d -> %d", g_pressedRounds, rounds);
+            return;
+        }
         if ((long)(now - g_pressedAt) < RELOAD_WAIT_MS) return;
         g_waiting = 0;
-        g_pressedAt = now;
+        g_noReserveAt = now;            /* this press brought nothing back */
         Log("ac: the reload at %d did not come back - no reserve left?", rounds);
         return;
     }
-    if ((long)(now - g_pressedAt) < RELOAD_BACKOFF) return;
+
+    /* Nothing has been fired since this magazine was last as full as it gets,
+     * so there is nothing to reload - and pressing here is what made a weapon
+     * that holds one round cost a full wait plus a backoff on every shot: the
+     * magazine never rises above the threshold, so the wait above never saw it
+     * come back. Reported 2026-09-25: "with the grenade launcher, one shot
+     * means one reload, and the auto reload is extremely slow to follow".
+     *
+     * Empty is always worth a press, and it is the one case where this cannot
+     * tell "full" from "never read anything fuller": an empty magazine that
+     * auto reload was just switched on for, or one a load put the player in
+     * front of, has 0 on both sides of the comparison. The press is free there
+     * - if there is a reserve it reloads, and if there is none the wait below
+     * says so and holds the next one off. */
+    if (rounds > 0 && g_seenMax >= 0 && rounds >= g_seenMax) return;
+
+    if ((long)(now - g_noReserveAt) < RELOAD_BACKOFF) return;
 
     ShFakeKey(KEY_VK((int)g_key), 1);
     g_pressedAt = now;
+    g_pressedRounds = rounds;
     g_waiting = 1;
     Log("ac: magazine at %d (threshold %d) - pressed '%c'", rounds,
         (int)g_thresh, (char)KEY_VK((int)g_key));
