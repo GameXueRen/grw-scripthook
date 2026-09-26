@@ -42,7 +42,31 @@ typedef struct {
      *  the wrong count of bytes. */
     uint64_t locSizeOff;   /**< index record +16                       */
     uint64_t infoSizeOff;  /**< info record +0                         */
+
+    /* Where the whole records live, and what the info record holds beside
+     * the name. A new entry needs both: its own records appended to the
+     * tables, and the umac/extension fields the engine reads out of them -
+     * the extension is the class hash of the container's root resource. */
+    uint64_t locOff;       /**< index record, 20 bytes                 */
+    uint64_t infoOff;      /**< info record, 192 bytes                 */
+    uint64_t umac;         /**< info record +4                         */
+    uint32_t extension;    /**< info record +16                        */
 } ShForgeEntry;
+
+#define SH_FORGE_SET_MAX 64
+
+/** One file set: the header, the two tables it points at, and how many
+ *  entries it holds. The geometry matters to an addition: a set is laid out
+ *  for one row more than it holds, and where that spare row is follows from
+ *  these. */
+typedef struct {
+    uint64_t headerOff;    /**< the 48 byte file set header            */
+    uint64_t locationTable;/**< header +8                              */
+    uint64_t infoTable;    /**< header +32                             */
+    uint64_t infoEnd;      /**< header +40, where the trailing sets go */
+    int      count;        /**< header +0 and +28                      */
+    int      firstEntry;   /**< its first entry in f->entries          */
+} ShForgeSet;
 
 typedef struct {
     int            version;
@@ -50,6 +74,18 @@ typedef struct {
     ShForgeEntry  *entries;
     unsigned long long fileSize;
     char           path[SH_FORGE_PATH_MAX];
+
+    /* The global meta file, which is what points at the first file set and
+     * counts every entry. Its count is one of the two a set's own header
+     * keeps, and adding a row bumps both - the limit is left alone, because
+     * that is the room the tables were laid out with, and the row goes into
+     * it rather than past it. */
+    uint64_t       metaOff;      /**< from the file header +13         */
+    int            totalCount;   /**< meta +0                          */
+    int            limit;        /**< meta +28                         */
+
+    int            fileSets;
+    ShForgeSet     sets[SH_FORGE_SET_MAX];
 } ShForge;
 
 /** Read the tables of `path`. Returns 1 on success, 0 on any failure -

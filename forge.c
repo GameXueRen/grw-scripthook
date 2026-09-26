@@ -75,7 +75,12 @@ int ShForgeOpen(const char *path, ShForge *f) {
 
     fileSets  = RdI32(dh + 32);
     firstSet  = RdI64(dh + 36);
-    if (fileSets <= 0 || fileSets > 64) goto bad;
+    if (fileSets <= 0 || fileSets > SH_FORGE_SET_MAX) goto bad;
+
+    f->metaOff    = (uint64_t)dhOff;
+    f->totalCount = RdI32(dh + 0);
+    f->limit      = RdI32(dh + 28);
+    f->fileSets   = fileSets;
 
     /* Pass one: how many entries in total, following the section chain. */
     {
@@ -109,9 +114,17 @@ int ShForgeOpen(const char *path, ShForge *f) {
             if (cur <= 0 || (unsigned long long)cur + sizeof(sh) > size) goto bad;
             if (!ReadAt(fp, (unsigned long long)cur, sh, sizeof(sh))) goto bad;
             n = RdI32(sh + 0);
-            if (n <= 0) { cur = RdI64(sh + 16); continue; }
             locationTable = cur + 48;           /* inline after the header */
             infoTable     = (uint64_t)RdI64(sh + 32);
+
+            f->sets[i].headerOff     = (uint64_t)cur;
+            f->sets[i].locationTable = locationTable;
+            f->sets[i].infoTable     = infoTable;
+            f->sets[i].infoEnd       = (uint64_t)RdI64(sh + 40);
+            f->sets[i].count         = n > 0 ? n : 0;
+            f->sets[i].firstEntry    = idx;
+
+            if (n <= 0) { cur = RdI64(sh + 16); continue; }
 
             if (locationTable + (uint64_t)n * FORGE_LOC_SIZE > size) goto bad;
             if (infoTable + (uint64_t)n * FORGE_INFO_SIZE > size) goto bad;
@@ -135,8 +148,12 @@ int ShForgeOpen(const char *path, ShForge *f) {
                 e->offset     = RdU64(lp + 0);
                 e->id         = RdU64(lp + 8);
                 e->length     = RdU32(lp + 16);
-                e->locSizeOff = locationTable + (uint64_t)j * FORGE_LOC_SIZE + 16;
-                e->infoSizeOff = infoTable + (uint64_t)j * FORGE_INFO_SIZE;
+                e->locOff     = locationTable + (uint64_t)j * FORGE_LOC_SIZE;
+                e->infoOff    = infoTable + (uint64_t)j * FORGE_INFO_SIZE;
+                e->locSizeOff = e->locOff + 16;
+                e->infoSizeOff = e->infoOff;
+                e->umac       = RdU64(ip + 4);
+                e->extension  = RdU32(ip + 16);
 
                 while (k < SH_FORGE_NAME_MAX - 1 && nm[k]) {
                     char c = (char)nm[k];
