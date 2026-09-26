@@ -27,7 +27,11 @@
  *   POP_REGISTER 32 bytes identical to the old body
  *   COLLECT     identical to the old body except the rel32 of one call
  *   RETIRE      no call site to vote with and no unique body shape; the only
- *               .pdata candidate at 80%. Its failure is logged, not silent.
+ *               .pdata candidate at 80%. Its failure is logged, not silent -
+ *               and on 2026-09 it was seen to fail: the call goes out on a
+ *               valid spec and the entity stays where it is, so ShDespawn now
+ *               reads the entity back and answers 0 with SH_ERR_NO_EFFECT
+ *               rather than 1. Re-pin this one before trusting it.
  *   KIND / POOL_FIND / SPEC_OF / NPC_SPEC_VTABLE were re-pinned earlier and
  *               checked against the old build then.
  *
@@ -46,8 +50,12 @@
 #define RVA_KIND         0x89372E0
 #define RVA_POOL_FIND    0xE2E0780
 
-/* Despawn, from the Domino UnspawnFromEntity node: the
- * entity's spawning spec, then retire it. Verified live. */
+/* Despawn, from the Domino UnspawnFromEntity node: the entity's spawning spec,
+ * then retire it. The spec half works - SPEC_OF answers for an entity that came
+ * out of the spawn system, which is why the handle side was never the problem.
+ * The retire half does not work on this build (see RETIRE above): the call is
+ * accepted and the entity stays. ShDespawn therefore verifies the result
+ * instead of reporting that a call was made. */
 #define RVA_SPEC_OF      0xA9C3F80
 #define RVA_RETIRE       0x99FDBB0
 
@@ -550,14 +558,22 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
 typedef uint64_t (__attribute__((ms_abi)) *SpecOf_t)(uint64_t);
 typedef int (__attribute__((ms_abi)) *Retire_t)(uint64_t);
 
+/* Defined beside SpecEntity, further down; the despawn path uses it to find out
+ * whether the retire call did anything at all. */
+static int EntityStillSpawned(uint64_t ent);
+
 static volatile uint64_t g_killEnt = 0;
 static volatile int g_killDone = 0;
 static volatile int g_killOk = 0;
+static volatile int g_killGone = 0;         /* out of the spawn system */
+static volatile uint64_t g_verifyEnt = 0;   /* a later, second look at one */
+static volatile int g_verifyDone = 0;
 
 static void DespawnOnGameThread(uint64_t entity) {
     uint64_t spec;
 
     g_killOk = 0;
+    g_killGone = 0;
     spec = ((SpecOf_t)ImgAddr(RVA_SPEC_OF))(entity);
     if (!spec) { NpcWhy("no spec for the entity to unspawn", entity, 0); return; }
     if (!ShReadableAddr(spec, 0x180)) {
@@ -566,6 +582,9 @@ static void DespawnOnGameThread(uint64_t entity) {
     }
     ((Retire_t)ImgAddr(RVA_RETIRE))(spec);
     g_killOk = 1;
+    /* The call is out; whether it took is a separate question, and the one the
+     * caller is asking. The entity is read back before any answer is given. */
+    g_killGone = EntityStillSpawned(entity) ? 0 : 1;
 }
 
 /* Called from the physics hook, next to ShSpawnPump.
@@ -590,6 +609,20 @@ void ShNpcPump(void) {
         DespawnOnGameThread(e);
         g_killDone = 1;
         did = 1;
+    }
+
+    /* An entity whose despawn did not take is looked at again here: a retire can
+     * land a frame late, and the caller is waiting on the answer. No second call
+     * is made - this only asks the entity whether it is still there. */
+    {
+        uint64_t v = (uint64_t)InterlockedExchange64(
+            (volatile LONG64 *)&g_verifyEnt, 0);
+
+        if (v) {
+            g_killGone = EntityStillSpawned(v) ? 0 : 1;
+            g_verifyDone = 1;
+            did = 1;
+        }
     }
 
     if (InterlockedExchange((volatile LONG *)&g_listWanted, 0)) {
@@ -665,13 +698,41 @@ static uint64_t SpecEntity(uint64_t spec) {
     return BlockObj(blk);
 }
 
+/* Is this entity still in the spawn system?
+ *
+ * The specification it was spawned with is the test: a retired entity has none,
+ * and the one it had - if that memory is still readable at all - no longer names
+ * this entity. Every read is guarded, so a freed handle answers 0 (gone) rather
+ * than faulting. This is what ShDespawn asks, instead of trusting a call that
+ * this build accepts and ignores. */
+static int EntityStillSpawned(uint64_t ent) {
+    uint64_t spec;
+
+    if (!ent || !ShReadableAddr(ent, 0x40)) return 0;
+    spec = ((SpecOf_t)ImgAddr(RVA_SPEC_OF))(ent);
+    if (!spec) return 0;
+    if (!ShReadableAddr(spec, 0x1A0)) return 0;
+    if (ShReadQ(spec) != NPC_SPEC_VTABLE) return 0;
+    if (SpecEntity(spec) != ent) return 0;
+    return 1;
+}
+
 /* Any spawn system entity, NPC or vehicle. Entities built
- * outside that road have no spec and refuse. */
+ * outside that road have no spec and refuse.
+ *
+ * 1 means the entity is gone: read back and confirmed, not merely called at. The
+ * retire address is the one pin in this build with no call site to confirm it,
+ * and what was seen live is a call that goes through on a valid spec while the
+ * entity stays put - that answers 0 with SH_ERR_NO_EFFECT, so no caller is ever
+ * told a despawn happened when it did not. */
 int ShDespawn(uint64_t entity) {
+    int i;
+
     if (!entity) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (!ShRequireInGame()) return 0;
 
     g_killDone = 0;
+    g_killGone = 0;
     g_killEnt = entity;
     if (!WaitFlag(&g_killDone, 3000)) {
         g_killEnt = 0;
@@ -679,7 +740,23 @@ int ShDespawn(uint64_t entity) {
         return 0;
     }
     if (!g_killOk) { ShSetError(SH_ERR_NO_CANDIDATE); return 0; }
-    return 1;
+    if (g_killGone) return 1;
+
+    /* It did not take yet, and it may still land: the entity is asked again five
+     * times over about half a second before the answer is given. When it never
+     * lands the answer is 0, with the reason in the npc log. */
+    for (i = 0; i < 5; i++) {
+        g_verifyDone = 0;
+        g_verifyEnt = entity;
+        if (!WaitFlag(&g_verifyDone, 1000)) break;
+        if (g_killGone) return 1;
+        Sleep(50);
+    }
+    NpcWhy("the retire call did not take: the entity is still in the spawn "
+           "system (RETIRE is the weakest pin in this build)", entity,
+           ImgAddr(RVA_RETIRE));
+    ShSetError(SH_ERR_NO_EFFECT);
+    return 0;
 }
 
 uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos) {

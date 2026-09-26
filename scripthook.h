@@ -485,7 +485,8 @@ enum ShError {
     SH_ERR_UI_NOT_READY,   /**< in game, scene not up yet */
     SH_ERR_UI_PROP,        /**< no such property on the class */
     SH_ERR_UI_ASSET,       /**< font or texture not loaded */
-    SH_ERR_REGISTRY_FULL   /**< a fixed table is full (blacklist: 64) */
+    SH_ERR_REGISTRY_FULL,  /**< a fixed table is full (blacklist: 64) */
+    SH_ERR_NO_EFFECT       /**< the engine took the call and nothing changed */
 };
 
 /** @} */
@@ -823,7 +824,13 @@ SH_API uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos);
 
 /** Retire a spawned entity, NPC or vehicle, through the
  *  spawn manager. Entities built outside the spawn system
- *  have no spec and refuse. */
+ *  have no spec and refuse.
+ *
+ *  Answers 1 only after the entity has been read back and is
+ *  no longer in the spawn system. The retire address is the
+ *  one pin in this build with no call site to confirm it, and
+ *  on this build the call is accepted and does nothing: that
+ *  case answers 0 with SH_ERR_NO_EFFECT, not 1. */
 SH_API int ShDespawn(uint64_t entity);
 
 /* ---- factions ----------------------------------------------------

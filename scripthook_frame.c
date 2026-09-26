@@ -125,7 +125,22 @@ static int EnsureHook(void) {
     int o = 0;
     DWORD old = 0;
 
-    if (InterlockedCompareExchange(&g_installing, 1, 0)) return 0;
+    /* One installer at a time - but a caller that arrives while another one is
+     * installing must not be told "no". It waits for that install to finish and
+     * then answers from the result, because 0 here means "this framework cannot
+     * give you a frame hook", and a plugin has no way to tell that apart from
+     * "ask again in a moment". Seen on 2026-09-27: a plugin registered 69 ms
+     * before the physics module did, was answered no, and never asked again -
+     * so its callback never ran and the batch it was polling sat unfinished
+     * while the progress line said so. */
+    if (InterlockedCompareExchange(&g_installing, 1, 0)) {
+        ULONGLONG end = GetTickCount64() + 5000;
+
+        while (InterlockedCompareExchange(&g_installing, 0, 0) &&
+               GetTickCount64() < end)
+            Sleep(1);
+        return g_stub != NULL;
+    }
     if (g_stub) { InterlockedExchange(&g_installing, 0); return 1; }
 
     if (!SiteOk(&site)) {

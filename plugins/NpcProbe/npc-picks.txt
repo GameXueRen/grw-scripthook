@@ -1,0 +1,100 @@
+# NPC ids worth having to hand, each one labelled with what THIS build says it is.
+#
+# The id column is a set of ids that were collected by hand, one at a time, in an
+# earlier round of this work; the first published collection of them came from a
+# third-party plugin, which is where they were first copied from. They are game
+# data like any other id, so this file does not rest on that: every row below was
+# checked against the engine catalogue of the build named in npc-catalogue.txt,
+# and the index/kind/group columns are read from that catalogue, not from anyone's
+# table. All 76 are in it, so all 76 can be summoned on this build.
+#
+# What the columns mean (same as npc-catalogue.txt):
+#   n     the position in the list, which is also the row order in [Settings] ids=
+#   id    the archetype id to summon
+#   idx   its index in the engine catalogue (this build)
+#   kind  the engine's own classification number
+#   group the framework's bucket over kind - not engine data
+#
+# Regenerate or re-check: put the ids in [Settings] ids=, then use NpcProbe's
+# "summon next in the list" - an id this build does not hold answers with
+# "no archetype block for the id" and lands in the log.
+#
+#
+# The list, in the order it is written into [Settings] ids=:
+#
+  1  0x000001A987A8752D  idx  128  kind  1  平民
+  2  0x000001AFB8794FE6  idx  131  kind  6  反抗军
+  3  0x000001B155F83D72  idx  132  kind  6  反抗军
+  4  0x000001AFB8751E8E  idx  133  kind  6  反抗军
+  5  0x000001A987A5256F  idx  134  kind  6  反抗军
+  6  0x000001B155F6628C  idx  136  kind  6  反抗军
+  7  0x000001AFB8794FEA  idx  137  kind  6  反抗军
+  8  0x000001A987A5FFD7  idx  139  kind  0  平民
+  9  0x00000183A1B02363  idx  140  kind  6  反抗军
+ 10  0x00000185B81997B0  idx  141  kind  6  反抗军
+ 11  0x0000018173A2EB26  idx  142  kind  6  反抗军
+ 12  0x0000018173A5399A  idx  143  kind  6  反抗军
+ 13  0x00000187334C4DB7  idx  144  kind  6  反抗军
+ 14  0x00000185B81B4750  idx  145  kind  1  平民
+ 15  0x00000187E427E5C5  idx  146  kind  3  圣塔布兰卡
+ 16  0x0000018173A30AC6  idx  147  kind  6  反抗军
+ 17  0x0000018173A2FCA4  idx  148  kind  6  反抗军
+ 18  0x0000018173A3102F  idx  149  kind  1  平民
+ 19  0x00000197A932C062  idx  150  kind  6  反抗军
+ 20  0x0000018F3D2B2FA2  idx  151  kind  3  圣塔布兰卡
+ 21  0x000001A16C520991  idx  152  kind  6  反抗军
+ 22  0x0000018D7BD5327E  idx  153  kind  6  反抗军
+ 23  0x000001994707A751  idx  154  kind  6  反抗军
+ 24  0x0000008A9482DAC2  idx  221  kind  3  圣塔布兰卡
+ 25  0x0000007C0B092643  idx  225  kind  5  联合军
+ 26  0x0000008A9482DACC  idx  227  kind  3  圣塔布兰卡
+ 27  0x0000014397E627AE  idx  239  kind  3  圣塔布兰卡
+ 28  0x00000154BBBC37D0  idx  251  kind  1  平民
+ 29  0x00000154BBB495E1  idx  252  kind  3  圣塔布兰卡
+ 30  0x000000537991063F  idx  261  kind  3  圣塔布兰卡
+ 31  0x0000004AC59FCA66  idx  264  kind  3  圣塔布兰卡
+ 32  0x0000005379910630  idx  267  kind  3  圣塔布兰卡
+ 33  0x000000537991063E  idx  271  kind  3  圣塔布兰卡
+ 34  0x0000004AC59FCA65  idx  277  kind  3  圣塔布兰卡
+ 35  0x0000005379910631  idx  279  kind  3  圣塔布兰卡
+ 36  0x0000004AC59FCA64  idx  280  kind  3  圣塔布兰卡
+ 37  0x00000068EB25F118  idx  304  kind  1  平民
+ 38  0x000000433A9B6E26  idx  306  kind  3  圣塔布兰卡
+ 39  0x00000068EB25EB16  idx  308  kind  3  圣塔布兰卡
+ 40  0x0000007D662A1D27  idx  309  kind  1  平民
+ 41  0x00000078C9B348CF  idx  338  kind  1  平民
+ 42  0x00000045F1E58279  idx  347  kind  3  圣塔布兰卡
+ 43  0x000000792C60E200  idx  348  kind  3  圣塔布兰卡
+ 44  0x0000018B72EE403D  idx  414  kind  6  反抗军
+ 45  0x00000198B997684C  idx  415  kind  6  反抗军
+ 46  0x00000071CBB77732  idx  416  kind  3  圣塔布兰卡
+ 47  0x00000071CBB77725  idx  417  kind  3  圣塔布兰卡
+ 48  0x00000071CBB77721  idx  418  kind  3  圣塔布兰卡
+ 49  0x00000071CBB77722  idx  419  kind  3  圣塔布兰卡
+ 50  0x00000071CBB7772D  idx  420  kind  3  圣塔布兰卡
+ 51  0x00000071CBB77720  idx  421  kind  3  圣塔布兰卡
+ 52  0x00000071CBB77739  idx  422  kind  3  圣塔布兰卡
+ 53  0x0000007929219EF8  idx  423  kind  3  圣塔布兰卡
+ 54  0x00000045F1E58223  idx  424  kind  3  圣塔布兰卡
+ 55  0x00000071CBB77729  idx  425  kind  3  圣塔布兰卡
+ 56  0x00000071CBB77724  idx  426  kind  3  圣塔布兰卡
+ 57  0x00000071CBB77727  idx  427  kind  4  特殊
+ 58  0x00000071CBB77736  idx  428  kind  3  圣塔布兰卡
+ 59  0x00000147CD1A13C3  idx  430  kind  6  反抗军
+ 60  0x00000082AF1233BC  idx  431  kind  1  平民
+ 61  0x00000071CBB77735  idx  432  kind  5  联合军
+ 62  0x00000071CBB77731  idx  433  kind  6  反抗军
+ 63  0x00000071CBB7772C  idx  434  kind  3  圣塔布兰卡
+ 64  0x00000071CBB77728  idx  435  kind  3  圣塔布兰卡
+ 65  0x00000071CBB7772B  idx  436  kind  3  圣塔布兰卡
+ 66  0x00000071CBB77726  idx  437  kind  3  圣塔布兰卡
+ 67  0x00000071CBB77734  idx  438  kind  5  联合军
+ 68  0x00000071CBB7772A  idx  439  kind  3  圣塔布兰卡
+ 69  0x00000071CBB77730  idx  440  kind  4  特殊
+ 70  0x00000071CBB7773A  idx  441  kind  4  特殊
+ 71  0x00000071CBB77738  idx  442  kind  6  反抗军
+ 72  0x0000007926908976  idx  443  kind  3  圣塔布兰卡
+ 73  0x00000071CBB77737  idx  444  kind  3  圣塔布兰卡
+ 74  0x000000CA9DCD4408  idx  445  kind  3  圣塔布兰卡
+ 75  0x00000071CBB77723  idx  446  kind  3  圣塔布兰卡
+ 76  0x0000007C33CCA452  idx  447  kind  1  平民

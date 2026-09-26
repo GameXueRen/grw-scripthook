@@ -407,6 +407,14 @@ Build-Plugin 'AmmoProbe'    'AmmoProbe.c'    @($libPath, 'libscripthook.lib')
 # by construction - it spawns nothing, hooks nothing - and off until its own ini
 # says enabled=1. Not in the beta set: it ships to nobody.
 Build-Plugin 'VehicleProbe' 'VehicleProbe.c' @($libPath, 'libscripthook.lib', 'user32.lib')
+# NpcProbe answers two questions: what this build's archetype registry holds
+# (527 entries, grouped by the kind the engine keeps with each one) and whether
+# an id outside that registry can still be summoned. It compiles no id table in
+# - the one this project once carried belonged to another build, and not one of
+# its 76 entries is in the registry today - so the escape hatch is a list of ids
+# the operator writes in [NpcProbe] ids, which is how a legacy id is checked.
+# Off until its own ini says enabled=1. Not in the beta set: it ships to nobody.
+Build-Plugin 'NpcProbe'      'NpcProbe.c'      @($libPath, 'libscripthook.lib', 'user32.lib')
 # AmmoControl is the capacity multiplier and an automatic reload. Every change
 # goes through the framework's own engine calls (ShSetAmmoScale for the
 # capacity, ShFakeKey for the reload), so it installs no hook of its own and
@@ -493,6 +501,21 @@ foreach ($dir in (Get-ChildItem $srcPlugins -Directory)) {
             Copy-Item $from $to -Force
             Write-Host "seeded $to"
         }
+    }
+}
+
+# One plugin ships a data file rather than a setting, and that kind is copied
+# every build: a setting belongs to whoever changed it, while this is the record
+# of a game build and belongs with the source it is shipped beside. NpcProbe
+# reads the engine's own catalogue every session and checks its answer against
+# this file, so a stale copy would be a false alarm. See the file's own header.
+foreach ($rel in @('NpcProbe\npc-catalogue.txt', 'NpcProbe\npc-picks.txt')) {
+    $from = Join-Path $srcPlugins $rel
+    $to   = Join-Path $outPlugins $rel
+    if (Test-Path $from) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $to) | Out-Null
+        Copy-Item $from $to -Force
+        Write-Host "deployed $to"
     }
 }
 

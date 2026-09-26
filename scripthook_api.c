@@ -92,6 +92,8 @@ SH_API const char *ShErrorString(int err) {
         return "too far from the player: collision only streams "
                "in within about 1500m, so query nearer or move "
                "the player there first";
+    case SH_ERR_NO_EFFECT:
+        return "the engine took the call and the entity is still there";
     case SH_ERR_CONTROLLER:
         return "please use the native player controller "
                "velocity for this purpose: this entity is "
