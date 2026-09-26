@@ -318,6 +318,23 @@ typedef struct {
     char     how[64];
 } IdFind;
 
+/* A dword whose four bytes are all printable ASCII is the text a name scan is
+ * standing in - the neighbourhood of one name is full of other names - and not
+ * an id. Every catalogue id has at least one byte outside that range, and the
+ * first run of the name scan showed what happens without this test: 0x415F6564
+ * ("de_A"), 0x41706143 ("CapA") and friends all read as ids in the vehicle
+ * range. */
+static int LooksLikeText(uint32_t v) {
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        unsigned char b = (unsigned char)(v >> (i * 8));
+
+        if (b < 0x20 || b > 0x7E) return 0;
+    }
+    return 1;
+}
+
 /* A dword that could be a vehicle id: every catalogue id lives in
  * 0x40000000..0x41FFFFFF, and the low 16 bits have to say something, because
  * the round float constants live in the same range (2.0f is 0x40000000, 4.0f
@@ -328,6 +345,7 @@ static void RangeNote(IdFind *f, uint32_t v) {
 
     if (v < ID_LO || v >= ID_HI) return;
     if ((v & 0xFFFFu) == 0) return;
+    if (LooksLikeText(v)) return;
     for (i = 0; i < f->rangeN && i < max; i++) {
         if (f->rangeV[i] == v) { f->rangeC[i]++; return; }
     }
@@ -837,6 +855,211 @@ static void WriteReport(void) {
     Log("report: %d id(s), %d unknown and real -> %s", n, unknown, path);
 }
 
+/* ---- from a name to an id ---------------------------------------------
+ * A vehicle id carries no name - the catalogue says so where it is listed
+ * (named by eye, one spawn at a time) - so "does this game have vehicle X"
+ * cannot be answered from an id. It can be answered from the other end: a name
+ * is a string, and a string the game has loaded is in memory. This walks for
+ * [Settings] needle, as the bytes the ini holds and as UTF-16 (game text is
+ * wide), and reports every hit with the vehicle-range dwords around it, each
+ * marked with what is already known about it: a catalogue name, what the walk
+ * saw of it, or nothing at all.
+ *
+ * That mark is the answer. A name whose neighbourhood holds a real id belongs
+ * to a vehicle this process could spawn; a name that exists with no id near it
+ * is text - a store entry, a paint, a wiki line - and not a vehicle definition.
+ */
+
+#define NEEDLE_MAX     64
+#define NEEDLE_RAW     192
+#define NEEDLE_WIDE    384
+#define NEEDLE_AROUND  0x400
+#define NEEDLE_HITS    20
+#define NEEDLE_IDS     8
+
+static char g_needle[NEEDLE_MAX];
+static int  g_hotkeyNeedle = VK_F6;
+
+/* UTF-8 (what the ini holds) to UTF-16LE (what the game holds), one code point
+ * at a time. Anything that is not valid UTF-8 is copied as a byte, so a plain
+ * ASCII needle comes out as the obvious wide string. */
+static int Utf8ToWide(const char *in, uint8_t *out, int max, int *points) {
+    int i = 0, o = 0, n = 0;
+
+    while (in[i] && o + 2 <= max) {
+        unsigned char c = (unsigned char)in[i];
+        uint32_t      cp;
+        int           extra;
+
+        if (c < 0x80)             { cp = c;        extra = 0; }
+        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1Fu; extra = 1; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0Fu; extra = 2; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07u; extra = 3; }
+        else { cp = c; extra = 0; }
+        i++;
+        while (extra-- > 0) {
+            if (!in[i]) break;
+            cp = (cp << 6) | ((unsigned char)in[i] & 0x3Fu);
+            i++;
+        }
+        out[o++] = (uint8_t)(cp & 0xFF);
+        out[o++] = (uint8_t)((cp >> 8) & 0xFF);
+        n++;
+    }
+    if (points) *points = n;
+    return o;
+}
+
+typedef struct {
+    uint8_t raw[NEEDLE_RAW];
+    uint8_t wide[NEEDLE_WIDE];
+    int     rawLen;
+    int     wideLen;
+} Needle;
+
+/* What is around one hit: the vehicle-range dwords in the bytes either side of
+ * it, with what this run already knows about each. */
+static void NeedleHit(uint64_t at, const char *how) {
+    uint8_t  around[NEEDLE_AROUND * 2];
+    uint32_t seen[NEEDLE_IDS];
+    int      cnt[NEEDLE_IDS];
+    int      n = 0, i, off;
+
+    if (!ShReadBytes(at - NEEDLE_AROUND, around, sizeof(around))) {
+        Log("needle: hit at %llX (%s) - the bytes around it could not be read",
+            (unsigned long long)at, how);
+        return;
+    }
+    for (off = 0; off + 4 <= (int)sizeof(around); off += 4) {
+        uint32_t v;
+        int      k;
+
+        memcpy(&v, around + off, 4);
+        if (v < ID_LO || v >= ID_HI || (v & 0xFFFFu) == 0) continue;
+        if (LooksLikeText(v)) continue;
+        for (k = 0; k < n; k++) {
+            if (seen[k] == v) { cnt[k]++; break; }
+        }
+        if (k == n && n < NEEDLE_IDS) {
+            seen[n] = v;
+            cnt[n] = 1;
+            n++;
+        }
+    }
+    Log("needle: hit at %llX (%s): %d vehicle-range dword(s) around it",
+        (unsigned long long)at, how, n);
+    for (i = 0; i < n; i++) {
+        const char *name = NULL;
+        Found      *f;
+        char        tail[160];
+
+        Lock();
+        f = TabAt(seen[i], 0);
+        if (f && f->claimed) name = f->name;
+        snprintf(tail, sizeof(tail), "%s%s%s",
+                 name ? "in the catalogue as " : "",
+                 name ? name : "",
+                 (f && !name) ? (IsReal(f) ? "seen by the walk, a real vehicle"
+                                           : "seen by the walk, not a vehicle")
+                              : (name ? "" : "unknown to the walk so far"));
+        Unlock();
+        Log("needle:   id %08X x%d  %s", seen[i], cnt[i], tail);
+    }
+    if (!n)
+        Log("needle:   no vehicle-range id near that text (it is text, or the "
+            "ids are elsewhere)");
+}
+
+static void NeedleScan(void) {
+    static uint8_t buf[0x40000];
+    Needle           ne;
+    MEMORY_BASIC_INFORMATION mbi;
+    uint8_t         *scan = (uint8_t *)0x10000;
+    uint64_t         sLo = 0, sHi = 0, iLo = 0, iHi = 0, bytes = 0;
+    DWORD            t0, last;
+    int              regions = 0, skipped = 0, hits = 0;
+
+    if (!g_needle[0]) {
+        Log("needle: [Settings] needle is empty - nothing to look for");
+        return;
+    }
+    if (InterlockedCompareExchange(&g_busy, 1, 0)) {
+        Log("needle: a scan is already running");
+        return;
+    }
+    memset(&ne, 0, sizeof(ne));
+    ne.rawLen = (int)strlen(g_needle);
+    if (ne.rawLen > NEEDLE_RAW) ne.rawLen = NEEDLE_RAW;
+    memcpy(ne.raw, g_needle, (size_t)ne.rawLen);
+    ne.wideLen = Utf8ToWide(g_needle, ne.wide, NEEDLE_WIDE, NULL);
+    OwnStack(&sLo, &sHi);
+    OwnImage(&iLo, &iHi);
+    t0 = last = GetTickCount();
+    Log("needle: looking for \"%s\" (%d byte(s) as stored, %d as UTF-16); own "
+        "image %llX..%llX and this stack skipped", g_needle, ne.rawLen,
+        ne.wideLen, (unsigned long long)iLo, (unsigned long long)iHi);
+
+    while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
+        uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
+
+        if (next <= scan) break;
+        if ((uint64_t)(uintptr_t)mbi.BaseAddress >= ADDR_MAX) break;
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & 0xFF) &&
+            !(mbi.Protect & PAGE_GUARD) && mbi.Protect != PAGE_NOACCESS) {
+            uint8_t *b = (uint8_t *)mbi.BaseAddress;
+            size_t   sz = mbi.RegionSize, o, got, k;
+
+            if (Overlaps((uint64_t)(uintptr_t)b, (uint64_t)(uintptr_t)(b + sz),
+                         sLo, sHi) ||
+                Overlaps((uint64_t)(uintptr_t)b, (uint64_t)(uintptr_t)(b + sz),
+                         iLo, iHi)) {
+                skipped++;
+                scan = next;
+                continue;
+            }
+            regions++;
+            for (o = 0; o + 16 <= sz; o += sizeof(buf) - 16) {
+                got = sz - o;
+                if (got > sizeof(buf)) got = sizeof(buf);
+                if (!ShReadBytes((uint64_t)(uintptr_t)(b + o), buf,
+                                 (uint32_t)got))
+                    continue;
+                bytes += got;
+                for (k = 0; k + (size_t)ne.rawLen <= got; k++) {
+                    if (buf[k] != ne.raw[0] ||
+                        buf[k + (size_t)ne.rawLen - 1] != ne.raw[ne.rawLen - 1])
+                        continue;
+                    if (memcmp(buf + k, ne.raw, (size_t)ne.rawLen)) continue;
+                    hits++;
+                    if (hits <= NEEDLE_HITS)
+                        NeedleHit((uint64_t)(uintptr_t)(b + o + k), "as stored");
+                }
+                for (k = 0; k + (size_t)ne.wideLen <= got; k++) {
+                    if (buf[k] != ne.wide[0] ||
+                        buf[k + (size_t)ne.wideLen - 1] !=
+                            ne.wide[ne.wideLen - 1])
+                        continue;
+                    if (memcmp(buf + k, ne.wide, (size_t)ne.wideLen)) continue;
+                    hits++;
+                    if (hits <= NEEDLE_HITS)
+                        NeedleHit((uint64_t)(uintptr_t)(b + o + k), "UTF-16");
+                }
+                if (GetTickCount() - last > 3000) {
+                    last = GetTickCount();
+                    Log("needle: %llu MB, %d region(s), %d hit(s) so far",
+                        (unsigned long long)(bytes >> 20), regions, hits);
+                }
+            }
+        }
+        scan = next;
+    }
+    Log("needle: done, %llu MB in %lu ms over %d region(s), %d skipped, %d "
+        "hit(s)%s", (unsigned long long)(bytes >> 20),
+        (unsigned long)GetTickCount() - t0, regions, skipped, hits,
+        hits > NEEDLE_HITS ? " (only the first 20 were detailed)" : "");
+    InterlockedExchange(&g_busy, 0);
+}
+
 /* ---- settings, loop and entry ------------------------------------------ */
 
 static int IniInt(const char *key, int def) {
@@ -850,9 +1073,14 @@ static void LoadSettings(void) {
     g_hotkey     = IniInt("hotkey", VK_F5);
     g_minHits    = IniInt("min_hits", 3);
     g_scanOnLoad = IniInt("scan_on_load", 0) ? 1 : 0;
+    g_hotkeyNeedle = IniInt("hotkey_needle", VK_F6);
+    if (g_ini[0])
+        GetPrivateProfileStringA("Settings", "needle", "", g_needle,
+                                 sizeof(g_needle), g_ini);
     if (g_radius < 0) g_radius = 0;
     if (g_minHits < 1) g_minHits = 1;
     if (g_hotkey <= 0 || g_hotkey > 255) g_hotkey = VK_F5;
+    if (g_hotkeyNeedle <= 0 || g_hotkeyNeedle > 255) g_hotkeyNeedle = VK_F6;
 }
 
 static DWORD WINAPI WalkThread(LPVOID p) {
@@ -863,8 +1091,15 @@ static DWORD WINAPI WalkThread(LPVOID p) {
     return 0;
 }
 
+static DWORD WINAPI NeedleThread(LPVOID p) {
+    (void)p;
+    NeedleScan();
+    return 0;
+}
+
 static DWORD WINAPI Track(LPVOID p) {
     int g_autoStarted = 0;
+    int wasNeedle = 0;
 
     (void)p;
     LogInitAlways("VehicleProbe.log");
@@ -889,15 +1124,18 @@ static DWORD WINAPI Track(LPVOID p) {
         return 0;
     }
     Log("VehicleProbe: enabled - 0x%X scans what is nearby (radius %d m), "
-        "Ctrl+0x%X walks the whole address space; min_hits %d, scan_on_load %d",
-        g_hotkey, g_radius, g_hotkey, g_minHits, g_scanOnLoad);
+        "Ctrl+0x%X walks the whole address space, 0x%X looks for the needle "
+        "%s; min_hits %d, scan_on_load %d",
+        g_hotkey, g_radius, g_hotkey, g_hotkeyNeedle,
+        g_needle[0] ? g_needle : "(none set)", g_minHits, g_scanOnLoad);
 
     for (;;) {
-        int down;
+        int down, downNeedle;
 
         Sleep(TICK_MS);
         if (!ShGameFocused()) {
             g_wasDown = 0;
+            wasNeedle = 0;
             continue;
         }
         /* Once, not once per tick: the walk takes a minute and the loop runs
@@ -930,6 +1168,25 @@ static DWORD WINAPI Track(LPVOID p) {
             }
         }
         g_wasDown = down;
+
+        downNeedle = (GetAsyncKeyState(g_hotkeyNeedle) & 0x8000) != 0;
+        if (downNeedle && !wasNeedle) {
+            if (!g_needle[0])
+                Log("VehicleProbe: the needle key was pressed but "
+                    "[Settings] needle is empty - put the vehicle name there "
+                    "first");
+            else if (g_busy)
+                Log("VehicleProbe: a scan is already running");
+            else {
+                HANDLE t;
+
+                Log("VehicleProbe: looking for \"%s\"", g_needle);
+                t = CreateThread(NULL, 0, NeedleThread, NULL, 0, NULL);
+                if (t) CloseHandle(t);
+                else Log("VehicleProbe: could not start the needle thread");
+            }
+        }
+        wasNeedle = downNeedle;
     }
     return 0;
 }
