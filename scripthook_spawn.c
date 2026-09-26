@@ -517,6 +517,12 @@ static uint64_t SpecFor(uint32_t vehicleId) {
         if (!g_specTried[i]) need = 1;
         break;
     }
+    /* The id is not in the catalogue, so the loop above ran to the end and left
+     * i at VEHICLE_COUNT: both of the reads below were one element past their
+     * array, and the neighbour of g_specCache - read as an address, and then
+     * dereferenced by ShReadQ - is not a spec. Reachable from outside: a plugin
+     * passes the id, and the game holds ids this catalogue does not list. */
+    if (i >= VEHICLE_COUNT) return 0;
     /* Never walked here: the walk is the warm thread's, and this waits for
      * it (see SpecScanWait). Running it on this thread is what made a
      * dispatch occasionally take the whole fifteen seconds - see the
