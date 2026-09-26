@@ -34,6 +34,7 @@ typedef int (*MenuAction_t)(uint32_t, const char *, ShMenuFn, void *);
 typedef int (*MenuStatus_t)(uint32_t, const char *);
 typedef int (*MenuStatusF_t)(uint32_t, const char *, ...);
 typedef int (*MenuHint_t)(uint32_t, const char *);
+typedef uint32_t (*MenuSub_t)(uint32_t, const char *);
 
 /* This plugin had no log at all, which made the one failure it can have -
  * an export this dinput8 does not carry - look like a submenu that simply
@@ -167,6 +168,16 @@ static LangDeclare_t pLangDeclare;
 static const TextRow kEn[] = {
     { "@sp.page",     "Vehicle dispatch" },
     { "@sp.hint",     "The first dispatch may take a moment." },
+    { "@sp.cat.air",  "Aircraft" },
+    { "@sp.cat.armor", "Armoured / military" },
+    { "@sp.cat.suv",  "SUV, pickup, off-road" },
+    { "@sp.cat.car",  "Cars" },
+    { "@sp.cat.truck", "Trucks, buses, vans" },
+    { "@sp.cat.bike", "Motorcycles" },
+    { "@sp.cat.boat", "Boats" },
+    { "@sp.cat.misc", "Special / unusable" },
+    { "@sp.cat.misc.hint",
+      "Alpaca and Monster freeze the game on entry." },
     { "@sp.noplayer", "no player position" },
     { "@sp.spawning", "spawning..." },
     { "@sp.spawned",  "spawned, %d this session" },
@@ -177,6 +188,15 @@ static const TextRow kEn[] = {
 static const TextRow kZh[] = {
     { "@sp.page",     "载具派遣" },
     { "@sp.hint",     "首次载具派遣可能需要一点时间。" },
+    { "@sp.cat.air",  "飞行器" },
+    { "@sp.cat.armor", "装甲·军用" },
+    { "@sp.cat.suv",  "SUV·皮卡·越野" },
+    { "@sp.cat.car",  "轿车·跑车" },
+    { "@sp.cat.truck", "卡车·巴士·厢车" },
+    { "@sp.cat.bike", "摩托车" },
+    { "@sp.cat.boat", "船" },
+    { "@sp.cat.misc", "特殊·不可用" },
+    { "@sp.cat.misc.hint", "Alpaca 与 Monster 进入后会卡死，勿点。" },
     { "@sp.noplayer", "无法获取玩家位置" },
     { "@sp.spawning", "正在生成……" },
     { "@sp.spawned",  "已生成，本次会话共 %d 辆" },
@@ -201,11 +221,125 @@ static void TextInit(void) {
                  (int)(sizeof(kZh) / sizeof(kZh[0])));
 }
 
+/* ---- the pages a vehicle can be filed under -------------------------
+ * One page per kind, so a dispatch is a couple of steps instead of a scroll
+ * through sixty-five rows. The catalogue carries nothing to file by: an id is
+ * a hash and the names were written by eye, one spawn at a time (see
+ * scripthook_spawn.c where they are listed), so this files by name - the same
+ * thing the framework already does for "which vehicle am I sitting in"
+ * (scripthook_api.c, VehicleClassFromName), just finer, and with nothing
+ * added to the API for it.
+ *
+ * The order the word lists are asked in is part of the rule, and each list
+ * sitting before another is there for a name that both would claim: "4x4
+ * armed" is armour before it is off-road, "Trophy truck" and "Monster truck"
+ * are off-road before they are trucks, the armoured ambulance is armour
+ * before "ambulance" can have it, and the killdozer is a digger before it is
+ * armoured - the one name that has to be asked about before the armour list
+ * rather than after it.
+ *
+ * A name no word claims is filed with the last page and named in this
+ * plugin's log rather than dropped: the catalogue grows without asking this
+ * file, and a vehicle nobody can find is worse than one filed oddly.
+ */
+enum {
+    CAT_AIR = 0,     /* helicopters and the light planes              */
+    CAT_ARMOR,       /* APCs, MRAPs, the armed pickups                */
+    CAT_SUV,         /* 4x4s, SUVs, pickups, the off-road trucks      */
+    CAT_CAR,         /* sedans, hatchbacks, the sports cars           */
+    CAT_TRUCK,       /* buses, vans and the lorries                   */
+    CAT_BIKE,        /* motorcycles                                   */
+    CAT_BOAT,        /* boats                                         */
+    CAT_MISC,        /* the engineering vehicles - and the two that
+                      * freeze the game if entered                    */
+    CAT_COUNT
+};
+
+/* The page titles, in the order the pages are made: the air first, the
+ * unusable last. Text keys, so a translation in this plugin's lang.ini
+ * renames a page without touching code. */
+static const char *const kCatKey[CAT_COUNT] = {
+    "@sp.cat.air", "@sp.cat.armor", "@sp.cat.suv", "@sp.cat.car",
+    "@sp.cat.truck", "@sp.cat.bike", "@sp.cat.boat", "@sp.cat.misc"
+};
+
+/* Case-insensitive substring, the way the framework's own name test works:
+ * these names are hand-written and mixed-case ("HELICOPTER", "uh-60",
+ * "KILLDOZER"), so nothing here can compare whole strings. */
+static int NameHas(const char *name, const char *word) {
+    size_t i, j, nl, wl;
+
+    if (!name || !word) return 0;
+    nl = strlen(name);
+    wl = strlen(word);
+    if (!wl || wl > nl) return 0;
+    for (i = 0; i + wl <= nl; i++) {
+        for (j = 0; j < wl; j++) {
+            char a = name[i + j], b = word[j];
+
+            if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+            if (b >= 'A' && b <= 'Z') b = (char)(b + ('a' - 'A'));
+            if (a != b) break;
+        }
+        if (j == wl) return 1;
+    }
+    return 0;
+}
+
+static int HasWord(const char *name, const char *const *words, int n) {
+    int i;
+
+    for (i = 0; i < n; i++)
+        if (NameHas(name, words[i])) return 1;
+    return 0;
+}
+#define HAS(name, arr) HasWord((name), (arr), \
+                               (int)(sizeof(arr) / sizeof((arr)[0])))
+
+/* Which page a catalogue name belongs on, or -1 when no word claims it. */
+static int CatOf(const char *name) {
+    static const char *air[]   = { "helicopter", "gunship", "uh-60",
+                                   "plane", "airplane", "cossna" };
+    static const char *eng[]   = { "tractor", "digger", "killdozer" };
+    static const char *armor[] = { "apc", "mrap", "amv", "armed",
+                                   "armoured", "technical" };
+    static const char *suv[]   = { "4x4", "suv", "buggy", "pickup",
+                                   "trophy truck", "monster truck" };
+    /* "sumitzu car," keeps its comma: the van below is a "Sumitzu Carry",
+     * and "sumitzu car" is a prefix of it. */
+    static const char *car[]   = { "sedan", "hatchback", "200gt", "90s",
+                                   "paranero", "sumitzu car," };
+    static const char *truck[] = { "minibus", "van", "tow truck",
+                                   "oil truck", "boxcar", "barracks",
+                                   "murder disposal", "advert truck",
+                                   "comms truck", "ambulance" };
+    static const char *bike[]  = { "bike" };
+    static const char *boat[]  = { "boat", "dinghy", "yacht" };
+    static const char *misc[]  = { "alpaca", "monster" };
+
+    if (HAS(name, air))   return CAT_AIR;
+    if (HAS(name, eng))   return CAT_MISC;
+    if (HAS(name, armor)) return CAT_ARMOR;
+    if (HAS(name, suv))   return CAT_SUV;
+    if (HAS(name, car))   return CAT_CAR;
+    if (HAS(name, truck)) return CAT_TRUCK;
+    if (HAS(name, bike))  return CAT_BIKE;
+    if (HAS(name, boat))  return CAT_BOAT;
+    if (HAS(name, misc))  return CAT_MISC;
+    return -1;
+}
+
+/* The pages, once they exist. One the API refuses stays 0 and its vehicles
+ * go on the root page, so nothing becomes unreachable. */
+static uint32_t g_cats[CAT_COUNT];
+
 static DWORD WINAPI BindThread(LPVOID p) {
     HMODULE m = NULL;
     MenuCreate_t menuCreate;
     MenuAction_t menuAction;
-    int n, i;
+    MenuSub_t menuSub;
+    int n, i, c;
+    int counts[CAT_COUNT] = {0};
     (void)p;
 
     while (!m) {
@@ -225,23 +359,30 @@ static DWORD WINAPI BindThread(LPVOID p) {
                                                  "ShSpawnWarmProgress");
     *(FARPROC *)&menuCreate = GetProcAddress(m, "ShMenuCreate");
     *(FARPROC *)&menuAction = GetProcAddress(m, "ShMenuAction");
+    *(FARPROC *)&menuSub = GetProcAddress(m, "ShMenuSub");
     *(FARPROC *)&g_status = GetProcAddress(m, "ShMenuStatus");
     *(FARPROC *)&g_statusF = GetProcAddress(m, "ShMenuStatusF");
     *(FARPROC *)&g_hint = GetProcAddress(m, "ShMenuHint");
     if (!g_count || !g_at || !g_spawn || !g_playerPos ||
-        !menuCreate || !menuAction || !g_status || !g_statusF || !g_hint) {
+        !menuCreate || !menuAction || !menuSub || !g_status || !g_statusF ||
+        !g_hint) {
         /* Each of these is one GetProcAddress: a framework that does not
          * carry it means no submenu, and until now nothing said so. */
         SpLog("bind failed: count=%p at=%p spawn=%p playerPos=%p "
-              "menuCreate=%p menuAction=%p status=%p statusF=%p hint=%p",
+              "menuCreate=%p menuAction=%p menuSub=%p status=%p statusF=%p "
+              "hint=%p",
               (void *)g_count, (void *)g_at, (void *)g_spawn,
               (void *)g_playerPos, (void *)menuCreate, (void *)menuAction,
-              (void *)g_status, (void *)g_statusF, (void *)g_hint);
+              (void *)menuSub, (void *)g_status, (void *)g_statusF,
+              (void *)g_hint);
         return 1;
     }
 
-    /* The catalogue is static, so every vehicle becomes a
-     * row once and the API scrolls them.
+    /* The catalogue is static, so every vehicle becomes a row once and the
+     * API scrolls them. One page per kind instead of one page of sixty-five
+     * rows: the pages are made up front, in the order a vehicle is usually
+     * wanted (the air first, the unusable last), and the catalogue is walked
+     * once, filing every name into one of them.
      */
     TextInit();
     g_menu = menuCreate("@sp.page");
@@ -250,11 +391,43 @@ static DWORD WINAPI BindThread(LPVOID p) {
         return 1;
     }
     g_hint(g_menu, "@sp.hint");
+    for (c = 0; c < CAT_COUNT; c++) {
+        g_cats[c] = menuSub(g_menu, kCatKey[c]);
+        if (!g_cats[c])
+            SpLog("ShMenuSub refused %s - those vehicles stay on the root page",
+                  kCatKey[c]);
+    }
     n = g_count();
     for (i = 0; i < n; i++) {
         const Vehicle *v = g_at(i);
-        if (v) menuAction(g_menu, v->name, OnSpawn, (void *)v);
+        uint32_t page;
+        int cat;
+
+        if (!v) continue;
+        cat = CatOf(v->name);
+        if (cat < 0) {
+            /* Nothing claimed it: filed with the last page, and named here,
+             * so a vehicle the word lists have not caught up with is one log
+             * line away from being found. */
+            SpLog("no category matched \"%s\" - filed with %s",
+                  v->name, kCatKey[CAT_MISC]);
+            cat = CAT_MISC;
+        }
+        counts[cat]++;
+        page = g_cats[cat] ? g_cats[cat] : g_menu;
+        menuAction(page, v->name, OnSpawn, (void *)v);
     }
+    /* What went where, once per session: this is what a report about a
+     * vehicle sitting on the wrong page is read against. */
+    SpLog("filed %d vehicles: air %d, armor %d, suv %d, car %d, truck %d, "
+          "bike %d, boat %d, special %d",
+          n, counts[CAT_AIR], counts[CAT_ARMOR], counts[CAT_SUV],
+          counts[CAT_CAR], counts[CAT_TRUCK], counts[CAT_BIKE],
+          counts[CAT_BOAT], counts[CAT_MISC]);
+    /* The last page holds two entries that freeze the game if entered (the
+     * framework's own note on those two catalogue rows), so the page says so
+     * before the rows do. */
+    if (g_cats[CAT_MISC]) g_hint(g_cats[CAT_MISC], "@sp.cat.misc.hint");
     /* The spec cache warm-up is owned by the framework: the state
      * hook calls ShSpawnOnEnterPlaying when the world is playable. */
     return 0;
