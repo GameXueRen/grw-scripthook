@@ -628,6 +628,37 @@ static void BuildLanguageRow(uint32_t parent) {
                    (void *)g_langCodes);
 }
 
+/* The keys that go back a page: both (the default, and what the menu did
+ * before this row existed), Esc alone, Backspace alone. The words are the key
+ * names themselves - they are what is printed on the keyboard, so no language
+ * has anything to translate.
+ *
+ * The menu is told the moment it changes, because this is the one setting whose
+ * effect IS the menu: the key a press leaves a page on, the key the menu takes
+ * from the game while it is up, and the root's hint line that names it, all
+ * follow this value. The key left out is the player's and the game keeps
+ * receiving it. The row's own value comes from the same ini key the menu loads
+ * at start up, so the two cannot disagree. */
+static const char *g_backOpts[] = { "Esc / Backspace", "Esc", "Backspace" };
+#define BACK_OPTS 3
+
+static void OnBackKey(uint32_t menu, uint32_t item, int value, void *user) {
+    (void)item;
+    (void)user;
+    if (ShConfigSetInt("Settings", "backkey", value)) {
+        ShMenuSetBackKeys(value);
+        ReportSaved(menu);
+    }
+}
+
+static void BuildBackKeyRow(uint32_t parent) {
+    int idx = (int)ShConfigGetInt("Settings", "backkey", 0);
+
+    if (idx < 0 || idx >= BACK_OPTS) idx = 0;
+    ShMenuList(parent, "@settings.backkey", g_backOpts, BACK_OPTS, idx,
+               OnBackKey, NULL);
+}
+
 /* ---- the mode blacklist line ------------------------------------------
  * The Plugins page lists every plugin with a switch that only takes effect
  * on the next launch. The mode blacklist is the other reason a plugin can
@@ -967,6 +998,9 @@ void ShModSettingsStartup(void) {
     g_pluginMenu = ShMenuSub(g_modMenu, "@settings.plugins");
     g_cpuMenu    = ShMenuSub(g_modMenu, "@settings.cpu");
     g_orderMenu  = ShMenuSub(g_modMenu, "@settings.order");
+    /* Directly under the menu order row: both are about the menu as the player
+     * uses it, and the hint line the root shows names the key this picks. */
+    BuildBackKeyRow(g_modMenu);
 
     ScanPlugins();
     BuildSettings(g_cpuMenu, g_cpuSettings,

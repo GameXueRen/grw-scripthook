@@ -36,7 +36,7 @@ static const ShText kEnUS[] = {
     /* One line, kept as short as the Chinese it mirrors: the panel does not
      * wrap, so a line that runs past it is a line read in halves. */
     { "@menu.root.hint",
-      "F4 menu, Enter confirm; Esc / Backspace back; "
+      "F4 menu, Enter confirm; %s back; "
       "\xE2\x86\x91 \xE2\x86\x93 select, \xE2\x86\x90 \xE2\x86\x92 adjust" },
     { "@menu.on",             "on" },
     { "@menu.off",            "off" },
@@ -60,6 +60,7 @@ static const ShText kEnUS[] = {
     { "@settings.hint",
       "Plugin switches and CPU scheduling take effect on the next start." },
     { "@settings.order",      "Menu order" },
+    { "@settings.backkey",    "Back key" },
     /* One line, and about the length of the Chinese it translates. The
      * English this replaces explained when a move is saved and what happens
      * to a plugin that is switched off - useful, but it ran to four lines
@@ -204,7 +205,7 @@ static const ShText kEnUS[] = {
 
 static const ShText kZhCN[] = {
     { "@menu.root.hint",
-      "F4 菜单，Enter 确认；Esc / Backspace 返回；↑ ↓ 上下选择，← → 左右调整" },
+      "F4 菜单，Enter 确认；%s 返回；↑ ↓ 上下选择，← → 左右调整" },
     { "@menu.on",             "开" },
     { "@menu.off",            "关" },
     { "@menu.footer.pos",     "第 %d / %d 行" },
@@ -220,6 +221,7 @@ static const ShText kZhCN[] = {
     { "@settings.hint",
       "插件开关、CPU调度改变需下次启动生效。" },
     { "@settings.order",      "菜单排序" },
+    { "@settings.backkey",    "返回按键" },
     { "@settings.order.hint",
       "改变菜单显示顺序。← → 把当前行上移 / 下移。" },
     { "@settings.order.empty", "还没有可排序的插件菜单。" },

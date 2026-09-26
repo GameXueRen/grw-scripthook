@@ -1264,6 +1264,19 @@ SH_API int  ShMenuStatusF(uint32_t menu, const char *fmt, ...);
  *  English key in the [lang.<menu>] table. */
 SH_API int  ShMenuHint(uint32_t menu, const char *text);
 SH_API void ShMenuSetKey(int vk);
+
+/** Internal: which key goes back a page, as the settings page offers them:
+ *  0 both Esc and Backspace (the default, and what the menu did before this
+ *  existed), 1 Esc alone, 2 Backspace alone. Anything outside 0..2 is read
+ *  as 0. The key it names is the one a press leaves a page on, the one the
+ *  root's hint shows (so the line cannot promise a key that does nothing) and
+ *  the only one of the two the menu takes from the game while it is up; the
+ *  other is not touched at all and the game keeps receiving it - Esc under
+ *  "Backspace" is the game's own pause menu. The menu loads it from
+ *  [Settings] backkey when it comes up. Not part of the plugin API: the page
+ *  that sets it is the framework's own. */
+void ShMenuSetBackKeys(int mode);
+
 SH_API int  ShMenuIsOpen(void);
 /** Is that menu the page on screen right now?  1 when the menu is up and
  *  `menu` is exactly the page being shown; 0 when another page is

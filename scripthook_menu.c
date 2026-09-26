@@ -497,10 +497,15 @@ static void Scroll(Menu *m) {
     if (m->top < 0) m->top = 0;
 }
 
+/* Defined below with the rest of the back-key mode, and named here because
+ * leaving a page comes first in Navigate: which key does it is the mode's
+ * answer, not a fixed pair. */
+static int LeaveKey(int vk);
+
 static void Navigate(void) {
     Menu *m = MenuOf(g_current);
     Item *it;
-    int upE, dnE, lfE, rtE;
+    int upE, dnE, lfE, rtE, backE, delE;
     int upHeld, dnHeld, lfHeld, rtHeld;
     int navDown, navDir, valDown, valDir, r;
 
@@ -516,8 +521,19 @@ static void Navigate(void) {
      * taken away. This used to sit below a "nothing to navigate" return, so on
      * such a page Back and ESC did nothing at all and only F4 - which is not
      * part of navigation - closed the menu. Reported 2026-09-23 against the
-     * Plugin switches page with no plugins installed. */
-    if (Pressed(VK_BACK) || Pressed(VK_ESCAPE)) {
+     * Plugin switches page with no plugins installed.
+     *
+     * Which of the two keys it is is the [Settings] backkey mode, and only the
+     * key that mode names counts: the other is inert in the menu while it is
+     * up (it stays hidden from the game, it just does nothing here). Both are
+     * polled on every capture whatever the mode says they are for - Pressed()
+     * carries the edge state, and a key only asked about in one mode would
+     * bring a stale "was down" into the other, the same reason the arrows below
+     * are polled one by one. Reported 2026-09-26: this test named both keys, so
+     * the mode changed what the game could not see and nothing else. */
+    backE = Pressed(VK_ESCAPE);
+    delE  = Pressed(VK_BACK);
+    if ((backE && LeaveKey(VK_ESCAPE)) || (delE && LeaveKey(VK_BACK))) {
         HoldReset();
         if (m->parent) g_current = m->parent;
         else g_open = 0;
@@ -609,13 +625,76 @@ static const int g_menuKeys[] = {
 };
 #define MENU_KEYS (int)(sizeof(g_menuKeys) / sizeof(g_menuKeys[0]))
 
-static int LeaveKey(int vk) {
+/* Which keys leave a menu: 0 both (what the menu has always done), 1 Esc,
+ * 2 Backspace. It is one value because three decisions rest on it and they have
+ * to agree: the key a press leaves a page on (Navigate), the sentence the root's
+ * hint shows, and which of the two the menu takes from the game while it is up.
+ * The key the mode leaves out is the player's and is left alone - Esc under
+ * "Backspace" is the game's own pause menu, and a menu that swallowed it anyway
+ * would defeat the setting. Set from the settings page (ShMenuSetBackKeys) and
+ * read from scripthook.ini when the menu first comes up, so a restart keeps it. */
+static volatile LONG g_backKeys = 0;
+
+/* Internal, not SH_API: the only caller is the framework's own settings page,
+ * and a plugin has nothing to say about which keys the menu leaves on. Keeping
+ * it out of the export table is what keeps the plugin API at version 2. */
+void ShMenuSetBackKeys(int mode) {
+    if (mode < 0 || mode > 2) mode = 0;
+    InterlockedExchange(&g_backKeys, mode);
+}
+
+static int BackKeys(void) {
+    return (int)InterlockedCompareExchange(&g_backKeys, 0, 0);
+}
+
+/* How the root's hint names them. Key names are not translated - they are what
+ * is printed on the keyboard. */
+static const char *BackKeysText(void) {
+    int m = BackKeys();
+
+    if (m == 1) return "Esc";
+    if (m == 2) return "Backspace";
+    return "Esc / Backspace";
+}
+
+/* Which of the two keys leaves a page under mode m. */
+static int LeavesUnder(int m, int vk) {
+    if (m == 1) return vk == VK_ESCAPE;
+    if (m == 2) return vk == VK_BACK;
     return vk == VK_ESCAPE || vk == VK_BACK;
 }
 
-static int LeaveHeld(void) {
-    return (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0 ||
-           (GetAsyncKeyState(VK_BACK) & 0x8000) != 0;
+/* The same under the mode in force now: this is what Navigate asks before it
+ * lets a press leave a page. */
+static int LeaveKey(int vk) {
+    return LeavesUnder(BackKeys(), vk);
+}
+
+/* The two keys that can leave a menu, whatever the mode says they are for. */
+static int IsBackKey(int vk) {
+    return vk == VK_ESCAPE || vk == VK_BACK;
+}
+
+/* Whether the menu takes this key from the game under mode m: every navigation
+ * key, and of the two back keys only the one that leaves - the other stays with
+ * the game. m is -1 when no back key is being held. */
+static int HiddenUnder(int m, int vk) {
+    if (m < 0) return 0;
+    if (!IsBackKey(vk)) return 1;
+    return LeavesUnder(m, vk);
+}
+
+/* Whether a key the menu took is still down: the press that closed the menu is
+ * in flight, and handing it over now would make the game act on the way out.
+ * Only the key that was taken is asked about - the other one was with the game
+ * all along, so there is nothing to hand back. */
+static int BackHeldUnder(int m) {
+    if (m < 0) return 0;
+    if (LeavesUnder(m, VK_ESCAPE) &&
+        (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) return 1;
+    if (LeavesUnder(m, VK_BACK) &&
+        (GetAsyncKeyState(VK_BACK) & 0x8000) != 0) return 1;
+    return 0;
 }
 
 /* Keys are hidden only while the menu is actually drawn. A menu that is
@@ -627,6 +706,19 @@ static volatile int g_captureNow = 0;
 static volatile int g_leaveDefer = 0;
 static DWORD g_leaveDeferAt = 0;
 static int g_hotkeyHidden = 0;      /* the menu hotkey currently hidden, or 0 */
+/* The mode the back key was hidden under, or -1 when none is held. What the
+ * menu hands back is what it took, under the rules it took it by: the settings
+ * page changes the mode while the menu is up, and ShBlockKey is one shared flag
+ * per key with no owner - an unblock aimed at the wrong key would either clear
+ * a plugin's own block or leave this module's behind. */
+static int g_hiddenBackMode = -1;
+
+/* Hand back the back key the menu took, and only that one. */
+static void BackHandBack(void) {
+    if (HiddenUnder(g_hiddenBackMode, VK_ESCAPE)) ShBlockKey(VK_ESCAPE, 0);
+    if (HiddenUnder(g_hiddenBackMode, VK_BACK))   ShBlockKey(VK_BACK, 0);
+    g_hiddenBackMode = -1;
+}
 
 /* Not SetCapture: that is a Win32 API and the name collides. */
 static void MenuCapture(int on) {
@@ -636,43 +728,70 @@ static void MenuCapture(int on) {
     g_captureNow = on;
 
     if (on) {
-        for (i = 0; i < MENU_KEYS; i++) ShBlockKey(g_menuKeys[i], 1);
+        g_hiddenBackMode = BackKeys();
+        for (i = 0; i < MENU_KEYS; i++)
+            if (HiddenUnder(g_hiddenBackMode, g_menuKeys[i]))
+                ShBlockKey(g_menuKeys[i], 1);
         g_hotkeyHidden = (int)g_key;
         if (g_hotkeyHidden) ShBlockKey(g_hotkeyHidden, 1);
         g_leaveDefer = 0;
         return;
     }
 
-    /* Closing: the navigation keys go back. The two leave keys wait - if one
-     * of them is still held, the press that closed the menu is in flight, and
-     * handing it over would make the game act on the way out (its own pause
+    /* Closing: the navigation keys go back at once. The back key the menu took
+     * waits if it is still down - the press that closed the menu is in flight,
+     * and handing it over would make the game act on the way out (its own pause
      * menu, on the way to something else). */
     for (i = 0; i < MENU_KEYS; i++)
-        if (!LeaveKey(g_menuKeys[i])) ShBlockKey(g_menuKeys[i], 0);
+        if (!IsBackKey(g_menuKeys[i])) ShBlockKey(g_menuKeys[i], 0);
     if (g_hotkeyHidden) {
         ShBlockKey(g_hotkeyHidden, 0);
         g_hotkeyHidden = 0;
     }
-    if (LeaveHeld()) {
+    if (BackHeldUnder(g_hiddenBackMode)) {
         g_leaveDefer = 1;
         g_leaveDeferAt = GetTickCount();
         return;
     }
-    for (i = 0; i < MENU_KEYS; i++)
-        if (LeaveKey(g_menuKeys[i])) ShBlockKey(g_menuKeys[i], 0);
+    BackHandBack();
 }
 
-/* A deferred leave ends once both keys are up, or after a second so a stuck
- * key cannot swallow them forever. */
+/* The mode can change while the menu is up - the settings page's row is inside
+ * the menu, so that is the only way it is ever changed. The change has to reach
+ * the keys at once: the key the new mode leaves out goes back to the game now,
+ * and the one it takes over is claimed now. The alternative - doing it in the
+ * setter - would have the settings page reach into capture state from another
+ * module; here it is two integer comparisons per tick and no config read, since
+ * g_backKeys already holds what the page wrote. */
+static void SyncBackKeys(void) {
+    int m = BackKeys();
+    int i;
+
+    if (!g_captureNow || g_hiddenBackMode < 0 || m == g_hiddenBackMode) return;
+    for (i = 0; i < MENU_KEYS; i++) {
+        int vk = g_menuKeys[i];
+        int was, now;
+
+        if (!IsBackKey(vk)) continue;
+        was = HiddenUnder(g_hiddenBackMode, vk);
+        now = HiddenUnder(m, vk);
+        if (was && !now) ShBlockKey(vk, 0);
+        if (!was && now) ShBlockKey(vk, 1);
+    }
+    g_hiddenBackMode = m;
+}
+
+/* A deferred leave ends once the key is up, or after a second so a stuck key
+ * cannot swallow it forever. */
 static void LeaveDeferTick(void) {
     DWORD now;
 
     if (!g_leaveDefer) return;
     now = GetTickCount();
-    if (!LeaveHeld() || (int)(now - g_leaveDeferAt) > 1000) {
+    if (!BackHeldUnder(g_hiddenBackMode) ||
+        (int)(now - g_leaveDeferAt) > 1000) {
         g_leaveDefer = 0;
-        ShBlockKey(VK_ESCAPE, 0);
-        ShBlockKey(VK_BACK, 0);
+        BackHandBack();
     }
 }
 
@@ -879,9 +998,19 @@ void ShMenuCaptureView(ShMenuView *v) {
          * ("<key>.hint") - which is how a plugin with no source gets a
          * hint at all. A hint nobody wrote stays empty and takes no
          * room, so this asks whether there is text before showing it. */
-        if (m->parent == 0)
-            SafeCopy(v->hint, sizeof(v->hint),
-                     ShLangText(NULL, "@menu.root.hint"));
+        if (m->parent == 0) {
+            /* The root's hint names the keys that leave a menu, and which those
+             * are is a setting: it is built from the same value the menu itself
+             * presses on, so the line can never promise a key that does
+             * nothing. ShTextFormat checks a translation's own conversions
+             * against the en-US template, the way the footer below is built. */
+            const char *en = ShTextEnUS(NULL, "@menu.root.hint");
+            const char *tr = ShLangText(NULL, "@menu.root.hint");
+
+            if (!en) en = "%s back";
+            ShTextFormat(v->hint, sizeof(v->hint), en, tr ? tr : en,
+                         BackKeysText());
+        }
         else if (m->hint[0])
             SafeCopy(v->hint, sizeof(v->hint),
                      ShLangText(owner, m->hint));
@@ -985,6 +1114,7 @@ static DWORD WINAPI MenuThread(LPVOID p) {
         ShTickPing(SH_TICK_MENU);
 
         LeaveDeferTick();
+        SyncBackKeys();
 
         /* Background window: the menu must not react to keys.
          * Forget held keys too, so nothing fires on refocus. */
@@ -1059,6 +1189,10 @@ static void EnsureMenu(void) {
         LogInit("scripthook_menu.log");
         InitializeCriticalSection(&g_lock);
         g_lockReady = 1;              /* lock live before the thread */
+        /* The back keys, before anything can draw a hint or press one: the page
+         * that changes them needs a value to start from, and the hint is built
+         * the first time the menu is drawn. */
+        ShMenuSetBackKeys((int)ShConfigGetInt("Settings", "backkey", 0));
         g_root = NewMenu("SCRIPTHOOK", 0, NULL);
         {
             HANDLE h = CreateThread(NULL, 0, MenuThread, NULL, 0, NULL);
