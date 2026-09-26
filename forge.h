@@ -134,9 +134,9 @@ void ShForgeStartup(void);
 int  ShForgeEnabled(void);
 /** 1 when dry_run: overlays are built and logged but not served. */
 int  ShForgeDryRun(void);
-/** 1 when [forgemod] log_reads=1: every read of a modded archive is
+/** 1 when [forgemod] report_reads=1: every read of a modded archive is
  *  recorded, which is how the asynchronous path is checked. */
-int  ShForgeLogReads(void);
+int  ShForgeReportReads(void);
 
 /** The overlay for an archive path, or NULL when it has no mods. The
  *  result is cached and owned by this module; do not free it. */

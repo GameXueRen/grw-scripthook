@@ -111,6 +111,18 @@ static HANDLE          g_cacheH[IO_CACHE];
 static ShForgeOverlay *g_cacheO[IO_CACHE];
 static HANDLE          g_pathH[IO_CACHE];
 static char            g_pathP[IO_CACHE][SH_FORGE_PATH_MAX + 8];
+
+/* Report every .forge the engine asks for, including the ones it does not get.
+ * Which names it tries is not in any file the loader can read: it is a table
+ * inside the executable, and the only way to see it is to watch the asks. It
+ * matters for one question above all others - whether the game would pick up
+ * a patch archive it has never had beside it, which is what decides if a mod
+ * can hand the engine one instead of the loader writing tables itself.
+ *
+ * A `report_` key, not a `log_` one: the framework's log level already decides
+ * how much is written, and these keys say which extra lines to write when it
+ * does. `report_copies` in [forgemod] is the same kind of switch. */
+static int             g_reportOpens;
 static volatile LONG   g_fixups;
 static volatile LONG   g_gorCalls;
 
@@ -504,8 +516,20 @@ static int ForgePathOf(const ShFileCall *c, char *out, int n) {
 static void ForgeOpenAfter(ShFileCall *c, void *user) {
     unsigned slot;
     HANDLE   h = (HANDLE)c->result;
+    char     path[SH_FORGE_PATH_MAX + 8];
 
     (void)user;
+
+    /* Before the handle is judged, because the interesting case is the one
+     * that failed: an archive the engine asks for and does not get. */
+    if (g_reportOpens && ForgePathOf(c, path, (int)sizeof(path))) {
+        if (h && h != INVALID_HANDLE_VALUE)
+            Log("open %s -> a handle", path);
+        else
+            Log("open %s -> refused, error %lu", path,
+                (unsigned long)c->error);
+    }
+
     if (!h || h == INVALID_HANDLE_VALUE) return;
 
     slot = SlotOf(h);
@@ -575,7 +599,7 @@ static void ForgeReadAfter(ShFileCall *c, void *user) {
         }
     }
 
-    if (o && haveOff && ShForgeLogReads())
+    if (o && haveOff && ShForgeReportReads())
         Log("read: off=%llu len=%lu %s hit=%d",
             (unsigned long long)off, (unsigned long)c->bytes,
             c->overlapped ? "async" : "sync", TouchesOverlay(o, off, c->bytes));
@@ -598,7 +622,7 @@ static void ForgeReadAfter(ShFileCall *c, void *user) {
             DWORD n = c->done ? c->done : (DWORD)ov->InternalHigh;
             if (n) {
                 CountFixup(o, off, (uint8_t *)c->buffer, n, "async-now");
-            } else if (ShForgeLogReads()) {
+            } else if (ShForgeReportReads()) {
                 Log("read/async-now: no byte count (intHigh=%lu)",
                     (unsigned long)ov->InternalHigh);
             }
@@ -606,7 +630,7 @@ static void ForgeReadAfter(ShFileCall *c, void *user) {
             /* Still in flight: remembered, and patched once the engine
              * asks for the result or waits on it. */
             PendingAdd(h, ov, c->buffer, c->bytes, off, o);
-            if (ShForgeLogReads())
+            if (ShForgeReportReads())
                 Log("read/async-pending: recorded off=%llu len=%lu",
                     (unsigned long long)off, (unsigned long)c->bytes);
         }
@@ -669,12 +693,12 @@ static void ForgeWaitAfter(ShFileCall *c, void *user) {
         if (c->result && PendingTake((LPOVERLAPPED)c->overlapped, &pr)) {
             DWORD n = c->done;
 
-            if (ShForgeLogReads()) Log("gor: matched=1 ok=1");
+            if (ShForgeReportReads()) Log("gor: matched=1 ok=1");
             if (n) {
                 if (n > pr.len) n = pr.len;
                 CountFixup(pr.o, pr.off, pr.buf, n, "async-done");
             }
-        } else if (ShForgeLogReads() &&
+        } else if (ShForgeReportReads() &&
                    InterlockedIncrement(&g_gorCalls) <= 8) {
             Log("gor: matched=0 ok=%d", c->result ? 1 : 0);
         }
@@ -731,6 +755,8 @@ void ShForgeIoStartup(void) {
         int i, j;
 
         memset(&d, 0, sizeof(d));       /* where a .forge handle came from */
+        g_reportOpens = ShConfigGetBool("forgemod", "report_opens", 0);
+
         d.group  = SH_FILE_OPEN;
         d.action = SH_FILE_DECIDE;      /* no before: watch, never answer */
         d.after  = ForgeOpenAfter;
@@ -759,8 +785,9 @@ void ShForgeIoStartup(void) {
         }
     }
 
-    LogAlways("forge io installed (SetFilePointerEx=%p GetFinalPathNameByHandleW=%p)",
-        (void *)p_SetFilePointerEx, (void *)p_FinalPath);
+    LogAlways("forge io installed (SetFilePointerEx=%p GetFinalPathNameByHandleW=%p, "
+              "report_opens=%d)", (void *)p_SetFilePointerEx, (void *)p_FinalPath,
+              g_reportOpens);
 }
 
 int ShForgeIoFixups(void) {

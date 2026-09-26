@@ -114,7 +114,8 @@ dry_run=0               ; 1 = 只解析并写日志，不实际叠加
 report_copies=1         ; 1 = 检测同一资源在其它归档里的副本并提示
 apply_all_copies=0      ; 1 = 把 mod 自动叠加到那些副本
 probe=0                 ; 1 = 安装取证探针（排查用）
-log_reads=0             ; 1 = 记录每次读取（排查用）
+report_reads=0          ; 1 = 记录每次读取（排查用）
+report_opens=0          ; 1 = 记录引擎请求的每个 .forge（含没打开成功的，排查用）
 
 [Settings]
 LogLevel=warn           ; 日志等级：debug, info, warn, error

@@ -255,7 +255,7 @@ if ([System.IO.File]::Exists($iniPath)) {
             continue
         }
         # [forgemod] keeps everything else it was found with. dry_run, strict,
-        # report_copies, probe and log_reads are the operator's settings and
+        # report_copies, probe and report_reads are the operator's settings and
         # this script has no business dropping them - it owns one line in that
         # section, and its replacement is written at the section head.
         if ($inForge) {

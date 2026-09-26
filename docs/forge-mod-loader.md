@@ -80,6 +80,7 @@ Two forms are accepted for a mod file:
 |---|---|
 | `1234_-_GR_PLAYER_Template.data` | entry index 1234, name checked against the file name |
 | `GR_PLAYER_Template.data` | entry name |
+| `+GR_PLAYER_Template.data` | an entry the archive never held: read, checked, then **refused** (see [Additions](#additions-the-engines-own-patch-archives)) |
 
 Entry names are **not** unique inside an archive, so the index form is the
 reliable one - it is also what the toolkit's own export produces. A file
@@ -153,7 +154,8 @@ strict=1           ; 1 = refuse a replacement that does not fit; 0 = it takes
 report_copies=1    ; 1 = name the other archives a resource also lives in
 apply_all_copies=0 ; 1 = override those copies as well
 probe=0            ; 1 = install the evidence probe (diagnostics)
-log_reads=0        ; 1 = log every read of a modded archive (diagnostics)
+report_reads=0     ; 1 = report every read of a modded archive (diagnostics)
+report_opens=0     ; 1 = report every .forge the engine asks for, refused ones too
 ```
 
 The in-game page (**F4 → Forge Mod Loader**) has the two switches, a status
@@ -167,6 +169,13 @@ line and a hint; changes need a restart, like the rest of the loader's keys.
 |---|---|
 | `logs\scripthook_forge.log` | config, archives found, every mod resolved or rejected, conflicts, the cross-archive copy report |
 | `logs\scripthook_forge_io.log` | the hooks, each archive served and how many entries it patches, and a line per patched read |
+
+Both files are a framework module's logs, so they only exist at `[Settings]
+LogLevel=info` or above - a release build defaults to `warn`, where the module
+logs are not created at all. The `report_*` keys in `[forgemod]` say which
+extra lines to write when the file is there; the level says whether it is
+there. Setting one of those keys without raising the level looks like it did
+nothing.
 
 ---
 
@@ -260,6 +269,80 @@ room) took the room of the 236-byte entry after it and the first 73,812 bytes
 of the streamed mip after that, the game showed the new payload, the covered
 entries stayed correct, and no patch was refused.
 
-Known gaps: additions and deletions (`.delete` is recognised but does not act);
-the root-directory "new archive" route, which the executable's fixed table
-appears not to support.
+Known gaps: deletions (`.delete` is recognised but does not act). Additions are
+not a gap in that sense - they are refused on purpose, because the two payloads
+that make an entry real are not written here. The section below says why, and
+what to use instead.
+
+---
+
+## Additions: the engine's own patch archives
+
+This loader replaces bytes. It does not add an entry, and a file named
+`+<entry name>.data` is read, checked, and then refused rather than served.
+That refusal is the useful part of the feature, so it is worth writing down
+what stands behind it.
+
+**The row is the easy half, and it is already there.** An archive lays its
+tables out for one row more than it holds. Measured on `DataPC.forge`: the meta
+says 29,640 entries used with a limit of 29,641, the location table ends
+exactly where the info table begins, and the info table ends exactly where the
+trailing set begins - and `DataPC_extra_patch_01` is laid out the same way, to
+the byte. So an addition appends one 20-byte location record, one 192-byte info
+record copied from a container of the same class, and five small counts. No
+pointer moves and no table is rebuilt, and both rows land exactly where an
+offline reading of the tables says they will.
+
+**A row is not an entry.** The engine also finds entries through the global
+meta (`GlobalMetaFile`, entry 16) and the prefetch registry
+(`PrefetchingFileInfos`, entry 145), and it reads both while it starts. With
+the row appended and nothing else, the game went from the integrity warning it
+shows for any mod straight to a dead process, with no archive read reaching the
+I/O layer in between. In `DataPC.forge` those two payloads are 139,510 and
+429,560 bytes (the registry is a compressed blob); in a patch archive they are
+296 and 131 bytes, because a patch archive's copies describe only that archive.
+
+**Which is why additions belong to the engine.** A mod of the game's own kind
+ships the two companions beside its payloads - one of the reference patch
+archives holds a single weapon file and then entries 16 and 145, and nothing
+else - and the engine merges the file and updates both registries itself. The
+toolkit builds exactly that, so the job needs no loader:
+
+```
+toolkit: Add -> install as a patch archive
+  AddonArchiveService.SlotPath / NextSlot   -> <family>_patch_NN.forge
+  GlobalMetaFile.CreatePatch(identity)      -> the companion record (ForgeArchive.cs)
+  ForgeArchive.Rebuild(out, replacements, additions, removals)
+```
+
+Drop the result in the game directory and it is picked up; that is how the mods
+of this kind in the wild are installed.
+
+### The two mechanisms are layers, not rivals
+
+They do not conflict. The engine merges archives by its own priority first
+(base game < `*_patch_NN`), and the loader patches the bytes of whichever
+archive is read, after that. So both apply, in a fixed order. Two consequences
+are worth knowing:
+
+- A replacement only lands if it names the archive that wins for that entry.
+  `report_copies=1` names the other archives a resource also lives in, and
+  `apply_all_copies=1` overrides those too. An entry only a patch archive
+  provides is not in the base archive at all.
+- A patch archive in the game directory is an archive like any other to this
+  loader, so `mods\DataPC_patch_02\` replaces inside it - an added entry can be
+  retextured the same way a base-game one can.
+
+| The mod changes | How |
+|---|---|
+| textures, meshes, any bytes of an entry that exists | a loose file in `mods\<archive>\` |
+| a new entry (a weapon, a body, anything the archive never held) | a `<family>_patch_NN.forge` from the toolkit, in the game directory |
+| an added entry's own resources | `mods\<that patch archive's name>\` |
+
+On names, honestly: `GRW.exe` mentions exactly one patch archive,
+`DataPC_patch_01.forge` - no `_02`, `_03` or `_04` anywhere in 405 MB - and
+with `report_opens=1` the engine was watched never asking for an archive that is
+not there. How a newly added root archive is found is therefore not pinned
+down; that it works when dropped in is the field evidence of the mods that ship
+that way. `report_opens` is the way to watch it again if this is ever revisited.
+

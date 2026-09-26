@@ -77,7 +77,7 @@ typedef struct {
 } ForgeMod;
 
 static int g_enabled, g_dryRun, g_strict, g_reportCopies, g_applyAll;
-static int g_logReads;
+static int g_reportReads;
 /* 1 = keep the read ledger: which .forge archives this session has
  * actually read. It rides scripthook_forge_io.c, so the I/O layer is
  * installed for it even with nothing to serve - that is the whole cost
@@ -1668,7 +1668,7 @@ const char *ShForgeStatusLine(void) { return g_status; }
 
 int ShForgeEnabled(void) { return g_enabled && !g_dryRun; }
 int ShForgeDryRun(void)  { return g_dryRun; }
-int ShForgeLogReads(void) { return g_logReads; }
+int ShForgeReportReads(void) { return g_reportReads; }
 
 static void OnEnabled(uint32_t menu, uint32_t item, int v, void *u) {
     (void)item; (void)u;
@@ -1736,7 +1736,7 @@ void ShForgeStartup(void) {
     g_strict       = ShConfigGetBool("forgemod", "strict", 1);
     g_reportCopies = ShConfigGetBool("forgemod", "report_copies", 1);
     g_applyAll     = ShConfigGetBool("forgemod", "apply_all_copies", 0);
-    g_logReads     = ShConfigGetBool("forgemod", "log_reads", 0);
+    g_reportReads  = ShConfigGetBool("forgemod", "report_reads", 0);
 
     /* Default place in the root menu: right behind the settings page.
      * Written only when the key is missing, so a move made on the mod
