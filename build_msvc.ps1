@@ -400,6 +400,13 @@ Build-Plugin 'TimeWeatherControl' 'TimeWeatherControl.c' @($libPath, 'libscripth
 # when that comes back empty and the player asks for it. Not in the beta set:
 # it ships to nobody.
 Build-Plugin 'AmmoProbe'    'AmmoProbe.c'    @($libPath, 'libscripthook.lib')
+# VehicleProbe answers one question: which vehicles this game has that the
+# framework's catalogue does not. A vehicle id is readable without any catalogue
+# (the masked handle carries it in its high dword), so the probe reads ids
+# around the player and, on request, out of the whole address space. Read-only
+# by construction - it spawns nothing, hooks nothing - and off until its own ini
+# says enabled=1. Not in the beta set: it ships to nobody.
+Build-Plugin 'VehicleProbe' 'VehicleProbe.c' @($libPath, 'libscripthook.lib', 'user32.lib')
 # AmmoControl is the capacity multiplier and an automatic reload. Every change
 # goes through the framework's own engine calls (ShSetAmmoScale for the
 # capacity, ShFakeKey for the reload), so it installs no hook of its own and
