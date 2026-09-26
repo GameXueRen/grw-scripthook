@@ -68,6 +68,8 @@ typedef struct {
     uint32_t index;
     uint32_t len;              /* payload length on disk                */
     uint64_t room;             /* room the entry has                    */
+    int      moved;            /* 1 = larger than its room: it takes the
+                                * room of the entries that follow it     */
 } ForgeMod;
 
 static int g_enabled, g_dryRun, g_strict, g_reportCopies, g_applyAll;
@@ -467,15 +469,23 @@ static void ResolveMods(void) {
         m->index = e->index;
         m->len   = (uint32_t)fad.nFileSizeLow;
         m->room  = e->room;
+        m->moved = 0;
 
         if ((uint64_t)m->len > e->room) {
+            if (g_strict) {
+                Log("mods: %s: %u bytes does not fit %s entry %u ('%s', %llu "
+                    "bytes of room) - strict=1 refuses it; strict=0 lets it "
+                    "take the room of the entries that follow", m->rel, m->len,
+                    m->archive, e->index, e->name, (unsigned long long)e->room);
+                m->ok = -2;
+                ShForgeClose(&f);
+                continue;
+            }
+            m->moved = 1;
             Log("mods: %s: %u bytes does not fit %s entry %u ('%s', %llu bytes "
-                "of room) - it would need the entry moved, which this build "
-                "does not do", m->rel, m->len, m->archive, e->index, e->name,
+                "of room) - it takes the room of the entries that follow it",
+                m->rel, m->len, m->archive, e->index, e->name,
                 (unsigned long long)e->room);
-            m->ok = -2;
-            ShForgeClose(&f);
-            continue;
         }
 
         m->ok = 1;
@@ -600,6 +610,20 @@ static int ArchiveHasMods(const char *base) {
     return 0;
 }
 
+/* Is this entry the target of a mod of its own? A payload that takes room
+ * from the entries after it cannot do that if one of them is being replaced
+ * too: the put-back would cover that mod. A folder that lost to a higher
+ * priority one is not served, so it does not stand in the way. */
+static int IsModdedEntry(const char *base, uint32_t index) {
+    int i;
+    for (i = 0; i < g_nmods; i++) {
+        if (g_mods[i].ok != 1) continue;
+        if (!StrEqI(g_mods[i].archive, base)) continue;
+        if (g_mods[i].index == index) return 1;
+    }
+    return 0;
+}
+
 /* Read len bytes of the archive itself at off, for the safety check. */
 static uint8_t *ReadOrig(FILE *af, uint64_t off, uint32_t len) {
     uint8_t *p;
@@ -632,6 +656,143 @@ static int AddPatch(ShForgeOverlay *o, FILE *af, uint64_t off, uint32_t len,
     o->patches[o->patchCount].bytes = bytes;
     o->patches[o->patchCount].orig = orig;
     o->patchCount++;
+    return 1;
+}
+
+/* A replacement whose length differs has to patch both places RawDataSize is
+ * written, or the engine reads the old count of bytes. An equal one changes
+ * neither. */
+static int AddSizePatches(ShForgeOverlay *o, FILE *af, const ShForgeEntry *e,
+                          uint32_t len) {
+    uint8_t *p1, *p2;
+    int ok1 = 0, ok2 = 0;
+
+    if (len == e->length) return 1;
+    p1 = (uint8_t *)malloc(4);
+    p2 = (uint8_t *)malloc(4);
+    if (p1) { memcpy(p1, &len, 4); ok1 = AddPatch(o, af, e->locSizeOff, 4, p1); }
+    if (p2) { memcpy(p2, &len, 4); ok2 = AddPatch(o, af, e->infoSizeOff, 4, p2); }
+    return ok1 && ok2;
+}
+
+/* One entry that a larger payload covers. */
+typedef struct { const ShForgeEntry *e; uint32_t covered; } ShForgeDisplaced;
+
+#define SH_FORGE_DISPLACE_MAX 32
+
+/* Put one mod payload at its entry's offset. A payload larger than the room
+ * that entry has is possible only because these bytes are served, not
+ * written: it covers the payloads that follow it in the file, and their own
+ * bytes are spliced back into the payload's patch at the offsets they came
+ * from - one range, so a read that spans both (the engine streams, it does
+ * not read one entry at a time) ends up with the right bytes everywhere.
+ *
+ * Nothing is invented past the end of the archive, and no read is answered
+ * by the loader itself: every offset the engine asks for is an offset the
+ * file really holds, which is why an asynchronous read keeps completing
+ * exactly the way it did before.
+ *
+ * Takes ownership of `payload` on success (AddPatch does), and the caller
+ * rolls back on failure. */
+static int AddMovedPayload(ShForgeOverlay *o, FILE *af, const ShForge *f,
+                           const char *base, const ShForgeEntry *e,
+                           const ForgeMod *m, uint8_t *payload) {
+    ShForgeDisplaced d[SH_FORGE_DISPLACE_MAX];
+    uint64_t end = e->offset + (uint64_t)m->len;
+    int n = 0, i;
+
+    if (!m->moved)
+        return AddPatch(o, af, e->offset, m->len, payload) &&
+               AddSizePatches(o, af, e, m->len);
+
+    if (end > f->fileSize) {
+        Log("forge: %s: %s: %u bytes at entry %u would reach 0x%llX and %s is "
+            "0x%llX bytes long - that is past the end of the archive, where "
+            "the loader would have to invent bytes; skipped", base, m->rel,
+            m->len, e->index, (unsigned long long)end, base,
+            (unsigned long long)f->fileSize);
+        free(payload);
+        return 0;
+    }
+
+    /* What it covers, before anything is added: a modded entry among them
+     * would be put back over its own replacement, and a check that fails
+     * here leaves nothing to undo but what the caller rolls back. */
+    for (i = 0; i < f->entryCount; i++) {
+        const ShForgeEntry *o2 = &f->entries[i];
+        uint64_t cov;
+
+        if (o2 == e || o2->offset <= e->offset || o2->offset >= end) continue;
+        if (n == SH_FORGE_DISPLACE_MAX) {
+            Log("forge: %s: %s: covers more than %d entries - that is not a "
+                "replacement any more; skipped", base, m->rel,
+                SH_FORGE_DISPLACE_MAX);
+            free(payload);
+            return 0;
+        }
+        if (IsModdedEntry(base, o2->index)) {
+            Log("forge: %s: %s: it would cover entry %u, which a mod of its "
+                "own is replacing; skipped", base, m->rel, o2->index);
+            free(payload);
+            return 0;
+        }
+        cov = (uint64_t)o2->length < end - o2->offset ? o2->length
+                                                     : end - o2->offset;
+        d[n].e = o2;
+        d[n].covered = (uint32_t)cov;
+        n++;
+    }
+
+    if (n == 0) {
+        /* The payload fits after all - the room walk and this disagree only
+         * when the file was rewritten under us. */
+        Log("forge: %s: %s: nothing to take room from, applied in place",
+            base, m->rel);
+        return AddPatch(o, af, e->offset, m->len, payload) &&
+               AddSizePatches(o, af, e, m->len);
+    }
+
+    /* The covered bytes are put back inside the payload's own patch, spliced
+     * in at the offsets they came from. One patch, one range, one comparison
+     * against the archive - and a read that spans both (the engine streams,
+     * it does not read one entry at a time) gets the right bytes everywhere.
+     * Two overlapping patches could not be checked at all: the second would
+     * be judged against the first one's output rather than against what the
+     * read produced, and a put-back would look like a mismatch. */
+    for (i = 0; i < n; i++) {
+        uint8_t *orig = ReadOrig(af, d[i].e->offset, d[i].covered);
+        size_t at = (size_t)(d[i].e->offset - e->offset);
+
+        if (!orig) {
+            Log("forge: %s: %s: entry %u could not be read back for its "
+                "put-back", base, m->rel, d[i].e->index);
+            free(payload);
+            return 0;
+        }
+        if (at + d[i].covered > m->len) {
+            /* The coverage scan says otherwise, so this cannot happen; the
+             * check is here because a wrong put-back writes into live data. */
+            free(orig);
+            free(payload);
+            return 0;
+        }
+        memcpy(payload + at, orig, d[i].covered);
+        free(orig);
+
+        if (d[i].covered == d[i].e->length)
+            Log("forge: %s: entry %u ('%s') is covered by %s and is served "
+                "from its own bytes", base, d[i].e->index, d[i].e->name,
+                m->rel);
+        else
+            Log("forge: %s: entry %u ('%s') is covered for its first %u of %u "
+                "bytes; what is left of it still comes from the archive",
+                base, d[i].e->index, d[i].e->name, d[i].covered,
+                d[i].e->length);
+    }
+
+    if (!AddPatch(o, af, e->offset, m->len, payload) ||
+        !AddSizePatches(o, af, e, m->len))
+        return 0;
     return 1;
 }
 
@@ -697,7 +858,10 @@ static ShForgeOverlay *OverlayBuild(const char *path, const char *base) {
         }
         if (!add || !e) continue;
 
-        if ((uint64_t)m->len > e->room) {
+        /* A payload larger than its room is served too when strict=0: the
+         * resolver marked it moved, and AddMovedPayload takes the room of
+         * the entries that follow it. */
+        if ((uint64_t)m->len > e->room && !m->moved) {
             Log("forge: %s: %s does not fit entry %u, skipped", base, m->rel,
                 e->index);
             continue;
@@ -717,28 +881,13 @@ static ShForgeOverlay *OverlayBuild(const char *path, const char *base) {
             Log("copies: %s also applied to %s entry %u", m->rel, base, e->index);
 
         start = o->patchCount;
-        if (!AddPatch(o, af, e->offset, m->len, buf)) {
-            Log("forge: %s: %s: the archive could not be read back for the "
-                "safety check, skipped", base, m->rel);
+        /* AddMovedPayload owns `buf` from the moment it adds the payload
+         * patch; anything it leaves behind on failure is freed by the
+         * rollback below, which frees every patch added since `start`. */
+        if (!AddMovedPayload(o, af, &f, base, e, m, buf)) {
+            Log("forge: %s: %s could not be placed, skipped", base, m->rel);
             RollbackPatches(o, start);
             continue;
-        }
-
-        /* A shorter payload needs both RawDataSize fields rewritten, or
-         * the engine reads the old count of bytes. An equal one does not
-         * change them. */
-        if (m->len != e->length) {
-            uint8_t *p1 = (uint8_t *)malloc(4);
-            uint8_t *p2 = (uint8_t *)malloc(4);
-            int ok1 = 0, ok2 = 0;
-            if (p1) { memcpy(p1, &m->len, 4); ok1 = AddPatch(o, af, e->locSizeOff, 4, p1); }
-            if (p2) { memcpy(p2, &m->len, 4); ok2 = AddPatch(o, af, e->infoSizeOff, 4, p2); }
-            if (!ok1 || !ok2) {
-                Log("forge: %s: %s: the size fields could not be prepared, "
-                    "skipped", base, m->rel);
-                RollbackPatches(o, start);
-                continue;
-            }
         }
         chosen++;
     }
@@ -895,6 +1044,10 @@ void ShForgeStartup(void) {
 
     g_enabled      = ShConfigGetBool("forgemod", "enabled", 0);
     g_dryRun       = ShConfigGetBool("forgemod", "dry_run", 0);
+    /* On by default, which is the behaviour this loader has always had: a
+     * payload that does not fit its room is refused. Setting it to 0 lets
+     * such a payload take the room of the entries that follow it. */
+    g_strict       = ShConfigGetBool("forgemod", "strict", 1);
     g_strict       = ShConfigGetBool("forgemod", "strict", 1);
     g_reportCopies = ShConfigGetBool("forgemod", "report_copies", 1);
     g_applyAll     = ShConfigGetBool("forgemod", "apply_all_copies", 0);

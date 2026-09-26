@@ -13,11 +13,18 @@ disk stays exactly as shipped and nothing is written anywhere.
 
 ## Requirements and limits, read this first
 
-- **A replacement must fit the room the entry already has.** In this
-  container the payloads are stored back to back with no gaps, so an
-  entry's room is its own length. A replacement that is the same size or
-  smaller works; a larger one would need the entry moved, which this build
-  does not do, and is refused with a line in the log.
+- **A replacement larger than the room the entry already has takes the room of
+  the entries that follow it**, with `strict=0`. Payloads in this container are
+  stored back to back with no gaps, so an entry's room is its own length; a
+  larger payload therefore covers the payloads after it, and their own bytes
+  are spliced back into the payload's patch at the offsets they came from. Every
+  offset the engine asks for is still an offset the file really holds, nothing
+  is invented past the end of the archive, and a read that spans the boundary
+  (the engine streams, it does not read one entry at a time) gets the right
+  bytes everywhere. With `strict=1` - the default - such a replacement is still
+  refused with a line in the log. It may not run past the end of the archive, it
+  may not cover an entry that a mod of its own is replacing, and it may not
+  cover more than 32 entries.
 - **Entries are replaced, not added or deleted.** There is no `grow` and no
   new entry. A `.delete` file is recognised and skipped.
 - **The whole entry payload is the unit.** A mod file is a complete forge
@@ -141,7 +148,8 @@ civilian, `UNP` named-NPC parts.
 [forgemod]
 enabled=0          ; 1 = load mods\ (off by default)
 dry_run=0          ; 1 = resolve and log only, serve nothing
-strict=1           ; 1 = refuse a replacement that does not fit
+strict=1           ; 1 = refuse a replacement that does not fit; 0 = it takes
+                   ;     the room of the entries that follow it
 report_copies=1    ; 1 = name the other archives a resource also lives in
 apply_all_copies=0 ; 1 = override those copies as well
 probe=0            ; 1 = install the evidence probe (diagnostics)
@@ -246,6 +254,12 @@ design - what was verified is the mechanism. A real texture or data edit is
 the next step, and that is a toolkit job (change the resource, rebuild the
 entry, drop it in `mods\`).
 
+The larger-payload path was verified on 2026-09-26 against the same install:
+a 175,094-byte replacement for `DataPC.forge` entry 25192 (101,046 bytes of
+room) took the room of the 236-byte entry after it and the first 73,812 bytes
+of the streamed mip after that, the game showed the new payload, the covered
+entries stayed correct, and no patch was refused.
+
 Known gaps: additions and deletions (`.delete` is recognised but does not act);
-any replacement larger than its entry; the root-directory "new archive" route,
-which the executable's fixed table appears not to support.
+the root-directory "new archive" route, which the executable's fixed table
+appears not to support.
