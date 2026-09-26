@@ -106,9 +106,13 @@ extern void ShForgeStartup(void);
  * a plugin that was just added - dropped in by the player, or shipped by an
  * update - works without a trip to the menu first, which is the case that used
  * to cost the most (a plugin folder that is there and silently doing nothing
- * reads as a broken plugin). The scan writes the line a folder was missing (a
- * 1), so the ini ends up naming every folder it saw; turning one off in the mod
- * menu's Plugins page writes a 0 there, and that line is what keeps it off.
+ * reads as a broken plugin). The scan writes nothing at all: an earlier version
+ * wrote the missing line back as a 1, which made the section grow one line per
+ * folder under plugins\ - a list of lines nobody had chosen, each of them
+ * saying only what the absent line already said. A line in there is now
+ * something a person put there: the Plugins page writes the 0 that keeps one
+ * off, and a 1 it writes is a plugin switched back on. Nothing about loading
+ * changed - only what the file holds at the end of a session.
  *
  * Deleting scripthook.ini is still the reset, and what it resets to is now
  * "everything in plugins\ loads" - what ruling a plugin out really takes is the
@@ -194,7 +198,7 @@ static void LoadASIPlugins(void) {
     WIN32_FIND_DATAA fd;
     HANDLE h;
     uint32_t need;
-    int n = 0, nSkipped = 0, nAdded = 0, count = 0, i, j;
+    int n = 0, nSkipped = 0, nDefaultOn = 0, count = 0, i, j;
 
     if (!ShPluginsDir(pluginsDir, sizeof(pluginsDir))) {
         LogAlways("cannot find the game directory");
@@ -262,27 +266,20 @@ static void LoadASIPlugins(void) {
         }
     }
 
-    /* Phase two: decide, and give a folder with no line of its own the line it
-     * is missing. -1 is "no line at all" (ShConfigGetInt cannot tell that apart
-     * from a 0, which is why this asks for an int), and a folder with no line
-     * is ON: a plugin that was just added works without a trip to the menu
-     * first. A 0 written by the Plugins page is what keeps one off from then
-     * on. A write that fails is logged and changes nothing: the decision is
-     * made either way. */
+    /* Phase two: decide, and write nothing. -1 is "no line at all"
+     * (ShConfigGetInt cannot tell that apart from a 0, which is why this asks
+     * for an int), and a folder with no line is ON: a plugin that was just
+     * added works without a trip to the menu first, and the ini is left as the
+     * player wrote it. A 0 put there by the Plugins page is what keeps one off
+     * from then on; the default is counted so the scan's summary says how many
+     * plugins are on that way, without a line each to say it. */
     for (i = 0; i < count; i++) {
         const char *name = names[i];
         int on = ShConfigGetInt("plugins", name, -1);
 
         if (on < 0) {
             on = 1;
-            if (ShConfigSetInt("plugins", name, 1)) {
-                Log("plugins\\%s: no [plugins] line, wrote %s=1 (on by "
-                    "default; switch it off in the mod menu)", name, name);
-                nAdded++;
-            } else {
-                Log("plugins\\%s: no [plugins] line, on by default "
-                    "(writing it back failed)", name);
-            }
+            nDefaultOn++;
         }
         if (!on) {
             Log("plugin disabled in scripthook.ini: %s", name);
@@ -324,8 +321,8 @@ static void LoadASIPlugins(void) {
 
         if (t) CloseHandle(t);
     }
-    LogAlways("plugin scan done: %d loaded, %d skipped, %d line(s) written back",
-              n, nSkipped, nAdded);
+    LogAlways("plugin scan done: %d loaded, %d skipped, %d on by default "
+              "(no [plugins] line, nothing written)", n, nSkipped, nDefaultOn);
 }
 
 /* Which game builds this framework has been run against, and what was

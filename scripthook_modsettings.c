@@ -324,10 +324,10 @@ static void BuildSettings(uint32_t menu, const Setting *rows, int n) {
  * now - switched off, or hidden by the mode blacklist - has no page name
  * to show, so it reads as its folder alone. The "restart needed" note
  * lives once on the menu hint line, not on every row. A folder with no
- * line of its own reads as off, which is the same rule the loader
- * applies: by the time this page is built the loader has usually written
- * the line itself, so this default only covers a folder that appeared
- * after that scan. */
+ * line of its own reads as ON, which is the rule the loader applies too -
+ * "no line" is how every folder starts, since the scan writes nothing -
+ * so this page is usually where the first line for a plugin comes from,
+ * and it is a 0: switching one off. Switching it back on writes the 1. */
 static void BuildPluginMenu(void) {
     ShMenuOrderRow rows[64];
     int i, j, n;
@@ -347,7 +347,7 @@ static void BuildPluginMenu(void) {
     for (i = 0; i < g_nplugins; i++) {
         const char *name = g_plugins[i];
         char buf[224];
-        int cur = ShConfigGetBool("plugins", name, 0);
+        int cur = ShConfigGetBool("plugins", name, 1);
 
         /* "<folder>(<page name>)". The page name is dropped rather than
          * faked when the plugin has no page in the root right now:

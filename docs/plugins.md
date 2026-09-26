@@ -51,11 +51,13 @@ loads. The loader reads `[loader] load_plugins` and one
 there is loaded** - the same for a plugin this mod ships and for a
 third-party `.asi` dropped into `plugins\`. That is the case that
 used to cost the most: a folder that is there and silently doing
-nothing reads as a broken plugin. The first scan writes the line a
-folder was missing (`=1`), so the list ends up naming every plugin
-it found; switching one off in the mod menu's Plugin switches page
-writes a `0` there, and that line is what keeps it off. Both take
-effect on the next launch. Deleting `scripthook.ini` is still the
+nothing reads as a broken plugin. Nothing is written back for it:
+the section holds the lines somebody chose, so switching one off in
+the mod menu's Plugin switches page writes the `0` that keeps it
+off, and a `=1` in there is a plugin switched back on. A shipped
+plugin and a third-party one are treated exactly alike, and the
+section does not grow a line per folder. Both take effect on the
+next launch. Deleting `scripthook.ini` is still the
 reset, and what it resets to is "everything in `plugins\` loads" -
 so ruling a plugin out means the menu switch, or taking its folder
 away. The file also holds the `[loader]` CPU dials and the
