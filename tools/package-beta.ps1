@@ -33,15 +33,17 @@ param(
     [string]$OutDir,
 
     # The plugins that ship. Everything else under plugins\ is left out.
-    # Keep this in step with $betaSet in build_msvc.ps1: that one decides what
-    # a -Beta / -Release build deploys, this one what the package carries.
     # AmmoControl (2026-09-21) and TimeWeatherControl (re-added 2026-09-20) are
     # the framework's own implementations and they ship. Ballistics stays out of
-    # the set that CameraPresets joined on 2026-09-22.
+    # the set that CameraPresets joined in 2026-09-22; PredatorMelee joined on
+    # 2026-09-27. This list no longer has to be kept in step with $betaSet in
+    # build_msvc.ps1 by hand - the check below reads that one back and refuses to
+    # package when the two disagree, so a plugin can no longer be deployed as if
+    # it shipped and then dropped from the archive without a word.
     [string[]]$Plugins = @(
         'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat',
         'micfix', 'AllLanguages', 'CameraPresets', 'AmmoControl',
-        'TimeWeatherControl'
+        'TimeWeatherControl', 'PredatorMelee'
     ),
 
     # Also produce a .zip beside the tree.
@@ -59,9 +61,54 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
 # The Markdown-to-text converter, for the .txt copy that goes out beside every
-# packaged document. Dot-sourced rather than shelled out: the file's parameter
-# block binds nothing this way, so only its functions come in.
+# packaged document. Dot-sourced so that only its functions come in - but the
+# belief that "the parameter block binds nothing this way" is wrong: dot-sourcing
+# runs md-to-txt.ps1's parameter block in THIS scope, and it declares -OutDir as
+# well, so the value passed to this script was being replaced with $null right
+# here. Every package went to the default out\ folder whatever -OutDir said, and
+# the example at the top of this file (-OutDir 'D:\dist') quietly did nothing.
+# The two names it declares are put back after the import. Seen 2026-09-27.
+$keepPath = $Path
+$keepOutDir = $OutDir
 . (Join-Path $PSScriptRoot 'md-to-txt.ps1')
+$Path = $keepPath
+$OutDir = $keepOutDir
+
+# The two lists of plugins have to agree, and nothing else enforces it. The build
+# script decides what a -Beta / -Release build deploys, this one what the package
+# carries. On 2026-09-27 they were one apart: PredatorMelee was in the build set
+# and not in this one, which is the worst way for them to disagree - the build
+# left the plugin in plugins\ looking like a shipping plugin, and this script
+# filed it under extras and left it out of the archive silently. So the build's
+# list is read back and compared before anything is copied.
+$buildScript = Join-Path $root 'build_msvc.ps1'
+if (-not (Test-Path $buildScript)) {
+    throw "build_msvc.ps1 is not at $buildScript, so the beta set cannot be checked"
+}
+$setMatch = [regex]::Match((Get-Content $buildScript -Raw),
+    '\$betaSet\s*=\s*@\(([^)]*)\)')
+if (-not $setMatch.Success) {
+    throw "no `$betaSet could be read out of $buildScript - fix that before packaging"
+}
+$builtSet = @([regex]::Matches($setMatch.Groups[1].Value, "'([^']+)'") |
+    ForEach-Object { $_.Groups[1].Value })
+if ($builtSet.Count -eq 0) {
+    throw "`$betaSet in $buildScript names no plugins - fix that before packaging"
+}
+$builtNotPackaged = @($builtSet | Where-Object { $Plugins -notcontains $_ })
+$packagedNotBuilt = @($Plugins | Where-Object { $builtSet -notcontains $_ })
+if ($builtNotPackaged.Count -or $packagedNotBuilt.Count) {
+    $differ = ("built but not packaged: [{0}]; packaged but not built: [{1}]" -f
+        ($builtNotPackaged -join ', '), ($packagedNotBuilt -join ', '))
+    if ($PSBoundParameters.ContainsKey('Plugins')) {
+        # A list given on the command line is a deliberate choice (a test kit
+        # carrying fewer plugins, say), so it is reported and not refused.
+        Write-Warning "this package's plugin list differs from the build's - $differ"
+    } else {
+        throw ("this package's plugin list and the build's disagree - {0}. Fix the " +
+            "lists, or pass -Plugins to package a deliberately smaller set." -f $differ)
+    }
+}
 
 if (-not $From) {
     $candidate = Join-Path (Join-Path $root '..\..') "Tom Clancy's Ghost Recon Wildlands"

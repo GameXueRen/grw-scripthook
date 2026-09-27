@@ -96,27 +96,31 @@ static WarmProgress_t g_warmProgress;
 static void OnSpawn(uint32_t menu, uint32_t item, int value,
                     void *user) {
     const Vehicle *v = (const Vehicle *)user;
-    ShVec3 pos;
+    ShVec3 pos, start;
+    ShCamera cam;
     uint64_t ent;
-    int aimed = 0;
+    float fx = 0.0f, fy = 0.0f;
+    int camOk = 0, aimed = 0;
 
     (void)item; (void)value;
     if (!v) return;
+    memset(&cam, 0, sizeof(cam));
     if (!g_playerPos(&pos)) {
         g_status(menu, "@sp.noplayer");
         return;
     }
+    start = pos;
     /* Horizontal only: the forward row tilts with the view, and a vehicle
      * placed along a look down at the ground would go underground. The
      * lift below is what raises it. */
     if (g_camera) {
-        ShCamera cam;
+        camOk = g_camera(&cam);
+        if (camOk) {
+            float len;
 
-        memset(&cam, 0, sizeof(cam));
-        if (g_camera(&cam)) {
-            float fx = cam.forward.x, fy = cam.forward.y;
-            float len = fx * fx + fy * fy;
-
+            fx = cam.forward.x;
+            fy = cam.forward.y;
+            len = fx * fx + fy * fy;
             if (len > 1e-6f) {
                 float k = AHEAD / (float)sqrt((double)len);
 
@@ -128,6 +132,16 @@ static void OnSpawn(uint32_t menu, uint32_t item, int value,
     }
     if (!aimed) pos.x += AHEAD;      /* no camera to ask: the old offset */
     pos.z += LIFT;
+
+    /* Where it was placed, and which way that decision went, once per dispatch.
+     * "The vehicle lands behind me" is a question about this line and nothing
+     * else answers it: AHEAD along the view when the camera answers, AHEAD east
+     * when it does not - and east is behind you as soon as you face west. Seen
+     * 2026-09-27. */
+    SpLog("place: aimed=%d cam=%d player %.1f %.1f %.1f cam %.1f %.1f %.1f "
+          "fwd %.3f %.3f -> %.1f %.1f %.1f",
+          aimed, camOk, start.x, start.y, start.z,
+          cam.pos.x, cam.pos.y, cam.pos.z, fx, fy, pos.x, pos.y, pos.z);
 
     /* The framework walks the whole address space for the vehicle specs the
      * first time the world is playable, about fifteen seconds (measured on

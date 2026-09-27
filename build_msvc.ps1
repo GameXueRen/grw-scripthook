@@ -81,9 +81,16 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 # (it is the renamed LastRites_dlcfix). CameraPresets is IN the set: the aim
 # yield and the preset names it carries are player facing, and it is the PR #2
 # plugin that ships.
+#
+# PredatorMelee is IN the set from 2026-09-27: it is what a player reaches for
+# once the catalogue question has an answer, the archetype is an ini setting
+# rather than a constant so it works with whatever a player's own copy holds, and
+# it ships off until its own ini says enabled=1. What it cannot do is stated on
+# its page instead of implied.
 $betaSet = @(
     'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat', 'micfix',
-    'AllLanguages', 'CameraPresets', 'AmmoControl', 'TimeWeatherControl'
+    'AllLanguages', 'CameraPresets', 'AmmoControl', 'TimeWeatherControl',
+    'PredatorMelee'
 )
 $script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
 $releaseBuild     = [bool]$Release
@@ -422,8 +429,9 @@ Build-Plugin 'NpcProbe'      'NpcProbe.c'      @($libPath, 'libscripthook.lib', 
 # never in a loop, because EnemyReinforce's header records what hardening what
 # it spawned used to do to the frame. Health is a fraction of the maximum (the
 # maximum is readable and not writable) and the archetype is an ini setting, not
-# a constant. Read only: the plugin never writes its own ini. Off until its ini
-# says enabled=1. Not in the beta set: it ships to nobody.
+# a constant. Read only: the plugin never writes its own ini. Off until its own
+# ini says enabled=1. IN the beta set from 2026-09-27: the crowd is what a player
+# asks the catalogue question for, and it ships beside the answer.
 Build-Plugin 'PredatorMelee' 'PredatorMelee.c' @($libPath, 'libscripthook.lib', 'user32.lib')
 # AmmoControl is the capacity multiplier and an automatic reload. Every change
 # goes through the framework's own engine calls (ShSetAmmoScale for the
