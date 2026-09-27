@@ -45,7 +45,10 @@
  * the file the operator keeps their notes in.
  *
  * Rules this follows, from the plugins that came before it:
- *   - nothing happens until [Settings] enabled=1;
+ *   - the page is built either way; [Settings] enabled=1 is what lets the
+ *     summon row through, and the row at the top of the page flips that for
+ *     the session (it used to decide whether the page existed at all, which
+ *     left a plugin nobody could find and no way to switch on in the game);
  *   - nothing engine-side is called from a menu callback except the job API,
  *     which is made for it; the health write runs in a worker, and the reads
  *     run on the frame hook, which is the game thread;
@@ -70,7 +73,9 @@
 static const ShText kEn[] = {
     { "@pm.page",         "Predator melee" },
     { "@pm.hint",         "Summons fight you. Consecutive summons must be 60 s apart." },
+    { "@pm.enabled",      "Summoning enabled" },
     { "@pm.summon",       "Summon the Predator (60 s cooldown)" },
+    { "@pm.toast.off",    "The summon switch is off - the row at the top of this page turns it on." },
     { "@pm.toast.cd",     "Summon on cooldown: %d s to go." },
     { "@pm.toast.cap",    "The field is full (%d of %d) - zero their health, or raise the ceiling." },
     { "@pm.toast.busy",   "The last batch is still arriving." },
@@ -90,7 +95,9 @@ static const ShText kEn[] = {
 static const ShText kZh[] = {
     { "@pm.page",         "铁血战士大混战" },
     { "@pm.hint",         "召唤铁血战士与你战斗。连续召唤的间隔必须 > 60 秒。" },
+    { "@pm.enabled",      "启用召唤" },
     { "@pm.summon",       "召唤铁血战士（CD 60s）" },
+    { "@pm.toast.off",    "召唤开关是关的——打开本页最上面那一行" },
     { "@pm.toast.cd",     "召唤冷却中，还剩 %d 秒可召唤" },
     { "@pm.toast.cap",    "场上已满（%d/%d）—— 清零它们的血量，或抬高上限" },
     { "@pm.toast.busy",   "上一批还在出" },
@@ -127,6 +134,8 @@ static const ShText kZh[] = {
 #define PM_ENT_MAX    256
 
 static char     g_ini[MAX_PATH];
+static volatile LONG g_on;           /* [Settings] enabled, and the row at the
+                                      * top of the page: 0 = summons refuse */
 static uint64_t g_id;
 static char     g_name[64];          /* the operator's name for the id, or "" */
 static int      g_count = 1;         /* how many per summon       */
@@ -448,12 +457,31 @@ static void Say(const char *key, uint32_t rgb, int a, int b) {
     p_toast(line, rgb, 2500u);
 }
 
+/* The switch at the top of the page: summoning on or off for this session. The
+ * ini decides the next one - this plugin never writes it (see the file head). */
+static void OnEnabled(uint32_t m, uint32_t it, int v, void *u) {
+    (void)m; (void)it; (void)u;
+    InterlockedExchange(&g_on, v ? 1 : 0);
+    Log("pm: summoning is %s for this session; [Settings] enabled in the plugin "
+        "ini decides the next one", v ? "on" : "off");
+}
+
 static void OnSummon(uint32_t m, uint32_t it, int v, void *u) {
     ShNpcSpawnRequest req;
     ShNpcSpawnLayout lay;
     int n, cd = CdLeft();
 
     (void)m; (void)it; (void)v; (void)u;
+    /* The switch, first: with it off nothing else on this page has anything to
+     * act on, and a refusal that names it is what says where to turn it back
+     * on - the row that does is one above this one. */
+    if (!InterlockedCompareExchange(&g_on, 0, 0)) {
+        Say("@pm.toast.off", 0xFFCC33u, 0, 0);
+        Log("pm: the summon row was pressed with the switch off ([Settings] "
+            "enabled=0; the row at the top of the page turns it on for this "
+            "session)");
+        return;
+    }
     if (!g_id) {
         Log("pm: [Settings] id is empty or unreadable, so there is nothing to "
             "summon - put the archetype id there");
@@ -751,17 +779,18 @@ static DWORD WINAPI InitThread(LPVOID p) {
     ShLangDeclare(PM_OWNER, "en-US", kEn, (int)(sizeof(kEn) / sizeof(kEn[0])));
     ShLangDeclare(PM_OWNER, "zh-CN", kZh, (int)(sizeof(kZh) / sizeof(kZh[0])));
     if (!ShPluginIniPath(PM_OWNER, g_ini, (int)sizeof(g_ini))) g_ini[0] = 0;
-    if (!IniInt("enabled", 0)) {
-        Log("pm: [Settings] enabled=0 in %s, the page is not created",
-            g_ini[0] ? g_ini : "the plugin ini (not found)");
-        return 0;
-    }
+    /* The switch is a row on the page, so the page is built either way: what
+     * enabled=0 means now is that the summon row refuses, not that this plugin
+     * is invisible. It used to return here, which left the plugin unlisted and
+     * with no way to turn it on from inside the game. */
+    g_on = IniInt("enabled", 0) ? 1 : 0;
     ReadSettings();
 
     Log("pm: id %016llX%s%s, %d per summon, %.0f m, hp %.0f%%, ceiling %d, "
-        "cooldown %d s",
+        "cooldown %d s, summoning %s",
         (unsigned long long)g_id, g_name[0] ? " (" : "", g_name[0] ? g_name : "",
-        g_count, g_distM, g_hp * 100.0f, g_cap, (int)(PM_CD_MS / 1000));
+        g_count, g_distM, g_hp * 100.0f, g_cap, (int)(PM_CD_MS / 1000),
+        g_on ? "on" : "off");
     if (!g_id)
         Log("pm: [Settings] id is empty, so the summon row will only say so");
     if (!p_layout)
@@ -797,6 +826,7 @@ static DWORD WINAPI InitThread(LPVOID p) {
      * answers with a toast instead, so this line and the status line do not both
      * count down the same thing. */
     ShMenuHint(g_menu, "@pm.hint");
+    ShMenuToggle(g_menu, "@pm.enabled", g_on ? 1 : 0, OnEnabled, NULL);
     ShMenuAction(g_menu, "@pm.summon", OnSummon, NULL);
     ShMenuNumber(g_menu, "@pm.count", (float)g_count, 1.0f, (float)PM_COUNT_MAX,
                  1.0f, OnCount, NULL);

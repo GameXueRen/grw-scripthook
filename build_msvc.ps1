@@ -528,6 +528,15 @@ foreach ($dir in (Get-ChildItem $srcPlugins -Directory)) {
 # reads the engine's own catalogue every session and checks its answer against
 # this file, so a stale copy would be a false alarm. See the file's own header.
 foreach ($rel in @('NpcProbe\npc-catalogue.txt', 'NpcProbe\npc-picks.txt')) {
+    # -Beta / -Release: this plugin is not in the set, so neither is its data
+    # file. Copying it anyway left a plugins\NpcProbe\ behind, which the step
+    # that moves everything outside the set then turned into a plugins_off\
+    # folder - a leftovers folder in an install that is meant to hold nothing
+    # but the set. Seen 2026-09-27.
+    if ($script:BetaOnly -and ($script:BetaOnly -notcontains 'NpcProbe')) {
+        Write-Host "skipped (not in the -Beta set): $rel"
+        continue
+    }
     $from = Join-Path $srcPlugins $rel
     $to   = Join-Path $outPlugins $rel
     if (Test-Path $from) {

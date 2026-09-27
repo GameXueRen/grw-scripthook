@@ -490,6 +490,16 @@ static void SpawnOnGameThread(uint64_t id, const void *mtx) {
     static volatile LONG campJobSaid = 0;
 
     g_pendErr = SH_ERR_NO_CANDIDATE;
+
+    /* The catalogue is read on demand, and until now the only demand was a
+     * plugin asking for it (ShNpcCount / ShNpcAt). A spawn needs it too -
+     * ArchetypeBlock below searches it - so on a machine with nothing but the
+     * beta set installed, where no plugin reads the list, every summon missed
+     * with "no archetype block for the id" and a count of 0: the batch came
+     * back "0 of the 1 asked for" and nothing was wrong with the request. Read
+     * it here, on the game thread, in the same call the pump reads it from. */
+    if (!g_npcCount) ListOnGameThread();
+
     archBlk = ArchetypeBlock(id);
     arch = BlockObj(archBlk);
     if (!arch) {

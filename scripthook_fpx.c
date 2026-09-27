@@ -1245,7 +1245,18 @@ static void AimEdge(const char *what) {
  * a line, and only on a jump. Reported 2026-09-26: "with first person on,
  * aiming, sometimes one frame of another picture flashes past".
  */
-#define TRACE_JUMP_M 0.25f
+/* How far the engine's camera, or the eye, has to move between two frames
+ * before that is worth a line.
+ *
+ * It was 0.25 m, which is below what ordinary play moves: running crosses 25 cm
+ * inside a frame at anything under about 20 fps, so the line fired on ordinary
+ * movement - 28,496 lines in fourteen minutes on 2026-09-27, two per frame (the
+ * camera and the eye), 99 percent of the whole logs folder and one fflush per
+ * frame on the game thread. What the line exists for is the handover cut, and
+ * that is metre-scale (the aim's own frame travels about 1.8 m, see the note at
+ * ShFp2PlaceEye), so a metre is the threshold that keeps the events and drops
+ * the traffic. */
+#define TRACE_JUMP_M 1.0f
 
 /* Engine fov values under this are a zoom optic at work - the line the fov
  * module itself uses (see scripthook_fov.c): a gameplay fov is 0.78 to 0.83
@@ -1292,10 +1303,26 @@ static void TraceJump(const char *what, const float *now, float *last,
         float dy = now[1] - last[1];
         float dz = now[2] - last[2];
 
-        if (dx * dx + dy * dy + dz * dz > TRACE_JUMP_M * TRACE_JUMP_M)
-            Log("fp: %s jumped %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f (last frame "
-                "was %s)", what, last[0], last[1], last[2],
-                now[0], now[1], now[2], BowName(g_bow));
+        if (dx * dx + dy * dy + dz * dz > TRACE_JUMP_M * TRACE_JUMP_M) {
+            /* A jump whose last frame was one of ours is the steady state
+             * rather than news: say it once a session, and let the three that
+             * mean something (ads, menu, stale) speak every time. See
+             * TRACE_JUMP_M. */
+            const char *was = BowName(g_bow);
+            static int saidOurs;
+
+            if (!was || strcmp(was, "ours") != 0) {
+                Log("fp: %s jumped %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f (last "
+                    "frame was %s)", what, last[0], last[1], last[2],
+                    now[0], now[1], now[2], was);
+            } else if (!saidOurs) {
+                saidOurs = 1;
+                Log("fp: %s jumped %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f (last "
+                    "frame was %s; further jumps like this are not logged "
+                    "again this session)", what, last[0], last[1], last[2],
+                    now[0], now[1], now[2], was);
+            }
+        }
     } else {
         *have = 1;
     }
