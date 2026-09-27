@@ -1330,6 +1330,14 @@ SH_API const char *ShLangText(const char *owner, const char *key) {
     return v;
 }
 
+/** The language generation: it moves whenever the answer to "what does this key
+ *  say" can change. Not exported - it is for a caller inside this module that
+ *  caches translations of its own (scripthook_menu.c caches row labels, which
+ *  are otherwise looked up on every frame the menu is open). */
+uint32_t ShLangGeneration(void) {
+    return g_lcGen;
+}
+
 /** Is there text for this key anywhere? */
 SH_API int ShLangHas(const char *owner, const char *key) {
     const char *v = NULL;

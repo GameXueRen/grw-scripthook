@@ -602,7 +602,17 @@ static void DespawnOnGameThread(uint64_t entity) {
  * id is what claims the request. */
 void ShNpcPump(void) {
     int did = 0;
-    uint64_t e = (uint64_t)InterlockedExchange64(
+    uint64_t e;
+
+    /* Nothing asked: no atomics, no work. This runs on every ray the engine
+     * casts, and the four exchanges below are locked read-modify-writes - a
+     * fixed tax on a path where a busy second is a few hundred calls. Plain
+     * loads answer the same question: a request published just after one of
+     * them is taken by the next ray, and every waiter here has hundreds of
+     * milliseconds to spare (WaitFlag, and the callers that came with it). */
+    if (!g_killEnt && !g_verifyEnt && !g_listWanted && !g_pendId) return;
+
+    e = (uint64_t)InterlockedExchange64(
         (volatile LONG64 *)&g_killEnt, 0);
 
     if (e) {
@@ -697,6 +707,20 @@ static uint64_t SpecEntity(uint64_t spec) {
     if (blk == ImgAddr(RVA_NULL_BLOCK)) return 0;
     return BlockObj(blk);
 }
+
+/* Tried and withdrawn, 2026-09-27. Two accessors used to be exported from here
+ * so the spawn path could ask an entity for its spec, and a spec for the entity
+ * it built. Neither question has an answer on this build:
+ *
+ *   the engine does not hand back the same spec pointer it was given - 21
+ *   dispatches, each 120 looks over a world that held the vehicles, and not one
+ *   match;
+ *   and for a *vehicle* spec the field at +0xA8 holds 0xFFFFFFFF, not the handle
+ *   block the NPC class keeps there (20 dispatches, every one the same).
+ *
+ * So they are gone rather than left unused: a pin nothing calls is a pin
+ * waiting to be believed. The walk in scripthook_entity.c stays as the way a
+ * dispatch finds what it made. */
 
 /* Is this entity still in the spawn system?
  *

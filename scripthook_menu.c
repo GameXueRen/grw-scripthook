@@ -962,6 +962,52 @@ int ShMenuSelectRow(uint32_t menu, const char *key) {
     return 0;
 }
 
+/* Row labels, translated once per language instead of once per frame.
+ *
+ * A label's translation only changes when the language does, but this runs for
+ * every visible row on every frame the menu is open - twelve keys a frame, each
+ * one a lock and a hash inside the text module, all of it taken while the menu
+ * lock is held. Only this function touches the cache and it holds that lock, so
+ * the cache needs no lock of its own. Entries are keyed by their own content
+ * plus the language generation, so a label edited in place and a language
+ * change both miss and are read again; the answer handed back is the one
+ * ShLangText would have given, truncated the same way the row copy truncates.
+ * The status line churns with its numbers, so it takes a slot a frame and the
+ * labels are evicted round-robin - a translation every thirty-odd frames rather
+ * than every frame. */
+#define LABEL_CACHE 32
+static struct {
+    uint32_t gen;
+    char     owner[32];
+    char     src[LABEL];
+    char     text[LABEL];
+} g_labelCache[LABEL_CACHE];
+static uint32_t g_labelNext;
+
+extern uint32_t ShLangGeneration(void);
+
+static const char *LabelText(const char *owner, const char *label) {
+    uint32_t gen = ShLangGeneration();
+    int i;
+
+    if (!label) return "";
+    if (!owner) owner = "";
+    for (i = 0; i < LABEL_CACHE; i++) {
+        if (g_labelCache[i].gen != gen) continue;
+        if (strcmp(g_labelCache[i].owner, owner) != 0) continue;
+        if (strcmp(g_labelCache[i].src, label) != 0) continue;
+        return g_labelCache[i].text;
+    }
+
+    i = (int)(g_labelNext++ % LABEL_CACHE);
+    g_labelCache[i].gen = gen;
+    SafeCopy(g_labelCache[i].owner, sizeof(g_labelCache[i].owner), owner);
+    SafeCopy(g_labelCache[i].src, sizeof(g_labelCache[i].src), label);
+    SafeCopy(g_labelCache[i].text, sizeof(g_labelCache[i].text),
+             ShLangText(owner, label));
+    return g_labelCache[i].text;
+}
+
 /* Snapshot the current menu for the overlay renderer. Labels,
  * values and the title are translated here (the model keeps the
  * English originals), then copied so the renderer can draw them
@@ -1024,9 +1070,9 @@ void ShMenuCaptureView(ShMenuView *v) {
         }
 
         SafeCopy(v->title, sizeof(v->title),
-                 ShLangText(owner, m->title));
+                 LabelText(owner, m->title));
         SafeCopy(v->status, sizeof(v->status),
-                 ShLangText(owner, m->status));
+                 LabelText(owner, m->status));
         for (i = m->top; i < m->count && v->rows < VISIBLE; i++) {
             ShMenuRow *r = &v->row[v->rows];
             const Item *it = &m->items[i];
@@ -1044,7 +1090,7 @@ void ShMenuCaptureView(ShMenuView *v) {
                 if (cm && cm->owner[0]) rowOwner = cm->owner;
             }
             SafeCopy(r->name, sizeof(r->name),
-                     ShLangText(rowOwner, it->label));
+                     LabelText(rowOwner, it->label));
             ValueText(owner, it, r->value, sizeof(r->value));
             r->selected = (i == m->sel);
             if (r->selected) v->sel = v->rows;

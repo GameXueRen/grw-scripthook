@@ -307,15 +307,28 @@ static void NoteActive(uint64_t scene) {
 /* name: root widget's template instance, string at +0x10 */
 #define NAME_CACHE 128
 static struct { uint64_t scene; char name[48]; } g_names[NAME_CACHE];
-static int g_nNames;
+static volatile LONG g_nNames;
 
 static const char *SceneName(uint64_t scene) {
     uint64_t priv, root, rootP, inst, blk;
     uint32_t len = 0;
-    int i;
-    /* The cache fills from both the render hook and plugin threads;
-     * without the lock two first-lookups raced for one slot and a
-     * wrong name stuck there for the session (UI state misread). */
+    int i, n;
+
+    /* A name already known is answered without the lock. This is called from
+     * the render hook for every scene of every pass, and the cache fills once:
+     * the lock was being taken to walk a table that is already there. Safe
+     * because a slot is written once and the count is published after it
+     * (InterlockedIncrement is a full barrier), so a reader that sees the count
+     * sees the name; and because entries are never moved or rewritten, the
+     * pointer handed back stays good for the session. */
+    n = (int)InterlockedCompareExchange(&g_nNames, 0, 0);
+    for (i = 0; i < n; i++)
+        if (g_names[i].scene == scene) return g_names[i].name;
+
+    /* A miss still takes the lock, and looks again under it: two threads can
+     * miss the same scene at once, and without the lock two first-lookups raced
+     * for one slot and a wrong name stuck there for the session (UI state
+     * misread). */
     SLock();
     for (i = 0; i < g_nNames; i++)
         if (g_names[i].scene == scene) {
@@ -343,7 +356,9 @@ static const char *SceneName(uint64_t scene) {
         }
     }
     {
-        const char *stored = g_names[g_nNames++].name;
+        const char *stored = g_names[g_nNames].name;
+
+        InterlockedIncrement(&g_nNames);  /* publish after the name is written */
         SUnlock();
         return stored;
     }
