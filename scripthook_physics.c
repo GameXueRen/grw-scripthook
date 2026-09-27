@@ -66,8 +66,6 @@ typedef uint8_t (__attribute__((ms_abi)) *CastRay_t)(void *, void *,
                                                      void *, char, char,
                                                      uint8_t, char);
 
-static SH_ALIGNED(16) uint8_t g_hitArr[0x880];
-static SH_ALIGNED(16) uint8_t g_recs[REC_COUNT * REC_STRIDE];
 static SH_ALIGNED(16) uint8_t g_desc[0x80];
 static SH_ALIGNED(16) float   g_org[4];
 static SH_ALIGNED(16) float   g_dir[4];
@@ -106,9 +104,12 @@ static HANDLE ProbeEvent(void) {
  * and a direction and waits, the frame callback sees it, casts, and fills
  * in the answer.
  *
- * A second, separate set of buffers on purpose - a physics callback may now
- * arrive on a worker thread while this is mid-cast, and sharing g_hitArr
- * with it would be a race.
+ * A second, separate set of buffers, and now the only ones the probe uses: a
+ * physics callback may arrive on a worker thread while this is mid-cast, so the
+ * ray callback's scratch and the probe's scratch cannot be the same memory. The
+ * pair these replaced are gone - ShProbeSurface went on reading them after the
+ * cast moved here, and since nothing wrote them any more it answered "no hits"
+ * for ever while reporting success.
  */
 static SH_ALIGNED(16) uint8_t g_pgHit[0x880];
 static SH_ALIGNED(16) uint8_t g_pgRecs[REC_COUNT * REC_STRIDE];
@@ -907,10 +908,19 @@ void ShPhysicsOnEnterPlaying(void) {
 
     /* The ground probe's cast runs from the frame hook rather than from the
      * ray callback - see GroundProbeFrame for why. Once, and a failure is
-     * worth a line: without it every probe would time out. */
+     * worth a line: without it every probe would time out.
+     *
+     * The flag is left set only once the hook is really up. It used to be set
+     * before the call, and it is what both the timeout diagnostic and ProbeDown
+     * read - so a refused registration left every probe timing out for half a
+     * second at a time while the log said "frame hook 1", which is the opposite
+     * of the truth. Registration is idempotent and a level change brings us back
+     * here, so a failure is cleared rather than buried for the session. */
     if (InterlockedCompareExchange(&g_pgArmed, 1, 0) == 0) {
-        if (!ShRegisterFrameCallback(GroundProbeFrame, NULL))
+        if (!ShRegisterFrameCallback(GroundProbeFrame, NULL)) {
+            InterlockedExchange(&g_pgArmed, 0);
             Log("physics: no frame hook - ground probes cannot be serviced");
+        }
     }
 
     if (InterlockedCompareExchange(&g_warmRunning, 1, 0)) return;
@@ -967,6 +977,17 @@ static int InStreamRange(float x, float y) {
 static int ProbeDown(float x, float y, float startZ, float span,
                      float *outZ) {
     ULONGLONG deadline;
+
+    /* The answer comes from GroundProbeFrame, and that only runs once the frame
+     * hook is up - which is what g_pgArmed says. With it clear there is nobody
+     * to answer, so the wait below would spend its whole deadline on nothing,
+     * once per probe. Say so at once instead. */
+    if (!InterlockedCompareExchange(&g_pgArmed, 0, 0)) {
+        LogFirst("scripthook_physics.log",
+                 "probe: no frame hook, so this probe was not made - state "
+                 "%d, ui 0x%X", ShGetGameState(), (unsigned)ShGetUiState());
+        return 0;
+    }
 
     g_pgOrg[0] = x; g_pgOrg[1] = y; g_pgOrg[2] = startZ; g_pgOrg[3] = 0.0f;
     g_pgDir[0] = 0.0f; g_pgDir[1] = 0.0f;
@@ -1054,10 +1075,15 @@ SH_API int ShProbeSurface(float x, float y, float nearZ,
      * unrelated collision high above the player. */
     if (!ProbeDown(x, y, nearZ + 16.0f, 24.0f, &z))
         return ShFailPhys(SH_ERR_NO_GROUND);
-    hits = *(uint16_t *)(g_hitArr + 0x1a);
+    /* The probe's own buffers, the ones GroundProbeFrame has just filled.
+     * Reading the ray callback's scratch here is what made this answer zero
+     * hits with a zeroed record for ever: nothing writes those any more. The
+     * call above has returned, so the cast is finished and these hold its
+     * answer. */
+    hits = *(uint16_t *)(g_pgHit + 0x1a);
     out->hitPos.x = x; out->hitPos.y = y; out->hitPos.z = z;
     out->hits = hits;
-    memcpy(out->record, g_recs, sizeof(out->record));
+    memcpy(out->record, g_pgRecs, sizeof(out->record));
     ShSetError(SH_OK);
     return 1;
 }

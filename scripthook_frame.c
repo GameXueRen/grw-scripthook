@@ -115,6 +115,34 @@ static int SiteOk(uint64_t *out) {
     return 1;
 }
 
+static volatile PVOID g_installEv = NULL;
+
+/* Signalled when an install attempt ends, so a caller that arrives while
+ * another one is installing is woken by it rather than polling a millisecond at
+ * a time - the arrangement the npc pump's wait already uses. Created on first
+ * need, never closed: the module outlives every waiter. */
+static HANDLE InstallEvent(void) {
+    HANDLE h = (HANDLE)g_installEv;
+
+    if (h) return h;
+    h = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (!h) return NULL;
+    if (InterlockedCompareExchangePointer(&g_installEv, h, NULL) != NULL) {
+        CloseHandle(h);              /* another thread won; use its handle */
+        h = (HANDLE)g_installEv;
+    }
+    return h;
+}
+
+/* Every way out of an install goes through here: the flag goes down and anyone
+ * waiting on it is woken. */
+static void InstallEnd(void) {
+    HANDLE ev = (HANDLE)g_installEv;
+
+    InterlockedExchange(&g_installing, 0);
+    if (ev) SetEvent(ev);
+}
+
 /* Build the stub, then take the six bytes. Once per process: the stub is
  * kept, and a later registration finds the hook already in place. */
 static int EnsureHook(void) {
@@ -135,13 +163,20 @@ static int EnsureHook(void) {
      * while the progress line said so. */
     if (InterlockedCompareExchange(&g_installing, 1, 0)) {
         ULONGLONG end = GetTickCount64() + 5000;
+        HANDLE ev = InstallEvent();
 
+        /* Woken by InstallEnd the moment the other attempt ends. The 1 ms is
+         * the fallback for a machine where the event could not be created, and
+         * for a second waiter - an auto-reset event wakes one. The flag is what
+         * ends the loop either way. */
         while (InterlockedCompareExchange(&g_installing, 0, 0) &&
-               GetTickCount64() < end)
-            Sleep(1);
+               GetTickCount64() < end) {
+            if (ev) WaitForSingleObject(ev, 1);
+            else Sleep(1);
+        }
         return g_stub != NULL;
     }
-    if (g_stub) { InterlockedExchange(&g_installing, 0); return 1; }
+    if (g_stub) { InstallEnd(); return 1; }
 
     if (!SiteOk(&site)) {
         if (InterlockedExchange(&g_said, 1) == 0) {
@@ -150,18 +185,18 @@ static int EnsureHook(void) {
                 "and no callback will run",
                 (unsigned long long)SH_IMG(FRAME_RVA));
         }
-        InterlockedExchange(&g_installing, 0);
+        InstallEnd();
         return 0;
     }
     if (g_tls == TLS_OUT_OF_INDEXES) g_tls = TlsAlloc();
     if (g_tls == TLS_OUT_OF_INDEXES) {
-        InterlockedExchange(&g_installing, 0);
+        InstallEnd();
         return 0;
     }
 
     s = (uint8_t *)ShAllocNear(site);
     if (!s) {
-        InterlockedExchange(&g_installing, 0);
+        InstallEnd();
         return 0;
     }
     memset(s, 0xCC, 0x1000);
@@ -182,7 +217,7 @@ static int EnsureHook(void) {
 
     if (!FlushInstructionCache(GetCurrentProcess(), s, (size_t)o)) {
         VirtualFree(s, 0, MEM_RELEASE);
-        InterlockedExchange(&g_installing, 0);
+        InstallEnd();
         return 0;
     }
 
@@ -194,7 +229,7 @@ static int EnsureHook(void) {
         !VirtualProtect((void *)(uintptr_t)site, STOLEN,
                         PAGE_EXECUTE_READWRITE, &old)) {
         VirtualFree(s, 0, MEM_RELEASE);
-        InterlockedExchange(&g_installing, 0);
+        InstallEnd();
         return 0;
     }
     patch[0] = 0xE9;
@@ -206,7 +241,7 @@ static int EnsureHook(void) {
     VirtualProtect((void *)(uintptr_t)site, STOLEN, old, &old);
 
     g_stub = s;
-    InterlockedExchange(&g_installing, 0);
+    InstallEnd();
 
     LogInit("scripthook_frame.log");
     Log("frame: hook at %llX -> stub %llX, one call a frame",
@@ -237,6 +272,12 @@ SH_API int ShRegisterFrameCallback(ShFrameFn_t fn, void *user) {
         g_cb[i] = fn;
         return 1;
     }
+    /* Out of slots. The caller is answered 0 and has no way to tell that from a
+     * refused hook, so it is said here, once: the fix is to have a plugin give
+     * its slot up, or for CB_MAX to go up. */
+    LogFirst("scripthook_frame.log",
+             "frame: all %d callback slots are taken - %llX did not get one",
+             CB_MAX, (unsigned long long)(uintptr_t)fn);
     return 0;
 }
 
