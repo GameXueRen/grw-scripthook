@@ -133,26 +133,40 @@ static int      g_count = 1;         /* how many per summon       */
 static int      g_cap = PM_CAP_DEF;  /* most on the field at once */
 static float    g_distM = PM_DIST_MIN;
 static float    g_hp = 0.5f;         /* arrival health fraction   */
-static int      g_live;              /* made, and still up        */
-static ULONGLONG g_liveAt;           /* when g_live was last counted */
+static volatile int g_live;          /* made, and still up; counted on the
+                                      * worker, read here and by the menu */
+static ULONGLONG g_liveAt;           /* when the worker was last asked */
 static ULONGLONG g_cdUntil;          /* no summon before this     */
 
 /* ---- the batch ---------------------------------------------------------- */
 
-static uint32_t g_job;
+/* Written by the menu thread when a batch is asked for, read by the frame
+ * callback that polls it. volatile because the two are different threads and the
+ * ordering matters: see the publish order in OnSummon. */
+static volatile uint32_t g_job;
 static int      g_jobMade;           /* entities the live job has produced */
 static int      g_lastMade;          /* what the last finished batch made  */
 static uint32_t g_menu;
 static int      g_menuReady;
 
 static uint64_t g_ent[PM_ENT_MAX];
-static int      g_entCount;
+/* Written by the frame callback (PollJob), read by the worker and by the menu
+ * thread. The handle goes into its slot first and this count is published after
+ * it (InterlockedIncrement is a full barrier), so a reader that sees the new
+ * count sees the handle too; a reader that sees the count from before it was
+ * published is one entity short, which every loop here already allows for. */
+static volatile LONG g_entCount;
 static int      g_applied;           /* how many have had health applied */
-static int      g_entFull;
+static volatile int g_entFull;       /* set by the frame callback, cleared by
+                                      * the menu thread's next summon */
 static ULONGLONG g_lastPoll;
-static ULONGLONG g_jobAt;            /* when the live job was asked for    */
+static ULONGLONG g_jobAt;            /* when the live job was asked for; 0 while
+                                      * the job is being handed over */
 static volatile LONG g_kill;         /* the worker is asked to zero health  */
-static volatile LONG g_killCheck;    /* the frame callback looks afterwards */
+static volatile LONG g_killCheck;    /* the worker looks afterwards        */
+static volatile LONG g_killDone;     /* ...and the frame callback reports  */
+static volatile LONG g_killUp;       /* how many were up when it looked    */
+static volatile LONG g_liveWanted;   /* the frame asks the worker to count  */
 static ULONGLONG g_killAt;
 
 /* ---- binding ------------------------------------------------------------ */
@@ -312,7 +326,10 @@ static void Remember(uint64_t e) {
     if (!e) return;
     for (i = 0; i < g_entCount; i++) if (g_ent[i] == e) return;
     if (g_entCount < PM_ENT_MAX) {
-        g_ent[g_entCount++] = e;
+        /* The handle in its slot first, then the count: this is the publication
+         * the worker and the menu thread read. */
+        g_ent[g_entCount] = e;
+        InterlockedIncrement(&g_entCount);
     } else if (!g_entFull) {
         g_entFull = 1;
         Log("pm: %d entities is as many as this page keeps track of; anything "
@@ -357,15 +374,77 @@ static void PollJob(void) {
 
 /* ---- the menu ----------------------------------------------------------- */
 
+/* The conversion specifiers of a format string, in order and nothing else: "%d
+ * of %d" and "%d 个 %d" come out the same, and "%%" comes out as nothing. What
+ * has to match between a template and a translation is the arguments they read,
+ * and for this plugin's two integers that is "two integer conversions, in
+ * order". */
+static int Conversions(const char *fmt, char *out, size_t cap) {
+    size_t n = 0;
+
+    if (cap) out[0] = 0;
+    while (fmt && *fmt) {
+        if (*fmt != '%') { fmt++; continue; }
+        fmt++;
+        if (*fmt == '%') { fmt++; continue; }          /* a literal percent */
+        while (*fmt && strchr("-+ #0", *fmt)) fmt++;   /* flags   */
+        while (*fmt >= '0' && *fmt <= '9') fmt++;      /* width   */
+        if (*fmt == '.') {
+            fmt++;
+            while (*fmt >= '0' && *fmt <= '9') fmt++;  /* precision */
+        }
+        while (*fmt && strchr("hljztL", *fmt)) fmt++;  /* length  */
+        if (!*fmt) break;
+        if (n + 1 < cap) out[n++] = *fmt;              /* the conversion */
+        fmt++;
+    }
+    if (cap) out[n < cap ? n : cap - 1] = 0;
+    return (int)n;
+}
+
+/* The en-US text this plugin declares for a key: a format string known at build
+ * time, which is what a translation is checked against. */
+static const char *EnTemplate(const char *key) {
+    int i;
+
+    for (i = 0; i < (int)(sizeof(kEn) / sizeof(kEn[0])); i++)
+        if (kEn[i].id && strcmp(kEn[i].id, key) == 0) return kEn[i].text;
+    return NULL;
+}
+
 /* One line on screen, in the operator's language, carrying two numbers (a key
  * with one placeholder just ignores the second): the framework's own toast, the
  * one GhostRevive uses. Silence when this dinput8 has no toast export - the log
- * line every caller writes next to this one is the record either way. */
+ * line every caller writes next to this one is the record either way.
+ *
+ * The translation is the operator's text, not a format string. It used to be
+ * handed to snprintf as one, which is undefined behaviour the first time a
+ * lang.ini row has a conversion too many or one too few - and a lang.ini is
+ * edited by hand. So the two are compared first: same conversions in the same
+ * order, and the translation is formatted; anything else falls back to this
+ * plugin's own template and says so, once per key, in the log. */
 static void Say(const char *key, uint32_t rgb, int a, int b) {
     char line[192];
+    char want[8], got[8];
+    const char *en, *tr;
 
     if (!p_toast) return;
-    snprintf(line, sizeof(line), ShLangText(PM_OWNER, key), a, b);
+    tr = ShLangText(PM_OWNER, key);
+    en = EnTemplate(key);
+    Conversions(en, want, sizeof(want));
+    Conversions(tr, got, sizeof(got));
+    if (en && tr && strcmp(want, got) == 0) {
+        snprintf(line, sizeof(line), tr, a, b);
+    } else if (en) {
+        if (tr)
+            Log("pm: %s: the translation reads its arguments as \"%s\" and en-US "
+                "as \"%s\", so the en-US text was used", key, got, want);
+        snprintf(line, sizeof(line), en, a, b);
+    } else {
+        /* No template here for this key, so there is nothing to check it
+         * against: the text goes out as it is. */
+        snprintf(line, sizeof(line), "%s", tr ? tr : key);
+    }
     p_toast(line, rgb, 2500u);
 }
 
@@ -429,14 +508,19 @@ static void OnSummon(uint32_t m, uint32_t it, int v, void *u) {
     req.distance = g_distM;
     req.formation = SH_NPC_FORMATION_RANDOM;
     req.facing = SH_NPC_FACING_PLAYER;
+    g_jobMade = 0;
+    g_entFull = 0;
+    /* No age until the job exists. The frame callback judges a batch that has not
+     * moved for fifteen seconds by this clock, and it reads the clock the moment
+     * it sees the job - publishing the job first let it judge a brand new batch
+     * on the previous one's age and ask it to stop. */
+    g_jobAt = 0;
     g_job = p_begin(&req);
     if (!g_job) {
         Log("pm: no free job (the framework keeps %d in flight); try again in "
             "a moment", SH_NPC_SPAWN_JOBS);
         return;
     }
-    g_jobMade = 0;
-    g_entFull = 0;
     g_jobAt = GetTickCount64();
     g_cdUntil = g_jobAt + PM_CD_MS;
     Log("pm: asked for %d of id %016llX%s%s: scattered, %.0f m ahead, spin step "
@@ -565,34 +649,28 @@ static void PmFrame(void *user) {
         }
     }
 
-    /* How many of what this page made are still up - counted over what this page
-     * made and no more, four times a second so a kill shows up while the
-     * operator is still looking at the line. A health read each is not a per
-     * frame cost. */
+    /* How many of what this page made are still up, asked for four times a second
+     * so a kill shows up while the operator is still looking at the line. The
+     * counting itself is the worker's, not this callback's: it is one health read
+     * per entity, and a health read reaches engine code that can block. All this
+     * does is raise the flag; the worker ticks every PM_TICK_MS, so the figure
+     * lands sooner than the four times a second it used to. */
     if (g_entCount > 0) {
         if (now - g_liveAt >= 250) {
-            int i, up = 0;
-
             g_liveAt = now;
-            for (i = 0; i < g_entCount; i++)
-                if (g_ent[i] && AliveNow(g_ent[i])) up++;
-            g_live = up;
+            InterlockedExchange(&g_liveWanted, 1);
         }
     } else {
         g_live = 0;
     }
 
-    /* What the health-zero row did, looked at a second later rather than taken
-     * on trust: health that still answers above zero is an entity still up. */
-    if (InterlockedCompareExchange(&g_killCheck, 0, 0) &&
-        now - g_killAt >= 1000) {
-        int i, up = 0;
-
-        InterlockedExchange(&g_killCheck, 0);
-        for (i = 0; i < g_entCount; i++)
-            if (g_ent[i] && AliveNow(g_ent[i])) up++;
+    /* What the health-zero row did, said a second later rather than taken on
+     * trust: health that still answers above zero is an entity still up. The
+     * counting is the worker's; this only reports what it found, because a health
+     * read is not this callback's work and a toast is not the worker's. */
+    if (InterlockedExchange(&g_killDone, 0)) {
         Log("pm: after the health-zero row: %d of the %d this page made are "
-            "still up", up, g_entCount);
+            "still up", (int)g_killUp, (int)g_entCount);
         RefreshStatus();
     }
 }
@@ -604,9 +682,33 @@ static void PmFrame(void *user) {
 static DWORD WINAPI PmWorker(LPVOID p) {
     (void)p;
     for (;;) {
-        /* Health 0 for everything this page has made: a write that has worked
-         * since the first version of this plugin. What it does is checked a
-         * second later by the frame callback, not claimed here. */
+        /* The field figure, moved here from the frame callback: one health read
+         * per entity is not work for the engine's frame. */
+        if (InterlockedExchange(&g_liveWanted, 0)) {
+            int i, up = 0;
+            int n = (int)InterlockedCompareExchange(&g_entCount, 0, 0);
+
+            for (i = 0; i < n; i++)
+                if (g_ent[i] && AliveNow(g_ent[i])) up++;
+            g_live = up;
+        }
+
+        /* The health-zero row, looked at again a second later: a read that still
+         * answers above zero is an entity still up. The log line and the status
+         * refresh are left to the frame callback, which is the only one of the two
+         * allowed to touch the menu. */
+        if (InterlockedCompareExchange(&g_killCheck, 0, 0) &&
+            GetTickCount64() - g_killAt >= 1000) {
+            int i, up = 0;
+            int n = (int)InterlockedCompareExchange(&g_entCount, 0, 0);
+
+            InterlockedExchange(&g_killCheck, 0);
+            for (i = 0; i < n; i++)
+                if (g_ent[i] && AliveNow(g_ent[i])) up++;
+            g_killUp = up;
+            InterlockedExchange(&g_killDone, 1);
+        }
+
         if (InterlockedCompareExchange(&g_kill, 0, 1) == 1) {
             int i, asked = 0;
 

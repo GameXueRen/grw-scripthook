@@ -261,7 +261,11 @@ static MicCoCreateInstance_t g_realCoCreateInstance;
 
 static volatile LONG g_cfgFix   = 1;
 static volatile LONG g_cfgForce = 0;
-static volatile LONG g_cfgProbe = 1;
+/* Off until the ini says otherwise, which is what LoadConfig's default is: this
+ * started life at 1, so anything that read it before the ini was loaded saw the
+ * probe on. Changing the startup order even slightly would have turned a
+ * diagnostic into a default. */
+static volatile LONG g_cfgProbe = 0;
 static volatile LONG g_cfgDevice;         /* row value: a device's position */
 static char g_targetKey[MIC_KEY_MAX];     /* what force matches on          */
 static volatile LONG g_targetOk;          /* 1 when that key was in the scan */
@@ -2907,12 +2911,35 @@ static DWORD WINAPI PollThread(LPVOID p) {
         Sleep(700);
         if (InterlockedCompareExchange(&g_stop, 0, 0)) return 0;
         if (InterlockedExchange(&g_rescanWanted, 0)) {
+            int before;
+
             if (InterlockedCompareExchange(&g_stop, 0, 0)) return 0;
             Log("rescan: asked for from the menu");
             ScanDevices();
+            before = g_nopt;
+            BuildDeviceOptions();
             if (g_menu) {
-                ShMenuClear(g_menu);
-                BuildMenuItems();
+                /* The device row reads its options through this file's own buffer
+                 * (BuildDeviceOptions points g_optPtr at g_optBuf), so a scan that
+                 * comes back with the same number of devices has nothing to
+                 * re-declare: the strings it displays are already the new ones,
+                 * and only the selected index may need syncing.
+                 *
+                 * A different count does need the row built again, and there the
+                 * page is cleared first - the framework's menu only appends rows
+                 * (NewItem takes the next slot), so declaring the device row twice
+                 * would show it twice. That pair of calls is the one place this
+                 * leaves the page blank for a frame; it is a deliberate trade
+                 * against showing a row that lies about what the scan found. */
+                if (g_nopt != before) {
+                    ShMenuClear(g_menu);
+                    BuildMenuItems();
+                } else {
+                    int pick = (int)InterlockedCompareExchange(&g_cfgDevice, 0, 0);
+
+                    ShMenuSetValue(g_menu, "@mic.device",
+                                   (pick >= 0 && pick < g_nopt) ? pick : 0);
+                }
             }
             UpdateStatus();
         }
