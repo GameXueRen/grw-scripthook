@@ -586,6 +586,7 @@ static void FinishPrevious(void) {
 static volatile LONG g_cbStage = 0;
 static volatile LONG g_cbIn = 0;
 static volatile LONG g_cbSeq = 0;
+static volatile LONG64 g_cbTick = 0;
 static volatile LONG g_stallWatched = 0;
 
 static DWORD WINAPI StallWatchThread(LPVOID p) {
@@ -626,11 +627,33 @@ static DWORD WINAPI StallWatchThread(LPVOID p) {
     return 0;
 }
 
+/* How long since the engine last came through the ray callback, and how many
+ * times it has come.
+ *
+ * This is the framework's only signal for "the game thread is still being asked
+ * to do things": the pump, the queued engine calls and every ground probe's cast
+ * happen in this callback and nowhere else. A caller that would otherwise sit on
+ * a deadline waiting for it can ask instead of guessing - a request made while
+ * the engine is casting nothing (entering the world, a load, a warm-up scan
+ * holding the game thread) is answered at once with that reason rather than
+ * after the deadline. -1 means the callback has never run this session. */
+int ShRayIdleMs(void) {
+    LONG64 t = g_cbTick;
+
+    if (!t) return -1;
+    return (int)((LONG64)GetTickCount64() - t);
+}
+
+LONG ShRaySeq(void) {
+    return g_cbSeq;
+}
+
 /* Runs on the game thread inside a live physics call. */
 static void __attribute__((ms_abi))
 RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
     InterlockedIncrement(&g_cbIn);
     InterlockedIncrement(&g_cbSeq);
+    g_cbTick = (LONG64)GetTickCount64();
     g_ctx = rcx;
     if (g_probeEv) SetEvent(g_probeEv);
     g_cbStage = 1;

@@ -270,6 +270,64 @@ static const void *g_pendMtx = NULL;
 static volatile uint64_t g_pendSpec = 0;
 static volatile int g_pendDone = 0;
 static volatile int g_pendErr = 0;
+/* Set by the pump while it is running a published request, cleared when it has
+ * finished. A waiter must not time out under a request that is already being
+ * executed: the engine calls inside it can take a while on a busy game thread,
+ * and an entity made after the waiter gave up is an entity nobody knows about -
+ * it is in no list, it is not counted against the ceiling, and zeroing the
+ * health of "what is out" walks straight past it. */
+static volatile LONG g_pendRunning = 0;
+
+/* The pump runs inside the engine's ray callback and nowhere else, so a request
+ * is a wait for that callback to come round - hundreds of times a second in play,
+ * but not at all while the engine is casting nothing (entering the world, a load,
+ * or a warm-up scan holding the game thread). Waiting out the whole deadline in
+ * that state buys a longer stall and nothing else, so the callback's own count is
+ * sampled as well: unchanged for SH_PUMP_STALL_MS means the pump is not coming,
+ * and the caller is told that now instead of later. */
+extern LONG ShRaySeq(void);
+extern int  ShRayIdleMs(void);
+
+#define SH_PUMP_STALL_MS 500
+
+/* Once the pump has claimed a request, the wait is bounded only by this: the
+ * engine calls inside a spawn can be slow on a busy game thread, and giving up
+ * under one is exactly what leaves an entity nobody knows about. It is a hard
+ * limit and not "for ever" because a game thread that has stopped answering
+ * would otherwise hold this thread for the rest of the session. */
+#define SH_PUMP_HARD_MS 20000
+
+static int WaitPump(volatile int *flag, int ms) {
+    DWORD start = GetTickCount();
+    DWORD end = start + (DWORD)ms;
+    DWORD hardEnd = start + SH_PUMP_HARD_MS;
+    DWORD lastMove = start;
+    LONG seq = ShRaySeq();
+
+    while (!*flag) {
+        DWORD now = GetTickCount();
+        HANDLE ev;
+        int claimed = InterlockedCompareExchange(&g_pendRunning, 0, 0) != 0;
+
+        if (now >= hardEnd) break;
+        if (claimed) {
+            /* The pump is running this very request; waiting is the only thing
+             * that can still turn it into an entity, and the ordinary deadline
+             * does not apply to it any more. */
+            lastMove = now;
+        } else if (ShRaySeq() != seq) {
+            seq = ShRaySeq();
+            lastMove = now;
+        } else if (now - lastMove >= SH_PUMP_STALL_MS) {
+            break;
+        }
+        if (!claimed && now >= end) break;
+        ev = GetPumpEvent();
+        if (ev) WaitForSingleObject(ev, 25);
+        else Sleep(1);
+    }
+    return *flag;
+}
 
 /* The archetype's own block, out of the catalogue.
  *
@@ -647,8 +705,13 @@ void ShNpcPump(void) {
         if (id) {
             const void *mtx = g_pendMtx;
 
+            /* Claimed before the work and released only after the answer is
+             * published: the waiter's deadline must not expire under a request
+             * that is already running. See g_pendRunning. */
+            InterlockedExchange(&g_pendRunning, 1);
             if (mtx) SpawnOnGameThread(id, mtx);
             g_pendDone = 1;
+            InterlockedExchange(&g_pendRunning, 0);
             did = 1;
         }
     }
@@ -798,8 +861,12 @@ uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos) {
     g_pendSpec = 0;
     g_pendMtx = mtx;
     g_pendId = archetypeId;
-    if (!WaitFlag(&g_pendDone, 3000)) {
+    if (!WaitPump(&g_pendDone, 3000)) {
         g_pendId = 0;
+        NpcWhy("no spawn was made: the game thread never came round to the "
+               "request (the world is loading, or something is holding the "
+               "engine's ray callback) - idle ms",
+               (uint64_t)(unsigned)(ShRayIdleMs() < 0 ? 0 : ShRayIdleMs()), 0);
         ShSetError(SH_ERR_NO_PHYSICS);
         return 0;
     }
@@ -1132,6 +1199,26 @@ static int SpawnBatch(const ShNpcSpawnRequest *req, uint64_t *out,
     }
 
     if (!ShRequireInGame()) return 0;
+
+    /* Everything below asks the game thread for something, and the game thread
+     * only answers inside the engine's ray callback. While the engine is casting
+     * nothing - entering the world, a load, or a warm-up scan holding it - each
+     * of those steps would sit on its own deadline instead: the batch that
+     * produced this guard took 23 seconds to come back and came back empty, and
+     * the only thing the player saw was "0 of the 1 asked for". A request that
+     * cannot be served is answered here, with the reason. */
+    {
+        int idle = ShRayIdleMs();
+
+        if (idle < 0 || idle > SH_PUMP_STALL_MS) {
+            NpcWhy("nothing was asked for: the engine has not cast a ray for a "
+                   "while, so nothing on the game thread could be reached - "
+                   "idle ms", (uint64_t)(unsigned)(idle < 0 ? 0 : idle), 0);
+            ShSetError(SH_ERR_NO_PHYSICS);
+            return 0;
+        }
+    }
+
     if (!ShGetPlayer(&pl) || !ShGetPlayerPosition(&pp) ||
         !ShGetEntityTransform(pl.entity, &tmp, &yaw, &pitch, &roll)) {
         ShSetError(SH_ERR_NO_POSITION);
