@@ -45,8 +45,17 @@
  * to be filled in - so an ini that is missing, unreadable, or has that line
  * blanked still summons what the plugin always summons. A file that is not
  * there at all is written once at load, so
- * the operator has something to edit. An ini that does exist is read and left
- * alone: the plugin cannot rewrite the file the operator keeps their notes in.
+ * the operator has something to edit.
+ *
+ * 2026-09-28: the rows write back. Until today the file was read and left
+ * alone - the reasoning was that a plugin should not rewrite the file the
+ * operator keeps their notes in - and the field reported what that means in
+ * practice: every setting changed on the page was gone the next time the game
+ * started. So a row marks the file dirty and the worker writes it out, at most
+ * once every PM_SAVE_MS (a slider dragged across its range is one write, not one
+ * per step). Comments in this file are lost when that happens, which is why the
+ * settings this plugin ships are a bare list; anything else an operator adds to
+ * it is theirs to re-add.
  *
  * 2026-09-27: before this, the ini was read-only and the id lived in it and
  * nowhere else. A package that dropped that one file therefore shipped a plugin
@@ -525,13 +534,60 @@ static void Say(const char *key, uint32_t rgb, int a, int b) {
     p_toast(line, rgb, 2500u);
 }
 
-/* The switch at the top of the page: summoning on or off for this session. The
- * ini decides the next one - this plugin never writes it (see the file head). */
+/* ---- writing the settings back ----------------------------------------- */
+
+/* Every row on this page goes through MarkDirty, and the worker writes the file
+ * once the changes have settled: a slider dragged across every one of its steps
+ * is one write, not one per step. See the file head for why this plugin writes
+ * its ini at all as of 2026-09-28. */
+#define PM_SAVE_MS 400
+static volatile LONG      g_dirty;
+static volatile ULONGLONG g_dirtyAt;
+
+static void MarkDirty(void) {
+    g_dirtyAt = GetTickCount64();
+    InterlockedExchange(&g_dirty, 1);
+}
+
+/* The whole [Settings] block, in the shape ReadSettings expects to read it back
+ * - the distance is a whole number of metres and the health keeps its decimal
+ * point, because that is what those two readers ask for. Keys this plugin does
+ * not own are left alone: WritePrivateProfileString replaces the key it is
+ * given and keeps the rest of the file. */
+static void SaveIni(void) {
+    char buf[64];
+
+    if (!g_ini[0]) {
+        Log("pm: no ini path, so the settings stay in memory only");
+        return;
+    }
+    snprintf(buf, sizeof(buf), "%d",
+             InterlockedCompareExchange(&g_on, 0, 0) ? 1 : 0);
+    WritePrivateProfileStringA("Settings", "enabled", buf, g_ini);
+    snprintf(buf, sizeof(buf), "0x%016llX", (unsigned long long)g_id);
+    WritePrivateProfileStringA("Settings", "id", buf, g_ini);
+    if (g_name[0])
+        WritePrivateProfileStringA("Settings", "name", g_name, g_ini);
+    snprintf(buf, sizeof(buf), "%d", g_count);
+    WritePrivateProfileStringA("Settings", "count", buf, g_ini);
+    snprintf(buf, sizeof(buf), "%d", g_cap);
+    WritePrivateProfileStringA("Settings", "cap", buf, g_ini);
+    snprintf(buf, sizeof(buf), "%d", (int)g_distM);
+    WritePrivateProfileStringA("Settings", "distance", buf, g_ini);
+    snprintf(buf, sizeof(buf), "%.1f", g_hp);
+    WritePrivateProfileStringA("Settings", "hp", buf, g_ini);
+    Log("pm: settings written to %s", g_ini);
+}
+
+/* The switch at the top of the page: summoning on or off, and the ini is
+ * written to match (see the file head). */
 static void OnEnabled(uint32_t m, uint32_t it, int v, void *u) {
     (void)m; (void)it; (void)u;
     InterlockedExchange(&g_on, v ? 1 : 0);
-    Log("pm: summoning is %s for this session; [Settings] enabled in the plugin "
-        "ini decides the next one", v ? "on" : "off");
+    MarkDirty();
+    Log("pm: summoning is %s; [Settings] enabled in the plugin ini is written "
+        "to match, so the next session starts the way this one was left",
+        v ? "on" : "off");
 }
 
 static void OnSummon(uint32_t m, uint32_t it, int v, void *u) {
@@ -546,8 +602,7 @@ static void OnSummon(uint32_t m, uint32_t it, int v, void *u) {
     if (!InterlockedCompareExchange(&g_on, 0, 0)) {
         Say("@pm.toast.off", 0xFFCC33u, 0, 0);
         Log("pm: the summon row was pressed with the switch off ([Settings] "
-            "enabled=0; the row at the top of the page turns it on for this "
-            "session)");
+            "enabled=0; the row at the top of the page turns it on)");
         return;
     }
     if (!g_id) {
@@ -664,6 +719,7 @@ static void OnKill(uint32_t m, uint32_t it, int v, void *u) {
 static void OnCount(uint32_t m, uint32_t it, int v, void *u) {
     (void)m; (void)it; (void)u;
     g_count = v < 1 ? 1 : (v > PM_COUNT_MAX ? PM_COUNT_MAX : v);
+    MarkDirty();
     Log("pm: %d per summon", g_count);
     RefreshStatus();
 }
@@ -671,6 +727,7 @@ static void OnCount(uint32_t m, uint32_t it, int v, void *u) {
 static void OnCap(uint32_t m, uint32_t it, int v, void *u) {
     (void)m; (void)it; (void)u;
     g_cap = v < PM_CAP_MIN ? PM_CAP_MIN : (v > PM_CAP_MAX ? PM_CAP_MAX : v);
+    MarkDirty();
     Log("pm: at most %d of them on the field at once", g_cap);
     RefreshStatus();
 }
@@ -683,6 +740,7 @@ static void OnDistance(uint32_t m, uint32_t it, int v, void *u) {
     if (v < 0) v = 0;
     if (v > 9) v = 9;
     g_distM = PM_DIST_MIN + PM_DIST_STEP * (float)v;
+    MarkDirty();
     Log("pm: %.0f m ahead of the player", g_distM);
     RefreshStatus();
 }
@@ -693,6 +751,7 @@ static void OnHp(uint32_t m, uint32_t it, int v, void *u) {
     if (v < 0) v = 0;
     if (v > 9) v = 9;
     g_hp = (float)(v + 1) / 10.0f;
+    MarkDirty();
     Log("pm: arrivals keep %.0f%% of their health%s", g_hp * 100.0f,
         g_hp > 0.999f ? " (full: nothing is written to their health)" : "");
     RefreshStatus();
@@ -785,6 +844,14 @@ static void PmFrame(void *user) {
 static DWORD WINAPI PmWorker(LPVOID p) {
     (void)p;
     for (;;) {
+        /* Rows changed on the page are written out here, once they have
+         * settled - see MarkDirty/SaveIni. */
+        if (InterlockedCompareExchange(&g_dirty, 0, 0) &&
+            GetTickCount64() - g_dirtyAt >= PM_SAVE_MS) {
+            InterlockedExchange(&g_dirty, 0);
+            SaveIni();
+        }
+
         /* The field figure, moved here from the frame callback: one health read
          * per entity is not work for the engine's frame. */
         if (InterlockedExchange(&g_liveWanted, 0)) {
