@@ -89,8 +89,7 @@ typedef struct {
     int      order;        /* negative: under the game */
     int      visible;
     uint64_t handle, priv, rootH, rootP;
-    uint64_t dead;         /* last session's scene */
-    uint64_t vt;           /* the scene class vtable, to verify dead */
+    uint64_t vt;           /* the scene class vtable, to verify a teardown */
     LONG     flippedFrame; /* flip once per frame */
 } SceneSlot;
 
@@ -528,19 +527,12 @@ static uint64_t __attribute__((ms_abi)) CreateJob(uint64_t sid, uint64_t b,
     uint8_t idx;
     (void)b; (void)c; (void)d;
 
-    /* The engine may have freed the previous scene with the
-     * world; destroying a stale handle faults the game. The
-     * vtable is cached at creation, so a recycled block fails
-     * the check and the teardown is skipped. */
-    if (s->dead) {
-        if (s->vt && RQ(s->dead) != s->vt)
-            Log("scene %llu: dead %llx stale, engine freed it",
-                (unsigned long long)sid,
-                (unsigned long long)s->dead);
-        else
-            DestroyEngineScene(s->dead);
-        s->dead = 0;
-    }
+    /* No teardown of a previous scene is owed here any more: a world reload
+     * hands its handles back to the engine and clears the slot (see
+     * ShSceneInvalidate), which is where the deferred destroy used to be queued
+     * and where it took the game down on 2026-09-27. A scene this slot still
+     * owns is one it made in this world, and there is none before the first
+     * create. */
 
     scene = EAlloc(0x10);
     if (!scene) return 0;
@@ -586,14 +578,29 @@ fail:
     return 0;
 }
 
+/* A teardown is only issued when the object still looks like the one this slot
+ * made: the vtable is cached at creation and compared here. That is a heuristic
+ * rather than a proof - a block the engine reused for a scene of the same class
+ * would pass it - which is exactly why a world reload queues nothing at all (see
+ * ShSceneInvalidate). This guard is what is left for the teardowns a caller asks
+ * for by name, where the slot still believes it owns a live scene. */
+static void DestroyIfOurs(uint64_t scene, uint64_t vt) {
+    if (!scene) return;
+    if (vt && RQ(scene) != vt) {
+        Log("scene %llx: not this slot's any more (class %llx), left alone",
+            (unsigned long long)scene, (unsigned long long)RQ(scene));
+        return;
+    }
+    DestroyEngineScene(scene);
+}
+
 static uint64_t __attribute__((ms_abi)) DestroyJob(uint64_t sid, uint64_t b,
                                                    uint64_t c, uint64_t d) {
     SceneSlot *s = &g_s[sid - 1];
     (void)b; (void)c; (void)d;
-    if (s->dead) { DestroyEngineScene(s->dead); s->dead = 0; }
     if (s->live) {
         s->live = 0;
-        DestroyEngineScene(s->handle);
+        DestroyIfOurs(s->handle, s->vt);
     }
     memset(s, 0, sizeof(*s));
     BumpOrder();
@@ -716,27 +723,32 @@ uint64_t ShScenePriv(int sid) {
     return ShSceneLive(sid) ? g_s[sid - 1].priv : 0;
 }
 
-uint64_t ShSceneDeadPriv(int sid) {
-    if (sid < 1 || sid > MAX_SCENES || !g_s[sid - 1].dead) return 0;
-    return RQ(g_s[sid - 1].dead + 8);
-}
-
-/* world reload: scenes stop, destroyed on next ensure */
+/* A world reload. The engine tears its world down and its scenes with it, so the
+ * handles in these slots are dangling from this moment on, and nothing here is
+ * ours to destroy any more: the engine owns its scenes again and frees them
+ * itself.
+ *
+ * This used to queue each handle for a teardown on the next ensure, with a vtable
+ * comparison as the guard against a handle the engine had already freed. On
+ * 2026-09-27 a handle passed that comparison - a recycled block of the same class
+ * looks exactly like ours - and the engine called a null pointer inside its own
+ * scene teardown, which ended the session. So the slot forgets the handle
+ * instead. At worst one scene per reload stays with the engine, which is the leak
+ * the leak probe exists to show; a session that ends is worse than a scene that
+ * outlives its world. */
 void ShSceneInvalidate(void) {
     int i;
     SLock();
     for (i = 0; i < MAX_SCENES; i++) {
         if (!g_s[i].live) continue;
-        Log("scene %d: invalidated %llx", i + 1,
-            (unsigned long long)g_s[i].handle);
-        if (g_s[i].dead) {
-            if (g_s[i].vt && RQ(g_s[i].dead) != g_s[i].vt)
-                Log("scene %d: dead %llx stale, engine freed it",
-                    i + 1, (unsigned long long)g_s[i].dead);
-            else
-                DestroyEngineScene(g_s[i].dead);
-        }
-        g_s[i].dead = g_s[i].handle;
+        Log("scene %d: invalidated %llx (the engine owns it from here)",
+            i + 1, (unsigned long long)g_s[i].handle);
+        g_s[i].handle = 0;
+        g_s[i].priv = 0;
+        g_s[i].rootH = 0;
+        g_s[i].rootP = 0;
+        g_s[i].vt = 0;
+        g_s[i].flippedFrame = -1;
         g_s[i].live = 0;
         BumpOrder();
     }
@@ -761,21 +773,22 @@ void ShSceneUnlock(uint64_t priv) {
     if (priv) ((Fn1)F_UNLOCK)(priv + 0x370);
 }
 
-/* Leak probe: counts for the 5s overlay heartbeat (see ovl).  A live
- * slot holds an engine scene; dead slots are scenes invalidated by a
- * world reload that are only destroyed on the next ensure.  Watch for
- * live/dead never returning to zero after leaving the world. */
+/* Leak probe: counts for the 5s overlay heartbeat (see ovl).  A live slot holds
+ * an engine scene. There is no third kind of slot any more - a world reload hands
+ * its scenes back to the engine instead of queueing them for a teardown (see
+ * ShSceneInvalidate) - so the third count is reported as 0 and is kept only
+ * because the overlay still prints it. Watch for live never returning to zero
+ * after leaving the world. */
 int ShSceneLeakProbe(int *used, int *live, int *dead) {
-    int i, u = 0, l = 0, d = 0;
+    int i, u = 0, l = 0;
     SLock();
     for (i = 0; i < MAX_SCENES; i++) {
         if (g_s[i].used) u++;
         if (g_s[i].live) l++;
-        if (g_s[i].dead) d++;
     }
     SUnlock();
     if (used) *used = u;
     if (live) *live = l;
-    if (dead) *dead = d;
+    if (dead) *dead = 0;
     return 0;
 }

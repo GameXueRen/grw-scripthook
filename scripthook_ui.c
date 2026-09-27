@@ -153,7 +153,6 @@ extern int  ShSceneRelease(int sid);
 extern int  ShSceneSetOrder(int sid, int order);
 extern int  ShSceneShow(int sid, int visible);
 extern uint64_t ShScenePriv(int sid);
-extern uint64_t ShSceneDeadPriv(int sid);
 extern void ShSceneInvalidate(void);
 extern int  ShPropRttiOf(uint64_t obj, char *out, int n);
 
