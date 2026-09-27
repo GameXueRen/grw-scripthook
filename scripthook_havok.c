@@ -113,20 +113,30 @@ static int Install(void) {
     memcpy(g_orig, at, HK_ALLOC_LEN);
     /* This module sets no error of its own on the way out, so without a
      * line here a stale constant is a body that is quietly never hooked. */
-    if (g_orig[0] != 0x48 || g_orig[1] != 0x89 || g_orig[2] != 0x5C) {
+    /* Four bytes, not three, and the fourth is asked for its shape rather than a
+     * value: 48 89 5C is mov [reg+disp8], rbx, the ModRM byte says the addressing
+     * goes through a SIB, and that SIB's base field has to say rsp - the body is
+     * saving rbx to the stack. Three bytes are shared by a great many prologues.
+     * The fifth byte is the stack offset itself; it belongs to this build's frame
+     * layout, so it is printed rather than required, and the line below records it
+     * for the day it is worth pinning. */
+    if (g_orig[0] != 0x48 || g_orig[1] != 0x89 || g_orig[2] != 0x5C ||
+        (g_orig[3] & 0x07) != 0x04) {
         LogFirst("scripthook_havok.log",
-                 "havok body %llX holds %02X %02X %02X, wanted 48 89 5C - "
-                 "stale constant?",
+                 "havok body %llX holds %02X %02X %02X %02X %02X, wanted "
+                 "48 89 5C <SIB base=rsp> ?? - stale constant?",
                  (unsigned long long)HK_ALLOC_BODY, g_orig[0], g_orig[1],
-                 g_orig[2]);
+                 g_orig[2], g_orig[3], g_orig[4]);
         return 0;
     }
     if (!BuildStub()) {
         LogFirst("scripthook_havok.log", "havok stub could not be built");
         return 0;
     }
-    LogFirst("scripthook_havok.log", "havok body %llX hooked",
-             (unsigned long long)HK_ALLOC_BODY);
+    LogFirst("scripthook_havok.log",
+             "havok body %llX hooked (48 89 5C 24 %02X - the last byte is this "
+             "build's stack offset, printed rather than required)",
+             (unsigned long long)HK_ALLOC_BODY, g_orig[4]);
 
     rel = (int64_t)(uintptr_t)g_stub - ((int64_t)HK_ALLOC_BODY + 5);
     if (rel > 0x7FFFFFFFLL || rel < -0x7FFFFFFFLL) return 0;

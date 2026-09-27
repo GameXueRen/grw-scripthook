@@ -138,7 +138,9 @@ int ShFovInstall(void) {
      * cannot report any other way: the caller sees SH_ERR_NO_CANDIDATE and
      * nothing says which site it was or what is there now.
      */
-    if (g_orig[0] != 0x89 || g_orig[1] != 0x88) {
+    if (g_orig[0] != 0x89 || g_orig[1] != 0x88 ||
+        g_orig[2] != 0x80 || g_orig[3] != 0x01 ||
+        g_orig[4] != 0x00 || g_orig[5] != 0x00) {
         LogFirst("scripthook_fov.log",
                  "fov site %llX holds %02X %02X %02X %02X %02X %02X, wanted "
                  "89 88 80 01 00 00 - stale constant?",

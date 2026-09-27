@@ -758,16 +758,42 @@ SH_API int ShHitHookInstall(void) {
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;
     }
-    /* This site is a call the patch reissues by hand and there is no byte
-     * check to catch a move, so the line records what is there this session:
-     * compared against the previous run's, it is what says the constant
-     * still points at the same call. */
+    /* The site is a call the patch reissues by hand, so the two pinned constants
+     * have to agree with what is really there. The bytes themselves cannot be
+     * pinned - the displacement moves with the build - but the target can, and
+     * that is the check scripthook_camera.c makes at its manager site: a call
+     * opcode, and a rel32 that lands on the address we think it lands on.
+     *
+     * Without it, a HIT_SITE that has moved means five bytes of whatever lives
+     * there now get overwritten. The byte line stays, and stays first: it is
+     * what a re-pin starts from. */
     {
-        uint8_t b[4];
+        uint8_t b[5];
+        int32_t rel32;
+        uint64_t target;
+
         memcpy(b, (const void *)(uintptr_t)fn, sizeof(b));
+        memcpy(&rel32, b + 1, sizeof(rel32));
+        target = (uint64_t)((int64_t)fn + 5 + (int64_t)rel32);
         LogFirst("scripthook_hit.log",
-                 "hit site %llX holds %02X %02X %02X %02X",
-                 (unsigned long long)fn, b[0], b[1], b[2], b[3]);
+                 "hit site %llX holds %02X %02X %02X %02X %02X",
+                 (unsigned long long)fn, b[0], b[1], b[2], b[3], b[4]);
+        if (b[0] != 0xE8) {
+            LogFirst("scripthook_hit.log",
+                     "hit site %llX starts with %02X, not E8 - it moved, no hook",
+                     (unsigned long long)fn, (unsigned)b[0]);
+            ShSetError(SH_ERR_HOOK_FAILED);
+            return 0;
+        }
+        if (target != (uint64_t)HIT_ORIG_CALL) {
+            LogFirst("scripthook_hit.log",
+                     "hit site %llX calls %llX, not %llX - one of them moved, "
+                     "no hook", (unsigned long long)fn,
+                     (unsigned long long)target,
+                     (unsigned long long)HIT_ORIG_CALL);
+            ShSetError(SH_ERR_HOOK_FAILED);
+            return 0;
+        }
     }
     s = (uint8_t *)ShAllocNear(fn);
     if (!s) { ShSetError(SH_ERR_HOOK_FAILED); return 0; }
