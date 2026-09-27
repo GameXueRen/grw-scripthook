@@ -33,7 +33,7 @@
 | `scripthook_spawn.c` | `SPEC_VTABLE`（学习式） | 先按形状走，学到的 vtable 与钉值对照打印 | 仍能找到对象，只多出误报，日志给出真值 |
 | `scripthook_weather.c` | `WX_RECORD` / `ENV_VTABLE` / `TIME_MGR` | 结构判定（可读 vtable、时钟落在 `[0,24)`）+ 学到值对照钉值 | 记 `the env vtable is not the pinned one …`，并给出要重新定址的值 |
 | `scripthook_reflect.c` | `FLOW_METHODS` `0x483B920` | 门 + 由 `state.c` 每 100 ms 汇报判定与真值 | 静默拒绝，但判定与真值仍会进日志 |
-| `scripthook_frame.c` | `FRAME_RVA` `0xBF42B60`（`Ai::SpawningManagerUpdate`） | 30 字节函数序言签名，打补丁前比对 | 拒绝打补丁，日志一行，`ShRegisterFrameCallback` 返回 0（**只在有人注册时才装 hook**） |
+| `scripthook_frame.c` | `FRAME_RVA` `0x0BF42B60`（`Ai::SpawningManagerUpdate`） | 30 字节函数序言签名，打补丁前比对 | 拒绝打补丁，日志一行，`ShRegisterFrameCallback` 返回 0（**只在有人注册时才装 hook**） |
 | `scripthook_fov.c` / `scripthook_camera.c` / `scripthook_blur.c` / `scripthook_havok.c` | `FOV_SITE` `0x81E0C22`(6) / `MGR_SITE` `0x81E0B7E`(5) / `BLUR_MATCH` `0x1485806C`(5+16) / `HK_ALLOC_BODY` `0x163CA8C0`(5) | 2026-09-27 逐行核对过：`fov` 比**全 6 字节**（当天实机跑过，日志 `matched (89 88 80 01 00 00)`）；`camera` 比操作码 + rel32 目标等于钉值（两处站点同款）；`blur` 比 16 字节掩码签名 + 立即数 ∈{0,1}；`havok` 比 4 字节，其中第 4 字节按**形状**判（SIB 的 base 必须是 rsp），**这一条 2026-09-27 由 3 字节升到 4 字节** | 一律拒绝改动 + 一行日志（判词里带上实际字节） |
 | `scripthook_hit.c` | `HIT_SITE` `0x14703F83`、`HIT_ORIG_CALL` `0x29B4E00` | **2026-09-27 新增**：站点首字节必须是 `E8`，且 rel32 解出的目标必须等于 `HIT_ORIG_CALL`（与 `camera` 的 manager site 同款）。在此之前这里是"照打不误"—— 源码注释自述没有字节校验，靠跨会话比对 4 字节代替 | 不符即 `SH_ERR_HOOK_FAILED`，拒绝打补丁 + 一行日志（含站点 5 字节，重定址从它开始） |
 
@@ -45,8 +45,8 @@
 
 | 模块 | 常量（RVA） | 用途 |
 |---|---|---|
-| `scripthook_ui.c` | `0xE4094B0` `0x674F1A0` `0x4D78D00` `0x32F5310` `0x32F4D00` `0x16BAFD60`、标签/图像一族 `0x336xxxx`/`0x333xxxx`、`VT_*` `0x3CFxxxx`/`0x3D0xxxx`、贴图一族 `0xDF5xxxx`/`0xE04F670`/`0x14FEEB0`（**这一行的匿名值与上面那个 `0x14FEEB0` 2026-09-27 未逐条复核**）、`G_DEVICE 0x4D5B0D8` | 自绘 UI 的对象、标签、贴图与设备 |
-| `scripthook_scene.c` | `0x32EE140` `0x32EE1C0` `0x16B9A730` `0x16B99DC0` `0x16B9B8C0` `0x16B99570` `0x173F9930` `0x173F9160`（**这 8 个匿名值 2026-09-27 未逐条复核**）、`F_FREE 0xE4F8110`、`F_LOCK 0x3621550`、`F_UNLOCK 0x3286FF0`、`RENDER_THUNK 0x32EE4A0`、`G_UIMGR 0x4D585E0`、`VT_GAME_RESOLVER 0x3A05A00` | 场景生命周期与渲染接管 |
+| `scripthook_ui.c` | 分配与挂载：`F_ALLOC_CTX` `0xE410100`、`F_ALLOC` `0x674F1A0`、`G_POOL` `0x4D78D80`、`F_ATTACH` `0x32F4230`、`F_CONT_CTOR` `0x32F5310`、`F_DIRTY` `0x16BAFD60`、`F_WIDGET_COLOUR` `0x32F3310`；标签：`F_LINST_CTOR` `0x336E440`、`F_LABEL_CREATE` `0x336EB60`、`F_LABEL_APPLY` `0x336EB20`、`F_LABEL_TEXT` `0x3336260`、`F_LABEL_SIZE` `0x3336310`、`F_LABEL_UPDATE` `0x16C30910`、`F_LABEL_REGIST` `0x3334E20`、`F_LABEL_FIXW` `0x3335AD0`、`F_LABEL_FIXH` `0x3336570`；图像与贴图：`F_IINST_CTOR` `0x336DB60`、`F_IMAGE_CREATE` `0x336E010`、`F_IMAGE_APPLY` `0x336DFC0`、`F_TEX_CTOR` `0xDF5C480`、`F_TEX_CREATE` `0xE04F670`、`F_TEX_MAP` `0xDF7FEB0`、`F_TEX_PUSH` `0x14FFE70`、`F_IMG_UV0` `0x32FD280`、`F_IMG_UV1` `0x32FD420`；设备：`G_DEVICE` `0x4D5B0D8`；vtable：`VT_LABEL` `0x3CF8930`、`VT_CONTAINER` `0x3CF0920`、`VT_CONT_PRIV` `0x3CF0958`、`VT_IMAGE` `0x3CF15C0`、`VT_LABEL_INST` `0x3D05228`、`VT_IMAGE_INST` `0x3D04E00` | 引擎 HUD 树里的原生控件（容器 / 标签 / 图像 / 贴图）。**2026-09-27 按源码逐条写名**。**使用者**：框架自己的 HUD 板与 toast（`scripthook_hud.c`，120 ms tick）、公测插件 `AmmoControl`（建自己的场景、读游戏 HUD 的弹药标签）、开发件 `test_plugin` / `ui_sample` / `ModeProbe`。**与 ImGui 菜单无关** —— 菜单画在 `scripthook_ovl.cpp`，它只从 `scripthook_hud.c` 取 toast 快照 |
+| `scripthook_scene.c` | `F_SCENE_CTOR` `0x32EE140`、`F_SCENE_DTOR` `0x32EE1C0`、`F_SCENE_TICK` `0x16B9BB20`、`F_SCENE_FLIP` `0x16B9B440`、`F_SCENE_RENDER` `0x16B99A30`、`F_SCENE_RESIZE` `0x16B98D80`、`F_SCENE_SETCTX` `0x16B9A730`、`F_SCENE_SETRES` `0x16B99DC0`、`F_FREE` `0xE4F8110`、`F_LOCK` `0x3621550`、`F_UNLOCK` `0x3286FF0`、`RENDER_THUNK` `0x32EE4A0`、`G_UIMGR` `0x4D585E0`、`VT_GAME_RESOLVER` `0x3A05A00` | 场景生命周期与渲染接管。**2026-09-27 按源码逐条写名**（原来那 8 个匿名值里 4 个是 2026-09 更新前的地址、4 个是 `rva-list.txt` 的试算草稿，见下） |
 | `scripthook_api.c` | `SH_PLAYER_GLOBAL 0x4BC3470`；`SH_VT_ENTITY 0x39C6DF8` / `SH_VT_SKELETON 0x3ACBB58`（**学习式**：运行时从玩家实体取得，`ShEntityVtable()`） | 玩家对象与实体类型判定 |
 | `scripthook_camera.c` | `CAM_THUNK 0x13796D0`、`CAM_IMPL 0xD67FFA0` | 相机取值与接管 |
 | `scripthook_fpx.c` | `0xA074190` `0x188CE00` `0x120ADE51` `0x1209EA35` `0x1209C0CC` `0x113A0875` `0x147FF653` `0x147FF669` `0x14897FBA` `0x2A185A0` `0x1489A365` `0x13A1255B` `0x149C3E7A` `0x2A257C0` `0x4B90638`（**全为匿名值，2026-09-27 未逐条复核**） | 第一人称/藏头的一批字节站点与两个引擎调用 |
@@ -75,6 +75,20 @@ spawn system (RETIRE is the weakest pin in this build)`。
 也就是说，它的失效症状是**"收不掉"（干净地失败并报出来）**，不是花屏也不是崩 ——
 但重新定址时它要排在前面：判据用 Domino 的 `UnspawnFromEntity` 调用点，
 不要再用 `.pdata` 候选。
+
+### `tools/rva-list.txt` 的用法（2026-09-27 补）
+
+那份文件是**重新定址当时的过程记录**：两列分别是"更新前的旧值"和"试算的新值"。它的
+`new` 列**不等于**源码现值 —— 2026-09-27 按名字比过约 10 处（`F_SCENE_TICK` /
+`F_SCENE_FLIP` / `F_SCENE_RENDER` / `F_SCENE_RESIZE`、`F_LOCK`、`F_TEX_PUSH`、`G_POOL`、
+`G_DEVICE`、`G_UIMGR`、`RENDER_THUNK`），每一处都与源码不同；里面还夹着"body 70%"、
+"only .pdata candidate (80%)"这类**当时**的置信度，那是判断过程的痕迹，不是结论。
+
+本文件第二节原先那一行匿名值就是从它抄的：4 个抄了 `old`（更新前的地址），4 个抄了
+`new`（试算草稿），于是 8 个全是错的（2026-09-27 已按源码改齐）。
+
+**用法**：拿它当"当时试过什么、哪一条还没在游戏里验证过"的线索；**取值一律以源码为准**，
+改完源码再回来改本文件。
 
 ## 三、当前构建
 
