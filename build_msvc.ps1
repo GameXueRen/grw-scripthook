@@ -35,6 +35,14 @@ param(
     # third_party/imgui; -Imgui overrides for a newer checkout.
     [string]$Imgui = (Join-Path $PSScriptRoot 'third_party\imgui'),
 
+    # Deploy only these plugins, by folder name: the same filter -Beta uses for
+    # the shipping set, named by hand. Nothing is moved out of plugins\, and every
+    # plugin not named here is neither built nor written - a plain run deploys the
+    # whole tree, which is what working on the framework does not want.
+    #   -Deploy micfix,PredatorMelee     those two, and the framework
+    #   -Deploy none                     the framework alone
+    [string[]]$Deploy = @(),
+
     # Public beta: build and deploy only the plugins that ship in it, and
     # move every other plugin folder out of the game's plugins\ into
     # plugins_off\<stamp>\ - moved, never deleted, so a plain build puts
@@ -92,8 +100,14 @@ $betaSet = @(
     'AllLanguages', 'CameraPresets', 'AmmoControl', 'TimeWeatherControl',
     'PredatorMelee'
 )
-$script:BetaOnly  = if ($Beta -or $Release) { $betaSet } else { $null }
+$script:BetaOnly  = if ($Beta -or $Release) { $betaSet }
+                    elseif ($Deploy.Count)   { if ($Deploy -contains 'none') { @('none') } else { $Deploy } }
+                    else                     { $null }
 $releaseBuild     = [bool]$Release
+# Only -Beta / -Release move the plugin folders that are not in the set. A named
+# -Deploy leaves the game's plugins\ exactly as it found it: it is for working on
+# one plugin or on the framework, not for staging a release.
+$moveAside        = ($Beta -or $Release)
 
 if (-not $Gamedir) {
     $candidate = Join-Path (Join-Path $root '..\..') "Tom Clancy's Ghost Recon Wildlands"
@@ -216,7 +230,7 @@ function Build-Plugin {
     param([string]$Name, [string]$Source, [string[]]$LinkArgs,
           [string[]]$ExtraSources)
     if ($script:BetaOnly -and ($script:BetaOnly -notcontains $Name)) {
-        Write-Host "skipped (not in the -Beta set): $Name"
+        Write-Host "skipped (not in the deploy set): $Name"
         return
     }
     $dir = Join-Path $outPlugins $Name
@@ -567,7 +581,7 @@ foreach ($rel in @('NpcProbe\npc-catalogue.txt', 'NpcProbe\npc-picks.txt')) {
 # every plugin folder outside the set is moved aside - never deleted - into
 # <gamedir>\plugins_off\<stamp>\. A plain build puts them back in place.
 $offDir = $null
-if ($script:BetaOnly) {
+if ($moveAside) {
     $offDir = Join-Path $Gamedir ('plugins_off\' + (Get-Date -Format 'yyMMdd_HHmmss'))
     foreach ($dir in (Get-ChildItem $outPlugins -Directory)) {
         if ($script:BetaOnly -contains $dir.Name) { continue }
