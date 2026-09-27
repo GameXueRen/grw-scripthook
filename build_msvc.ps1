@@ -191,9 +191,9 @@ if ($releaseBuild) { $c += '/DSH_RELEASE=1' }
 # The version comes from scripthook.h and is not typed again anywhere: that one
 # string is also what the loader's start up line, the crash report header, the
 # About page and the package folder name carry, so a second copy could only
-# disagree with it. "1.0-beta4" becomes file version 1.0.0.4 - the beta number
+# disagree with it. "1.0-beta5" becomes file version 1.0.0.5 - the beta number
 # in the fourth field - and a plain "1.0.3" would be 1.0.3.0. StringFileInfo
-# keeps the letters, so the dialog reads "1.0-beta4".
+# keeps the letters, so the dialog reads "1.0-beta5".
 $shVer = ''
 $shVer4 = '1,0,0,0'
 $shFlags = '0'

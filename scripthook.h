@@ -124,8 +124,37 @@ extern "C" {
  *  (SH_API_VERSION 2, see SH_REQUIRES_API): a plugin that needs more of the API
  *  than the framework in front of it offers is refused by name in the log and
  *  on screen, instead of starting and failing somewhere inside itself. And
- *  firstperson gained the row that switches its view change toast on and off. */
-#define SH_VERSION "1.0-beta4"
+ *  firstperson gained the row that switches its view change toast on and off.
+ *
+ *  1.0-beta5 (2026-09-27 night): the line that was stuck on the loading screen,
+ *  and the summon that sat there for twenty-three seconds.
+ *
+ *  The overlay draws on the game's own window and reaches dxgi's Present in
+ *  code rather than through a table, because a platform overlay's own present
+ *  never goes through the table - the field machine hung on the loading screen
+ *  for exactly that reason. Each swapchain gets its own table, so no other
+ *  module's is taken apart, and NVIDIA's own swapchain on its invisible window
+ *  is no longer mistaken for the render window.
+ *
+ *  A summon asks the game thread for its every step, and the game thread only
+ *  answers inside the engine's ray callback. While the engine casts nothing -
+ *  entering the world, a load, a warm-up scan holding it - a request used to
+ *  sit on one deadline per step and come back empty a quarter of a minute
+ *  later, leaving an entity in no list, uncounted and out of reach of the row
+ *  that zeroes the health of what is out. A request that cannot be served now
+ *  says so at once and with its reason, and one the pump has already taken is
+ *  no longer abandoned by its waiter.
+ *
+ *  ShRegisterFrameCallback and ShUnregisterFrameCallback have been declared
+ *  since the API was written and are implemented now, so a plugin that
+ *  imports them loads; the ground probe casts from that frame callback instead
+ *  of from the ray callback where it could stall the frame, and its lift above
+ *  the surface is a setting (ground_lift_cm, 10 cm). Every pinned site is
+ *  compared against what the build actually holds before anything is written
+ *  to it, the menu stops paying for idle work every frame, and the plugin scan
+ *  no longer writes the [plugins] section back - a missing line means load,
+ *  and a line the player wrote is left as it is. */
+#define SH_VERSION "1.0-beta5"
 
 /** Where this build's source lives, in one place for the same reason the
  *  version is: the About page formats it in rather than typing it, so a

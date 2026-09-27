@@ -1,17 +1,21 @@
 /* The version resource of dinput8.dll: what Windows shows in the file's
  * Properties, filled in by the build.
  *
- * The version arrives as defines - /d SH_FILEVER=1,0,0,4 /d SH_VERSTR=1.0-beta4
+ * The version arrives as defines - /d SH_FILEVER=1,0,0,5 /d SH_VERSTR=1.0-beta5
  * - because scripthook.h is where the version lives: the loader's start up
  * line, the crash report header, the About page and the package folder name all
  * read that one string, and a copy written here could only disagree with it.
- * The build parses it: "1.0-beta4" is file version 1.0.0.4, the beta number in
+ * The build parses it: "1.0-beta5" is file version 1.0.0.5, the beta number in
  * the fourth field, and a plain "1.0.3" would be 1.0.3.0. StringFileInfo keeps
- * the letters, so the Properties dialog reads "1.0-beta4".
+ * the letters, so the Properties dialog reads "1.0-beta5".
  *
  * CompanyName, LegalCopyright and Comments are deliberately absent: the reader
  * of a Properties dialog is looking for which build this is, and nothing here
  * has to say who made it - the About page and the README do that.
+ *
+ * FileDescription is one short line, "dinput8 proxy and plugin loader", since
+ * it is what a file list shows beside the name: the ProductName next to it
+ * already carries the name, so this one says what the file is.
  *
  * build_msvc.ps1 compiles this with rc.exe, the Makefile with windres, both
  * passing the same three defines; keep the two in step.
@@ -44,7 +48,7 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "FileDescription",  "GRW ScriptHook: the dinput8 proxy, the plugin loader and the menu"
+            VALUE "FileDescription",  "dinput8 proxy and plugin loader"
             VALUE "FileVersion",      SH_STR(SH_VERSTR)
             VALUE "InternalName",     "dinput8"
             VALUE "OriginalFilename", "dinput8.dll"

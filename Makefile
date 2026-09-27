@@ -2,7 +2,7 @@ CC = x86_64-w64-mingw32-gcc
 CXX = x86_64-w64-mingw32-g++
 # The version resource (scripthook.rc) wants the same values build_msvc.ps1
 # passes, and it reads them from the same place: SH_VERSION in scripthook.h.
-# "1.0-beta4" is file version 1,0,0,4 - the beta number in the fourth field -
+# "1.0-beta5" is file version 1,0,0,5 - the beta number in the fourth field -
 # and the string form keeps the letters.
 WINDRES = x86_64-w64-mingw32-windres
 SH_VER   := $(shell sed -n 's/^\#define SH_VERSION "\(.*\)"/\1/p' scripthook.h)
