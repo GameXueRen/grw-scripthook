@@ -759,6 +759,25 @@ static int CastUsable(void) {
     return 1;
 }
 
+/* One line for the whole chain, wherever the install gives up.
+ *
+ * Everything the ray callback drives goes away with it: ShSceneTick, ShSpawnPump
+ * and ShNpcPump are called from there and from nowhere else, and so are every
+ * queued engine call and every ground query. Without this line a refusal arrives
+ * as four unrelated symptoms - a summon batch that never moves, scene hooks that
+ * never fire, ground probes timing out at 500 ms, callers reporting no physics -
+ * each reported by its own module, none of them naming the cause. The reason is
+ * the one word that differs between the paths below.
+ *
+ * LogAlways: a level that has logging quietened is exactly when a session-long
+ * loss like this has to still say so. */
+static void RayChainDown(const char *why) {
+    LogAlways("physics: the ray callback is NOT installed (%s) - this session "
+              "has no scene tick, no spawn pump, no NPC pump, no ground query and "
+              "no queued engine call; every caller can only report its own "
+              "timeout", why);
+}
+
 static int InstallHook(void) {
     uint64_t fn = RAY_HOOK_SITE;
     uint8_t *s;
@@ -788,21 +807,29 @@ static int InstallHook(void) {
     if (g_stub) return 1;
     if (!ShReadableAddr(fn, (size_t)sizeof sig)) {
         Log("ray hook: %llX is not readable", (unsigned long long)fn);
+        RayChainDown("the site is not readable");
         return 0;
     }
     if (memcmp((const void *)(uintptr_t)fn, sig, sizeof sig) != 0) {
         Log("ray hook: %llX does not open like the pinned site - not patched "
             "(the pump and every ray would never run)", (unsigned long long)fn);
+        RayChainDown("the site does not open like the pinned one");
         return 0;
     }
     /* The site holds; the function it calls has to hold too, or the pump
      * would run and then call something else at a fixed address. Checked
      * once here rather than per ray: this is the only place it can be
      * decided for the session. */
-    if (!CastUsable()) return 0;
+    if (!CastUsable()) {
+        RayChainDown("the function it calls is not the pinned cast");
+        return 0;
+    }
 
     s = (uint8_t *)ShAllocNear(fn);
-    if (!s) return 0;
+    if (!s) {
+        RayChainDown("no stub could be allocated near the site");
+        return 0;
+    }
     memset(s, 0xCC, 0x1000);
 
     memcpy(s + o, PU, sizeof(PU)); o += sizeof(PU);
@@ -818,10 +845,15 @@ static int InstallHook(void) {
     *(uint64_t *)(s+o) = fn + n;
 
     rel = (int64_t)(uintptr_t)s - (int64_t)(fn + 5);
-    if (rel > 0x7FFFFFFFLL || rel < -0x7FFFFFFFLL) return 0;
-    if (!VirtualProtect((void *)(uintptr_t)fn, n,
-                        PAGE_EXECUTE_READWRITE, &old))
+    if (rel > 0x7FFFFFFFLL || rel < -0x7FFFFFFFLL) {
+        RayChainDown("the stub is too far from the site for a rel32 jump");
         return 0;
+    }
+    if (!VirtualProtect((void *)(uintptr_t)fn, n,
+                        PAGE_EXECUTE_READWRITE, &old)) {
+        RayChainDown("the site could not be made writable");
+        return 0;
+    }
     memcpy(g_orig, (void *)(uintptr_t)fn, n);
     g_origLen = n;
     memset(patch, 0x90, n);

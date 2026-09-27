@@ -112,8 +112,10 @@ ray hook: 7FF683CC18D0 hooked - the pump, the ground queries and every queued en
 1. 跑一次游戏，读 `logs\scripthook.log` 的 `game build:` 行——不匹配就把它加进
    `kKnownBuilds`（note 写清范围）。
 2. 逐个看模块日志里"有护栏"那批的判词（`not patched` / `not the pinned` /
-   `REFUSED` / `the engine calls do not have the pinned shape`）。**报错的那条就是
-   要重定址的那条**，日志里通常已经带上了该处的真实值或字节。
+   `REFUSED` / `the engine calls do not have the pinned shape` / `the ray callback
+   is NOT installed`）。**报错的那条就是要重定址的那条**，日志里通常已经带上了该处
+   的真实值或字节。最后那条是一句汇总：物理链一断，场景 tick、召唤泵、NPC 泵、地面
+   查询与排队引擎调用**全停** —— 看到它就不必再去解释那四个各自超时的现象了。
 3. 裸钉那批没有判词：按功能实机过一遍（自绘 UI、场景接管、相机、藏头、输入、
    天气、资源/技能、NPC、实体判定），坏了再定位。
 4. 定址手法有三套，按强度排：
