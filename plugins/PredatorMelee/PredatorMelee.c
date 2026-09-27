@@ -40,15 +40,28 @@
  * ceiling and the status line is a health read over what this page made, four
  * times a second, so a kill shows up while the operator is still looking.
  *
- * The ini is read, never written: every setting here has a default in the file
- * and the rows change it for the session. That way the plugin cannot rewrite
- * the file the operator keeps their notes in.
+ * The ini is an override, never a requirement. The id has a default in this
+ * file - PM_DEF_ID is the Predator's own archetype, not a placeholder waiting
+ * to be filled in - so an ini that is missing, unreadable, or has that line
+ * blanked still summons what the plugin always summons. A file that is not
+ * there at all is written once at load, so
+ * the operator has something to edit. An ini that does exist is read and left
+ * alone: the plugin cannot rewrite the file the operator keeps their notes in.
+ *
+ * 2026-09-27: before this, the ini was read-only and the id lived in it and
+ * nowhere else. A package that dropped that one file therefore shipped a plugin
+ * that could not summon anything, said so only in the log, and looked broken to
+ * the player who pressed the row - which is exactly what happened.
  *
  * Rules this follows, from the plugins that came before it:
- *   - the page is built either way; [Settings] enabled=1 is what lets the
- *     summon row through, and the row at the top of the page flips that for
- *     the session (it used to decide whether the page existed at all, which
- *     left a plugin nobody could find and no way to switch on in the game);
+ *   - the page is built either way; [Settings] enabled decides whether the
+ *     summon row goes through, and the row at the top of the page flips that
+ *     for the session (it used to decide whether the page existed at all,
+ *     which left a plugin nobody could find and no way to switch on in the
+ *     game). The default is 0 (2026-09-27, on request): a row that spawns
+ *     hostiles on a keypress is not something to hand a player who has not
+ *     asked for it, and the switch that turns it on is the first row of the
+ *     page this plugin just put up;
  *   - nothing engine-side is called from a menu callback except the job API,
  *     which is made for it; the health write runs in a worker, and the reads
  *     run on the frame hook, which is the game thread;
@@ -76,6 +89,7 @@ static const ShText kEn[] = {
     { "@pm.enabled",      "Summoning enabled" },
     { "@pm.summon",       "Summon the Predator (60 s cooldown)" },
     { "@pm.toast.off",    "The summon switch is off - the row at the top of this page turns it on." },
+    { "@pm.toast.noid",   "Nothing to summon: no archetype id - see the log." },
     { "@pm.toast.cd",     "Summon on cooldown: %d s to go." },
     { "@pm.toast.cap",    "The field is full (%d of %d) - zero their health, or raise the ceiling." },
     { "@pm.toast.busy",   "The last batch is still arriving." },
@@ -98,6 +112,7 @@ static const ShText kZh[] = {
     { "@pm.enabled",      "启用召唤" },
     { "@pm.summon",       "召唤铁血战士（CD 60s）" },
     { "@pm.toast.off",    "召唤开关是关的——打开本页最上面那一行" },
+    { "@pm.toast.noid",   "没有可召唤的对象：id 没设（见日志）" },
     { "@pm.toast.cd",     "召唤冷却中，还剩 %d 秒可召唤" },
     { "@pm.toast.cap",    "场上已满（%d/%d）—— 清零它们的血量，或抬高上限" },
     { "@pm.toast.busy",   "上一批还在出" },
@@ -133,11 +148,22 @@ static const ShText kZh[] = {
 #define PM_DIST_STEP  5.0f
 #define PM_ENT_MAX    256
 
+/* What this plugin summons when the ini says nothing - which includes the case
+ * of no ini at all. The id is the Predator's archetype in this build, the same
+ * one the shipped ini carries: the file overrides these values, it is not what
+ * makes the plugin work. */
+#define PM_DEF_ID   0x0154BBB495E1ULL
+
+/* There is deliberately no built-in name to go with it: [Settings] name is the
+ * operator's own note for whichever id they point this at, printed beside the id
+ * in the log, and a plugin has no business inventing one. */
+
 static char     g_ini[MAX_PATH];
 static volatile LONG g_on;           /* [Settings] enabled, and the row at the
                                       * top of the page: 0 = summons refuse */
-static uint64_t g_id;
-static char     g_name[64];          /* the operator's name for the id, or "" */
+static int      g_idFromIni;         /* the ini named an id; the log says which */
+static uint64_t g_id = PM_DEF_ID;
+static char     g_name[64];          /* the operator's note for the id, or "" */
 static int      g_count = 1;         /* how many per summon       */
 static int      g_cap = PM_CAP_DEF;  /* most on the field at once */
 static float    g_distM = PM_DIST_MIN;
@@ -247,13 +273,55 @@ static void IniStr(const char *key, char *out, int n) {
     if (g_ini[0]) GetPrivateProfileStringA("Settings", key, "", out, n, g_ini);
 }
 
+/* The ini this plugin reads, written once when it is not there at all: the keys
+ * and nothing else. The page carries the labels and the ranges, so prose in the
+ * file would be a second place to keep in step and one more thing to read; the
+ * file is storage. An ini that exists is never rewritten, so this cannot undo a
+ * setting, and the values written are the built-in ones - the plugin runs the
+ * same way with the file deleted. */
+static void SeedIni(void) {
+    static const char kBody[] =
+        "[Settings]\n"
+        "enabled=0\n"
+        "id=0x0154BBB495E1\n"
+        "count=1\n"
+        "cap=20\n"
+        "distance=5\n"
+        "hp=0.5\n";
+    FILE *f;
+
+    if (!g_ini[0]) return;
+    if (GetFileAttributesA(g_ini) != INVALID_FILE_ATTRIBUTES) return;
+    f = fopen(g_ini, "wb");
+    if (!f) {
+        Log("pm: no ini at %s and it cannot be written, so the built-in "
+            "settings are used", g_ini);
+        return;
+    }
+    fputs(kBody, f);
+    fclose(f);
+    Log("pm: no ini at %s, so one was written from the built-in settings",
+        g_ini);
+}
+
 static void ReadSettings(void) {
     char buf[64];
     int v;
 
+    /* An empty key means "keep the built-in value", not "no id". A missing ini,
+     * an ini with no [Settings] section, and a line somebody blanked all have to
+     * mean the same thing: what this plugin summons cannot depend on a file
+     * being shipped, unpacked and readable. */
     IniStr("id", buf, (int)sizeof(buf));
-    g_id = buf[0] ? (uint64_t)_strtoui64(buf, NULL, 16) : 0;
-    IniStr("name", g_name, (int)sizeof(g_name));
+    if (buf[0]) {
+        g_id = (uint64_t)_strtoui64(buf, NULL, 16);
+        g_idFromIni = 1;
+    }
+    IniStr("name", buf, (int)sizeof(buf));
+    if (buf[0]) {
+        strncpy(g_name, buf, sizeof(g_name) - 1);
+        g_name[sizeof(g_name) - 1] = 0;
+    }
 
     v = IniInt("count", g_count);
     g_count = v < 1 ? 1 : (v > PM_COUNT_MAX ? PM_COUNT_MAX : v);
@@ -483,8 +551,15 @@ static void OnSummon(uint32_t m, uint32_t it, int v, void *u) {
         return;
     }
     if (!g_id) {
-        Log("pm: [Settings] id is empty or unreadable, so there is nothing to "
-            "summon - put the archetype id there");
+        /* Unreachable while PM_DEF_ID is a real id - an empty key leaves the
+         * built-in value standing - but kept as the guard it has always been,
+         * and said on screen now as well: a row that does nothing when it is
+         * pressed reads as a freeze, and the reports of this plugin "not
+         * summoning" were all a silently refused press. */
+        Say("@pm.toast.noid", 0xFFCC33u, 0, 0);
+        Log("pm: no usable archetype id (built in %016llX, and the ini did not "
+            "give one either), so there is nothing to summon",
+            (unsigned long long)PM_DEF_ID);
         return;
     }
     /* Every refusal answers on screen as well as in the log. A row that does
@@ -783,16 +858,19 @@ static DWORD WINAPI InitThread(LPVOID p) {
      * enabled=0 means now is that the summon row refuses, not that this plugin
      * is invisible. It used to return here, which left the plugin unlisted and
      * with no way to turn it on from inside the game. */
+    SeedIni();
     g_on = IniInt("enabled", 0) ? 1 : 0;
     ReadSettings();
 
+    Log("pm: settings read from %s", g_ini[0] ? g_ini
+        : "the plugin itself (no ini path was resolved)");
     Log("pm: id %016llX%s%s, %d per summon, %.0f m, hp %.0f%%, ceiling %d, "
-        "cooldown %d s, summoning %s",
+        "cooldown %d s, summoning %s - the id is %s",
         (unsigned long long)g_id, g_name[0] ? " (" : "", g_name[0] ? g_name : "",
         g_count, g_distM, g_hp * 100.0f, g_cap, (int)(PM_CD_MS / 1000),
-        g_on ? "on" : "off");
+        g_on ? "on" : "off", g_idFromIni ? "from the ini" : "built in");
     if (!g_id)
-        Log("pm: [Settings] id is empty, so the summon row will only say so");
+        Log("pm: no usable archetype id, so the summon row will only say so");
     if (!p_layout)
         Log("pm: this dinput8 has no ShNpcSpawnSetLayout, so batches go "
             "straight ahead facing the player instead of scattering");
