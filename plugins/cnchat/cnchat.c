@@ -435,10 +435,18 @@ static SendJob g_sendJob;
 static DWORD WINAPI SendThread(LPVOID arg) {
     (void)arg;
     if (g_sendJob.send && g_sendJob.hwnd && g_sendJob.txt[0]) {
+        /* The world this text was written in. A forced reload (a failed
+         * mission, a load the engine starts by itself) is a different one,
+         * and in it this text is addressed to a chat box that no longer
+         * exists - see the hold below. */
+        int gen = ShUiGen();
+        int gone = 0;
         int i;
+
         /* Feed the text into the game's open chat box, then submit
          * with Enter - the exact channel GRW-CNChat uses. */
         for (i = 0; i < g_sendJob.len; i++) {
+            if (ShUiGen() != gen) { gone = 1; break; }
             PostMessageW(g_sendJob.hwnd, WM_CHAR,
                          (WPARAM)g_sendJob.txt[i], 1);
             Sleep(3);
@@ -449,12 +457,31 @@ static DWORD WINAPI SendThread(LPVOID arg) {
          * so the down state survives even the stretched frames that
          * follow a long character burst (the game samples the
          * keyboard state per frame, not per event - a short hold is
-         * what made long texts sporadically fail to auto-submit). */
+         * what made long texts sporadically fail to auto-submit).
+         *
+         * Held in steps, and the world is checked on each one: a reload
+         * that lands inside the hold is a world where this Enter means
+         * nothing, and the key must not still be down when it comes up.
+         * 2026-09-27: that is exactly what happened - the chat box was
+         * mid-send, the mission failed, and afterwards the game ignored
+         * every key and the mouse until it was restarted. */
         ReleaseKeys();
         Sleep(60);   /* DI re-attach after the capture comes off */
-        InjectKeyDown(VK_RETURN);
-        Sleep(800);
-        InjectKeyUp(VK_RETURN);
+        if (!gone && ShUiGen() != gen) gone = 1;
+        if (gone) {
+            Log("the world changed while the text was being sent: nothing "
+                "was submitted and no key was ever pressed");
+        } else {
+            InjectKeyDown(VK_RETURN);
+            for (i = 0; i < 16 && !gone; i++) {
+                Sleep(50);
+                if (ShUiGen() != gen) gone = 1;
+            }
+            InjectKeyUp(VK_RETURN);
+            if (gone)
+                Log("the world changed under the submit: the Enter was "
+                    "released early and nothing was submitted");
+        }
     } else {
         /* Cancelled.  Nothing is injected here on purpose: the capture
          * never hides the escapes (see Escapes() in scripthook_input.c),

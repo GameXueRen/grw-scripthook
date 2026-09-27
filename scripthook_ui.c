@@ -1449,6 +1449,28 @@ static int ValidParent(uint32_t scene, uint32_t parent) {
 /* The scene dies on reload; so does every widget in it. */
 void ShUiOnEnterPlaying(void) {
     int i;
+
+    /* A world reload is not a place to keep typing. A text-input session -
+     * or the keyboard swallow that an injection keeps up, see
+     * ShDrawInputSetSending - was opened for the world that just went away,
+     * and one that outlives its world leaves the game ignoring every press
+     * until it is restarted (field report 2026-09-27: the chat box was open
+     * and mid-send when a failed mission forced the world to reload, and
+     * every key and the mouse stopped reaching the game afterwards).
+     *
+     * Both are ended here, before the new world draws anything. Done before
+     * the UI lock is taken, because the draw module has a lock of its own
+     * and the two are not ordered. Each says so in the log, so the next
+     * report can say which of the two was still up. */
+    if (ShDrawInputIsOpen()) {
+        Log("state change: ending the input session (its world is gone)");
+        ShDrawInputClose();
+    }
+    if (ShDrawInputSending()) {
+        Log("state change: clearing the send flag (its world is gone)");
+        ShDrawInputSetSending(0);
+    }
+
     Lock();
     Log("state change: gen %d to %d", g_ctx.gen, g_ctx.gen + 1);
     ShSceneInvalidate();
