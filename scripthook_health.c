@@ -8,6 +8,7 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "image.h"
+#include "log.h"
 
 #define OFF_OWNER      0x028
 #define OFF_MAXHP      0x0F0
@@ -115,6 +116,17 @@ static int EngineComponent(uint64_t owner, uint64_t *out) {
 static int FindComponent(uint64_t owner, uint64_t *out) {
     MEMORY_BASIC_INFORMATION mbi;
     uint8_t *scan = (uint8_t *)0x1000000;
+
+    /* Said out loud, once per call site: this is the "tens of seconds" path
+     * (see the note in EntityComponent), and without a line here a call that
+     * takes half a minute looks like a hang with nothing to point at. Seen
+     * 2026-09-27: a vehicle dispatch sat here for 30 s, for a vehicle whose
+     * health component the fast lookup could not resolve - reached from the
+     * entity listing, which asks for health once per listed entity. */
+    LogFirst("scripthook_health.log",
+             "health: no component in the fast path for %llX - a full heap "
+             "pass follows (tens of seconds)",
+             (unsigned long long)owner);
 
     while (VirtualQuery(scan, &mbi, sizeof(mbi))) {
         uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
@@ -233,6 +245,35 @@ static int EntityComponent(uint64_t entity, uint64_t *out) {
     g_compOwner = root;
     ShSetError(SH_OK);
     return 1;
+}
+
+static int ReadHealth(uint64_t comp, uint32_t *cur, uint32_t *max);
+
+/* The same resolution without the heap pass.
+ *
+ * FindComponent walks the whole heap and is the "tens of seconds" path, so a
+ * caller that is only filling in a field must not reach it. ShFindEntities asks
+ * for health once per listed entity, and on 2026-09-27 a vehicle dispatch paid
+ * the full pass - 30 s, measured - because a vehicle's sub component does not
+ * resolve in the fast path. This answers from the engine lookup and from the
+ * cache only; the scan stays where it belongs, in ShGetHealthEntity.
+ *
+ * Not exported: it is for this module's other users, and a plugin that wants a
+ * real answer calls ShGetHealthEntity. */
+int ShHealthPeek(uint64_t entity, uint32_t *cur, uint32_t *max) {
+    uint64_t root = 0, comp = 0;
+
+    if (!entity || !ShRequireInGame()) return 0;
+    if (!ShWalkToRoot(entity, &root)) return 0;
+    if (EngineComponent(root, &comp)) {
+        g_comp = comp;                  /* the same short cache the call keeps */
+        g_compOwner = root;
+    } else if (g_comp && g_compOwner == root && CompValid(g_comp, root)) {
+        comp = g_comp;
+    } else {
+        return 0;                       /* not resolved yet, and no scan here */
+    }
+    return ReadHealth(comp, cur, max);
 }
 
 static int ReadHealth(uint64_t comp, uint32_t *cur, uint32_t *max) {

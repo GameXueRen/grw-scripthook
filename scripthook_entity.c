@@ -38,6 +38,8 @@ extern void ShSetError(int err);
 extern int ShRequireInGame(void);
 extern int ShGetHealthEntity(uint64_t entity, uint32_t *cur,
                              uint32_t *max);
+/* The same read without the heap pass; see scripthook_health.c. */
+extern int ShHealthPeek(uint64_t entity, uint32_t *cur, uint32_t *max);
 
 static uint64_t ImgAddr(uint64_t rva) {
     return (uint64_t)(uintptr_t)GetModuleHandleA(NULL) + rva;
@@ -124,8 +126,14 @@ static const struct {
  * costs ~8 kernel reads - and KindIndex runs it over every
  * component of every candidate entity during a find.  A small
  * open-addressed cache keyed by the object pointer removes the
- * repeat cost; ShInvalidate clears it with the rest. */
-#define CLS_CACHE 512
+ * repeat cost; ShInvalidate clears it with the rest.
+ *
+ * It was 512, which a single find thrashes: the world list measured 173
+ * entities on 2026-09-27, each with a handful of components, so the keys in
+ * flight are in the high hundreds - and every dispatch walked the list again
+ * with the entries already evicted. 4096 is the headroom that makes the second
+ * walk cheap, and it costs 64 KB of static. */
+#define CLS_CACHE 4096
 #define CLS_NONE  0xFFFFFFFFu
 static struct { uint64_t obj; uint32_t hash; } g_clsCache[CLS_CACHE];
 
@@ -1022,7 +1030,12 @@ SH_API int ShFindEntities(int kind, float radius, uint32_t flags,
         if (kind != SH_KIND_ANY
             && (ki < 0 || g_kinds[ki].kind != kind)) continue;
 
-        ShGetHealthEntity(e, &cur, &mx);
+        /* Peek, not resolve: this runs once per listed entity, and the real
+         * call falls back to a full heap pass when the fast lookup misses -
+         * 30 s inside a vehicle dispatch, measured 2026-09-27. maxHealth comes
+         * back 0 for an entity that has not been resolved by anyone yet, which
+         * is what the field means when it is unknown. */
+        ShHealthPeek(e, &cur, &mx);
 
         /* Insertion sort, nearest first. */
         for (j = n; j > 0 && out[j - 1].distance > d; j--)
@@ -1043,4 +1056,65 @@ SH_API int ShFindEntities(int kind, float radius, uint32_t flags,
     }
     ShSetError(SH_OK);
     return n;
+}
+
+/* The nearest entity of one kind, as a handle and nothing else.
+ *
+ * ShFindEntities answers a listing: every field of every entry, nearest first,
+ * up to `max` of them. A caller that wants one handle for the thing it has just
+ * spawned needs none of that, and the cost of it was measured on 2026-09-27: a
+ * vehicle dispatch spent ~200 ms here, and until that day it also paid a health
+ * lookup per entity (see ShHealthPeek). This walks the same list, keeps the
+ * nearest one inside maxDist of ref, and fills nothing else - no health, no
+ * name, no sort.
+ *
+ * Tried and taken out again, same day: filtering by the entity's spawning spec
+ * instead of by kind, on the reasoning that a dispatch knows the spec it asked
+ * for. The engine does not hand back that pointer for what it built - 21
+ * dispatches, each 120 looks over a world holding the vehicles, and not one
+ * match - so the filter is a kind filter and a walk, as before.
+ *
+ * radius is measured from the player, exactly as in ShFindEntities: a dispatch
+ * is placed where the operator aimed, not at the player, and the two windows
+ * are separate questions. Internal, not exported: it exists for the spawn path,
+ * and a plugin that wants a listing wants ShFindEntities. */
+int ShFindNearest(int kind, const ShVec3 *ref, float radius, float maxDist,
+                  uint64_t *out, float *outDist) {
+    uint64_t lst = 0, vtEnt, found = 0;
+    uint32_t cnt = 0, i;
+    ShVec3 me;
+    float best = maxDist;
+
+    if (!ref || !out) return 0;
+    *out = 0;
+    if (outDist) *outDist = 0.0f;
+    if (!ShRequireInGame()) return 0;
+    if (!WorldList(&lst, &cnt)) return 0;
+    if (!ShGetPlayerPosition(&me)) return 0;
+    vtEnt = ShEntityVtable();
+
+    for (i = 0; i < cnt && best > 0.0f; i++) {
+        uint64_t e = ShReadQ(lst + (uint64_t)i * 8);
+        float p[3], dx, dy, dz, d2;
+
+        if (!e || !ShReadableAddr(e, 0x90)) continue;
+        if (ShReadQ(e) != vtEnt) continue;
+        memcpy(p, (void *)(uintptr_t)(e + OFF_ENT_POS), 12);
+        dx = p[0] - me.x; dy = p[1] - me.y; dz = p[2] - me.z;
+        if (dx * dx + dy * dy + dz * dz > radius * radius) continue;
+        if (!IsRoot(e)) continue;
+        if (kind != SH_KIND_ANY) {
+            int ki = KindIndex(e);
+
+            if (ki < 0 || g_kinds[ki].kind != kind) continue;
+        }
+        dx = p[0] - ref->x; dy = p[1] - ref->y; dz = p[2] - ref->z;
+        d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 >= best * best) continue;
+        best = sqrtf(d2);              /* and the window closes behind it */
+        found = e;
+    }
+    *out = found;
+    if (outDist) *outDist = found ? best : 0.0f;
+    return found != 0;
 }

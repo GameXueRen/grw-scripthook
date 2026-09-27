@@ -592,11 +592,41 @@ static volatile uint64_t g_pendSpec = 0;
 static volatile const void *g_pendMtx = NULL;
 static volatile uint32_t g_pendSeq = 0;
 static volatile uint32_t g_doneSeq = 0;
+static volatile PVOID g_pumpEv = NULL;
+
+/* One event, created once, signalled when a request finishes, so the caller
+ * that queued it is woken instead of polling - the arrangement scripthook_npc.c
+ * already uses for its own pump. The module outlives every waiter, so the
+ * handle is never closed. */
+static HANDLE SpawnPumpEvent(void) {
+    HANDLE h = (HANDLE)g_pumpEv;
+
+    if (h) return h;
+    h = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (!h) return NULL;
+    if (InterlockedCompareExchangePointer(&g_pumpEv, h, NULL) != NULL) {
+        CloseHandle(h);              /* another thread won; use its handle */
+        h = (HANDLE)g_pumpEv;
+    }
+    return h;
+}
 
 void ShSpawnPump(void) {
     uint64_t spec = 0, mgr, spawner;
     const void *mtx = NULL;
     uint32_t my = 0;
+
+    /* Nothing queued: no lock, no work. This is called on every ray the engine
+     * casts - every bullet, every probe - and the lock below was being taken
+     * for a slot that is empty on all but a handful of calls in a session. A
+     * request is published under the lock before its caller waits, so an empty
+     * slot here means no caller is waiting on this pump. The release is kept:
+     * it is what lets a waiter whose request an earlier pump consumed go
+     * through. */
+    if (!g_pendSpec) {
+        g_doneSeq = g_pendSeq;
+        return;
+    }
 
     EnsureLocks();
     EnterCriticalSection(&g_pendLock);
@@ -647,28 +677,38 @@ void ShSpawnPump(void) {
             (unsigned long long)ImgAddr(RVA_COMMIT));
     }
     g_doneSeq = my;
+    {
+        HANDLE ev = SpawnPumpEvent();
+
+        if (ev) SetEvent(ev);        /* wake the caller waiting on this seq */
+    }
 }
+
+/* The nearest entity of one kind to a point, as a handle. Internal: see
+ * ShFindNearest in scripthook_entity.c, which walks the world list without
+ * filling a listing - a dispatch wants one handle, and the listing it used to
+ * go through cost ~200 ms a time (measured 2026-09-27). */
+extern int ShFindNearest(int kind, const ShVec3 *ref, float radius,
+                         float maxDist, uint64_t *out, float *outDist);
+/* The spec+0xA8 route was tried here and withdrawn on 2026-09-27: for a vehicle
+ * spec that field reads 0xFFFFFFFF rather than a handle block (20 dispatches,
+ * all the same), so the walk below stays the way this finds what it made. See
+ * the note in scripthook_npc.c, where the pins for it live. */
 
 /* The entity arrives a frame or two after the commit, so
  * look for the vehicle nearest where we asked for it.
- */
-static uint64_t EntityNear(const ShVec3 *pos, float tol) {
-    ShEntity found[48];
+ *
+ * The window is tol * tol, which is what this used to compare against (a
+ * distance against tol squared, so 20 asked for 400 m). That is kept as it is:
+ * a change that makes this a handle-only lookup is not the place to also change
+ * how far it looks. The distance now comes back and goes into the log. */
+static uint64_t EntityNear(const ShVec3 *pos, float tol, float *outDist) {
     uint64_t best = 0;
-    float bd = tol;
-    int n, i;
+    float d = 0.0f;
 
-    n = ShFindEntities(SH_KIND_VEHICLE, 120.0f, 0, found, 48);
-    for (i = 0; i < n; i++) {
-        float dx = found[i].pos.x - pos->x;
-        float dy = found[i].pos.y - pos->y;
-        float dz = found[i].pos.z - pos->z;
-        float d = dx * dx + dy * dy + dz * dz;
-        if (d < bd * bd) {
-            bd = (float)sqrt((double)d);
-            best = found[i].entity;
-        }
-    }
+    if (!ShFindNearest(SH_KIND_VEHICLE, pos, 120.0f, tol * tol, &best, &d))
+        return 0;
+    if (outDist) *outDist = d;
     return best;
 }
 
@@ -677,6 +717,8 @@ uint64_t ShSpawnVehicle(uint32_t vehicleId, const ShVec3 *pos) {
     const void *mtx;
     uint32_t mySeq;
     int waited;
+    ULONGLONG t0;
+    float foundDist = 0.0f;
 
     if (!pos) { ShSetError(SH_ERR_BAD_ARG); return 0; }
     if (!ShRequireInGame()) return 0;
@@ -705,12 +747,29 @@ uint64_t ShSpawnVehicle(uint32_t vehicleId, const ShVec3 *pos) {
     g_pendMtx = mtx;
     mySeq = ++g_pendSeq;
     LeaveCriticalSection(&g_pendLock);
-    Log("spawn: id=%x seq=%u", vehicleId, mySeq);
+    t0 = GetTickCount64();
+    /* The point as asked for, because where the vehicle ends up is a question
+     * about this line and the plugin's aim, not about this module: the matrix
+     * turns the player's own orientation into the vehicle's, and only the
+     * position comes from the caller. Seen 2026-09-27, when dispatches began
+     * landing behind the player and nothing here had moved. */
+    Log("spawn: id=%x seq=%u at %.1f %.1f %.1f", vehicleId, mySeq,
+        pos->x, pos->y, pos->z);
 
-    /* The pump runs in the physics hook, so wait for it. The
-     * hook fires every physics frame, so poll tightly. */
-    for (waited = 0; waited < 300 && g_doneSeq < mySeq; waited++)
-        Sleep(2);
+    /* The pump runs in the physics hook, so wait for it - on the event it
+     * signals, so the wait ends when the request does instead of on the next
+     * 2 ms tick. The deadline is the same 600 ms it always was, and the
+     * sequence is re-read every round, so a signal that went to another waiter
+     * (an auto-reset event wakes one) cannot leave this one stuck. */
+    {
+        HANDLE ev = SpawnPumpEvent();
+        ULONGLONG end = GetTickCount64() + 600;
+
+        while (g_doneSeq < mySeq && GetTickCount64() < end) {
+            if (ev) WaitForSingleObject(ev, 2);
+            else Sleep(2);
+        }
+    }
     if (g_doneSeq < mySeq) {
         /* Timed out: pull the request unless a newer one has
          * already replaced it (that one gets its own pump). */
@@ -726,12 +785,20 @@ uint64_t ShSpawnVehicle(uint32_t vehicleId, const ShVec3 *pos) {
         return 0;
     }
 
+    /* What the pump cost and what it left behind. This line is here because the
+     * entity line below used to report nothing but its own sleeps - "after
+     * 20 ms" on a call that had taken half a minute - which read as if the wait
+     * had been instant and the time had gone nowhere. Seen 2026-09-27. */
+    Log("spawn: seq=%u the pump answered after %u ms (doneSeq %u, pendSeq %u)",
+        mySeq, (unsigned)(GetTickCount64() - t0), (unsigned)g_doneSeq,
+        (unsigned)g_pendSeq);
+
     /* The vehicle appears a frame or two after the commit; the
      * first spawn of a model can stream its assets in for a
      * couple of seconds, so poll longer than a vehicle every
      * second and accept a wider radius. */
     for (waited = 0; waited < 120 && !ent; waited++) {
-        ent = EntityNear(pos, 20.0f);
+        ent = EntityNear(pos, 20.0f, &foundDist);
         if (!ent) Sleep(20);
     }
     if (!ent) {
@@ -742,13 +809,22 @@ uint64_t ShSpawnVehicle(uint32_t vehicleId, const ShVec3 *pos) {
          * list is a broken anchor, a populated one that is not near the
          * asked position is a vehicle that landed somewhere else. */
         ShSetError(SH_ERR_NO_CANDIDATE);
-        Log("spawn: id=%x seq=%u committed, entity not seen in %d ms "
-            "(%d vehicle(s) in the world list)",
-            vehicleId, mySeq, waited * 20, listed);
+        Log("spawn: id=%x seq=%u committed, entity not seen in %u ms "
+            "(%d look(s), %d vehicle(s) in the world list)",
+            vehicleId, mySeq, (unsigned)(GetTickCount64() - t0), waited,
+            listed);
     } else {
-        Log("spawn: id=%x seq=%u entity=%llx after %d ms",
-            vehicleId, mySeq, (unsigned long long)ent, waited * 20);
+        /* The whole call, not just the sleeps - see the note above the pump
+         * line. The distance is here because the window this looks in is
+         * tol squared (400 m, see EntityNear), so "found" on the first look
+         * does not say how near the vehicle actually was. */
+        Log("spawn: id=%x seq=%u entity=%llx after %u ms (%d look(s), %.1f m)",
+            vehicleId, mySeq, (unsigned long long)ent,
+            (unsigned)(GetTickCount64() - t0), waited, foundDist);
     }
+
+    /* (The direct-route cross-check that stood here answered its question on
+     * 2026-09-27 - see the note above EntityNear - and is gone.) */
     return ent;
 }
 
