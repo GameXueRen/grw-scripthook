@@ -197,10 +197,10 @@ static struct {
  * scan, because AssetAt re-checks the GUID and the class. */
 static uint64_t g_assetFontOff, g_assetImageOff;
 
-/* When a scan last came up empty. A miss is a whole-address-space walk
- * and the HUD poller asks for the assets every 120 ms; one empty result is
- * worth a wait, not a repeat. */
-static DWORD    g_scanMissAt;
+/* When a sliced walk last came up empty. The HUD poller asks for the assets every
+ * 120 ms and a walk reads a lot of memory, so one empty result is worth a wait
+ * rather than an immediate second walk. */
+static DWORD    g_awSettled;
 
 /* batches: edits recorded per thread, one job per commit */
 typedef struct {
@@ -375,80 +375,277 @@ static uint64_t AssetAt(uint64_t rec, const uint8_t *guid) {
     return rec;
 }
 
-/* One walk of the address space looking for the two asset records, in a
- * single pass so a cold first build does not pay for the missing assets
- * twice. Stops early once both are found.
+/* The two asset records, found by a walk of memory that is resumable: each call
+ * reads what fits in ASSET_SLICE_MS and comes back for the rest.
  *
- * privateOnly leaves out everything that is not the process's own heap.
- * The engine maps its .forge archives - tens of gigabytes of MEM_MAPPED
- * pages - and the sweep used to read those through the kernel as well.
- * That is where the twenty-nine seconds went (measured in the field, right
- * as the world came up, which is the stutter that was reported), and it
- * read them for nothing: an asset record is an engine object, so it lives
- * on the private heap. */
-static void ScanPass(uint64_t *font, uint64_t *image, int privateOnly) {
-    MEMORY_BASIC_INFORMATION mbi;
-    uint8_t *scan = NULL;
+ * It used to be one blocking walk, and on 2026-09-27 that walk took 28 seconds on
+ * a field machine - inside the frame that first asked for the UI, on the game
+ * thread, right as the world came up. The bytes are the cost, and most of them are
+ * not the heap: the engine maps its archives - ten .forge files, 53.4 GB together,
+ * the largest 21 GB - and the walk read every one of them through the kernel for
+ * nothing.
+ *
+ * Four passes now, each sliced, each reading only what the one before it did not:
+ *
+ *   0  the private heap's small regions - which is where the two records actually
+ *      sat (22:42 log: the font 47 KB into a 64 KB region, the image 12 KB into
+ *      another) and a sliver of the bytes;
+ *   1  the rest of the private heap - 4.4 GB of it, and the twenty-five seconds;
+ *   2  the other mappings, except views of a .forge archive (see IsForgeView) -
+ *      that is where the 53 GB goes, and it is skipped, not read;
+ *   3  the .forge views themselves, so an install whose records do turn out to
+ *      live inside an archive still finds them.
+ *
+ * A pass starts only when the one before it came up empty, and the caller is told
+ * "not ready" while the walk runs - on its own thread, so no frame waits. */
+#define ASSET_SLICE_MS 50u
 
-    while (VirtualQuery(scan, &mbi, sizeof(mbi)) &&
-           (!*font || !*image)) {
-        uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
-        if (next <= scan) break;
-        if (mbi.State == MEM_COMMIT &&
-            (!privateOnly || mbi.Type == MEM_PRIVATE) &&
-            (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
-                            PAGE_EXECUTE_READWRITE)) &&
-            !(mbi.Protect & PAGE_GUARD) &&
-            (uint64_t)(uintptr_t)mbi.BaseAddress < 0x800000000000ULL)
-        {
-            static uint8_t chunk[0x10000 + 0x40];
-            uint8_t *b = (uint8_t *)mbi.BaseAddress;
-            size_t done = 0, sz = mbi.RegionSize;
-            while (done < sz) {
-                size_t want = sz - done, got = 0, o;
-                if (want > 0x10000) want = 0x10000;
-                if (!ReadProcessMemory(GetCurrentProcess(), b + done,
-                                       chunk, want, &got) || got < 0x40)
-                    break;
+/* Small enough to be worth reading before the rest of the heap. An engine
+ * container of this size is a sliver of the bytes - and it is where the asset
+ * registry turned out to live. */
+#define ASSET_SMALL_REGION (128u * 1024u)
+
+/* How much is asked of the kernel at a time. The walk's cost turned out to be the
+ * number of ReadProcessMemory calls rather than the bytes: at 64 KB a call the
+ * measured walk made tens of thousands of them and spent 29.9 seconds doing it,
+ * all of it in the private heap - the archives were never reached. A quarter of a
+ * megabyte a call is the same read with a quarter of the calls. */
+#define ASSET_CHUNK (256u * 1024u)
+
+/* The walk's own state, touched by the walk thread and by nothing else. What the
+ * game thread reads is the published answer below. */
+static uint8_t *g_awReg;          /* region being read                    */
+static size_t   g_awRegSize;      /* its size                             */
+static size_t   g_awDone;         /* how much of it has been read         */
+static uint8_t *g_awNext;         /* where the region walk is up to       */
+static int      g_awPass;         /* 0 heap, 1 other mappings, 2 all      */
+static int      g_awFontPass;     /* which pass found each one            */
+static int      g_awImagePass;
+static size_t   g_awFontRegSize;  /* and the region it was sitting in     */
+static size_t   g_awImageRegSize;
+static uint64_t g_awFontOff;      /* and how far into that region         */
+static uint64_t g_awImageOff;
+static uint64_t g_awSkipped;      /* bytes left unread in .forge views    */
+static uint64_t g_awPassBytes[4]; /* what each pass actually cost         */
+static uint64_t g_awPassRegions[4];
+static uint32_t g_awReadMs;       /* time inside ReadProcessMemory        */
+static uint32_t g_awScanMs;       /* time searching what came back        */
+
+/* The answer, and the thread that produces it. Reading is the whole cost of the
+ * walk - twenty-eight seconds of it the one time it was measured - and none of it
+ * needs the game thread: the only memory the walk touches is its own chunk
+ * buffer, and a region the game releases mid read makes ReadProcessMemory fail,
+ * which the slice already handles. So the game thread starts a walk and is told
+ * "not ready" until the thread publishes; no frame ever waits for it. */
+static HANDLE          g_awThread;
+static volatile LONG   g_awReady;     /* 1 = the walk finished; both below
+                                       * are published once it is set      */
+static volatile LONG64 g_awFont, g_awImage;
+static DWORD           g_awLastMs;    /* how long the last walk took      */
+
+static void WalkReset(void) {
+    g_awReg = NULL; g_awRegSize = 0; g_awDone = 0;
+    g_awNext = NULL; g_awPass = 0;
+    g_awFontPass = 0; g_awImagePass = 0; g_awSkipped = 0;
+    g_awFontRegSize = 0; g_awImageRegSize = 0;
+    g_awFontOff = 0; g_awImageOff = 0;
+    memset(g_awPassBytes, 0, sizeof(g_awPassBytes));
+    memset(g_awPassRegions, 0, sizeof(g_awPassRegions));
+    g_awReadMs = 0; g_awScanMs = 0;
+}
+
+/* psapi's GetMappedFileName: taken from kernel32 where it is exported as K32...
+ * and from psapi.dll otherwise, so the framework grows no link dependency for one
+ * call. Null when neither is there, and then no view is skipped. */
+typedef DWORD (WINAPI *MappedNameFn)(HANDLE, LPVOID, LPSTR, DWORD);
+
+static MappedNameFn MappedName(void) {
+    static MappedNameFn fn;
+    static int tried;
+
+    if (!tried) {
+        HMODULE k = GetModuleHandleA("kernel32.dll");
+        tried = 1;
+        if (k) *(FARPROC *)&fn = GetProcAddress(k, "K32GetMappedFileNameA");
+        if (!fn) {
+            HMODULE p = LoadLibraryA("psapi.dll");
+            if (p) *(FARPROC *)&fn = GetProcAddress(p, "GetMappedFileNameA");
+        }
+    }
+    return fn;
+}
+
+/* True for a view of a .forge archive: the ten of them, 53.4 GB together, the
+ * largest 21 GB, every one mapped whole by the engine. Reading those is where the
+ * twenty-eight seconds went, and an asset record - an engine object - has no
+ * business living inside one. The name is the whole test. Size was tried as well
+ * and dropped: a file that merely sits beside the archives is not one of them, and
+ * only the archives are read by the engine as archives. */
+static int IsForgeView(MEMORY_BASIC_INFORMATION *mbi) {
+    MappedNameFn fn = MappedName();
+    static const char kForge[] = ".forge";
+    size_t suffix = sizeof(kForge) - 1;
+    char path[MAX_PATH];
+    DWORD n;
+    size_t len, i;
+
+    if (!fn) return 0;
+    n = fn(GetCurrentProcess(), mbi->BaseAddress, path, (DWORD)sizeof(path));
+    if (!n) return 0;                        /* not a view of a file at all */
+    len = (size_t)n;
+    if (len < suffix) return 0;
+    for (i = 0; i < suffix; i++)
+        if ((path[len - suffix + i] | 0x20) != kForge[i]) return 0;
+    return 1;
+}
+
+/* Which regions a given pass reads. Between them the four passes cover everything
+ * exactly once: the private heap in 0 and 1, every other mapping in 2, and the
+ * .forge views 2 skipped in 3. */
+static int RegionWanted(MEMORY_BASIC_INFORMATION *mbi) {
+    int tiny;                         /* not "small": windef.h defines that away */
+
+    if (mbi->State != MEM_COMMIT) return 0;
+    if (!(mbi->Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
+                          PAGE_EXECUTE_READWRITE))) return 0;
+    if (mbi->Protect & PAGE_GUARD) return 0;
+    if ((uint64_t)(uintptr_t)mbi->BaseAddress >= 0x800000000000ULL) return 0;
+    tiny = mbi->RegionSize <= ASSET_SMALL_REGION;
+    if (mbi->Type == MEM_PRIVATE) {
+        if (g_awPass == 0) return tiny;
+        if (g_awPass == 1) return !tiny;
+        return 1;
+    }
+    if (g_awPass < 2) return 0;
+    if (g_awPass == 2) {
+        if (IsForgeView(mbi)) {
+            g_awSkipped += mbi->RegionSize;
+            return 0;
+        }
+        return 1;
+    }
+    return IsForgeView(mbi);          /* pass 3: only what pass 2 left out */
+}
+
+/* Reads for at most budgetMs. Returns 1 when the walk has nothing left to do -
+ * both records found, or memory exhausted - and 0 when there is more to read. */
+static int ScanSlice(uint64_t *font, uint64_t *image, DWORD budgetMs) {
+    static uint8_t chunk[ASSET_CHUNK + 0x40];
+    MEMORY_BASIC_INFORMATION mbi;
+    DWORD end = GetTickCount() + budgetMs;
+
+    for (;;) {
+        if (g_awReg && g_awDone < g_awRegSize) {
+            size_t want = g_awRegSize - g_awDone, got = 0, o;
+            uint32_t t0 = GetTickCount();
+            int ok;
+
+            if (want > ASSET_CHUNK) want = ASSET_CHUNK;
+            /* A page released mid walk fails the call for the whole chunk, so ask
+             * for less rather than give up on the rest of the region. */
+            for (;;) {
+                got = 0;
+                ok = ReadProcessMemory(GetCurrentProcess(), g_awReg + g_awDone,
+                                       chunk, want, &got);
+                if (ok || want <= 0x1000) break;
+                want >>= 1;
+            }
+            g_awReadMs += GetTickCount() - t0;
+            if (ok && got >= 0x40) {
+                uint32_t s0 = GetTickCount();
+                const uint8_t fb = g_fontGuid[0], ib = g_imageGuid[0];
                 for (o = 0; o + 0x40 <= got; o += 8) {
                     uint64_t rec;
+                    uint8_t b = chunk[o];
+                    /* Two memcmp a step over 3.8 GB measured 3501 ms; a guid's
+                       first byte almost never matches, so look at it first. */
+                    if (b != fb && b != ib) continue;
                     /* record {object, flags, guid}: the object
                        must carry an Asset class vtable */
-                    if (!*font &&
-                        memcmp(chunk + o, g_fontGuid, 16) == 0) {
-                        rec = (uint64_t)(uintptr_t)(b + done + o) - 0x10;
-                        if (AssetAt(rec, g_fontGuid)) *font = rec;
+                    if (!*font && b == fb && memcmp(chunk + o, g_fontGuid, 16) == 0) {
+                        rec = (uint64_t)(uintptr_t)
+                              (g_awReg + g_awDone + o) - 0x10;
+                        if (AssetAt(rec, g_fontGuid)) {
+                            *font = rec;
+                            g_awFontPass = g_awPass;
+                            g_awFontRegSize = g_awRegSize;
+                            g_awFontOff = (uint64_t)(uintptr_t)
+                                          (g_awReg + g_awDone + o) -
+                                          (uint64_t)(uintptr_t)g_awReg;
+                        }
                     }
-                    if (!*image &&
-                        memcmp(chunk + o, g_imageGuid, 16) == 0) {
-                        rec = (uint64_t)(uintptr_t)(b + done + o) - 0x10;
-                        if (AssetAt(rec, g_imageGuid)) *image = rec;
+                    if (!*image && b == ib && memcmp(chunk + o, g_imageGuid, 16) == 0) {
+                        rec = (uint64_t)(uintptr_t)
+                              (g_awReg + g_awDone + o) - 0x10;
+                        if (AssetAt(rec, g_imageGuid)) {
+                            *image = rec;
+                            g_awImagePass = g_awPass;
+                            g_awImageRegSize = g_awRegSize;
+                            g_awImageOff = (uint64_t)(uintptr_t)
+                                           (g_awReg + g_awDone + o) -
+                                           (uint64_t)(uintptr_t)g_awReg;
+                        }
                     }
                 }
+                g_awScanMs += GetTickCount() - s0;
+                g_awPassBytes[g_awPass] += got;
                 /* overlap so a pair on the chunk edge is seen */
-                done += (got > 0x38) ? got - 0x38 : got;
+                g_awDone += (got > 0x38) ? got - 0x38 : got;
+            } else {
+                /* a region released mid walk: it is not coming back */
+                g_awDone = g_awRegSize;
+            }
+            if (*font && *image) return 1;
+            if (GetTickCount() >= end) return 0;
+            continue;
+        }
+
+        /* this region is finished: step to the next one that can hold an object */
+        g_awReg = NULL;
+        if (VirtualQuery(g_awNext, &mbi, sizeof(mbi))) {
+            uint8_t *next = (uint8_t *)mbi.BaseAddress + mbi.RegionSize;
+            if (next > g_awNext) {
+                g_awNext = next;
+                if (RegionWanted(&mbi)) {
+                    g_awReg = (uint8_t *)mbi.BaseAddress;
+                    g_awRegSize = mbi.RegionSize;
+                    g_awDone = 0;
+                    g_awPassRegions[g_awPass]++;
+                }
+                if (GetTickCount() < end) continue;
+                return 0;
             }
         }
-        scan = next;
+        /* this pass is over: the next one, or nothing left to read */
+        if (g_awPass < 3) { g_awPass++; g_awNext = NULL; continue; }
+        return 1;
     }
 }
 
-/* The heap first, and the whole address space only if that misses. The
- * records are heap objects, so the second pass is not expected to run at
- * all - it is there so a build this code has not seen still finds them. */
-static void ScanAssets(uint64_t *font, uint64_t *image) {
-    ScanPass(font, image, 1);
-    if (!*font || !*image)
-        ScanPass(font, image, 0);
+/* The walk, on its own thread. It publishes what it found and then ends: the
+ * handle is closed by the next FindAssets that sees the walk done. */
+static DWORD WINAPI AssetWalkThread(LPVOID p) {
+    uint64_t font = 0, image = 0;
+    DWORD t0 = GetTickCount();
+
+    (void)p;
+    /* A chore, not work the player is waiting on: it reads for as long as it takes
+     * and must not take cycles off the game doing it. */
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    while (!ScanSlice(&font, &image, ASSET_SLICE_MS))
+        ;
+    g_awLastMs = GetTickCount() - t0;
+    InterlockedExchange64(&g_awFont, (LONG64)font);
+    InterlockedExchange64(&g_awImage, (LONG64)image);
+    InterlockedExchange(&g_awReady, 1);       /* publishes the two above */
+    return 0;
 }
 
-/* Cached asset records, verified in place, then one combined
- * scan for whatever is still missing. The scan is a whole
- * address space walk and takes seconds on a cold session, so
- * the verified offsets matter for the very first F4. */
-static void FindAssets(uint64_t *font, uint64_t *image) {
+/* Cached asset records, verified in place, then - for whatever is still missing -
+ * a walk of memory on a thread of its own (see AssetWalkThread). Returns 1 when
+ * both records are known, 0 while a walk is still running. */
+static int FindAssets(uint64_t *font, uint64_t *image) {
     uint64_t rec;
-    DWORD t0 = GetTickCount();
 
     if (!*font && g_assetFontOff) {
         rec = AssetAt(ShImageBase() + g_assetFontOff, g_fontGuid);
@@ -458,15 +655,80 @@ static void FindAssets(uint64_t *font, uint64_t *image) {
         rec = AssetAt(ShImageBase() + g_assetImageOff, g_imageGuid);
         if (rec) *image = rec; else g_assetImageOff = 0;
     }
-    if (*font && *image) return;
-    if (g_scanMissAt && (DWORD)(t0 - g_scanMissAt) < 10000u) return;
-    ScanAssets(font, image);
-    if (*font) g_assetFontOff = *font - ShImageBase();
-    if (*image) g_assetImageOff = *image - ShImageBase();
-    if (!*font || !*image) g_scanMissAt = t0;
-    Log("asset scan: %lu ms, font %llx image %llx",
-        (unsigned long)(GetTickCount() - t0),
-        (unsigned long long)*font, (unsigned long long)*image);
+    if (*font && *image) return 1;
+
+    if (g_awThread) {
+        if (!InterlockedCompareExchange(&g_awReady, 0, 0))
+            return 0;                        /* still walking */
+        CloseHandle(g_awThread);
+        g_awThread = NULL;
+        *font  = (uint64_t)g_awFont;
+        *image = (uint64_t)g_awImage;
+        g_assetFontOff  = *font  ? *font  - ShImageBase() : 0;
+        g_assetImageOff = *image ? *image - ShImageBase() : 0;
+        Log("asset scan: %lu ms on its own thread, font %llx image %llx",
+            (unsigned long)g_awLastMs, (unsigned long long)*font,
+            (unsigned long long)*image);
+        Log("asset scan: found in pass %d for the font and %d for the image "
+            "(0 private heap under %llu KB, 1 the rest of it, 2 other mappings, "
+            "3 .forge views); %llu MB of .forge views skipped, not read",
+            g_awFontPass, g_awImagePass,
+            (unsigned long long)(ASSET_SMALL_REGION >> 10),
+            (unsigned long long)(g_awSkipped >> 20));
+        Log("asset scan: read %llu MB over %llu region(s) in %llu ms, searched "
+            "them in %llu ms, %llu KB a call",
+            (unsigned long long)((g_awPassBytes[0] + g_awPassBytes[1] +
+                                  g_awPassBytes[2] + g_awPassBytes[3]) >> 20),
+            (unsigned long long)(g_awPassRegions[0] + g_awPassRegions[1] +
+                                 g_awPassRegions[2] + g_awPassRegions[3]),
+            (unsigned long long)g_awReadMs, (unsigned long long)g_awScanMs,
+            (unsigned long long)(ASSET_CHUNK >> 10));
+        Log("asset scan: per pass, MB and region(s): 0 %llu/%llu, 1 %llu/%llu, "
+            "2 %llu/%llu, 3 %llu/%llu",
+            (unsigned long long)(g_awPassBytes[0] >> 20),
+            (unsigned long long)g_awPassRegions[0],
+            (unsigned long long)(g_awPassBytes[1] >> 20),
+            (unsigned long long)g_awPassRegions[1],
+            (unsigned long long)(g_awPassBytes[2] >> 20),
+            (unsigned long long)g_awPassRegions[2],
+            (unsigned long long)(g_awPassBytes[3] >> 20),
+            (unsigned long long)g_awPassRegions[3]);
+        Log("asset scan: font sat %llu KB into a %llu KB region, image %llu KB "
+            "into a %llu KB region",
+            (unsigned long long)(g_awFontOff >> 10),
+            (unsigned long long)(g_awFontRegSize >> 10),
+            (unsigned long long)(g_awImageOff >> 10),
+            (unsigned long long)(g_awImageRegSize >> 10));
+        if (*font && *image) return 1;
+        g_awSettled = GetTickCount();        /* came up empty: wait before another */
+        return 0;
+    }
+
+    /* Nothing about memory changes inside a few milliseconds and a walk reads a
+     * lot of it, so a walk that has just come up empty is not repeated at once.
+     * The poller asks every 120 ms. */
+    if (g_awSettled && (DWORD)(GetTickCount() - g_awSettled) < 10000u)
+        return 0;
+
+    WalkReset();
+    InterlockedExchange(&g_awReady, 0);
+    InterlockedExchange64(&g_awFont, 0);
+    InterlockedExchange64(&g_awImage, 0);
+    g_awThread = CreateThread(NULL, 0, AssetWalkThread, NULL, 0, NULL);
+    if (!g_awThread) {
+        /* No thread to be had. Rather than leave the UI without its assets, the
+         * walk runs here - the blocking version this change exists to avoid, kept
+         * as the last resort it is: one session, one hitch. */
+        DWORD t;
+        Log("asset scan: no thread; walking on the game thread");
+        while (!ScanSlice(font, image, ASSET_SLICE_MS))
+            ;
+        t = GetTickCount();
+        g_assetFontOff  = *font  ? *font  - ShImageBase() : 0;
+        g_assetImageOff = *image ? *image - ShImageBase() : 0;
+        g_awSettled = (*font && *image) ? 0 : t;
+    }
+    return 0;                                /* answered when the walk is done */
 }
 
 static int Nibble(char c) {
@@ -542,7 +804,11 @@ static int Resolve(int sid) {
     }
     if (ShSceneLive(sid)) return 1;
     g_ctx.pool = RQ(G_POOL);
-    FindAssets(&g_ctx.fontAsset, &g_ctx.imageAsset);
+    if (!FindAssets(&g_ctx.fontAsset, &g_ctx.imageAsset)) {
+        /* the walk is not finished: the caller comes back next poll */
+        ShSetError(SH_ERR_UI_NOT_READY);
+        return 0;
+    }
     if (!g_ctx.fontAsset || !g_ctx.imageAsset) {
         ShSetError(SH_ERR_UI_ASSET);
         return 0;
