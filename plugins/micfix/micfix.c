@@ -124,11 +124,18 @@
  * Both are live, and both are written back to this plugin's own ini
  * plugins\micfix\micfix.ini:
  *
- *   fix=1     hand the game ASCII aliases for names it cannot read.
- *             On by default: enabling the plugin in scripthook.ini is
- *             already the opt-in, and a fix plugin that does nothing until
- *             a second switch is flipped is a plugin nobody can tell apart
- *             from a broken one.
+ *   fix=0     the default (2026-09-27, on request): every device name is
+ *             left exactly as the system wrote it, and this plugin changes
+ *             nothing until it is asked to.
+ *   fix=1     hand the game ASCII aliases for names it cannot read. A device
+ *             whose names are all ASCII is never touched either way.
+ *             It was the default until 2026-09-27: the reasoning was that
+ *             loading the plugin is already the opt-in, and a fix that does
+ *             nothing until a second switch is flipped is hard to tell apart
+ *             from a broken one. That holds for a fix, but not for a plugin
+ *             that rewrites what the game is handed the moment it is
+ *             installed - the switch is one row away on the plugin's own
+ *             page, and the page is where someone who wants the fix looks.
  *   force=0   offer the game the picked device and no other. Picking a
  *             device in the menu turns this on, because that is what
  *             picking one means.
@@ -259,7 +266,11 @@ static MicCoCreateInstance_t g_realCoCreateInstance;
 
 /* ---- settings --------------------------------------------------------- */
 
-static volatile LONG g_cfgFix   = 1;
+/* Off until the ini says otherwise, which is what LoadConfig's default is -
+ * see the switch note in the file head. The initial value has to agree with
+ * that default: anything that reads this before the ini is loaded would
+ * otherwise see a fix the operator has switched off. */
+static volatile LONG g_cfgFix   = 0;
 static volatile LONG g_cfgForce = 0;
 /* Off until the ini says otherwise, which is what LoadConfig's default is: this
  * started life at 1, so anything that read it before the ini was loaded saw the
@@ -2737,7 +2748,7 @@ static void SaveIni(void) {
 }
 
 static void LoadConfig(void) {
-    InterlockedExchange(&g_cfgFix,   IniInt("fix", 1) ? 1 : 0);
+    InterlockedExchange(&g_cfgFix,   IniInt("fix", 0) ? 1 : 0);
     InterlockedExchange(&g_cfgForce, IniInt("force", 0) ? 1 : 0);
     InterlockedExchange(&g_cfgProbe, IniInt("probe", 0) ? 1 : 0);
     InterlockedExchange(&g_cfgDevice, IniInt("device", 0));
