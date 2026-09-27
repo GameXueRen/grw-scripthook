@@ -415,6 +415,16 @@ Build-Plugin 'VehicleProbe' 'VehicleProbe.c' @($libPath, 'libscripthook.lib', 'u
 # the operator writes in [NpcProbe] ids, which is how a legacy id is checked.
 # Off until its own ini says enabled=1. Not in the beta set: it ships to nobody.
 Build-Plugin 'NpcProbe'      'NpcProbe.c'      @($libPath, 'libscripthook.lib', 'user32.lib')
+# PredatorMelee is the other half of that work: a crowd of one archetype, for
+# watching a fight. It spawns through the framework's batch API, so a menu
+# callback starts a job on the API's own worker rather than blocking on the
+# physics pump, and it writes entity health once, the moment an entity appears -
+# never in a loop, because EnemyReinforce's header records what hardening what
+# it spawned used to do to the frame. Health is a fraction of the maximum (the
+# maximum is readable and not writable) and the archetype is an ini setting, not
+# a constant. Read only: the plugin never writes its own ini. Off until its ini
+# says enabled=1. Not in the beta set: it ships to nobody.
+Build-Plugin 'PredatorMelee' 'PredatorMelee.c' @($libPath, 'libscripthook.lib', 'user32.lib')
 # AmmoControl is the capacity multiplier and an automatic reload. Every change
 # goes through the framework's own engine calls (ShSetAmmoScale for the
 # capacity, ShFakeKey for the reload), so it installs no hook of its own and
