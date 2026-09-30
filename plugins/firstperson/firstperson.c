@@ -11,6 +11,13 @@
  * What this plugin owns is the part a player touches: the
  * on/off state, the eye offset, the hotkey, the menu, and
  * telling the player what is happening.
+ *
+ * The view always uses the game's own fov. It is not offered as a
+ * setting and nothing here holds one: the engine narrows its own fov to
+ * bring the sights up, and a fov written over that frame covers the
+ * transition - the sight arrives in one jump. Only the game's own value
+ * leaves the aim transition natural (the user's own read, 2026-09-29),
+ * so the plugin is deliberately silent about the fov.
  */
 /* Binds late by choice. Plugins may import the ScriptHook
  * directly instead, since the loader loads them from a
@@ -45,6 +52,16 @@ SH_REQUIRES_API(1);
 #define OFF_MIN     -100.0f
 #define OFF_MAX     100.0f
 #define OFF_STEP    1.0f
+
+/* There is no fov row and no fov channel held here. The view keeps whatever
+ * fov the game itself gives it, which is the whole point: the engine narrows
+ * its own fov to bring the sights up, and a fov of ours written over that
+ * frame covers the transition - the sight arrives in one jump instead of
+ * travelling in. Only the game's own value leaves the aim transition natural
+ * (measured 2026-09-29), so this plugin offers none and touches none. The
+ * fov_changer plugin is where a player who wants a fixed fov goes; the two
+ * are unaffected by each other.
+ */
 
 /* The offset is not one set of numbers, it is one per kind of
  * moment: a motorcycle leans, a helicopter seat sits high, a
@@ -249,6 +266,12 @@ typedef void     (*Fp2HeadShow_t)(int);
 typedef int      (*Fp2Bow_t)(void);
 typedef uint32_t (*Fp2Age_t)(void);
 typedef int      (*PluginAllowed_t)(void);
+/* The camera field release, the one hand-back this plugin makes. It is for
+ * SH_CAM_HEAD and nothing else now: taking the eye leaves the camera's own
+ * fov alone (there is no fov row), so this is not a shared channel with
+ * fov_changer and only this plugin's head claim is ever given back. Optional,
+ * like the engine side: without it a held claim would not be released. */
+typedef void     (*ShCameraReleaseFields_t)(uint32_t);
 
 /* Config convention, shared by every plugin: the .ini sits
  * beside the .asi and takes its base name, so
@@ -293,6 +316,9 @@ static Fp2HeadShow_t  g_fpxHeadShow;
 static Fp2Bow_t       g_fpxBow;
 static Fp2Age_t       g_fpxAge;
 static int            g_fpxUp = 0;   /* engine sites are patched */
+/* The camera field release, late bound like everything else, used once and
+ * only for this plugin's own SH_CAM_HEAD claim (see Hold). */
+static ShCameraReleaseFields_t g_camRelease;
 
 static uint32_t g_menu = 0;
 /* The toggle, flipped from the menu worker and from the hotkey thread, so
@@ -1115,7 +1141,8 @@ static DWORD WINAPI TickThread(LPVOID p) {
 
     /* Unloading: the eye and the head go back from here. Shown rather than
      * simply dropped, because the engine's own path only shows the head once
-     * first person has let go of it. */
+     * first person has let go of it. Nothing else is handed back: the camera's
+     * own fov was never touched, so there is nothing of ours left on it. */
     if (InterlockedCompareExchange(&g_on, 0, 0)) {
         InterlockedExchange(&g_on, 0);
         ShowHead();
@@ -1424,6 +1451,12 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_fpxHeadShow = GetProcAddress(m, "ShFp2HeadShow");
     *(FARPROC *)&g_fpxBow = GetProcAddress(m, "ShFp2Bow");
     *(FARPROC *)&g_fpxAge = GetProcAddress(m, "ShFp2Age");
+    /* Optional, and the only camera field call left: the release of this
+     * plugin's own SH_CAM_HEAD claim on the way down (see Hold). The camera's
+     * fov is never touched, so there is no fov call to bind. Without this one
+     * the hold is not given back, which is what an older dinput8 gets. */
+    *(FARPROC *)&g_camRelease =
+        GetProcAddress(m, "ShCameraReleaseFields");
 
     if (!g_inGame || !g_state || !g_fp || !g_release ||
         !menuCreate || !menuToggle || !menuNumber ||
@@ -1486,6 +1519,8 @@ static DWORD WINAPI BindThread(LPVOID p) {
                  HOTKEYS, g_hotKey, OnHotKey, NULL);
     /* Under it: whether a change of view says anything on screen. */
     menuToggle(g_menu, "@fp.say.enabled", (int)g_sayOn, OnSayToggle, NULL);
+    /* No fov row: the view keeps the game's own fov so the engine's own
+     * sight-up transition shows (see the note at the top of this file). */
     /* Which set of offsets is in force: Auto follows what the
      * player is doing, a preset holds one set regardless. */
     if (menuList) {

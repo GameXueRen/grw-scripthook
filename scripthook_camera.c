@@ -46,6 +46,28 @@
 #define MGR_LEN     5
 #define MGR_NEXT    SH_IMG(0x10D8E20)
 
+/* The instruction one step before that call: the engine storing
+ * the position it has just built, movaps [rax+170],xmm2, seven
+ * bytes, then the call this file hooks. It is the second way in
+ * and it is the community table's - Wildlands First Person,
+ * Last Rites RC1, decoded 2026-09-29. That table patches this
+ * store, writes the position and needs nothing else of the
+ * manager: no +170, no +190, no fov to read. So it is the way
+ * back in for a build where those offsets drift, at the cost of
+ * giving up the transform and the fov this file also writes.
+ *
+ * Checked every session, never patched - see MgrStoreCheck. It
+ * is here so that the question "is the other way in still on
+ * this build?" is answered by a log line rather than by a
+ * session spent reading bytes, which is what the 2026-09-27
+ * update cost.
+ */
+#define MGR_STORE     SH_IMG(0x81E0B77)
+#define MGR_STORE_LEN 7
+static const uint8_t MGR_STORE_SIG[MGR_STORE_LEN] = {
+    0x0F, 0x29, 0x90, 0x70, 0x01, 0x00, 0x00
+};
+
 /* Verified live in gameplay: the mode at +0x6C reads 3, so
  * consumers take the position from +0x170 while the render
  * camera takes the rows at +0x190. Both are restated. */
@@ -53,6 +75,14 @@
 #define MGR_POS     0x170
 #define MGR_FOV     0x180
 #define MGR_XFORM   0x190
+
+/* MEASURE 2026-09-30: MGR_ALT (+0x1E0) and ShCameraAltEye, the probe that
+ * restated the eye into that third position the engine keeps in the same
+ * manager, went with the rest of the measurement. What it established is in
+ * docs/firstperson-aim-flash-and-offset.md: the copy sits about 0.39 m from
+ * the eye, off along one axis, writing it changes nothing on screen, and it
+ * is therefore not what the weapon or optic alignment reads.
+ */
 
 /* Ownership is per field, so two plugins can hold different
  * parts of the camera at once. Orbit is a private bit: it
@@ -248,13 +278,15 @@ static void ApplyPose(float *m, float fov) {
 /* First person sits centimetres from the weapon and arms, but the
  * engine's near plane is tuned for its third-person chase camera, so
  * gun geometry inside it is sliced and the multi-kilometre far plane
- * leaves almost no depth precision on weapon parts. Pull it in only
- * while the first person path owns the eye, never tighter than the
- * engine's own value (zoom optics can run closer), and write the
- * remembered stock plane back once on release. */
+ * leaves almost no depth precision on weapon parts. Pull it in while
+ * first person is on, never tighter than the engine's own value (zoom
+ * optics can run closer), and write the remembered stock plane back
+ * once first person lets go. */
 #define CAM_NEAR_FP 0.02f
 static float g_nearStock = 0.0f;
 static int   g_nearStockValid = 0;
+static int   g_nearLoggedHeld = 0;
+static int   g_nearLoggedStock = 0;
 
 static void NearRestore(void) {
     if (!g_nearStockValid) return;
@@ -263,19 +295,32 @@ static void NearRestore(void) {
     g_nearStockValid = 0;
 }
 
-/* Whether first person owns the eye this frame. The head claim alone
- * is not enough: a frame the engine path declines - an aim, a menu,
- * the drone - is a frame the engine's own camera carries the view,
- * and its near plane is the one it tuned. So the claim has to be
- * armed AND the eye actually placed, measured the way the rest of
- * this file measures it: g_headWroteAt, the stamp ShFp2PlaceEye's
- * success refreshes every frame it takes the camera. The same
- * window the view state lends (FP_LIVE_MS) covers a frame or two
- * the placement has to sit out. */
-static int FpEyeOwned(void) {
-    return (g_apply & CAM_HEAD_BIT) != 0
-        && g_headWroteAt != 0
-        && GetTickCount64() - g_headWroteAt <= FP_LIVE_MS;
+/* Whether first person is ON - a constant policy for the near plane:
+ * it follows the switch, not the camera's ownership this frame.
+ *
+ * CAM_HEAD_BIT is the framework's own "first person holds the camera"
+ * state (set by ShCameraFirstPerson, cleared by every other claim /
+ * release). It is deliberately NOT FpEyeOwned(): that one is true only
+ * on frames we actually WROTE the eye, so it goes false the instant the
+ * aim byte hands the frame to the engine (ShFp2PlaceEye's skip[3]
+ * branch does not refresh g_headWroteAt). Gating the near plane on the
+ * write made it flip back to the engine's stock value on the aim frame
+ * and back again on release - a render-parameter step at each edge, the
+ * near-plane twin of the fov hysteresis flash. The community table never
+ * touches the near plane at all, which is why it never had that step.
+ *
+ * 2026-09-29, user report: "opening the sights flashes for one frame".
+ * That frame is exactly the write-to-handover edge; the near plane was
+ * following the handover while it only ever had to follow the switch.
+ *
+ * This is a CONSTANT policy: the near plane is pulled in every frame
+ * first person is on - the aim frames included, where we still hold
+ * CAM_HEAD_BIT even though the engine carries the eye - and given back
+ * once first person is off. There must be NO threshold, NO grace, NO
+ * timer, and above all NO "look at who owns the camera this frame"
+ * branch here. A judge that can drift is a judge that flashes. */
+static int FpNearHeld(void) {
+    return (g_apply & CAM_HEAD_BIT) != 0;
 }
 
 /* Skew and mode belong to the render camera, so they stay
@@ -288,7 +333,10 @@ static void ApplyFields(uint64_t cam) {
     }
     if (g_apply & SH_CAM_MODE)
         *(int *)(uintptr_t)(cam + CAM_MODE) = g_modeSet;
-    if (FpEyeOwned()) {
+    /* Constant policy: keyed on first person being ON, not on who
+     * owns the camera this frame. See FpNearHeld above. The write is
+     * still skipped when already at CAM_NEAR_FP (kept from before). */
+    if (FpNearHeld()) {
         float nearPlane = *(const float *)(uintptr_t)(cam + CAM_NEAR);
         /* Capture the stock plane once, from a plausible gameplay value;
          * a scope already engaged must not become the restore target. */
@@ -296,8 +344,14 @@ static void ApplyFields(uint64_t cam) {
             g_nearStock = nearPlane;
             g_nearStockValid = 1;
         }
-        if (g_nearStockValid && nearPlane > CAM_NEAR_FP)
+        if (g_nearStockValid && nearPlane > CAM_NEAR_FP) {
             *(float *)(uintptr_t)(cam + CAM_NEAR) = CAM_NEAR_FP;
+            if (!g_nearLoggedHeld) {
+                g_nearLoggedHeld = 1;
+                Log("near: held at %.4f (stock %.4f)", CAM_NEAR_FP,
+                    g_nearStock);
+            }
+        }
     }
 }
 
@@ -319,11 +373,18 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
     g_cam = rcx;
     g_calls++;
     /* The near plane first person pulled in goes back on the first
-     * frame the eye is not owned. Every way the claim can be
-     * dropped - the plugin's switch, a release, the engine path
-     * declining frame after frame - ends in this callback next,
-     * so this one place retires it for all of them. */
-    if (!FpEyeOwned()) NearRestore();
+     * frame first person is OFF - keyed on the switch (CAM_HEAD_BIT),
+     * not on who owns the camera: the aim frames keep the bit and keep
+     * the plane. Every way the switch can be dropped - the plugin's
+     * release, an orbit / free claim - ends in this callback next, so
+     * this one place retires it for all of them. */
+    if (!FpNearHeld()) {
+        if (g_nearLoggedHeld && !g_nearLoggedStock) {
+            g_nearLoggedStock = 1;
+            Log("near: restored to stock (first person off)");
+        }
+        NearRestore();
+    }
     /* When we last owned the eye, for the hand over grace in
      * ShCameraViewMode. */
     if (g_apply & CAM_HEAD_BIT) g_headHeldAt = GetTickCount64();
@@ -398,8 +459,26 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
 
 /* The manager's own transform, before any consumer reads
  * it. Rows match CAM_POSE: 0 right, 1 forward, 2 up, 3 the
- * translation. RAX holds the manager at the patch site. */
-static void __attribute__((ms_abi)) MgrCallback(uint64_t cm) {
+ * translation. RAX holds the manager at the patch site.
+ *
+ * MEASURE 2026-09-29: the return value is the eye this frame placed, or
+ * NULL. The stub in BuildMgrStub loads it into xmm2 before the tail
+ * jump, so the engine's own downstream - the weapon and optic alignment
+ * among it - reads the eye rather than the camera the engine had in
+ * xmm2. Bounded by g_altEye, off in a stock build, and live: the next
+ * frame is already on the new answer. NULL means "no eye to offer, keep
+ * the engine's own xmm2", which is what every path that declines the
+ * frame returns.
+ */
+/* MEASURE 2026-09-29: the eye-to-rig vector, learned on the frames the
+ * engine takes and applied on the frames we keep. In the eye's own axes,
+ * the same three numbers the player's offset uses. Zero and "not yet
+ * learned" until an aim has been handed over once; see the learn branch
+ * below and the apply in the tail. */
+static volatile float g_aimRig[3];
+static volatile int   g_aimRigHave;
+
+static float *__attribute__((ms_abi)) MgrCallback(uint64_t cm) {
     float *m, *p;
 
     /* The head's visibility has a claim every frame whether
@@ -407,7 +486,7 @@ static void __attribute__((ms_abi)) MgrCallback(uint64_t cm) {
      * handover has to restate itself here, where the engine
      * cannot out-talk it. */
     ShFp2HeadFrame();
-    if (!cm || !g_apply) return;
+    if (!cm || !g_apply) return 0;
 
     m = (float *)(uintptr_t)(cm + MGR_XFORM);
     p = (float *)(uintptr_t)(cm + MGR_POS);
@@ -424,11 +503,340 @@ static void __attribute__((ms_abi)) MgrCallback(uint64_t cm) {
      * pulling after the sights had settled. It answers only
      * for builds whose sites were never found. */
     if ((g_apply & CAM_HEAD_BIT) && ShFp2Ready()) {
+        static float lastEye[3];
+        static float lastBasis[9];
+
         if (ShFp2PlaceEye(cm, m, p)) {
+            static float rigTop = 9.9f, rigLow = 9.9f, rigProg;
+            float fv = *(const float *)(uintptr_t)(cm + MGR_FOV);
+            float rx, ry, rz;
+
             g_headWroteAt = GetTickCount64();
             g_writes++;
+            lastEye[0] = m[12]; lastEye[1] = m[13]; lastEye[2] = m[14];
+            lastBasis[0] = m[0]; lastBasis[1] = m[1]; lastBasis[2] = m[2];
+            lastBasis[3] = m[4]; lastBasis[4] = m[5]; lastBasis[5] = m[6];
+            lastBasis[6] = m[8]; lastBasis[7] = m[9]; lastBasis[8] = m[10];
+
+            /* MEASURE 2026-09-30: the walk onto the aim rig, in the only
+             * branch that runs. It used to sit in the tail below, which this
+             * branch returns before ever reaching - so the rig was never
+             * applied, the learned residual stayed the same number frame
+             * after frame, and the accumulator ran away to 244 m in one
+             * session. What caught it was the log line, not the code: a probe
+             * on a path nobody verified is worth exactly nothing.
+             *
+             * The fov is the engine's own transition clock, self-calibrating:
+             * high at the hip, low when settled, and every weapon's settled
+             * value differs, so the top and the running low are read here
+             * rather than fixed. One eye, moved by a vector that grows from
+             * nothing - no second source, nothing to switch - is what keeps
+             * this off the list of turns that flashed.
+             */
+            if (g_aimRigHave && fv > 0.0f) {
+                if (fv > rigTop) rigTop = fv;
+                if (fv < rigLow) rigLow = fv;
+                if (rigTop - rigLow > 0.02f) {
+                    rigProg = (rigTop - fv) / (rigTop - rigLow);
+                    if (rigProg < 0.0f) rigProg = 0.0f;
+                    if (rigProg > 1.0f) rigProg = 1.0f;
+                } else {
+                    rigProg = 0.0f;
+                }
+                /* Two guards, both at the only place the eye moves.
+                 *
+                 * The clock's top IS the hip fov, so prog reads 1 at the hip
+                 * - the offset must never apply there at all, or the eye is
+                 * displaced for the whole session and the view after an aim
+                 * ends up somewhere else. Not settled means not shifted.
+                 *
+                 * And a runaway vector must never move the eye: the figure is
+                 * 0.19 m, so anything past 0.30 m is a broken accumulation
+                 * (244 m was reached in the 2026-09-30 session) and is thrown
+                 * away rather than applied, along with the clock that fed it.
+                 */
+                /* PLAN A 2026-09-30: the walk lives only inside the aim's own
+                 * fall.
+                 *
+                 * Down here the view is on its way down - that is the aim's
+                 * transition, and the only stretch of time the eye should be
+                 * moved. The moment the view turns back up the aim is over and
+                 * the walk is off, with a 0.02 margin so ordinary jitter in
+                 * the hip view cannot keep it half-engaged: the version that
+                 * ended on "back to within 0.004 of the highest value seen"
+                 * left the eye pushed up to 0.19 m whenever the running high
+                 * had been raised by a run, a menu or a vehicle - the "view
+                 * feels odd after lowering the sights" report of 2026-09-30.
+                 *
+                 * 0.004 and not 0.02 on the hip side (see the rifle/pistol
+                 * log): a pistol's whole aim moves the fov far less than a
+                 * magnified rifle's, and a two-percent margin cancelled the
+                 * entire pistol aim - its residual sat at (50, 186, -10) mm
+                 * frame after frame while the rifle's fell to 1 mm. */
+                {
+                    static float rigDown = 9.9f;
+                    static int   rigFall;
+
+                    if (fv < rigDown - 0.0005f) rigFall = 1;   /* still coming down */
+                    if (fv > rigLow + 0.02f)    rigFall = 0;   /* it turned back up */
+                    rigDown = fv;
+                    if (!rigFall) rigProg = 0.0f;
+                }
+                if (fv >= rigTop - 0.004f) rigProg = 0.0f;
+                if (g_aimRig[0] * g_aimRig[0] + g_aimRig[1] * g_aimRig[1] +
+                    g_aimRig[2] * g_aimRig[2] > 0.09f) {
+                    Log("aim rig: %0.1f mm is out of range - dropped",
+                        (double)(1000.0f * sqrtf(
+                            g_aimRig[0] * g_aimRig[0] + g_aimRig[1] * g_aimRig[1] +
+                            g_aimRig[2] * g_aimRig[2])));
+                    g_aimRig[0] = g_aimRig[1] = g_aimRig[2] = 0.0f;
+                    g_aimRigHave = 0;
+                    rigTop = rigLow = 9.9f;
+                    rigProg = 0.0f;
+                }
+                if (rigProg > 0.0f) {
+                    rx = g_aimRig[0] * rigProg;
+                    ry = g_aimRig[1] * rigProg;
+                    rz = g_aimRig[2] * rigProg;
+                    m[12] += m[0] * rx + m[4] * ry + m[8] * rz;
+                    m[13] += m[1] * rx + m[5] * ry + m[9] * rz;
+                    m[14] += m[2] * rx + m[6] * ry + m[10] * rz;
+                    p[0] += m[0] * rx + m[4] * ry + m[8] * rz;
+                    p[1] += m[1] * rx + m[5] * ry + m[9] * rz;
+                    p[2] += m[2] * rx + m[6] * ry + m[10] * rz;
+                }
+            } else if (fv <= 0.0f) {
+                rigTop = rigLow = 9.9f;
+                rigProg = 0.0f;
+            }
+
+            /* The eye AS PLACED - recorded here, after the walk, not before
+             * it. The residual learned on the hand-over frame is measured
+             * against this, so it has to be the eye the picture actually
+             * shows: recording it before the offset made every residual the
+             * same number frame after frame (2026-09-30 log: (84.0, -87.3,
+             * -15.3) repeated, and (55.6, 236.6, -6.0) for the pistol), so
+             * the accumulator had nothing to converge to and grew without
+             * bound instead. The two stores above are the pre-offset eye and
+             * stay only so a stale basis is never used; these are the ones
+             * the learning reads. */
+            lastEye[0] = m[12]; lastEye[1] = m[13]; lastEye[2] = m[14];
+            lastBasis[0] = m[0]; lastBasis[1] = m[1]; lastBasis[2] = m[2];
+            lastBasis[3] = m[4]; lastBasis[4] = m[5]; lastBasis[5] = m[6];
+            lastBasis[6] = m[8]; lastBasis[7] = m[9]; lastBasis[8] = m[10];
+        } else {
+            /* MEASURE 2026-09-29: the place was declined, so this frame
+             * belongs to the engine - and that makes p[0..2] the engine's own
+             * aim rig, the shoulder-and-weapon seat the weapon is placed
+             * from and the one the sights are exact against. Learn the vector
+             * from the eye we last placed to that seat, in the eye's own axes
+             * (the last basis we wrote, so the numbers mean the same thing the
+             * player's offset means), and hand it to first person. It then
+             * walks the eye onto the seat over the aim's own transition, so
+             * the frame can be given up with both cameras already in the same
+             * place - no cut to see, and the sights exact either way.
+             *
+             * One frame of staleness in lastEye costs almost nothing: the
+             * seat and the eye do not move between two frames of a settled
+             * aim. A build whose sites were never found never reaches this
+             * branch, and never learns anything. */
+            /* MEASURE 2026-09-30: the one line that decides this whole
+             * question, kept short on purpose. engineRig is the seat the
+             * weapon is placed from, lastEye is the eye we last placed - the
+             * eye the picture showed, offset included - and aimRig is what we
+             * believe the difference is. Read the samples across an entry
+             * transition, where lastEye moves by the whole vector:
+             *
+             *   engineRig sliding along with lastEye  -> the seat is derived
+             *       from the camera we present, so no offset we can apply
+             *       will ever close the gap, and this whole line of work ends
+             *       here, honestly.
+             *   engineRig holding still while lastEye moves -> the walk is
+             *       real work and the residual is the error in it.
+             *
+             * Also prints whether the walk is running at all: eye is the raw
+             * eye, lastEye is after the offset, so their difference IS the
+             * applied vector. Ten a second while the engine owns the frame.
+             */
+            {
+                static uint64_t rigAt;
+
+                if (GetTickCount64() - rigAt >= 100) {
+                    rigAt = GetTickCount64();
+                    Log("rig probe: engineRig=(%.3f,%.3f,%.3f) lastEye=(%.3f,%.3f,%.3f) "
+                        "aimRig=(%.1f,%.1f,%.1f)mm fov=%.4f",
+                        (double)p[0], (double)p[1], (double)p[2],
+                        (double)lastEye[0], (double)lastEye[1], (double)lastEye[2],
+                        (double)(g_aimRig[0] * 1000.0f),
+                        (double)(g_aimRig[1] * 1000.0f),
+                        (double)(g_aimRig[2] * 1000.0f),
+                        (double)*(const float *)(uintptr_t)(cm + MGR_FOV));
+                }
+            }
+
+            float dx = p[0] - lastEye[0];
+            float dy = p[1] - lastEye[1];
+            float dz = p[2] - lastEye[2];
+            float rx = dx * lastBasis[0] + dy * lastBasis[1] + dz * lastBasis[2];
+            float fw = dx * lastBasis[3] + dy * lastBasis[4] + dz * lastBasis[5];
+            float up = dx * lastBasis[6] + dy * lastBasis[7] + dz * lastBasis[8];
+
+            if (rx == rx && fw == fw && up == up) {
+                if (rx * rx + fw * fw + up * up < 1.0f) {
+                    /* One rig PER WEAPON, and each residual added once.
+                     *
+                     * The weapon's own signature here is the fov the aim
+                     * settles on - the frame already carries it and nothing
+                     * else per-weapon is available without a new API. Measured
+                     * 2026-09-30: pistol iron sights settle at 0.6882 and a
+                     * magnified rifle at 0.4916, and their rigs are nothing
+                     * alike ((51, 245, -6) mm against (84, -88, -16) mm), which
+                     * is why one slot had the pistol wearing the rifle's
+                     * offset. Four slots, matched within 2 percent, oldest
+                     * reused.
+                     *
+                     * And each residual is added ONCE. The hand-over lasts
+                     * many frames while lastEye is frozen, so the same residual
+                     * arrived on every one of them and was added every one of
+                     * them: 0.23 -> 0.46 -> 0.92 -> ... -> the doubling in the
+                     * log (7175, 11393, 25230 mm, each thrown away by the range
+                     * guard) and the reason a session of aims never improved
+                     * anything.
+                     *
+                     * Whatever the slot now holds is published to g_aimRig,
+                     * which is what the walk in the placed branch reads - so
+                     * the next aim of this weapon walks onto this weapon's
+                     * seat. */
+                    static uint64_t logAt, lastLearn;
+                    static float key[4], acc[4][3], last[4][3];
+                    static int   next;
+                    static float learnLow = 9.9f;
+                    uint64_t now = GetTickCount64();
+                    float fvs = *(const float *)(uintptr_t)(cm + MGR_FOV);
+                    int i, use = -1, settled;
+
+                    /* MEASURE 2026-09-30, a rifle's first aim after a pistol:
+                     * a transition passes through many fov values, and the slot
+                     * was matched on the fov of the moment - so one weapon's
+                     * residual landed in two or three slots, and g_aimRig was
+                     * published from whichever slot matched THIS frame. The walk
+                     * then chased a different vector every frame: (33, -271, -5)
+                     * then (83, -88, -65) then one of them negated, three swings
+                     * in the 10:06 log, each the engine's optic snapping to a new
+                     * seat. That is the ghost the field reported - a scope in the
+                     * face, on the right, on a weapon's first aim.
+                     *
+                     * So only a settled aim teaches: the fov has to be at the
+                     * lowest it has been since this aim started, which is when
+                     * the engine's transition is over and its seat is the seat.
+                     * A slot's key is only written then too, so a slot stands for
+                     * a weapon rather than for a frame of its raise. The first
+                     * aim of a weapon is spent on nothing; from the second there
+                     * is one slot, one vector, and nothing to swing between. */
+                    if (now - lastLearn > 2000) learnLow = fvs;
+                    if (fvs < learnLow) learnLow = fvs;
+                    settled = (fvs <= learnLow + 0.010f);
+
+                    for (i = 0; i < 4; i++) {
+                        if (key[i] != 0.0f && fabsf(key[i] - fvs) < 0.02f) {
+                            use = i;
+                            break;
+                        }
+                    }
+                    if (use < 0) {
+                        for (i = 0; i < 4; i++) {
+                            if (key[i] == 0.0f) { use = i; break; }
+                        }
+                    }
+                    if (use < 0) { use = next; next = (next + 1) & 3; }
+                    if (key[use] == 0.0f && settled) key[use] = fvs;
+
+                    /* ONCE PER HAND-OVER, and a slot that has left the range
+                     * starts over.
+                     *
+                     * The per-value dedupe was not enough: the residual comes
+                     * back slightly different every frame (48.9 then 48.3 then
+                     * 43.6 ...), so every frame of a hand-over passed it and
+                     * every frame added another 0.2 m - 415 m inside a minute,
+                     * the whole of it thrown away by the range guard, so
+                     * nothing was ever learned. A hand-over is one event and
+                     * gets one sample: 300 ms between samples is inside every
+                     * aim measured (359 ms to 2.4 s) and outside the frame
+                     * time by two orders of magnitude.
+                     *
+                     * And a slot that the guard has already refused must not be
+                     * published again and again - it starts from zero instead,
+                     * which is what lets this converge from a bad state rather
+                     * than sitting at 415 m for the rest of the session. */
+                    if (!settled) {
+                        ;   /* the raise is still moving: not a seat yet */
+                    } else if (now - lastLearn < 1200) {
+                        ;   /* same hand-over: nothing to learn twice */
+                    } else if (rx * rx + fw * fw + up * up > 0.16f) {
+                        /* A sample over 250 mm is not a seat either - it is a
+                         * frame of a walk that was still in flight, or the
+                         * hip's own 1.9 m. It is dropped, and the slot is only
+                         * cleared when the slot ITSELF is out of range, so a
+                         * bad sample can no longer zero a good slot. */
+                        lastLearn = now;
+                        if (acc[use][0] * acc[use][0] +
+                            acc[use][1] * acc[use][1] +
+                            acc[use][2] * acc[use][2] > 0.0625f) {
+                            acc[use][0] = acc[use][1] = acc[use][2] = 0.0f;
+                            last[use][0] = last[use][1] = last[use][2] = 0.0f;
+                        }
+                    } else if (fabsf(rx - last[use][0]) > 0.002f ||
+                               fabsf(fw - last[use][1]) > 0.002f ||
+                               fabsf(up - last[use][2]) > 0.002f) {
+                        lastLearn = now;
+                        last[use][0] = rx;
+                        last[use][1] = fw;
+                        last[use][2] = up;
+                        acc[use][0] += rx;
+                        acc[use][1] += fw;
+                        acc[use][2] += up;
+                    } else {
+                        lastLearn = now;
+                    }
+                    /* MEASURE 2026-09-30, the weapon switch: only a slot whose
+                     * key belongs to the fov on screen may be published. A slot
+                     * was published for every fov the transition passed through,
+                     * so for the first frames of a rifle's first raise the eye
+                     * was still being moved by the PISTOL's 229 mm - one frame
+                     * of another weapon's seat, read as a scope ghost in the
+                     * face and gone before a 110 ms log line could see it. It is
+                     * why only the first raise after a switch showed it, and why
+                     * the second did not (by then the published value was this
+                     * weapon's own). No match: publish nothing, and the walk
+                     * applies nothing. */
+                    if (key[use] != 0.0f && fabsf(key[use] - fvs) < 0.02f) {
+                        g_aimRig[0] = acc[use][0];
+                        g_aimRig[1] = acc[use][1];
+                        g_aimRig[2] = acc[use][2];
+                        g_aimRigHave = 1;
+                    } else {
+                        g_aimRigHave = 0;
+                    }
+                    /* One line per half second - this branch runs on every
+                     * frame the engine owns, which was 1672 lines in one
+                     * session before. */
+                    if (now - logAt >= 500) {
+                        logAt = now;
+                        Log("aim rig: corrected by (%.1f, %.1f, %.1f) mm -> "
+                            "now (%.1f, %.1f, %.1f) mm  fov=%.4f",
+                            (double)(rx * 1000.0f), (double)(fw * 1000.0f),
+                            (double)(up * 1000.0f),
+                            (double)(g_aimRig[0] * 1000.0f),
+                            (double)(g_aimRig[1] * 1000.0f),
+                            (double)(g_aimRig[2] * 1000.0f),
+                            (double)*(const float *)(uintptr_t)(cm + MGR_FOV));
+                    }
+                }
+            }
         }
-        return;
+        /* The head position owned this frame, so there is no eye of ours
+         * to offer - the engine's own xmm2 stays, as it was. */
+        return 0;
     }
 
     ApplyPose(m, *(const float *)(uintptr_t)(cm + MGR_FOV));
@@ -436,11 +844,118 @@ static void __attribute__((ms_abi)) MgrCallback(uint64_t cm) {
     /* The engine fills the position vector from a second
      * call, so the row above is restated here rather than
      * left to disagree with it. */
+    /* MEASURE 2026-09-29: walk the eye onto the aim rig it learned, in step
+     * with the engine's own ADS transition.
+     *
+     * The fov is the transition's own clock (a hip view sits high, a settled
+     * aim low, and every weapon's settled value differs), so the progress is
+     * self-calibrating: the fov seen at the top of the aim is the start, the
+     * running minimum is the end. Nothing here is a threshold on a distance,
+     * and nothing switches between two sources - one eye, moved by a vector
+     * that grows from nothing - which is what keeps it off the list of turns
+     * that flashed (see the note at g_aimArm in scripthook_fpx.c). Moving the
+     * eye 191 mm over an aim's few hundred milliseconds reads as the sights
+     * coming up, not as a cut.
+     */
+    {
+        static float rigGot, fovTop = 9.9f, fovLow = 9.9f, prog, shown[3];
+        static float prevFv = 9.9f, steady;
+        float fv = *(const float *)(uintptr_t)(cm + MGR_FOV);
+        float rx, ry, rz;
+        int   k;
+
+        if (g_aimRigHave) {
+            rigGot = 1.0f;
+            /* MEASURE 2026-09-30: the fov is a clock only while it is MOVING.
+             * A raise passes through other weapons' settled fovs, and a slot
+             * matched on the way up published that weapon's seat - so a rifle's
+             * first raise was moved by the PISTOL's 229 mm for a few frames,
+             * which is the scope ghost the field reported (right side, at the
+             * face, once, then gone). Nothing is applied until the transition
+             * has stopped: three frames inside 0.5 mrad. */
+            steady = (fabsf(fv - prevFv) < 0.0005f) ? steady + 1.0f : 0.0f;
+            if (steady > 60.0f) steady = 60.0f;
+            prevFv = fv;
+            if (fv > 0.0f) {
+                if (fv > fovTop) fovTop = fv;              /* the hip value   */
+                if (fv < fovLow) fovLow = fv;              /* the settled one */
+                if (fovTop - fovLow > 0.02f) {
+                    prog = (fovTop - fv) / (fovTop - fovLow);
+                    if (prog < 0.0f) prog = 0.0f;
+                    if (prog > 1.0f) prog = 1.0f;
+                } else {
+                    prog = 0.0f;
+                }
+                if ((g_apply & CAM_HEAD_BIT) && prog > 0.0f) {
+                    /* MEASURE 2026-09-30, a rifle's first aim: the seat it has to
+                     * reach is 274 mm away, and how far along the raise the fov
+                     * clock is says nothing about how far along THIS eye is - so
+                     * the rig arrived whole in one frame. That is both halves of
+                     * what the field reported: learned, it is a snap; refused by
+                     * the range gate, the eye stays 274 mm ahead of the seat and
+                     * the engine's optic model (drawn at the seat) sits behind
+                     * the camera and crosses it on the raise - the ghost in the
+                     * face, on the right, on a weapon's first aim.
+                     *
+                     * So the eye does not jump to the rig, it travels to it: at
+                     * most 40 mm a frame, which is 2.4 m/s at 60 fps and puts
+                     * 274 mm behind 7 frames, around 0.12 s. Fast enough to be
+                     * over before the raise is, slow enough to read as the sight
+                     * coming up rather than as a cut. */
+                    for (k = 0; k < 3; k++) {
+                        float want = g_aimRig[k] * prog;
+                        float step = want - shown[k];
+
+                        if (step > 0.040f) step = 0.040f;
+                        if (step < -0.040f) step = -0.040f;
+                        shown[k] += step;
+                    }
+                    rx = shown[0];
+                    ry = shown[1];
+                    rz = shown[2];
+                    m[12] += m[0] * rx + m[4] * ry + m[8] * rz;
+                    m[13] += m[1] * rx + m[5] * ry + m[9] * rz;
+                    m[14] += m[2] * rx + m[6] * ry + m[10] * rz;
+                }
+            }
+        } else if (rigGot > 0.0f) {
+            /* The rig was known and the build changed under us (a new
+             * session's module, a plugin reload): forget the clock too. */
+            fovTop = fovLow = 9.9f;
+            prog = 0.0f;
+        }
+    }
+
     p[0] = m[12];
     p[1] = m[13];
     p[2] = m[14];
     p[3] = 0.0f;
     g_writes++;
+
+    /* MEASURE 2026-09-29: the engine's own answer, taken before this
+     * frame's write replaces it. Everything the four failed candidates
+     * taught, in one place: the aim camera is computed in the aim path
+     * from the character's pose and is read there - no copy of it in the
+     * manager (+0x170, +0x190, +0x1E0) and no register at the camera
+     * build (xmm2) is what the weapon and optic alignment consults. What
+     * the field does have is a number: with the frame handed over, the
+     * aim camera sits 191 mm from the eye on a settled aim, and 1873 mm
+     * at the hip, and the sights are exact in the first case and 191 mm
+     * out in the second.
+     *
+     * So the frame is handed over for exactly the part of the aim where
+     * it costs nothing. The engine's own ADS transition walks its camera
+     * from 1873 mm behind the head to 191 mm off it, and that walk passes
+     * through the eye - so the frame is given up at the frame where the
+     * two positions meet (a third of a metre, well inside the metre the
+     * trace calls a jump) and taken back when the aim ends. At the switch
+     * the two cameras hold the same position, so there is no cut to see:
+     * this is not the threshold of 2026-09-26, which switched between two
+     * cameras metres apart and flashed on ordinary play. The distance is
+     * only ever read to decide "are we at the crossing yet", never to
+     * move the camera onto a second source.
+     */
+    return 0;
 }
 
 /* Shared by both stubs. Volatile registers only: everything
@@ -516,6 +1031,18 @@ static int BuildMgrStub(void) {
     s[o++] = 0xFF; s[o++] = 0xD0;                   /* call rax  */
     memcpy(s + o, STUB_REST, sizeof(STUB_REST));
     o += (int)sizeof(STUB_REST);
+    /* MEASURE 2026-09-29: the callback's answer is the eye it placed, or
+     * NULL when the frame was not ours to place. Hand it on in xmm2 - the
+     * register the store at MGR_STORE put the engine's own camera into,
+     * and the one its downstream reads. Deliberately after STUB_REST: that
+     * block has just put the engine's xmm2 back from the spill, and this
+     * is the overwrite of it. Nothing here touches flags, and rax is dead
+     * between the call above and the tail jump below, so the test costs
+     * the caller nothing. NULL leaves the engine's own value alone, which
+     * is the whole reason this is a conditional and not a plain store. */
+    s[o++] = 0x48; s[o++] = 0x85; s[o++] = 0xC0;    /* test rax,rax     */
+    s[o++] = 0x74; s[o++] = 0x04;                   /* je +4            */
+    s[o++] = 0x0F; s[o++] = 0x28; s[o++] = 0x10;    /* movaps xmm2,[rax] */
     s[o++] = 0x48; s[o++] = 0x89; s[o++] = 0xEC;    /* mov rsp,rbp */
     s[o++] = 0x5D;                                  /* pop rbp   */
 
@@ -528,6 +1055,36 @@ static int BuildMgrStub(void) {
     return 1;
 }
 
+/* Read only: is the store above still the store? Nothing here
+ * patches anything. The answer is one log line, and it is the
+ * whole reason the fallback site is in this file - on a build
+ * whose call site moved, this line says whether the other way
+ * in is there before anyone goes looking for it by hand.
+ */
+static void MgrStoreCheck(void) {
+    const uint8_t *at = (const uint8_t *)(uintptr_t)MGR_STORE;
+    int i;
+
+    if (!ShReadableAddr(MGR_STORE, MGR_STORE_LEN)) {
+        Log("manager store: %llX is not readable - the second way in is "
+            "gone on this build", (unsigned long long)MGR_STORE);
+        return;
+    }
+    for (i = 0; i < MGR_STORE_LEN; i++) {
+        if (at[i] != MGR_STORE_SIG[i]) {
+            Log("manager store: %llX holds %02X %02X %02X %02X %02X %02X %02X, "
+                "not the store - it moved",
+                (unsigned long long)MGR_STORE,
+                (unsigned)at[0], (unsigned)at[1], (unsigned)at[2],
+                (unsigned)at[3], (unsigned)at[4], (unsigned)at[5],
+                (unsigned)at[6]);
+            return;
+        }
+    }
+    Log("manager store: %llX is the store, left alone (the fallback)",
+        (unsigned long long)MGR_STORE);
+}
+
 /* Refuse anything but the call we decoded, so a build we do
  * not know keeps its own camera. */
 static int MgrInstall(void) {
@@ -536,6 +1093,7 @@ static int MgrInstall(void) {
     DWORD old;
 
     if (g_mgrHooked) return 1;
+    MgrStoreCheck();
     /* The failure that says nothing is the dangerous one: a manager site
      * left over from an older build refuses the hook, the camera call
      * then reports a success it does not have, and first person reads as
@@ -776,6 +1334,15 @@ SH_API void ShCameraHandoverClear(void) {
 
 SH_API uint64_t ShCameraCalls(void) { return g_calls; }
 SH_API uint64_t ShCameraWrites(void) { return g_writes; }
+
+/* MEASURE 2026-09-30: ShCameraAltEye lived here - the knob that restated
+ * the eye into the engine's second camera copy at +0x1E0. It was added for
+ * one measurement, several sessions of asking it produced no visible change
+ * (the copy is not what the weapon or optic alignment reads), and no line
+ * of the framework or of a plugin ever called it. The measurement and what
+ * it ruled out are written down in
+ * docs/firstperson-aim-flash-and-offset.md, so the export is gone with it.
+ */
 
 /* The last nonzero camera mode seen, and how many mode 0
  * frames ago, so a REPL probe can name the special views.

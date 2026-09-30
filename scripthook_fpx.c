@@ -1,7 +1,7 @@
 /* First person the way the Cheat Engine table does it.
  *
  * The engine already computes where the head is: one call,
- * GRW.exe+188BA20, is handed an argument and writes a world
+ * GRW.exe+188CE00, is handed an argument and writes a world
  * position. The table does not reinvent that, it captures the
  * argument once - from a call site of the very same function -
  * then asks the function again every frame and writes the
@@ -17,6 +17,16 @@
  * Everything here runs on the frame path. The placement is
  * bounded: a handful of guarded dereferences, one engine call,
  * one store. Nothing scans, nothing allocates, nothing logs.
+ *
+ * The camera POSITION is the eye below plus the user's offset, on an
+ * aim's frame as on any other: the frame does not change hands, so
+ * there is no cut at either end of an aim and the flash the field
+ * reports for years cannot be produced. The engine's own ADS byte is
+ * still the signal that says an aim is up, but it is read for the log
+ * alone - see the branch in ShFp2PlaceEye and the note above it, which
+ * carries the price of the choice and the one knob that reverses it
+ * live for an A/B. The note at g_aimArm carries the wrong turns that
+ * must not come back.
  */
 #include <windows.h>
 #include <string.h>
@@ -33,9 +43,28 @@
  * each one carries in a known build. Every install checks for
  * its own bytes and refuses anything else, so a build we have
  * not seen keeps behaving exactly as it does today.
+ *
+ * 2026-09-29: the whole list was put beside the community table
+ * this file came from - Wildlands First Person, Last Rites RC1
+ * - whose [DISABLE] section carries the instruction each site
+ * held before that table patched it. Twelve of the thirteen
+ * agree byte for byte, the four call sites among them, and
+ * those four are what names the engine functions below. The
+ * odd one out is S_SHOULDER: the table prints 0F 84 8F (je
+ * +0x8F) where this build has 0F 85 87 (jne +0x87) - the
+ * target that table's own comment names. install miss=000 with
+ * extras mask=f is the live proof that the bytes here are the
+ * bytes on the build, so the table's line is the stale one.
+ *
+ * Three GRW.exe numbers that used to sit in this file's
+ * comments were the table's older revision and are corrected
+ * to what the code has always used: 188CE00 (the head call,
+ * not 188BA20), 2A257C0 (the visibility call the aim sites
+ * carry, not 2A25600) and 2A185A0 (the body position call,
+ * not 2A183E0).
  */
 
-/* call GRW.exe+188BA20: the capture site. This is where the
+/* call GRW.exe+188CE00: the capture site. This is where the
  * argument we reuse comes from. */
 #define S_ARGS      SH_IMG(0xA074190)
 #define S_ARGS_FN   SH_IMG(0x188CE00)
@@ -50,12 +79,15 @@
 /* mov [rdi+181A],bl: 1 while the tactical drone flies. */
 #define S_DRONE     SH_IMG(0x113A0875)
 
-/* call GRW.exe+2A25600 on entering and leaving aim down
- * sight. The dl the engine passes is the ADS state. */
+/* call GRW.exe+2A257C0 on entering and leaving aim down
+ * sight. The dl the engine passes is the ADS state, and the
+ * call is the same visibility one as FN_VIS below - which is
+ * why an aim can hide the head through it instead of needing a
+ * second engine call. */
 #define S_ADS_OUT   SH_IMG(0x147FF653)
 #define S_ADS_IN    SH_IMG(0x147FF669)
 
-/* call GRW.exe+2A183E0: carries the body position, which the
+/* call GRW.exe+2A185A0: carries the body position, which the
  * table keeps to vet the head reading against. */
 #define S_BODY      SH_IMG(0x14897FBA)
 #define S_BODY_FN   SH_IMG(0x2A185A0)
@@ -128,6 +160,12 @@ typedef struct {
     uint8_t  want;          /* 1 while first person is asked  */
     uint8_t  hidden;        /* last thing we told the head    */
     uint8_t  bodyOk;        /* body reading has landed once   */
+    /* MEASURE 2026-09-29: which aim site wrote the gate, and what
+     * it wrote. Two engine call sites write skip[3], and a burst
+     * can only be read for what it is if the two are told apart.
+     * Taken out with the measurement block below. */
+    uint8_t  adsIn;         /* S_ADS_IN  last value           */
+    uint8_t  adsOut;        /* S_ADS_OUT last value           */
 } FpState;
 
 static volatile FpState g_fp;
@@ -142,6 +180,64 @@ static volatile uint32_t g_exMiss = 0;
 /* Why the last frame placed nothing. Read from the plugin so a
  * view that stays third person can say why. */
 static volatile int     g_bow = 0;
+
+/* The camera position has TWO states, and only the community table's: on an
+ * ordinary frame it is our own eye plus the user's offset, and on an aim's
+ * frame the engine's own aim camera stands. The switch between them is the
+ * engine's own ADS byte, read as it is, on the frame itself - see the branch
+ * in ShFp2PlaceEye.
+ *
+ * That is the table's camera hook, reproduced line for line, and it is what
+ * gives the first person view its feel while aiming.
+ *
+ * The wrong turns are worth naming, because each one is a thing someone will
+ * want to try again:
+ *
+ *   - until 2026-09-26 an aim handed the whole frame over with a latch. The
+ *     latch held past the byte and showed the exit animation, third person.
+ *
+ *   - from 2026-09-26 to 2026-09-29 the frame was kept and the engine's aim
+ *     POSITION was borrowed, switched by distance thresholds. It flashed: a
+ *     threshold on a per-frame distance is crossed by ordinary play, and a
+ *     one-frame move between two cameras is a flash. 600 mm was visible as a
+ *     flash, 250 mm was not, but "not seen" is not "cannot happen" - the field
+ *     report of 2026-09-29 is a burst of hand-offs inside one aim.
+ *
+ *   - a fov hysteresis (FOV_AIM_IN / FOV_AIM_OUT) was in the decision as well,
+ *     and it flashed at each edge.
+ *
+ * So: no grace, no threshold that can drift, no borrowing the engine's aim
+ * position as a middle form. The byte the engine writes is the one signal, and
+ * it is read raw. See docs/beta-audit-first-public-beta.md 13.66.
+ *
+ * 2026-09-29, later: and the byte is no longer the signal for the camera at
+ * all. The floor is that the frame never changes hands - a hand-off is one
+ * frame of another picture, and that is the flash, whether it arrives once or
+ * in the bursts above. The byte is still read, by the diagnostics and by the
+ * A/B knob (g_aimHold), and the aim's two edges still reach the log. What the
+ * floor costs is at the handover branch in ShFp2PlaceEye, not here.
+ */
+static volatile int  g_aimArm;        /* OBSERVED ONLY: the fov says an aim is up */
+/* Aiming is armed by the engine's fov: a gameplay view holds 0.78 to 0.83 and
+ * an aim takes it below 0.75 - a pistol's iron sights land around 0.70, a 4x
+ * optic at 0.49 (measured live, 2026-09-29). g_aimArm is DIAGNOSTIC ONLY: it is
+ * read by ShFp2AimProbe(10) and by the Meas heartbeat, and it decides NOTHING
+ * about the camera. No camera line may read it. Kept because the aim's edges
+ * are what the field reports are read against. */
+#define FOV_AIM_IN   0.78f
+#define FOV_AIM_OUT  0.80f
+/* The distance, in millimetres, between the engine's own camera position and the
+ * eye this session computes, measured once per frame just before the eye is
+ * written over it. READ ONLY, DIAGNOSTIC ONLY: it is never consulted and must
+ * never be, or it is a second position source and the flash comes back with
+ * whatever threshold reads it (see the note at g_aimArm). Written on every
+ * frame, an aim's included and a hip shot's included, so the number stands on
+ * its own as a measurement - a hip shot reads the engine camera a metre or two
+ * behind the shoulder, which is itself worth having. Cheap and bounded by
+ * construction: only the sum of squares is formed, no square root, so there is
+ * nothing here that can be slow or overflow. Read out through
+ * ShFp2AimProbe(8). */
+static volatile int  g_lastGapMm;
 /* The first few placements are written to the log, step by
  * step. After that it goes quiet: this runs every frame. */
 static uint32_t         g_trace = 0;
@@ -572,8 +668,12 @@ static int InstallDrone(void) {
 
 /* Both aim sites call the same visibility function; the dl
  * leaving the engine is the aim state, so it is simply read
- * off on the way through. */
-static int InstallAds(uint64_t site) {
+ * off on the way through.
+ *
+ * own is where this site's own copy of that byte goes, so the
+ * measurement can tell the two apart - see Meas. Nothing reads it
+ * outside that block. */
+static int InstallAds(uint64_t site, volatile uint8_t *own) {
     static const uint8_t sig[1] = { 0xE8 };
     uint8_t *s;
     int o = 0;
@@ -584,6 +684,9 @@ static int InstallAds(uint64_t site) {
 
     s[o++] = 0x50;
     EmitMov64(s, &o, 0xB8, (uint64_t)(uintptr_t)&g_fp.skip[3]);
+    s[o++] = 0x88; s[o++] = 0x10;                   /* mov [rax],dl */
+    /* MEASURE 2026-09-29: the same dl, on this site's own byte. */
+    EmitMov64(s, &o, 0xB8, (uint64_t)(uintptr_t)own);
     s[o++] = 0x88; s[o++] = 0x10;                   /* mov [rax],dl */
     /* While first person holds the head down, this call is
      * also the engine speaking its own mind about the head -
@@ -744,6 +847,65 @@ static volatile uint64_t g_pickHoldA3;
 static volatile uint64_t g_pickHoldAt;
 static volatile uint32_t g_pickHoldGen;
 static volatile uint64_t g_pickHolds;
+
+/* The eye the placement last wrote, and when, so that a frame with no
+ * capture at all can draw the one before it instead of the engine's.
+ *
+ * The field report of 2026-09-26 is "aiming, and one frame of something
+ * else flashes past", and the 2026-09-28 log names the shape exactly: the
+ * two lines
+ *
+ *   [2026-09-28 15:46:20.329] bow: ours        -> no-argument
+ *   [2026-09-28 15:46:20.346] bow: no-argument -> ours
+ *
+ * are 17 ms apart - one frame - and the direction is ours, then the frame
+ * handed away, then ours again. That middle frame is one the engine's own
+ * camera drew, and on screen it is "another picture" for 1/60 s: the
+ * flicker the report describes. All three capture fallbacks failed on it -
+ * the ring had nothing that resolved (PickLocalCapture), the last pick was
+ * outside its window (g_pickHold), and the vetted argument was gone too
+ * (g_fp.headArgPrev) - so the code below bowed out and left the frame to
+ * the engine.
+ *
+ * One frame of difference is invisible here. Running crosses about 0.13 m
+ * in a frame, so redrawing the previous eye two or three frames running
+ * moves the camera by a few centimetres - a hidden step, not a picture.
+ * And it is our own previous frame: this is NOT the latch that was tried
+ * and reverted on 2026-09-21, which held the frame with the ENGINE and so
+ * showed the engine's own way out of the aim in third person. Here the
+ * frame is never handed over; it is the frame we drew, drawn once more.
+ *
+ * Bounded on purpose, and this is the whole of it: g_eyeReplayAt is
+ * stamped only by a placement that used a real capture, never by a replay
+ * itself, so a run of replays is anchored to the last real one and dies
+ * EYE_REPLAY_MS later however many of them there were. A capture that is
+ * gone stays gone; what is replayed cannot outlive the window by a frame,
+ * let alone latch. The menu, the drone and a replaced world clear it (see
+ * Fp2DropEyeReplay), because those frames are the engine's on purpose and
+ * what is remembered behind them is stale.
+ *
+ * g_eyeReplays counts the replays, the way g_pickHolds counts the holds:
+ * the count is what says whether this removed the flicker or only moved
+ * it. Read out through ShFp2AimProbe(11).
+ */
+static volatile float    g_eyeReplay[3];
+static volatile uint64_t g_eyeReplayAt;
+static volatile uint64_t g_eyeReplays;
+
+/* How long after the last real placement the eye may be redrawn. 80 ms is
+ * two to three frames at 30 to 60 fps: long enough to span the run of
+ * frames in which every fallback is missing at once, short enough that the
+ * step it leaves behind is a few centimetres at a sprint - see the note
+ * above. */
+#define EYE_REPLAY_MS 80u
+
+/* Forget the eye the placement last wrote. Called wherever the frame is
+ * deliberately the engine's - a menu, the drone, a world replaced - so
+ * that the first frame after it is placed by this session and not by the
+ * one before. See g_eyeReplay. */
+static void Fp2DropEyeReplay(void) {
+    g_eyeReplayAt = 0;
+}
 
 static uint64_t PickLocalCapture(const ShVec3 *me,
                                  uint64_t *outA2, uint64_t *outA3) {
@@ -1090,6 +1252,11 @@ static void Fp2DropRemembered(void) {
     g_fp.headArg9 = 0;
     g_fp.headArgPrev = 0;
     g_fp.headPtr = 0;
+    /* The eye as well: those are the frames on which the world may have
+     * moved under us (a pause, a load, a replaced world), and redrawing an
+     * eye from before the change is a camera in the old place for one
+     * frame. See g_eyeReplay. */
+    Fp2DropEyeReplay();
 }
 
 /* Everything remembered about the session that is being left behind,
@@ -1222,6 +1389,125 @@ static void AimEdge(const char *what) {
     g_adsEdgeSeen = 1;
 }
 
+/* ---- MEASURE 2026-09-29: the aim gate, and what else knows -----
+ * Temporary, and nothing here decides anything.
+ *
+ * The aim's ownership is decided per frame from one byte, and that byte changes
+ * hands every 60 to 450 ms in bursts (measured 09-20, and again in the 09-29
+ * log). While the two sides own different cameras every burst is a flash: the
+ * 09-29 log has the engine's own camera alternating between two fixed poses two
+ * metres apart for fifteen seconds.
+ *
+ * The question this block was written to answer - is the byte, or is the fov,
+ * the signal the ownership should follow - is settled: the user's decision is
+ * the community table, which reads that byte raw and hands the frame over on
+ * it, whatever the fov says. So this block now only observes the candidates
+ * side by side, for the record; the ownership itself is the branch in
+ * ShFp2PlaceEye. The candidates are:
+ *
+ *   gate    the byte ownership is read from today;
+ *   adsIn   what the S_ADS_IN site last wrote to it, and
+ *   adsOut  what S_ADS_OUT wrote - a burst from one site is a different animal
+ *           from the two sites disagreeing with each other;
+ *   fov     the engine's own fov, which is what the zoom-optic rule already
+ *           trusts and which should hold still for a whole aim;
+ *   mode    the camera manager's own mode at +0x6C - the field
+ *           scripthook_camera.c reads as MGR_MODE ("the mode at +0x6C reads 3
+ *           in gameplay"), read here off the manager this frame was called
+ *           with, which is the same object.
+ *
+ * Bounded on purpose: one line per gate edge, and one every MEAS_MS while the
+ * gate is up or a zoom optic is in the fov, then it stops for the session at
+ * MEAS_LINES - a long session must not be able to fill the log (see the
+ * 28,496 lines in fourteen minutes note on TRACE_JUMP_M for how that goes).
+ *
+ * Delete this block, FP_CAM_MODE, MEAS_MS, MEAS_LINES, Meas itself, the two
+ * adsIn/adsOut fields in FpState and the second store in InstallAds.
+ */
+#define FP_CAM_MODE  0x6C
+#define MEAS_MS      400u
+#define MEAS_LINES   700u
+
+/* MEASURE 2026-09-29: the gate the decision actually reads, which is
+ * the engine's byte unless the probe is holding it at a value. -1 is
+ * "not held"; 0 and 1 are the two states, held from outside so the
+ * question "does the flash follow this byte" can be answered while
+ * the player aims instead of one rebuild and restart per guess.
+ *
+ * g_lastCm is the manager the last frame ran on, kept so the probe can
+ * read the mode out of it from a plugin thread - the frame itself has
+ * it in hand, nothing else does.
+ */
+static volatile int      g_aimHold = -1;
+static volatile uint64_t g_lastCm;
+
+/* MEASURE 2026-09-29: the aim rig's share of the eye, and the engine's own
+ * two ends of the transition that carries it in.
+ *
+ * What the day settled: the weapon and the optic are placed from the
+ * character's aim rig - the shoulder and weapon - and with the frame handed
+ * to the engine the picture IS that rig, so the sights are exact; with the
+ * eye held on the head the picture is 191 mm off it (measured twice, 190 and
+ * 191 mm, on a settled aim; 1873 mm at the hip, where the engine is still
+ * behind the shoulder in its third-person camera), and the sights read that
+ * error. Nothing the frame does to the manager's position, to the manager's
+ * second copy at +0x1E0, or to xmm2 at the camera build changes it: the rig
+ * is computed in the aim path from the character, and in this mode the
+ * engine does not even compute the camera for it.
+ *
+ * So the eye is moved onto the rig instead, and moved by the engine's own
+ * transition: the fov it drives from the hip's 0.83 to the sights' 0.49 is
+ * the progress, so the shift grows from nothing as the aim comes up and
+ * shrinks to nothing as it goes down. There is no switch between two cameras
+ * anywhere in this - one source, scaled - which is what keeps it off the list
+ * of turns that flashed (see the note at g_aimArm).
+ *
+ * g_aimRig is the vector from the head to the rig, in the eye's own axes:
+ * right along the camera's right, forward along its forward flattened, up in
+ * world Z - the same axes as the player's offset, so the two simply add.
+ * Calibrated from the live pair on 2026-09-29 (see docs).
+ */
+static volatile int   g_aimShift = 1;      /* on: the picture follows the rig */
+/* 2026-09-30: the constant g_aimRig offset and the FOV_HIP/FOV_SIGHT pair
+ * went with the cleanup. They were the 09-29 stand-in for an alignment the
+ * aim rig in scripthook_camera.c now measures per weapon instead, and no
+ * line has read them since. g_aimAdd stays: the measured path still adds
+ * through it. */
+static volatile float g_aimAdd[3];
+
+/* The transition-settled detector: the running minimum of the fov while an
+ * aim is up, and how many frames it has held still. A monotonic fall, so a
+ * minimum that stops moving is the end of the walk - weapon independent.
+ * See the hand-over branch in ShFp2PlaceEye. */
+static volatile float g_fovMin = 9.9f;
+static volatile int   g_fovStill;
+
+static int AimGateNow(void) {
+    return g_aimHold >= 0 ? g_aimHold : (g_fp.skip[3] ? 1 : 0);
+}
+
+static void Meas(uint64_t cm, int force) {
+    static uint64_t lastAt;
+    static uint32_t n;
+    uint64_t now = GetTickCount64();
+    uint32_t mode = 0;
+
+    if (n >= MEAS_LINES) return;
+    if (!force && now - lastAt < MEAS_MS) return;
+    lastAt = now;
+    if (cm && ShReadableAddr(cm + FP_CAM_MODE, 4))
+        mode = *(volatile uint32_t *)(uintptr_t)(cm + FP_CAM_MODE);
+    Log("meas: %s gate=%d raw=%d hold=%d fov=%.4f mode=%u adsIn=%u "
+        "adsOut=%u bow=%d t=%llu",
+        force ? "edge" : "beat", AimGateNow(), (int)g_fp.skip[3],
+        g_aimHold, (double)ShFovEngine(), (unsigned)mode,
+        (unsigned)g_fp.adsIn, (unsigned)g_fp.adsOut, g_bow,
+        (unsigned long long)now);
+    if (++n == MEAS_LINES)
+        Log("meas: %u lines - this session's aim measurement is done",
+            (unsigned)n);
+}
+
 /* Called from the camera manager's own frame, in the same
  * place the table hooks: the engine has just written the
  * position it computed, and this is the last moment at which
@@ -1260,8 +1546,10 @@ static void AimEdge(const char *what) {
 
 /* Engine fov values under this are a zoom optic at work - the line the fov
  * module itself uses (see scripthook_fov.c): a gameplay fov is 0.78 to 0.83
- * radians, and a magnified optic computes far below it. ShFp2PlaceEye reads it
- * to decide whether an aim's frame has to stay with the engine's own camera. */
+ * radians, and a magnified optic computes far below it. Only the Meas
+ * heartbeat reads it. The camera POSITION does not depend on the fov at all,
+ * and since 2026-09-29 it does not depend on the engine's ADS byte either
+ * unless g_aimHold has been set from outside - see the handover branch. */
 #define FOV_ZOOM_RAD 0.5f
 static float g_trEng[3], g_trOurs[3];
 static int   g_trEngHave, g_trOursHave;
@@ -1331,6 +1619,29 @@ static void TraceJump(const char *what, const float *now, float *last,
     last[2] = now[2];
 }
 
+/* Put the eye onto the frame, and say the frame was placed.
+ *
+ * One writer for both the ordinary placement and the replay below, so the
+ * two cannot drift: the camera matrix (m[12..14], with the w it has), the
+ * camera position (p[0..2], p[3] zeroed as the table leaves it), the eye
+ * trace, and the stamp ShFp2Age reads. Only the caller's own book-keeping
+ * differs - the ordinary path remembers the eye for a replay and this one
+ * does not - which is exactly why that is at the call sites. */
+static void EyeWrite(float *m, float *p, const float *out) {
+    m[12] = out[0];
+    m[13] = out[1];
+    m[14] = out[2];
+    m[15] = 1.0f;
+    p[0] = out[0];
+    p[1] = out[1];
+    p[2] = out[2];
+    p[3] = 0.0f;
+
+    TraceJump("the eye", out, g_trOurs, &g_trOursHave);
+    g_fp.placedAt = GetTickCount64();
+    g_bow = BOW_NONE;
+}
+
 int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
     /* The table's own buffer is 32 bytes and the store into
      * it is an aligned one, so ours is too: a 16 byte array
@@ -1386,8 +1697,18 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
      * the frame we come back, and that frame is the engine's own camera. The
      * log of 2026-09-26 00:47:28 has it as the one "menu -> stale" line of the
      * session, on the frame the menu closed. */
-    if (g_fp.skip[0]) { g_pickHoldAt = GetTickCount64(); g_bow = BOW_MENU;  return 0; }
-    if (g_fp.skip[1]) { g_pickHoldAt = GetTickCount64(); g_bow = BOW_DRONE; return 0; }
+    if (g_fp.skip[0]) {
+        g_pickHoldAt = GetTickCount64();
+        Fp2DropEyeReplay();             /* the eye it remembers */
+        g_bow = BOW_MENU;
+        return 0;
+    }
+    if (g_fp.skip[1]) {
+        g_pickHoldAt = GetTickCount64();
+        Fp2DropEyeReplay();
+        g_bow = BOW_DRONE;
+        return 0;
+    }
 
     /* While first person holds the camera the head goes, and
      * it goes every frame: the engine reasserts its own idea
@@ -1397,61 +1718,163 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
      * menu or the drone the branches above left already, so
      * the engine's own state shows it again there. */
     if (!g_headShow) HeadVis(1);
-    /* An aim hands the frame to the engine's own aim camera,
-     * the instant it starts - the table's behaviour, and the
-     * only one this design has: the engine's aim transition
-     * runs the whole time, so a window that keeps writing over
-     * it does not blend anything, it hides the transition and
-     * then reveals it in one jump when the window closes.
-     * That is a pull, and it was measured as one. */
-    /* The aim: tracked, and no longer handed over.
+
+    /* ---- the aim: the engine's own camera, handed over the same frame -----
+     * This is the community table, line for line. Its camera hook is:
      *
-     * Until 2026-09-26 the frame went to the engine's own aim camera for the
-     * whole aim - that being the only way its aim transition is seen - and the
-     * price was a cut at each end, 0.36 m going in and 1.8 m coming out (see
-     * the trace above), which is the flash the field reports. Two attempts at
-     * softening those cuts were tried and taken out the same day, both because
-     * they showed the player the third-person camera instead. This is the third
-     * and it goes the other way: keep the eye, and let the engine animate what
-     * it animates without owning the camera - the weapon coming up and the fov
-     * zooming are its own work and do not need the camera to be. The note that
-     * used to be here warned that writing over the aim was measured as a pull,
-     * so this is the experiment of 2026-09-26 and it comes straight back out if
-     * the player reads it as worse.
+     *     mov r11l,[skipFirstPersonByte+3]   ; 1 = the player is in ADS
+     *     test r11l,r11l
+     *     jne  headPositionSkip              ; aiming -> skip recomputing the
+     *     ...                                ;   position and writing it
+     *   headPositionSkip:
+     *     movaps [rax+00000170],xmm2         ; the store still happens; xmm2 is
+     *                                        ;   the engine's own value, i.e.
+     *                                        ;   "do not overwrite"
      *
-     * The aim's two edges stay in the log (the plugin's report is read from
-     * them), and g_bow stays BOW_NONE through an aim that is kept - which is the
-     * truth: nothing was handed over.
+     * So while aiming the engine's own aim camera stands, and the decision is
+     * the one byte the engine writes at its own two ADS call sites - the same
+     * byte captured below as g_fp.skip[3] (see InstallAds). The switch is on
+     * the frame itself: the byte goes up this frame and the handover is this
+     * frame, with no lag and no look-ahead. The head was hidden just above, so
+     * an aim's frame still reads headless - the table does the same.
      *
-     * A magnified optic is the exception, and the engine's own answer draws the
-     * line: an engine fov under FOV_ZOOM_RAD means a zoom optic is at work (the
-     * line the fov module uses - a gameplay fov is 0.78 to 0.83, an optic
-     * computes far below it). That case keeps the frame with the engine's aim
-     * camera, because the optic's glass and the projection that carries it are
-     * computed from it: with the eye kept there instead, its lens came adrift
-     * and stayed at the side of the screen for every aim after it (reported
-     * 2026-09-26, right after this behaviour went in). Iron sights and 1x optics
-     * have no such glass, and they keep the new behaviour. */
+     * Do NOT bring any of these three back, in any spelling:
+     *
+     *   - a grace or sustain ("hold the handover for N ms"). The engine starts
+     *     its own way out of the aim the instant the byte drops, so the frames
+     *     a grace holds are third person - headless, exit animation and all -
+     *     straight at the player who just let go (tried and reverted
+     *     2026-09-26).
+     *
+     *   - a threshold that can drift (fov, a per-frame distance, a smoothed
+     *     signal). A threshold on a per-frame value is crossed by ordinary
+     *     play, and a one-frame move between two cameras is a flash: the fov
+     *     hysteresis here flashed at each edge on 2026-09-26, and the borrowed
+     *     position switched in and out every 60-450 ms on 2026-09-29.
+     *
+     *   - borrowing the engine's aim position as a middle form. It is still a
+     *     switch between two position sources, so it still needs a threshold,
+     *     and the flash still comes back with whatever reads it (2026-09-29).
+     *
+     * The cost is deliberate and is the user's call: while aiming the camera
+     * belongs to the engine, so the player's per-category offsets do not apply
+     * on those frames. First person's feel is what is being protected here,
+     * and the table pays exactly the same price.
+     *
+     * The two edges still go to the log (the plugin's report is read from
+     * them). g_bow = BOW_ADS is the truth for the handover: the frame was left
+     * to the engine.
+     *
+     * 2026-09-29, later that same day - the floor. The handover is OFF by
+     * default: the frame never changes hands, so the one-frame cut at each end
+     * of an aim cannot happen at all - by construction, not by a threshold that
+     * ordinary play can cross. What that buys and what it costs, in the field's
+     * own numbers:
+     *
+     *   bought   no cut at either end. The picture at the press is the picture
+     *            that was already there, and the burst of hand-offs inside one
+     *            aim the field reports cannot come back either, because there
+     *            is no hand-off to burst.
+     *   paid     through an aim the eye stands where the hip eye stood, and the
+     *            engine's weapon and optic alignment is computed against its
+     *            OWN aim camera - measured 230 mm away on a settled aim and
+     *            1873 mm at the hip (ShFp2AimProbe(8) on the 2026-09-29 trace).
+     *            The sights still line up; a long lever off them, a pistol's
+     *            suppressed barrel at about 0.8 m, reads as the drift the field
+     *            reports. A rifle's front sight at about 0.25 m does not.
+     *
+     * The order was the field's own: take the flash away first, because a
+     * one-frame jump between two pictures is not softened by anything, then
+     * earn the alignment back by letting the engine's own consumers read OUR
+     * eye - the second way in, MGR_STORE in scripthook_camera.c, kept for that
+     * purpose since the same day. Until that is done the drift is the known
+     * price of the floor.
+     *
+     * The table's behaviour is still reachable live, for an A/B inside one
+     * session, through the knob the probes already own: ShFp2AimHold 1 hands
+     * the frame over on the raw byte exactly as it did, ShFp2AimHold 0 or -1
+     * (the default, which is what a fresh session and a fresh ini have) keeps
+     * the eye. Nothing but this line and ShFp2AimProbe(7)/(0) reads g_aimHold,
+     * and the aim's two edges still reach the log either way. */
+    /* MEASURE 2026-09-29: hand over when the engine's own ADS transition is
+     * done, not the instant the byte goes up.
+     *
+     * The cut that flashes is the entry one, and it is the engine's camera
+     * that makes it: at the press that camera is still 1873 mm behind the
+     * head - its third-person seat - and it walks to the aim rig (191 mm off
+     * the eye, measured twice) over the transition. Handing over at the press
+     * therefore cuts 1.87 m in one frame; handing over at the end of the walk
+     * cuts 191 mm, ten times less, and the sights are exact from then on.
+     *
+     * The end of the walk is read off the fov rather than a fixed number,
+     * because a weapon's settled fov differs by weapon (a 4x optic measured
+     * 0.4916, iron sights sit higher). Settled here means the fov has stopped
+     * falling for a few frames - the transition is monotonic, so the running
+     * minimum holding still is the end of it, whatever the weapon.
+     *
+     * g_aimHold still overrides everything, for an A/B in one session:
+     * > 0 hands over at the press (the old behaviour, 1.87 m cut),
+     *   0 never hands over, -1 (the default) is this. */
+    if (!g_fp.skip[3]) {
+        g_fovMin = 9.9f;
+        g_fovStill = 0;
+    } else {
+        float fv = ShFovEngine();
+
+        if (fv > 0.0f && fv < g_fovMin - 0.005f) {
+            g_fovMin = fv;
+            g_fovStill = 0;
+        } else if (fv > g_fovMin + 0.008f) {
+            /* The engine has started walking its camera back out. Hand the
+             * frame back NOW, and not when its ADS byte finally drops: the
+             * byte outlives most of that walk, and by the time it does drop
+             * the engine's camera is metres away - the 2026-09-29 beta log
+             * has the cut at 2.3 m on the frame the byte went down. Our eye
+             * walks back off the same fov (see the apply in
+             * scripthook_camera.c), so the two are within a hand's width
+             * however early this fires. -1000 is the "it rose" mark: the
+             * condition below wants a settled fov, and no settled count is
+             * negative. g_fovStill's own reset above clears it for the next
+             * aim. */
+            g_fovStill = -1000;
+        } else if (g_fovStill < 8) {
+            g_fovStill++;
+        }
+    }
+    if (g_aimHold > 0) { g_bow = BOW_ADS; return 0; }          /* forced  */
+    if (g_aimHold != 0 && g_fp.skip[3] && g_fovStill >= 3) {
+        g_bow = BOW_ADS;
+        return 0;                                             /* settled */
+    }
+
+    g_lastCm = cm;                          /* MEASURE 2026-09-29 */
+    /* ---- the aim, for the probes only ------------------------------------
+     * g_aimArm is armed by the fov here so ShFp2AimProbe(10) and the Meas
+     * heartbeat have the aim's edges to read; it decides NOTHING about the
+     * camera. The ownership above is the raw byte, and no line of camera code
+     * may read g_aimArm - see the note at its declaration. */
+    {
+        float fv = ShFovEngine();
+
+        if (fv > 0.0f && fv < FOV_AIM_IN)      g_aimArm = 1;
+        else if (fv >= FOV_AIM_OUT)            g_aimArm = 0;
+    }
     {
         static int aiming;
 
-        if ((g_fp.skip[3] ? 1 : 0) != aiming) {
-            aiming = g_fp.skip[3] ? 1 : 0;
+        if (AimGateNow() != aiming) {
+            aiming = AimGateNow();
             AimEdge(aiming ? "started" : "ended");
+            Meas(cm, 1);                    /* MEASURE 2026-09-29 */
         }
     }
-    if (g_fp.skip[3]) {
-        float f;
+    /* MEASURE 2026-09-29: a beat while an aim, or a zoom optic, is in
+     * play. Logs at MEAS_MS, decides nothing. */
+    {
+        float fv = ShFovEngine();
 
-        /* The remembered capture's window is stamped here as it was: an aim can
-         * last minutes, and an expired hold is a frame with nothing to place. */
-        g_pickHoldAt = GetTickCount64();
-
-        f = ShFovEngine();
-        if (f > 0.0f && f < FOV_ZOOM_RAD) {
-            g_bow = BOW_ADS;
-            return 0;                   /* the engine's aim camera, as before */
-        }
+        if (AimGateNow() || (fv > 0.0f && fv < FOV_ZOOM_RAD))
+            Meas(cm, 0);
     }
 
     /* The world checks are at the top of this function now: they have to
@@ -1509,10 +1932,49 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
             arg = g_fp.headArgPrev;
         PickNote(arg, 1, &me);
         if (!arg) {
-            /* Nothing picked. Four ways to get here and the log
-             * has to say which: the ring was never written (the
-             * stub is not running), nothing in it resolves to a
-             * transform, everything is too far away, or every
+            /* Nothing picked, and this is the frame the field calls the
+             * flicker: all three fallbacks missed, so the frame would go
+             * to the engine's own camera and the screen would show it for
+             * one frame. Draw the eye this placement last wrote instead,
+             * while that is recent enough to stand in - see g_eyeReplay
+             * for what "recent enough" is and why it cannot latch.
+             *
+             * The memory is per placement, not per capture: nothing about
+             * which argument wrote the eye is needed here, only where it
+             * ended up, so the aim's own follow/offset state is already in
+             * the three numbers and is not tracked again. */
+            uint64_t now = GetTickCount64();
+
+            if (g_eyeReplayAt && now - g_eyeReplayAt <= EYE_REPLAY_MS) {
+                SH_ALIGNED(16) float re[3];
+
+                re[0] = g_eyeReplay[0];
+                re[1] = g_eyeReplay[1];
+                re[2] = g_eyeReplay[2];
+                /* The same write path a placement takes, so the frame is
+                 * placed - m, p, the trace and g_fp.placedAt - and only
+                 * the capture behind it is missing. Deliberately NOT
+                 * stamping g_eyeReplayAt: the window is measured from the
+                 * last real placement, and a replay that renewed it would
+                 * be the unbounded latch this must never become. */
+                EyeWrite(m, p, re);
+                g_eyeReplays++;
+                {
+                    static uint64_t lastAt;
+
+                    if (now - lastAt >= 2000) {
+                        lastAt = now;
+                        Log("pick: no capture, replayed the last eye "
+                            "(%llu frame(s) so far)",
+                            (unsigned long long)g_eyeReplays);
+                    }
+                }
+                return 1;
+            }
+            /* Nothing picked and the last eye is too old to stand in. Four
+             * ways to get here and the log has to say which: the ring was
+             * never written (the stub is not running), nothing in it
+             * resolves to a transform, everything is too far away, or every
              * slot in it was retired. */
             g_bow = BOW_ARG;
             RingTrace(&me);
@@ -1637,6 +2099,14 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
             s1 = g_offSeq;
         } while ((s0 != s1 || (s0 & 1u)) && ++spin < 8);
 
+        /* MEASURE 2026-09-29: the aim rig's share, in the same axes as the
+         * player's offset and added to it, so both go through one code path
+         * and one set of axes. Written from the aim branch on this same
+         * thread, so there is nothing to publish behind a counter here. */
+        ox += g_aimAdd[0];
+        oy += g_aimAdd[1];
+        oz += g_aimAdd[2];
+
         /* The offset is in the eye's own axes, not the
          * world's: right along the camera's right, forward
          * along its forward flattened to the horizon, and up
@@ -1669,18 +2139,45 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
         return 0;
     }
 
-    m[12] = out[0];
-    m[13] = out[1];
-    m[14] = out[2];
-    m[15] = 1.0f;
-    p[0] = out[0];
-    p[1] = out[1];
-    p[2] = out[2];
-    p[3] = 0.0f;
+    /* This is the ordinary frame's placement: out[] - the eye plus the user's
+     * offset - goes straight over the engine's position. Nothing else reaches
+     * here. An aim never gets this far (the branch at the top returned), so
+     * there is no position switch in this function and no threshold anywhere:
+     * on an aim's frame the engine's own aim camera simply stands. See the note
+     * at g_aimArm for why that shape - and only that shape - is the fix. */
 
-    TraceJump("the eye", out, g_trOurs, &g_trOursHave);
-    g_fp.placedAt = GetTickCount64();
-    g_bow = BOW_NONE;
+    /* Measure how far the engine's own camera sits from the eye, in
+     * millimetres, on this frame - NOW, just before out[] goes over p[], so
+     * that p[] is still the engine's position and out[] is already the eye. A
+     * pure reading: the sum of squares is formed and stored, and neither array
+     * is touched by it. It runs every frame that reaches here, an aim's frames
+     * and a hip shot's alike, because the value is only worth having if it is
+     * unfiltered - see the note at g_lastGapMm, and do not let anything read it
+     * back. */
+    {
+        float dx = out[0] - p[0];
+        float dy = out[1] - p[1];
+        float dz = out[2] - p[2];
+        float sq = dx * dx + dy * dy + dz * dz;
+
+        /* 1e9 mm^2 is a 1000 m gap: past that the two are in different worlds
+         * (a load, a cutscene) and the number says nothing, so it is dropped
+         * rather than stored. The bound is tested on the sum of squares, so it
+         * costs one comparison; the square root below only ever runs on a sum
+         * already known to be under the bound, which is also what keeps the
+         * millimetre value clear of an int's range. */
+        g_lastGapMm = (sq < 1.0e9f) ? (int)(sqrtf(sq) * 1000.0f) : -1;
+    }
+
+    EyeWrite(m, p, out);
+    /* Remember the eye for the frames in which no capture can be found -
+     * see g_eyeReplay. Stamped from the EyeWrite above rather than a second
+     * GetTickCount64, so the window is measured from exactly the placement
+     * that wrote the three numbers next to it. */
+    g_eyeReplay[0] = out[0];
+    g_eyeReplay[1] = out[1];
+    g_eyeReplay[2] = out[2];
+    g_eyeReplayAt = g_fp.placedAt;
     return 1;
 }
 
@@ -1696,7 +2193,8 @@ static int InstallCore(void) {
     if (!InstallMenu(S_MENU2, 0)) miss |= M_MENU2;
     if (!InstallMenu(S_MENU3, 1)) miss |= M_MENU3;
     if (!InstallDrone())          miss |= M_DRONE;
-    if (!InstallAds(S_ADS_OUT) || !InstallAds(S_ADS_IN)) miss |= M_ADS;
+    if (!InstallAds(S_ADS_OUT, &g_fp.adsOut) ||
+        !InstallAds(S_ADS_IN, &g_fp.adsIn)) miss |= M_ADS;
 
     g_miss = miss;
     g_ready = (miss & M_REQUIRED) == 0;
@@ -1818,6 +2316,11 @@ SH_API void ShFp2Enable(int on) {
     if (!on) {
         g_showUntil = GetTickCount64() + 800;
         HeadVis(0);
+        /* The frame is the engine's from here, and the eye this session
+         * last wrote belongs to it no longer: a replay from it after the
+         * switch goes back on would be a camera from the session before.
+         * See g_eyeReplay. */
+        Fp2DropEyeReplay();
     }
 }
 
@@ -1853,6 +2356,17 @@ SH_API void ShFp2SetOffset(float x, float y, float z) {
     g_fp.off[3] = 0.0f;
     g_offSeq++;
 }
+
+/* MEASURE 2026-09-30: the live half of the 2026-09-29 measurement lived here
+ * - ShFp2AimProbe and ShFp2AimHold, the two the test REPL polled and poked so
+ * that a question about an aim could be answered without a restart.
+ *
+ * The measurement is finished, its numbers are written down in
+ * docs/firstperson-aim-flash-and-offset.md, and nothing in the framework or in
+ * a plugin ever called either one. Both exports are gone rather than left as
+ * an API a plugin could believe in. The gate they poked is not: g_aimHold sits
+ * at its default -1 and the ownership branch reads it exactly as before.
+ */
 
 /** The live gate bytes: menu count, drone, aim, and whether a
  *  fresh capture is waiting. Any may be NULL.
