@@ -51,12 +51,15 @@ SH_REQUIRES_API(1);
 /* No zoom polls the fov faster than the menu's cadence: the sights come
  * up in a frame or two, not in half a second. */
 #define NOZOOM_MS   16
-/* A fov change is walked rather than snapped: about a sixth of a second
- * from one value to the next, on the same beat No zoom uses. A hold has
- * nothing to walk - its target is the value already on screen. */
+/* The tick a fov transition is measured in. MEASURE 2026-10-01: the walk
+ * itself is no longer a per-tick fraction of the distance - see RampOnce, which
+ * spreads a change over a fixed number of these ticks with a smoothstep on it.
+ * RAMP_STEP (an exponential 35 % a tick) lived here and is what made a wide
+ * override read as "no transition": it is removed rather than tuned, because
+ * the shape was wrong, not the rate. */
 #define RAMP_MS     16
-#define RAMP_STEP   0.35f
-#define RAMP_MIN    0.002f     /* rad: close enough to settle on the target */
+/* rad: close enough to call a fov settled, for the paths that only compare. */
+#define RAMP_MIN    0.002f
 /* While the override is on, which fov is in force depends on the view,
  * so a switch between first and third person has to land at once rather
  * than on the next slow tick. The same beat reads the view mode, and a
@@ -64,10 +67,19 @@ SH_REQUIRES_API(1);
  * from alive.
  */
 #define VIEW_MS     250
-/* How long after an aim the view is left alone. The framework reports first
- * person for the engine's own aim camera on the head bone, and goes on doing
- * it for a beat after the aim comes down; a reading inside that window is
- * the hand over, not a view. */
+/* How long after an aim the view is left alone. A reading inside this window
+ * is the aim's own settling, not a change of view.
+ *
+ * The framework used to report first person for the engine's own aim camera -
+ * which sits on the head bone - for a beat after the aim came down, and this
+ * window was measured against that hand over. The structure has since
+ * changed: the frame is never handed to the engine's aim camera, and the
+ * framework no longer takes its POSITION either (the eye is the only position
+ * source - see g_aimArm in scripthook_fpx.c), so the view is first person
+ * throughout an aim and after it either way. The constant and the wait are
+ * kept as they are: a reading taken inside an aim is still the aim, not a
+ * view change, and the window is what keeps the fov from being re-read
+ * against a camera that is still settling. */
 #define HANDOVER_MS 800
 /* Where an iron sight's fov sits. Measured live on the 2026-09 build,
  * the aim fov of every sight in the game: iron sights 0.69, 1x / 2.5x /
@@ -96,20 +108,16 @@ SH_REQUIRES_API(1);
  * pin is set). Narrower than this is a scope, and its magnification is not
  * ours to take. */
 #define OPTIC_RAD   0.50f
-/* How far above the framework's 0.5 line the engine's value is followed.
- * Only a magnified optic's pull reaches down here; an iron sight's 0.69 is
- * well clear of it, which is what keeps the hold from being followed (and
- * No zoom from showing the pull it exists to hide). */
+/* How far above the framework's 0.5 line the engine's value is followed, on
+ * an aim with No zoom off: only a magnified optic's pull reaches down here,
+ * and it is the one place the framework's own handover can land a step. */
 #define OPTIC_MARGIN 0.10f
-/* What counts as the sights being up: the engine's own value sitting inside
- * the sights' band, within HOLD_CALM of where that run started, for
- * HOLD_MS. Measured against the alternative - the engine's pull travels
- * about 0.12 rad through this range in a couple of hundred milliseconds, so
- * a traveller leaves HOLD_CALM within a tick or two whatever the cadence,
- * while a held aim stays inside it (its own sway is a fraction of a
- * degree). See the aim test in TickThread. */
-#define HOLD_CALM   0.02f
-#define HOLD_MS     120u
+/* MEASURE 2026-10-01: HOLD_CALM and HOLD_MS lived here. They timed the
+ * engine's own fov to decide whether the sights were up, because a plugin had
+ * no dependable aim state to read. It has one now - the engine's own byte,
+ * through ShFp2Gate - so the wait is gone, and with it the 120 ms of the pull
+ * that used to happen before No zoom took hold. The detector's full reasoning
+ * is in the note at GateAds. */
 
 /* Config convention, the same every plugin follows: the .ini sits beside
  * the .asi and takes its base name, so fov_changer.asi pairs with
@@ -154,6 +162,10 @@ static volatile LONG  g_view = SH_VIEW_UNKNOWN;
  */
 static volatile float g_lookRad = 0.0f;
 static volatile float g_shown = 0.0f;
+/* The fov No zoom holds, frozen at the frame an aim starts. See where it is
+ * written in TickThread: WantedRad() cannot serve this, because while an aim
+ * is up it returns the engine's own (narrowed) value. */
+static volatile float g_holdRad = 0.0f;
 /* What the ini asked for, applied once the menu exists. */
 static int g_initOverride = 0;
 static int g_initNozoom = 0;
@@ -169,12 +181,228 @@ static volatile float g_engRad = 0.0f;
 static volatile float g_camRad = 0.0f;
 static volatile float g_engPrev = 0.0f;
 static volatile LONG  g_aim = 0;
+/* For the diagnostic only: the latched aim, published so the log can show it
+ * beside `aim`. See the note in DiagState for why the log kept telling us the
+ * wrong story without it. */
+static volatile int   g_aimHeldDbg = 0;
+/* Which of the three value paths the last tick took: 1 following the engine,
+ * 2 holding a no-zoom target, 3 settling on a view's fov. Published for the
+ * diagnostic, so a log can say which branch produced a number rather than
+ * leaving it to be inferred from the number. */
+static volatile int   g_pathDbg = 0;
+
+/* The framework's live gate bytes, resolved by name because a dinput8 older
+ * than this plugin will not have them; see GateAds. `ads` is the byte the
+ * ENGINE writes at its own two aim sites - the edge itself, not a reading of
+ * the fov - which is what this plugin needs to tell an iron sight from a
+ * magnified optic without waiting to see which one settles.
+ */
+typedef void (*Fp2Gate_t)(int *menu, int *drone, int *ads, int *fresh);
+static Fp2Gate_t g_gate;
+
+/* 1 while an aim is up, from the engine's own byte.
+ *
+ * This replaced a time-based hold detector that watched the fov: the value
+ * had to sit inside [0.50, 0.75) within HOLD_CALM of where that run started
+ * for HOLD_MS before an aim was believed. Two things were wrong with it, both
+ * reported 2026-10-01.
+ *
+ * It is LATE. 120 ms of the engine's own pull happens before the hold is
+ * believed, and in that window No zoom was not yet holding - so the camera
+ * followed the engine down and was walked back when the hold engaged. That is
+ * the "it still zooms and then immediately returns" the field reported, and
+ * it is the detector's own latency showing on screen.
+ *
+ * And it is LATE ON PURPOSE, which is why it cannot simply be shortened: it
+ * existed to keep a magnified optic's pull through the same band from being
+ * taken for an aim (reported 2026-09-21: "why does it affect scopes?"), and
+ * only time told the two apart.
+ *
+ * The engine's byte has neither problem. It is the edge, so nothing is late,
+ * and it is 1 only for an aim and never for an optic's pull, so there is
+ * nothing to tell apart. A framework without the gate answers 0 and the fov
+ * test below is used instead - the old behaviour, minus the claim that it is
+ * the right one.
+ */
+static int GateAds(void) {
+    int ads = 0;
+
+    if (!g_gate) {
+        /* No gate: fall back to the fov, and be honest in the log about it. */
+        static int said;
+        float e = ShFovEngine();
+
+        if (!said) { said = 1; Log("fov: no ShFp2Gate - aim from the fov"); }
+        return e > OPTIC_RAD && e < SIGHT_HI;
+    }
+    g_gate(NULL, NULL, &ads, NULL);
+    return ads ? 1 : 0;
+}
 
 static int OverrideOn(void) {
     return InterlockedCompareExchange(&g_on, 0, 0) ? 1 : 0;
 }
 
-/* ---- settings -------------------------------------------- */
+/* How long the tick should wait before the next step of a running sweep. Set by
+ * RampOnce and read by the tick's cadence, so the sweep advances by real elapsed
+ * time whatever beat the loop happens to be on - which is what makes the travel
+ * the same length at 250 ms a tick as at 16 ms, and it is why this is not a
+ * per-tick fraction (audited 2026-10-01: the old fraction meant 2.5 s of
+ * transition at the slow beat against an engine whose own travel is 0.4 s). */
+static volatile DWORD g_rampDue = 60;
+/* The batch a sweep is divided into: it wants its next step at this delay, and
+ * the tick will not sleep longer than this while the batch stands. */
+#define RAMP_BATCH_MS 60u
+
+static void RampDue(DWORD ms) {
+    if (ms < 1u) ms = 1u;
+    if (ms > RAMP_BATCH_MS) ms = RAMP_BATCH_MS;
+    g_rampDue = ms;
+}
+
+/* Whether an aim byte could be about to arrive. Used only for the tick's
+ * cadence - see the note at the sleep. */
+static int CouldBeAiming(float eng) {
+    return (eng >= 0.05f && eng < 1.2f) ? 1 : 0;
+}
+
+/* A fov transition of a fixed length, eased at both ends.
+ * MEASURE 2026-10-01, and the whole of the "the raise and lower is a step"
+ * report. The walk used to be `g_shown += (goal - g_shown) * RAMP_STEP` - an
+ * exponential approach at 35 % a tick. That is not a transition curve: the
+ * first tick takes a third of the distance, the second takes a third of what
+ * is left, and by the third the picture has covered 73 % of the travel. Over
+ * the ~0.3 rad an unmodified game moves, that read as smooth enough. Over the
+ * 0.7 rad an override at 80 degrees moves it read as a single step - and that
+ * is exactly the split the field reported: cases 1 and 2 (override off, the
+ * engine's own narrow travel) smooth, cases 3 and 4 (override on, the wide
+ * travel) "no transition". The curve was the same in all four; only the
+ * distance differed, and an exponential only looks like a transition while
+ * the distance is short.
+ *
+ * So the travel is spread over a fixed number of ticks with a smoothstep on
+ * it: slow at the start, fast through the middle, slow into the target. The
+ * length is the engine's own ADS transition, so the fov arrives with the
+ * weapon rather than before or after it.
+ *
+ * The goal is sampled when it CHANGES - not every tick. An aim's own travel
+ * moves it every tick, and re-sampling each one would either restart the
+ * sweep forever or leave `from` chasing the value it is sweeping towards, so
+ * the travel would collapse. One aim, one sweep: when the goal moves by more
+ * than a hair, the sweep restarts from what the camera carries and runs to
+ * the new goal; while it holds, the picture settles and stays.
+ *
+ * TWO LENGTHS, because there are two jobs. A value of OURS settling on a
+ * target of OURS has to be long enough to read as a transition. A value
+ * tracking one the ENGINE is moving has to keep up with that movement - and
+ * "keep up" means the same order as the movement itself, not as fast as
+ * possible. MEASURE 2026-10-01, in two steps, because the first fix for this
+ * was wrong in the other direction:
+ *
+ *   - chasing the engine at the settling length left our value far above the
+ *     engine's when the framework's 0.5 handover took the channel back, so
+ *     the handover landed as a step. "The scope has no transition."
+ *   - chasing it fast enough to guarantee arrival before that handover made
+ *     the whole travel finish in about 60 ms, which is not a transition
+ *     either: nobody can see it. "Still far too fast, no visible transition
+ *     at all."
+ *
+ * The engine's own ADS travel runs about 400 ms, which is the thing being
+ * watched - so that is the length, and the handover is met by being close
+ * rather than by being early. The sweep's length is a duration, not a race.
+ */
+#define RAMP_MS_STEPS 28      /* settle: 28 x 16 ms, the engine's own raise */
+
+/* How long the channel stays ours after an aim ends, so the lowering sweep
+ * finishes under our own pin. Must exceed the sweep (RAMP_MS_STEPS x RAMP_MS
+ * = about 450 ms) with room for a slow tick or two. See the ownership note in
+ * TickThread - releasing on the aim-end frame is what made the raise animate
+ * and the lower jump. */
+#define SETTLE_MS     900u
+
+/* How far what we are about to write may sit from the engine's own value before
+ * we pin it. Under this the engine's value passes the framework's own test and
+ * ours is either the same value or a jitter away from it, so pinning would only
+ * suppress a camera the engine is legitimately driving. See the note at the pin
+ * in TickThread - this one number is what separates "our transition must land"
+ * from "let the engine's magnification through". */
+#define PIN_GAP       0.02f
+
+/* One fixed-length sweep, started by a caller that knows the moment the value
+ * has to move. MEASURE 2026-10-01, and the fix for the last piece: the
+ * engine's own fov does not ramp at all. Measured on the 2026-10-01 build, the
+ * ADS edge and the engine's value:
+ *
+ *     22:09:25.417  ads: 0 -> 1
+ *     22:09:25.431  fov=0.4916      <- 14 ms later, already at the sight's value
+ *
+ * It is a STEP. Every round of this before now tried to FOLLOW that value -
+ * at various rates, with a sweep, with an exponential - and following a step
+ * is a step: the override faithfully reproduced the shape it was told to
+ * track, which is exactly what "there is no transition" looked like. The
+ * animation the unmodified game shows in first person is the weapon model
+ * coming up, not the fov.
+ *
+ * So the transition has to be OURS: when the aim starts, take the value the
+ * camera carries and sweep it to the engine's over RAMP_MS_STEPS ticks, once,
+ * with an end point sampled at that moment. It does not track anything after
+ * that, so a step in the engine cannot become a step on screen.
+ */
+static float RampOnce(float to, int cancel) {
+    static float from = 0.0f, at = 0.0f, lastGoal = 0.0f;
+    static uint64_t startAt = 0;
+    static int have = 0;
+    float u;
+    uint64_t now = GetTickCount64();
+
+    if (cancel) { have = 0; lastGoal = 0.0f; return to; }
+    if (!(to > 0.05f && to < 3.0f)) return to;
+
+    /* A sweep is restarted by the caller's cancel, AND by its goal changing.
+     *
+     * MEASURE 2026-10-01: the cancel alone is not enough, and this is finding 4
+     * of the audit. In steady state the lowering branch re-arms a fresh sweep
+     * as soon as the previous one finishes, so `have` is 1 on nearly every tick
+     * with `at` frozen - and a view switch, a slider notch or Reset all change
+     * `to` while the running sweep keeps writing the OLD goal until its clock
+     * expires. The change then took another full sweep to arrive, so a
+     * first/third person switch showed nothing for up to 448 ms and then eased
+     * over another 448. Comparing the goal is what the deleted FovEase did
+     * wrong (it used a static goal and a shared clock); done here, next to the
+     * clock it restarts, it is safe: a changed goal restarts everything
+     * together, so there is no state to go stale. */
+    if (!have || fabsf(to - lastGoal) > 0.0005f) {
+        from = (g_shown > 0.05f && g_shown < 3.0f) ? g_shown : to;
+        at = to;
+        lastGoal = to;
+        startAt = now;
+        have = 1;
+    }
+
+    u = (float)(now - startAt) / (float)(RAMP_MS_STEPS * RAMP_MS);
+    if (u >= 1.0f) { have = 0; from = at; return at; }
+    if (u <= 0.0f) u = 0.0f;
+    /* Publish the time this sweep has left, so the tick can sleep until its next
+     * step rather than to a fixed beat. A sweep has RAMP_MS_STEPS steps; asking
+     * for the remainder divided by the steps left keeps every step the same
+     * length whatever cadence the rest of the loop is running at. */
+    {
+        DWORD left = (DWORD)(startAt + (uint64_t)(RAMP_MS_STEPS * RAMP_MS) - now);
+        DWORD stepsLeft = (DWORD)((1.0f - u) * (float)RAMP_MS_STEPS) + 1u;
+
+        RampDue(left / stepsLeft);
+    }
+    return from + (at - from) * (u * u * (3.0f - 2.0f * u));   /* smoothstep */
+}
+
+/* FovEase lived here, and is deleted rather than kept for the paths that no
+ * longer use it. It was the source of two of this file's bugs, both from the
+ * same design choice: it inferred when a transition started by comparing the
+ * goal against a static lastGoal, and a goal that repeated an earlier value -
+ * the view's fov on the way down is the same number a hip settle used a moment
+ * before - made it reuse an ancient clock and jump straight to the target.
+ * RampOnce replaces it everywhere and is explicit: a transition is started by
+ * a caller that knows the edge, not guessed. One primitive, no inference. */
 
 /* Resolve <gamedir>\plugins\<name>\<name>.ini from the plugin's own file
  * name, once - the framework knows the folders, this knows its own name. */
@@ -250,14 +478,32 @@ static volatile LONG g_learned;
 
 static void LearnDefault(void) {
     ShCamera c;
+    float v;
 
-    if (OverrideOn() || InterlockedCompareExchange(&g_learned, 0, 0)) return;
+    if (InterlockedCompareExchange(&g_learned, 0, 0)) return;
     if (!ShIsInGame()) return;
-    if (!ShGetCamera(&c)) return;
-    if (c.fov > 0.05f && c.fov < 3.0f) {
-        g_defaultRad = c.fov;
-        if (g_fpDeg <= 0.0f) g_fpDeg = c.fov * RAD2DEG;
-        if (g_tpDeg <= 0.0f) g_tpDeg = c.fov * RAD2DEG;
+
+    /* FINDING 10 of the 2026-10-01 audit: the override check that used to be
+     * here made a restored session (override=1 in the ini, which sets g_on
+     * before the tick has ever run) unable to learn the game's default at all -
+     * DefaultRad() stayed on the compiled-in fallback for the whole session, so
+     * the status line's "game default" and the "Back to the game default" row
+     * both reported a constant instead of the game's value.
+     *
+     * The engine's own value is the right source while the override is on: it
+     * is the fov the game computed, read before our replacement, so it is the
+     * default by definition. With the override off the camera carries the same
+     * thing, and reading it there keeps the old behaviour (and keeps working on
+     * a framework too old for ShFovEngine). */
+    v = ShFovEngine();
+    if (!(v > 0.05f && v < 3.0f)) {
+        if (!ShGetCamera(&c)) return;
+        v = c.fov;
+    }
+    if (v > 0.05f && v < 3.0f) {
+        g_defaultRad = v;
+        if (g_fpDeg <= 0.0f) g_fpDeg = v * RAD2DEG;
+        if (g_tpDeg <= 0.0f) g_tpDeg = v * RAD2DEG;
         InterlockedExchange(&g_learned, 1);
     }
 }
@@ -425,10 +671,22 @@ static void OnToggle(uint32_t menu, uint32_t item, int value,
         }
     } else {
         InterlockedExchange(&g_on, 0);
-        /* The no-zoom feature is on the same channel; releasing the
-         * override must not hand it back while the sights are held. */
-        if (!InterlockedCompareExchange(&g_nozoom, 0, 0))
+        /* Hand the fov back now rather than waiting up to a tick - the menu
+         * cannot see the tick's `held`, and a channel held half a second after
+         * the switch went off is a value nobody owns.
+         *
+         * The pin goes with it ONLY when No zoom is off too: that feature is
+         * the other thing that holds this channel, and it holds it with the
+         * pin, so clearing the pin under it would leave the sights narrowing
+         * again. Releasing the channel while leaving the pin set has its own
+         * failure - our value pinned with the engine supposed to be in charge -
+         * so the two are decided together, from the same state the tick reads. */
+        if (InterlockedCompareExchange(&g_nozoom, 0, 0)) {
+            /* No zoom still owns the channel; leave both alone. */
+        } else {
+            ShFovPin(0);
             ShCameraReleaseFields(SH_CAM_FOV);
+        }
     }
     SaveIniSoon();
     Report();
@@ -461,8 +719,16 @@ static void OnNoZoom(uint32_t menu, uint32_t item, int value,
     (void)menu; (void)item; (void)user;
     InterlockedExchange(&g_nozoom, value ? 1 : 0);
     if (!value) {
-        ShFovPin(0);
-        if (!OverrideOn()) ShCameraReleaseFields(SH_CAM_FOV);
+        /* FINDING 9 of the 2026-10-01 audit: the pin belongs to whichever
+         * feature is holding the channel, so it may only be cleared when the
+         * override is off too. Clearing it under a still-on override left a
+         * window - up to VIEW_MS, since the tick re-pins on its next pass - in
+         * which we held the channel with the pin down, and any engine value
+         * under 0.5 (a scope, a vehicle zoom) showed through ours. */
+        if (!OverrideOn()) {
+            ShFovPin(0);
+            ShCameraReleaseFields(SH_CAM_FOV);
+        }
     }
     SaveIniSoon();
     Report();
@@ -525,12 +791,34 @@ static void DiagOpen(void) {
         LogInitAlways("fov_changer.log");
 }
 
+/* The main line, on a change and once a second while it holds.
+ *
+ * MEASURE 2026-10-01: `shown` here must be the value the CAMERA was given, not
+ * the sweep's own variable. An earlier revision zeroed that variable on release
+ * and this printed it, so the log reported 0.000 through the very release the
+ * exercise was about - three rounds of reading a cleared variable, which is how
+ * the transition got argued about from the wrong numbers. The variable is no
+ * longer zeroed (see the release branch), but the rule stands: print what went
+ * to the camera, and print the inputs the decision was made from.
+ *
+ * `path` is which of the value paths ran - 1 follow, 2 hold, 3 settle on the
+ * view's fov, 4 an aim with nothing of ours to say (the engine's own value
+ * written through, which is what a magnified optic's aim under the override
+ * is) - so a line says which branch produced the number instead of leaving it
+ * to be inferred from the number. The audit of 2026-10-01 (finding 11) pointed
+ * out that the previous parameter was named `hold` but never printed, and that
+ * the per-tick line's parameter was named `follow` while receiving the path
+ * code. */
 static void DiagState(float eng, float cam, float shown, float want,
-                      int aim, int hold, int held, int nz, int ovr) {
+                      int aim, int path, int held, int nz, int ovr) {
+    int gateAds = 0;
+
+    if (g_gate) g_gate(NULL, NULL, &gateAds, NULL);
     if (g_diagOn != 1) return;
-    Log("eng=%.3f cam=%.3f shown=%.3f want=%.3f aim=%d hold=%d held=%d "
-        "nz=%d ovr=%d",
-        eng, cam, shown, want, aim, hold, held, nz, ovr);
+    Log("eng=%.3f cam=%.3f wrote=%.3f want=%.3f aim=%d latched=%d look=%.3f "
+        "hold=%.3f path=%d held=%d nz=%d ovr=%d gate=%d hasgate=%d",
+        eng, cam, shown, want, aim, g_aimHeldDbg, g_lookRad,
+        g_holdRad, path, held, nz, ovr, gateAds, g_gate ? 1 : 0);
 }
 
 /* Entering a session reinstalls the camera hook, so the
@@ -540,16 +828,36 @@ static DWORD WINAPI TickThread(LPVOID p) {
     int held = 0;      /* the fov channel is ours right now */
     DWORD viewAt = 0;  /* when the view mode was last read */
     DWORD aimAt = 0;   /* when an aim was last up, of any kind */
-    /* The hold detector, in time rather than in ticks: the engine's own
-     * value inside the sights' band, within HOLD_CALM of where that run
-     * started, for HOLD_MS. See the aim test - a value passing through the
-     * band is not an aim, and a per-tick delta cannot tell the two apart. */
-    static float    holdRef = 0.0f;
-    static uint64_t holdAt = 0;
-    static int      hold = 0;
+    /* The aim, latched for its whole duration. See the note at the aim test:
+     * this is the engine's own byte, held across the stretch where a magnified
+     * optic's value is already under the framework's 0.5 line and the fov
+     * alone would say "not an aim". */
+    int aimHeld = 0;
+    /* The same value one tick ago, so the rising edge can be seen. A sweep has
+     * to start there - see the note at the follow below. */
+    int aimHeldPrev = 0;
+    /* How long the channel stays ours after an aim ends. The lowering sweep
+     * runs under our own pin - releasing on the first frame of it is what made
+     * the raise animate and the lower jump. MEASURE 2026-10-01: the aim-end
+     * frame logged path=3 (our settle) with wrote=1.396 while cam went
+     * 0.492 -> 1.396 in the same tick, i.e. the engine's step landed on the
+     * frame we let go. See the note at the lowering branch. */
+    uint64_t aimEndAt = 0;
+    /* Which sight the current aim is: 1 an iron sight, 0 a magnified optic, and
+     * 0 with no aim up. Latched for the whole aim - see the note at the value
+     * decision, where a per-frame test is shown to be wrong. */
+    int iron = 0;
+    /* The engine's aim byte as read this tick, for the sight latch. See there. */
+    int gateUp = 0;
+    /* The delay a running sweep asked for before its next step, read at the top
+     * of the tick and written by RampOnce during the value decision. A sweep is
+     * the one thing here that knows the time it still needs, so it sets the
+     * beat; everything else only sets an upper bound. The first tick is
+     * immediate, via the initial value. */
     (void)p;
 
     while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
+        DWORD rampDue = g_rampDue;
         int in = ShIsInGame();
         int allowed = ShPluginAllowed();
         int nz = InterlockedCompareExchange(&g_nozoom, 0, 0) != 0;
@@ -601,58 +909,83 @@ static DWORD WINAPI TickThread(LPVOID p) {
          * held against a hip of 0.81. */
         quiet = fabsf(eng - g_engPrev) < 0.002f;
         if (eng >= SIGHT_HI && eng < 1.2f && quiet) g_hipRad = eng;
-
-        /* Held in the sights' band, or only passing through it? Passing is
-         * what a magnified optic's pull does on its way to 0.49 and below.
-         * Time is what tells them apart, not a per-tick delta: a held aim
-         * sways by a hair from tick to tick, which the delta test read as
-         * movement - so the hold never engaged, the plugin kept following the
-         * engine, and No zoom did nothing (reported 2026-09-21). A run that
-         * stays within HOLD_CALM for HOLD_MS is a hold; a pull leaves that
-         * range within a tick or two, which restarts the run. */
-        if (eng >= OPTIC_RAD && eng < SIGHT_HI &&
-            fabsf(eng - holdRef) <= HOLD_CALM) {
-            if (!holdAt) holdAt = GetTickCount64();
-            hold = (GetTickCount64() - holdAt) >= HOLD_MS;
-        } else {
-            holdRef = eng;
-            holdAt = 0;
-            hold = 0;
-        }
+        /* FINDING 8 of the 2026-10-01 audit: this was never assigned anywhere,
+         * so `quiet` compared against a permanent 0.0f and was false on every
+         * frame - meaning g_hipRad was never learned at all and both of its
+         * fallbacks silently degraded to DefaultRad()/g_shown. The comparison
+         * above is against the PREVIOUS frame, so the assignment belongs here. */
         g_engPrev = eng;
 
-        /* An aim, from the frame the engine starts pulling to the one it has
-         * let go of. The value alone says it, which keeps the feature
-         * independent of an aim state a plugin cannot depend on reading - and
-         * it is kept apart from the switch too, because the frame with No
-         * zoom off still has to know an aim is up: that is the frame the
-         * engine's own value is left alone on.
+        /* An aim, from the frame the engine's own byte says one is up - the
+         * edge itself, with no detector and nothing to wait for. See GateAds
+         * for what the time-based hold this replaced cost: 120 ms of the pull
+         * was read as "not an aim yet", so No zoom arrived after the zoom it
+         * exists to prevent.
          *
-         * Entering needs the value to be HELD in the band, not merely to be
-         * passing through it. A magnified optic's pull sweeps this same range
-         * on its way to 0.49 and below (reported 2026-09-21: "why does it
-         * affect scopes?"): with the band test alone the plugin took the hold
-         * over halfway through the optic's pull, walked the fov back towards
-         * the hip, and then let go under the framework's 0.5 line - a jump in
-         * both directions that the optic's own zoom had never had. Iron
-         * sights are held inside the band (0.69) and an optic is never held
-         * in it, so the hold is what tells them apart from the value alone.
+         * An optic's pull is no longer a risk at all - the byte is set by the
+         * engine's own aim sites on entering an aim, and a magnified optic
+         * sets it exactly like an iron sight does. What the byte cannot say
+         * is which kind of optic it is, and that is the fov's job, kept
+         * below: under the framework's 0.5 line the camera keeps the engine's
+         * value and a scope's magnification is not ours to take.
          *
-         * Leaving keeps the wide edge it always had: with the sights up, the
-         * value walks back up through the band, and handing the channel over
-         * at the first moving frame would land the camera on the engine's
-         * narrow end and jump from there.
+         * MEASURE 2026-10-01: `aim` must NOT be the aim state. It was
+         * `GateAds() && eng >= OPTIC_RAD`, which folds two different questions
+         * into one - is an aim up, and is the engine's value still in the iron
+         * sight band. A magnified optic's value falls UNDER the line as its
+         * pull runs, so the aim state went false mid-aim, the plugin released
+         * the channel on the frame the fov crossed 0.5, and the camera stepped
+         * on to whatever the engine had by then. That is the "the scope has no
+         * transition" report, and it also killed No zoom whenever an iron
+         * sight's value drifted under the line - both of them the same error.
          *
-         * Never an optic: under the framework's line the camera keeps the
-         * engine's value and a scope's magnification is not ours to take -
-         * the hold test is what makes that true.
+         * So: `inAim` is the aim, latched for its whole duration from the
+         * engine's own byte; `aim` stays what the no-zoom hold and the fov
+         * reporting need it to be (an aim whose value is in the sight band).
          */
         {
-            int was = InterlockedCompareExchange(&g_aim, 0, 0) != 0;
+            int gate = GateAds();
 
-            aim = eng < (was ? SIGHT_HI + 0.06f : SIGHT_HI) &&
-                  eng >= OPTIC_RAD &&
-                  (was || hold);
+            /* Kept for the whole tick: the sight latch below needs to know
+             * whether the engine is still pulling, and that is this byte. */
+            gateUp = gate;
+
+            if (gate) aimHeld = 1;
+            else if (eng >= SIGHT_HI) aimHeld = 0;   /* the byte cleared */
+
+            /* The aim just ended: start the window in which the lowering
+             * sweep still owns the channel. */
+            if (aimHeldPrev && !aimHeld) aimEndAt = GetTickCount64();
+
+            /* MEASURE 2026-10-01: freeze the fov the frame had BEFORE the aim,
+             * at the moment the aim starts, and hold THAT. No zoom captured
+             * its target through WantedRad, which returns the ENGINE's value
+             * while an aim is up - so the feature locked in the very number it
+             * exists to hide, and the sights narrowed exactly as they would
+             * have with it off. Measured on the 2026-10-01 logs: with No zoom
+             * on, `want` tracked the engine's pull down to 0.688 instead of
+             * staying at the 1.396 the frame carried before the aim.
+             *
+             * The value to hold is g_lookRad - what a plain hip frame carried,
+             * recorded on the frames with no aim up - sampled once, here. */
+            if (aimHeld && !aimHeldPrev) {
+                float hip = g_lookRad;
+
+                /* g_lookRad is what the hip frame carried, and it is preferred
+                 * because it is recorded on frames with no aim up. The fallbacks
+                 * are for the first aim of a session, before any hip frame has
+                 * been recorded: the engine's hip first, then whatever is on
+                 * screen. Preferring g_shown over g_hipRad here would sample a
+                 * sweep's moving value on a quick re-aim, which is the failure
+                 * the recording above exists to avoid. */
+                if (!(hip > 0.05f && hip < 3.0f)) hip = g_hipRad;
+                if (!(hip > 0.05f && hip < 3.0f)) hip = eng;
+                if (!(hip > 0.05f && hip < 3.0f)) hip = g_shown;
+                if (hip > 0.05f && hip < 3.0f) g_holdRad = hip;
+            }
+
+            aim = aimHeld && eng >= OPTIC_RAD;
+            g_aimHeldDbg = aimHeld;
         }
         InterlockedExchange(&g_aim, aim);
 
@@ -662,95 +995,375 @@ static DWORD WINAPI TickThread(LPVOID p) {
              * taken again once the mode allows it. */
             if (held) { ShCameraReleaseFields(SH_CAM_FOV); held = 0; }
             ShFovPin(0);
-        /* Both switches decide from here, and neither one is the whole of
-         * it: with the sights up it is No zoom that says whether the view
-         * is held, and with them down it is the override that says whether
-         * the view is ours at all. A frame that wants neither falls to the
-         * release below, which is what leaves the engine's own value - the
-         * game's small iron sight narrowing, and every magnified optic and
-         * the binoculars, whose values are under 0.5 rad and pass through
-         * unless the pin is set.
+        /* WHO HOLDS THE CHANNEL, and what to write while holding it.
+         *
+         * MEASURE 2026-10-01, and the structural error behind the whole
+         * exercise: this used to hold the channel only on frames whose aim
+         * test happened to pass, so who owned the camera fov flipped with a
+         * signal that flips. Every flip is a handover - we let go, the engine
+         * puts its own value on the camera, we take it back - and a handover
+         * on a frame nobody chose reads as the picture cutting. The aim byte
+         * is a real signal, but it goes up and down inside a single aim and
+         * across the 0.5 line, and ownership must not be wired to anything
+         * that does.
+         *
+         * So ownership follows the SWITCH:
+         *
+         *   the override is on  -> the channel is ours for as long as it is
+         *                          on, aim or no aim. What changes inside an
+         *                          aim is only the VALUE we write.
+         *   No zoom is on       -> ours while the aim lasts, because that is
+         *                          the feature: the fov must not move.
+         *   neither             -> released, and the engine's own value
+         *                          stands, which is the unmodified game.
+         *
+         * The value written is then one of three, and none of them is a
+         * handover:
+         *
+         *   FOLLOW  - an aim with No zoom off: move with the engine's own
+         *             travel. Our value has to become the engine's before the
+         *             framework's 0.5 line is reached, so this is tracking,
+         *             and tracking is short.
+         *   HOLD    - an aim with No zoom on: stay on the fov the frame had
+         *             before the aim came up. That is the whole feature.
+         *   SETTLE  - no aim: ease onto the view's own value, which is the
+         *             transition a switch or a slider should have.
          */
-        /* Applied while the override holds the view - and while No zoom holds
-         * the sights, which it does on its own, with the override off. With
-         * the override on and No zoom off an aim is applied to as well: what
-         * it is walked to there is the engine's own value (WantedRad), and
-         * releasing instead is what made that hand over a snap.
+        /* WHO HOLDS THE CHANNEL, and what to write while holding it.
+         *
+         * MEASURE 2026-10-01, in two parts.
+         *
+         * Ownership follows the SWITCH, not the aim: an aim byte goes up and
+         * down inside a single aim, and ownership wired to it flipped the
+         * camera back and forth - every flip a handover, every handover a cut.
+         *
+         * And it outlives the aim by the lowering sweep. Releasing on the frame
+         * the aim ENDS is what made the raise animate and the lower jump: that
+         * frame's own log is
+         *
+         *     22:29:21.426  eng=0.757 cam=0.492 wrote=1.396  lat=0 path=3
+         *
+         * - we wrote 1.396, path 3 is our settle, and cam moved 0.492 -> 1.396
+         * inside that one tick, because ShCameraReleaseFields had already
+         * cleared the pin and the engine's step landed on it. So the channel is
+         * held for SETTLE_MS after an aim goes down, which is longer than a
+         * sweep, and the sweep finishes under our own pin.
+         *
+         * FINDING 2 of the 2026-10-01 audit: that window must NOT open when the
+         * override is off. `aimEndAt` is set on every aim end whatever the
+         * switches say, so a session that had the override on earlier - or the
+         * nozoom-only mode - took the channel for 0.9 s after every aim and
+         * forced the SLIDER's fov onto the camera, then snapped back when this
+         * branch let go. With the override off there is no value of ours to
+         * lower to: the hold's target is the engine's own hip, so releasing on
+         * the aim-end frame is correct and invisible.
          */
-        } else if (OverrideOn() || (aim && nz)) {
+        } else if (OverrideOn() || (aim && nz) ||
+                   (OverrideOn() && GetTickCount64() - aimEndAt < SETTLE_MS)) {
             ShCameraOverride o;
             float want = WantedRad();
-            /* The engine's own value while it is travelling through the
-             * optic range: a magnified optic's pull walks 0.81 down to 0.49,
-             * and the framework hands the channel back to the engine at its
-             * 0.5 line - so a value of ours parked above that line turns the
-             * handover into a step down (reported 2026-09-21: correct with
-             * the override off, wrong with it on). Following the engine
-             * while it moves makes that line a continuation instead - our
-             * value arrives at 0.5 from above, the engine's carries on from
-             * below - and the value the override asked for comes back the
-             * moment the engine's value is held (see the aim test: a hold,
-             * not a still tick - an aim that has arrived still sways a
-             * little, and reading that as travel kept the hold from ever
-             * engaging).
-             */
-            /* ... and only close to the framework's line, which is the one
-             * place a step can land: an iron sight lives at 0.69 and never
-             * goes near 0.5, so following it there buys nothing and costs
-             * the thing No zoom is for - the pull stays visible as a dip and
-             * a return (reported 2026-09-21: "the view shrinks, then comes
-             * back"). With No zoom off there is nothing to hide, so the
-             * whole range is followed and the game's own pull shows through.
-             */
-            int nearLine = eng < OPTIC_RAD + OPTIC_MARGIN;
-
-            int follow = !hold && eng > 0.05f && eng < SIGHT_HI &&
-                         (nearLine || !nz);
-
-            if (follow) {
-                /* Ramped, not copied: entering the follow at its own top
-                 * would drop the camera onto the engine's value in a single
-                 * frame - the step this exists to remove, moved up from the
-                 * framework's line. What the ramp costs at the line itself
-                 * is a fraction of a degree. */
-                if (g_shown > 0.05f && g_shown < 3.0f)
-                    g_shown += (eng - g_shown) * RAMP_STEP;
-                else
-                    g_shown = eng;
-            } else {
-                /* Walked towards the target, never snapped to it, and seeded
-                 * from what the camera carries when nothing of ours is on
-                 * the channel yet - so a switch just turned on walks up from
-                 * the view on screen instead of jumping to its value. A hold
-                 * has nothing to walk: its target is already on screen.
-                 */
-                if (g_shown <= 0.05f && g_camRad > 0.05f && g_camRad < 3.0f)
-                    g_shown = g_camRad;
-                if (g_shown > 0.05f && g_shown < 3.0f &&
-                    fabsf(want - g_shown) > RAMP_MIN)
-                    g_shown += (want - g_shown) * RAMP_STEP;
-                else
-                    g_shown = want;
+            /* Whether this frame's value is OURS and has to be defended, as
+             * opposed to the engine's own value passed through. Decided at the
+             * pin below, from how far what we are about to write is from what
+             * the engine itself has - see the long note there.
+             *
+             * MEASURE 2026-10-01, and the regression that produced it: the pin
+             * is not only how the engine's value is suppressed, it is also what
+             * lets a value UNDER the framework's 0.5 line reach the camera at
+             * all. The stub replaces the engine's value only when the channel is
+             * enabled AND (pinned OR the engine's own value is >= 0.5). An aim
+             * drops the engine's value to 0.49, so an unpinned write of ours is
+             * discarded and the engine's step lands instead - which is exactly
+             * what the raises showed:
+             *
+             *     00:30:09.021  eng=0.492 cam=0.492 wrote=1.396   <- our sweep
+             *     ...                                                  discarded
+             *     00:30:09.557  eng=0.492 cam=0.492 wrote=0.492
+             *
+             * while the LOWERING worked, because by then the engine's value is
+             * back above 0.5 and an unpinned write passes the test on its own.
+             * One asymmetry, and it is the whole of "the raise has no
+             * transition and the lower does". */
+            /* ORDER IS THE FEATURE. No zoom is asked for first, and the follow is
+             * what is left over - not the other way round.
+             *
+             * MEASURE 2026-10-02, the last of the four-case matrix: with the
+             * override ON and No zoom ON, an iron sight still zoomed. The cause
+             * was this pair of conditions in the other order. `follow` was tested
+             * first and its test was `(eng >= SIGHT_HI || !nz)`, so a magnified
+             * optic could be followed even with No zoom on (that was the fix for
+             * finding 1) - but that also let an IRON SIGHT through whenever the
+             * engine's value had not yet reached the hip band, and the iron
+             * sight's own pull ends at 0.688, which is UNDER SIGHT_HI. So the
+             * frame was "followed" to 0.688 and the sight zoomed, with the
+             * switch that exists to prevent it sitting right there.
+             *
+             * With the hold asked first, the two features cannot overlap: No zoom
+             * answers whenever it can (an aim inside the framework's band, which
+             * is exactly an iron sight), and the follow covers what it cannot -
+             * a magnified optic's pull, which is under OPTIC_RAD and is not ours
+             * to take. Both test cases then hold at once, which the four-case
+             * matrix demanded and no ordering of `follow` alone could give. */
+            /* No zoom answers ONLY for an iron sight, which is the measured
+             * distinction below: the engine settles at 0.688 for an iron sight
+             * and at 0.492 for every magnified optic, and the second of those is
+             * under OPTIC_RAD while the first is over it.
+             *
+             * `aim` alone was too narrow (it goes false the moment a scope - or
+             * an iron sight that drifts - passes under OPTIC_RAD, and the hold
+             * then released mid-aim), and `aim || Narrowed(eng)` was too broad
+             * (it held every scope at the hip fov, which is a scope that never
+             * zooms at all). Both of those were in this file, and both are
+             * wrong for the same reason: they asked about the FRAMEWORK's line
+             * instead of about which sight is actually up. */
+            /* WHICH SIGHT IS UP, and this is a measurement, not a guess.
+             *
+             * MEASURE 2026-10-02, frame by frame at 60 Hz across a weapon
+             * switch inside one session:
+             *
+             *   iron sight   eng = 0.815 -> 0.714 -> 0.688   (a pull, with travel)
+             *   magnified    eng = 0.492                      (a step, within 16 ms)
+             *
+             * The engine's own settled value is therefore the signal, and
+             * OPTIC_RAD (0.5, the framework's pass-through line) is exactly the
+             * dividing line: an iron sight comes to rest at 0.688, above it, and
+             * every magnified optic at or under it. That line had been used all
+             * along as "should we suppress the engine" and never as "which sight
+             * is this" - and it is both.
+             *
+             * The catch, and the reason several versions of this were wrong: the
+             * line cannot be tested on the frame the aim byte RISES. At that
+             * instant an iron sight is still at 0.714 and a scope has already
+             * stepped to 0.492, so it takes one tick before the value means what
+             * it says. Both settle inside a single tick, so one frame of patience
+             * is the whole cost - and none of it is visible, because an iron
+             * sight is held from the first frame either way and a scope has not
+             * written anything yet.
+             *
+             * So: optimistic while an aim is up, narrowed only by a value that
+             * stands under the line.
+             *
+             * Gated on the aim byte still being RAISED (`gateUp`), and that gate
+             * is the second half of the same lesson. On the way DOWN the
+             * engine's value climbs back through 0.75 before the byte clears -
+             * 0.640, 0.683, 0.713, 0.734, 0.758 across the frames either side of
+             * one of these releases - so `eng >= OPTIC_RAD` reads as "an iron
+             * sight" exactly when the aim is ending, and the latch would flip a
+             * scope to iron as it lowered and hold the hip fov there instead of
+             * letting go. What that produced was `wrote` and `cam` frozen at
+             * 1.396 for the whole lower: a scope whose raise animated and whose
+             * lower did not, because the lowering had nothing to travel to. The
+             * byte being up is what says the engine is still pulling; once it is
+             * down the engine value is on its way back to the hip and is not
+             * evidence about the sight at all. */
+            if (!aimHeld) iron = 0;
+            else if (nz && gateUp) {
+                if (eng < OPTIC_RAD) iron = 0;      /* an optic, under the line */
+                else                 iron = 1;      /* still an iron sight       */
             }
 
+            /* Order: the hold first, so No zoom answers whenever it can and the
+             * follow covers what it cannot. */
+            if (nz && aimHeld && iron) {
+                /* The hold, and it is exactly that: the frozen pre-aim value,
+                 * written as it stands. No easing and no ramp - a value that
+                 * does not move is the whole feature, and any smoothing here
+                 * would move it. See where g_holdRad is frozen.
+                 *
+                 * `iron` is latched for the whole aim rather than tested per
+                 * frame, and that latch is the point. An iron sight's own pull
+                 * passes through 0.714 on its way to 0.688, and a per-frame test
+                 * would read that first frame as "not yet narrowed", hand the
+                 * aim to the follow sweep, and walk the view from the hip DOWN
+                 * to 0.714 before the hold could start - a visible narrowing
+                 * that No zoom then had to undo, which is exactly the "it still
+                 * zooms" the switch was meant to prevent. The latch holds from
+                 * the first frame and only gives way if the sight turns out to
+                 * be an optic. */
+                float hold = g_holdRad;
+
+                if (!(hold > 0.05f && hold < 3.0f)) hold = want;
+                g_shown = hold;
+                g_pathDbg = 2;
+            } else if (aimHeld && OverrideOn() && eng > 0.05f) {
+                /* No zoom is off (or an optic is under the framework's band,
+                 * which is not ours to hold): walk to the engine's value in one
+                 * sweep per aim.
+                 *
+                 * MEASURE 2026-10-01: the sweep's state outlives a single aim
+                 * unless it is reset, and that is what made the transition
+                 * intermittent - exactly two of ten raises had one. The reset
+                 * used to happen only when the channel was given back, and
+                 * with the override on the channel is held for the whole
+                 * session: so `have` stayed 1 and `startAt` was still the
+                 * previous aim's, `u` came out past 1 on the first frame of
+                 * the next aim, and RampOnce returned the target immediately.
+                 * The log shows it plainly - a raise whose first tick already
+                 * reads the settled value:
+                 *
+                 *     22:20:41.909  eng=0.492 cam=1.396 wrote=0.492
+                 *
+                 * against one that started correctly:
+                 *
+                 *     22:20:34.603  eng=0.492 cam=1.396 wrote=1.396
+                 *     22:20:34.655  eng=0.492 cam=1.384 wrote=1.368
+                 *
+                 * So the edge, not the release, is what starts a sweep. */
+                if (aimHeld && !aimHeldPrev) RampOnce(0.0f, 1);
+                g_shown = RampOnce(eng, 0);
+                g_pathDbg = 1;
+            } else {
+                /* Three jobs share this branch, and the branch condition above
+                 * is what decides which one is running:
+                 *
+                 *   an aim under the framework's band with No zoom on
+                 *                                 -> the LOWERING sweep, from
+                 *                                    the held value back to the
+                 *                                    view's, over the same fixed
+                 *                                    length as the raise;
+                 *   an aim whose engine value is above the band and No zoom on
+                 *                                 -> not a hold (it is not
+                 *                                    narrowing), so the view's
+                 *                                    fov is written as it stands;
+                 *   no aim at all                 -> the view's fov, walked.
+                 *
+                 * MEASURE 2026-10-01, two bugs in a row in the sweep.
+                 *
+                 * First, this used FovEase, whose reset condition is "the goal
+                 * changed" against a static lastGoal. The lowering goal is the
+                 * view's fov - the same number a hip settle used a moment
+                 * earlier - so the comparison said "no change", the elapsed
+                 * clock was the ancient one from before the aim, u came out
+                 * past 1, and every lowering after the first returned the
+                 * target on its first frame.
+                 *
+                 * Then, with RampOnce, the raise's sweep state was still
+                 * standing: nothing cancelled it on the way down, and a
+                 * finished sweep has `have` cleared, so the first lowering call
+                 * re-seeded from the aim's own value and returned the target
+                 * again. A sweep is per-transition, so BOTH edges have to
+                 * restart it - the raise's rising edge, and this falling one.
+                 *
+                 * Cancelling and restarting here makes the lowering identical
+                 * in shape to the raise: from the value on screen, to the
+                 * view's fov, over RAMP_MS_STEPS ticks.
+                 *
+                 * MEASURE 2026-10-02: guarded by `!aimHeld`, and that guard is
+                 * what lets a magnified optic keep its zoom while the override is
+                 * on. A scope's first frame lands here (the hold has already
+                 * given it up, and the follow is not the engine's to give yet),
+                 * and this branch writes the VIEW's fov - so without the guard
+                 * the scope's own step was replaced by the hip fov for that
+                 * frame, pinned, which is a visible flicker at the start of
+                 * every scope aim. With an aim up and no value of ours to write,
+                 * the engine's own value is simply left alone. */
+                if (!aimHeld) {
+                    if (aimHeldPrev) {
+                        RampOnce(0.0f, 1);
+                        (void)RampOnce(want, 0);
+                    }
+                    g_shown = RampOnce(want, 0);
+                    g_pathDbg = 3;
+                } else {
+                    /* An aim with nothing of ours to say about it: hand the
+                     * frame's fov back to the engine by writing what the engine
+                     * itself computed, unpinned (the pin test below sees no gap
+                     * and leaves it down). */
+                    g_shown = eng;
+                    g_pathDbg = 4;
+                }
+            }
+
+            /* At the source, through ShCameraApply - which is where a fov has
+             * to be taken, and which already does exactly that: it calls the
+             * framework's own source write (scripthook_camera.c, SH_CAM_FOV)
+             * and leaves the value in the store the camera manager reads,
+             * ahead of the camera build and ahead of culling.
+             *
+             * MEASURE 2026-10-01: an attempt to call that source write
+             * directly (ShFovSet) is what made the last round worse - it is
+             * NOT an export, so the plugin's call resolved to nothing and the
+             * value never landed at all. ShCameraApply is the exported door to
+             * the same write.
+             *
+             * And it has to be called on EVERY frame we hold, not just the
+             * first: the enable bit it sets is cleared by ShFovClear when the
+             * channel is given back, and ShFovPin only works while that bit is
+             * set - see the stub in scripthook_fov.c, which tests the enable
+             * first and the pin second. A pin without the enable is a pin
+             * nobody reads.
+             *
+             * The pin is then what holds OUR value against the engine's own
+             * step for as long as the hold is wanted - which is what makes a
+             * ramp we computed survive to the screen. */
             memset(&o, 0, sizeof(o));
             o.apply = SH_CAM_FOV;
             o.fov = g_shown;
             if (ShCameraApply(&o)) {
                 held = 1;
-                /* The sights' value is inside the gameplay range, so the
-                 * engine would take the override on its own; the pin is
-                 * what holds it there whatever a frame computes. */
-                ShFovPin(aim);
-                /* What a frame with no sights up carries - the value No
-                 * zoom hands back to them (g_lookRad). */
-                /* Only a plain hip is recorded here. A frame that is
-                 * following the engine mid-pull carries the optic's own
-                 * narrowing value, and taking that as "what the hip had" is
-                 * what made No zoom hold the sight's own fov - the feature
-                 * doing exactly nothing (measured 2026-09-21: want=0.688,
-                 * the engine's own aim value, with the hold engaged). */
-                if (!aim && !follow && eng >= SIGHT_HI) g_lookRad = g_shown;
+                /* PIN EXACTLY WHEN WE ARE FIGHTING THE ENGINE'S VALUE.
+                 *
+                 * That is the whole rule, and it is what the four test cases
+                 * forced. The stub replaces the engine's value only when the
+                 * channel is enabled AND (pinned OR the engine's own value is
+                 * >= 0.5 rad). So:
+                 *
+                 *   an aim puts the engine at 0.49, under that line, and an
+                 *   unpinned write of ours is DISCARDED - the engine's step
+                 *   lands and our sweep is thrown away. That is the "the raise
+                 *   has no transition" report, and the lowering passed only
+                 *   because the engine is back above 0.5 by then;
+                 *
+                 *   but pinning unconditionally (finding 5's first fix, and the
+                 *   version before it) suppresses the engine when we are writing
+                 *   the engine's own value - which is what a magnified optic's
+                 *   aim does on the follow path, and why a scope stopped zooming
+                 *   with the override on.
+                 *
+                 * Comparing what we are about to write against what the engine
+                 * has separates those exactly, with no case list:
+                 *
+                 *   our sweep travelling (1.396 -> 0.49)  -> far from 0.49 -> pin
+                 *   following the engine (0.49 -> 0.49)   -> equal        -> no pin
+                 *   No zoom holding the hip (0.815 vs 0.49)-> far apart    -> pin
+                 *   a hip frame (0.815 vs 0.815)          -> equal        -> no pin
+                 *
+                 * which is right in every case and leaves the binoculars, the
+                 * vehicle zooms and the drone alone, as the plugin's own header
+                 * promises. */
+                if (fabsf(g_shown - eng) > PIN_GAP) ShFovPin(1);
+                else                                ShFovPin(0);
+                /* The hip's fov, recorded on a frame with no aim up, and the
+                 * SOURCE follows whoever owns the camera. MEASURE 2026-10-02,
+                 * and this is what the whole of case 2 turned on:
+                 *
+                 *   with the override on, what the frame is showing is OUR
+                 *   value, not the engine's - and the engine's hip is 0.815
+                 *   while ours is 1.396 at an 80-degree row. Recording `eng`
+                 *   here therefore taught No zoom the ENGINE's hip, so the hold
+                 *   held 0.815: the view did not zoom during the aim, but it
+                 *   had already narrowed from 1.396 to 0.815 as the aim began,
+                 *   which is exactly what "it still zooms" looks like. The
+                 *   hold was working and holding the wrong number.
+                 *
+                 *   with the override off there is no value of ours, so the
+                 *   engine's is the one to record.
+                 *
+                 * The `!nz` guard that used to be here was the other half: it
+                 * made this record nothing at all whenever No zoom was on, so
+                 * g_lookRad stayed 0.000 for the whole of case 2 (the log shows
+                 * `look=0.000` on every line) and the freeze fell through to
+                 * g_shown - a sweep's moving value - which is how the wrong
+                 * number got in. What No zoom is set to is irrelevant to "what
+                 * did the hip carry"; what matters is that no aim is up. */
+                if (!aim) {
+                    float hip = OverrideOn()
+                                    ? ((g_shown > 0.05f && g_shown < 3.0f)
+                                           ? g_shown : eng)
+                                    : eng;
+
+                    if (hip > 0.05f && hip < 3.0f) g_lookRad = hip;
+                }
             } else {
                 held = 0;
                 ShFovPin(0);
@@ -763,24 +1376,53 @@ static DWORD WINAPI TickThread(LPVOID p) {
             /* A plain hip only, for the reason at the recording above: this
              * is what No zoom hands back when the sights come up. */
             if (!aim && eng >= SIGHT_HI && eng < 3.0f) g_lookRad = eng;
-            if (held) { ShCameraReleaseFields(SH_CAM_FOV); held = 0; }
-            ShFovPin(0);
-            g_shown = 0.0f;
+            /* Release ONLY what we took. Audited 2026-10-01 (finding 6): this
+             * used to clear `held` first and then release unconditionally, on
+             * every idle tick - which throws away the one fact needed to guard
+             * the call. ShCameraReleaseFields clears the SH_CAM_FOV ownership
+             * bit, and the framework's contract is "release only what you took,
+             * so releasing one field leaves another plugin's running". chaos.c
+             * owns SH_CAM_FOV for its fish-eye and tunnel effects, so an idle
+             * fov_changer was killing them within a tick. */
+            if (held) {
+                ShCameraReleaseFields(SH_CAM_FOV);
+                held = 0;
+            } else {
+                ShFovPin(0);
+            }
+            /* Keep the bookkeeping honest while the channel is not ours: the
+             * engine's value is what the camera carries now, so it is what the
+             * next sweep has to start from. Audited 2026-10-01 (finding 3):
+             * g_shown used to freeze at whatever we last wrote, so the next
+             * takeover set from == at and stepped instead of sweeping - which
+             * is the "turning Override on does not animate" symptom, and the
+             * same frozen value kept the cadence's `moving` test permanently
+             * true and the loop at 16 ms forever. */
+            if (eng > 0.05f && eng < 3.0f) g_shown = eng;
         }
 
-        /* The decision, on every change and once a second while it holds. */
+        /* The decision, on every change and once a second while it holds.
+         * MEASURE 2026-10-01: the gate's own byte is a third thing that can
+         * change now, and it is the one under investigation - a 1 Hz beat
+         * cannot see the edges of a signal that lasts a few hundred ms, which
+         * is exactly what made the aim test look intermittently false with no
+         * way to tell why. */
         DiagOpen();
         {
-            static int lastAim = -1, lastHold = -1;
+            static int lastAim = -1, lastGate = -1, lastHeld = -1;
             static DWORD lastAt;
             DWORD now = GetTickCount();
+            int gateNow = 0;
 
-            if (aim != lastAim || hold != lastHold ||
+            if (g_gate) g_gate(NULL, NULL, &gateNow, NULL);
+
+            if (aim != lastAim || gateNow != lastGate || aimHeld != lastHeld ||
                 (DWORD)(now - lastAt) >= 1000) {
                 lastAt = now;
                 lastAim = aim;
-                lastHold = hold;
-                DiagState(eng, g_camRad, g_shown, WantedRad(), aim, hold,
+                lastGate = gateNow;
+                lastHeld = aimHeld;
+                DiagState(eng, g_camRad, g_shown, WantedRad(), aim, g_pathDbg,
                           held, nz, OverrideOn());
             }
         }
@@ -795,10 +1437,61 @@ static DWORD WINAPI TickThread(LPVOID p) {
          * force follows the view, and a change has to land on the next beat
          * rather than half a second after the camera moved.
          */
-        Sleep((g_shown > 0.05f && g_shown < 3.0f &&
-               fabsf(WantedRad() - g_shown) > RAMP_MIN)
-                  ? RAMP_MS
-                  : (nz ? NOZOOM_MS : (OverrideOn() ? VIEW_MS : TICK_MS)));
+        /* The cadence, decided at the END of the tick from the state this tick
+         * leaves behind.
+         *
+         * MEASURE 2026-10-01, and the reason the transition could never be made
+         * to work by tuning a rate: a rate is a fraction PER TICK, so it means
+         * nothing unless the tick rate is known - and this loop's cadence
+         * changes with the switches. With the override on and no sight up it
+         * slept VIEW_MS (250 ms), which is 4 Hz, and any per-tick fraction
+         * takes ten times longer at 4 Hz than at 40. A follow that walks 55 %
+         * of the gap per tick needs about ten ticks; at 4 Hz that is 2.5
+         * seconds, against an engine transition of 0.4 - so our value never
+         * caught the engine's, the engine's arrived on the camera on its own,
+         * and the picture cut.
+         *
+         * So the fast beat is taken whenever anything of OURS is on the
+         * channel and moving, and whenever an aim is up or has just gone:
+         * those are the frames a transition lives in. The slow beats are for
+         * when nothing is moving, which is what they were for.
+         */
+        {
+            float want = WantedRad();
+            int moving = (g_shown > 0.05f && g_shown < 3.0f &&
+                          fabsf(want - g_shown) > RAMP_MIN);
+            DWORD ms = TICK_MS;
+
+            /* A sweep that is still travelling needs the fast beat, and so does
+             * one that has just been started; both are states this tick knows.
+             * `moving` catches the first, the block below the second. */
+            if (aimHeld || nz || aim || moving ||
+                (DWORD)(GetTickCount() - aimAt) < 400)
+                ms = NOZOOM_MS;
+            /* FINDING 7 of the 2026-10-01 audit: the sleep is chosen from the
+             * state at the END of the tick, so with the override on and nothing
+             * moving the loop slept VIEW_MS - and an aim that began during that
+             * sleep was noticed up to 250 ms late, with the camera keeping the
+             * hip fov for that whole time before the sweep even started. There
+             * is no way to see an edge that has not happened yet; what this can
+             * do is refuse to sleep through the one state an aim can arrive in.
+             * A plain hip is exactly that state, and it is also the only state
+             * the override has nothing to do in, so the fast beat costs nothing
+             * there - an aim byte that never comes costs one cheap read. */
+            else if (OverrideOn() && CouldBeAiming(eng))
+                ms = NOZOOM_MS;
+            else if (OverrideOn())
+                ms = VIEW_MS;
+
+            /* Everything else is a slow poll: nothing of ours is on the
+             * channel, so there is no value to keep up with. */
+            if (rampDue < ms) ms = rampDue;   /* a sweep's next step is due first */
+
+            Sleep(ms);
+        }
+        /* The aim's edge is for the NEXT tick to compare against - the sweep
+         * is started from it at the top of the value decision above. */
+        aimHeldPrev = aimHeld;
     }
 
     /* Unloading: an override left pushed would be one with no owner left to
@@ -836,6 +1529,12 @@ static DWORD WINAPI InitThread(LPVOID p) {
         Push();
     }
     if (g_initNozoom) InterlockedExchange(&g_nozoom, 1);
+    /* The framework's aim byte, by name. Optional on purpose: this plugin
+     * still declares SH_REQUIRES_API(1) and must load on a dinput8 that
+     * predates the gate - it then falls back to the fov test in GateAds
+     * rather than refusing to load over a missing import. */
+    *(FARPROC *)&g_gate = GetProcAddress(GetModuleHandleA("dinput8.dll"),
+                                         "ShFp2Gate");
     Report();
     /* A view override is not something a PvP match wants; saying it out
      * loud is what makes the release in the tick deliberate rather than an
