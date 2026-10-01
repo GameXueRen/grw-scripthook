@@ -200,7 +200,13 @@ static uint64_t g_ent[PM_ENT_MAX];
  * count sees the handle too; a reader that sees the count from before it was
  * published is one entity short, which every loop here already allows for. */
 static volatile LONG g_entCount;
-static int      g_applied;           /* how many have had health applied */
+static int      g_applied;           /* how many have had health applied;
+                                      * the worker's cursor, not the frame
+                                      * hook's - the apply itself is the
+                                      * worker's, because the health read can
+                                      * scan the heap (see ApplyToNew) */
+static volatile LONG g_applyWanted;  /* the frame hook asks the worker for the
+                                      * arrival health above g_applied */
 static volatile int g_entFull;       /* set by the frame callback, cleared by
                                       * the menu thread's next summon */
 static ULONGLONG g_lastPoll;
@@ -371,10 +377,14 @@ static void RefreshStatus(void) {
 
 /* ---- health, applied once per entity ------------------------------------ */
 
-/* Called from the frame hook, on the game thread, the moment a new entity
- * shows up. Once each: see the header for why this is not a loop that keeps
- * re-applying itself, and why an entity that arrived at full health is not
- * touched at all. */
+/* Applied by the worker, never on the game thread: the health read below is
+ * ShGetHealthEntity, which can miss the framework's fast path and fall into
+ * FindComponent's whole-heap scan - scripthook_health.c calls that "the tens of
+ * seconds path". On the frame hook a call that long stops rendering. The frame
+ * hook only publishes that new entities have arrived (g_applyWanted); this
+ * consumes that publication. Once each: see the header for why this is not a
+ * loop that keeps re-applying itself, and why an entity that arrived at full
+ * health is not touched at all. */
 static void ApplyToNew(void) {
     int i;
 
@@ -437,7 +447,13 @@ static void PollJob(void) {
     }
     for (i = 0; i < n; i++) Remember(got[i]);
     g_jobMade = n;
-    ApplyToNew();
+    /* The arrival health is not applied here. ShGetHealthEntity can miss the
+     * fast path and walk the whole heap - scripthook_health.c calls that "the
+     * tens of seconds path" - and this runs on the game thread, where a call
+     * that long freezes the picture. Publish instead: the worker applies it
+     * (see ApplyToNew and the tick that reads this flag). */
+    if (g_entCount > g_applied)
+        InterlockedExchange(&g_applyWanted, 1);
     if (done) {
         /* The success line, said at the moment it is true: a job being accepted
          * is not a summon, and this is the first point at which the batch has
@@ -851,6 +867,14 @@ static DWORD WINAPI PmWorker(LPVOID p) {
             InterlockedExchange(&g_dirty, 0);
             SaveIni();
         }
+
+        /* The arrival health, moved here from the frame callback for the same
+         * reason and one worse: the read (p_hpGet, = ShGetHealthEntity) can
+         * scan the whole heap, and it must not do that on the game thread. The
+         * frame hook only raised this flag; the read and the write are done
+         * here. */
+        if (InterlockedExchange(&g_applyWanted, 0))
+            ApplyToNew();
 
         /* The field figure, moved here from the frame callback: one health read
          * per entity is not work for the engine's frame. */
