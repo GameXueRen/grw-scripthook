@@ -212,16 +212,7 @@ static const char *DEFAULT_CONFIG =
     "[forgemod]\n"
     "enabled=0\n"
     "\n"
-    "[Settings]\n"
-    "; LogLevel: none/error/warn/info/debug (a release build defaults to\n"
-    "; warn, any other to info). Uncomment to change.\n"
-    ";LogLevel=info\n"
-    "\n"
-    "; Menu language: left out - as here - the first launch picks one from\n"
-    "; the Windows user language and writes it below. Delete the line to\n"
-    "; have it picked again.\n"
-    ";Languages=zh-CN,en-US\n"
-    ";Language=zh-CN\n";
+    "[Settings]\n";
 static void WriteDefaultConfig(const char *path) {
     FILE *f = fopen(path, "w");
     if (f) {
