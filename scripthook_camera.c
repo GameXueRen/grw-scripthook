@@ -275,53 +275,45 @@ static void ApplyPose(float *m, float fov) {
     (void)fov;
 }
 
-/* First person sits centimetres from the weapon and arms, but the
- * engine's near plane is tuned for its third-person chase camera, so
- * gun geometry inside it is sliced and the multi-kilometre far plane
- * leaves almost no depth precision on weapon parts. Pull it in while
- * first person is on, never tighter than the engine's own value (zoom
- * optics can run closer), and write the remembered stock plane back
- * once first person lets go. */
-#define CAM_NEAR_FP 0.02f
-static float g_nearStock = 0.0f;
-static int   g_nearStockValid = 0;
-static int   g_nearLoggedHeld = 0;
-static int   g_nearLoggedStock = 0;
-
-static void NearRestore(void) {
-    if (!g_nearStockValid) return;
-    if (g_cam && ShReadableAddr(g_cam + CAM_NEAR, 4))
-        *(float *)(uintptr_t)(g_cam + CAM_NEAR) = g_nearStock;
-    g_nearStockValid = 0;
-}
-
-/* Whether first person is ON - a constant policy for the near plane:
- * it follows the switch, not the camera's ownership this frame.
+/* MEASURE 2026-10-01: the first person near plane write lived here, and it
+ * is gone. It held the render near plane at CAM_NEAR_FP 0.02 while first
+ * person owned the eye, to keep the engine's third-person plane from slicing
+ * the weapon and arms - and it cost what that always costs: with a far plane
+ * of kilometres, the depth precision the distance needs. The two policies
+ * tried here (a constant hold, then a hold keyed on the eye this file
+ * actually wrote) each bought one symptom and paid for it with the other, and
+ * the field reports name both: "opening the sights flashes for one frame" and
+ * "opening the sights loses the buildings".
  *
- * CAM_HEAD_BIT is the framework's own "first person holds the camera"
- * state (set by ShCameraFirstPerson, cleared by every other claim /
- * release). It is deliberately NOT FpEyeOwned(): that one is true only
- * on frames we actually WROTE the eye, so it goes false the instant the
- * aim byte hands the frame to the engine (ShFp2PlaceEye's skip[3]
- * branch does not refresh g_headWroteAt). Gating the near plane on the
- * write made it flip back to the engine's stock value on the aim frame
- * and back again on release - a render-parameter step at each edge, the
- * near-plane twin of the fov hysteresis flash. The community table never
- * touches the near plane at all, which is why it never had that step.
+ * Three things settled it, and they are why this is a removal rather than
+ * another policy:
  *
- * 2026-09-29, user report: "opening the sights flashes for one frame".
- * That frame is exactly the write-to-handover edge; the near plane was
- * following the handover while it only ever had to follow the switch.
+ *   - it was ported in 6d32050 from the Wildlands Immersion Suite's camera
+ *     module, where CAM_NEAR is DECLARED AND NEVER USED. Nothing in that
+ *     fork ever wrote a near plane; the transplant activated a dormant
+ *     constant and inherited its cost without its evidence.
+ *   - nothing else in this ecosystem writes one. The community table (which
+ *     patches 14858071 and calls it "close up blur"), GhostHook, the GRW-FP
+ *     dxgi mod, Firejumper93's VR mod and the Immersion Suite itself all
+ *     address the camera-inside-the-body problem with the blur byte and the
+ *     head hide, and none of them touches a projection plane. Five
+ *     implementations, one of which sits 2 m forward inside the head, and
+ *     not one of them needed this.
+ *   - it contradicts this framework's own defaults. The first person
+ *     plugin ships engine_extras = 15, so EX_VIS (S_VIS) and EX_WALL
+ *     (S_WALL) are ON: both exist to stop the engine hiding the body near
+ *     the camera. Holding the near plane in as well is covering for a
+ *     condition two of our own patches create.
  *
- * This is a CONSTANT policy: the near plane is pulled in every frame
- * first person is on - the aim frames included, where we still hold
- * CAM_HEAD_BIT even though the engine carries the eye - and given back
- * once first person is off. There must be NO threshold, NO grace, NO
- * timer, and above all NO "look at who owns the camera this frame"
- * branch here. A judge that can drift is a judge that flashes. */
-static int FpNearHeld(void) {
-    return (g_apply & CAM_HEAD_BIT) != 0;
-}
+ * What it was covering, if anything, is the weapon and arms, which no patch
+ * of ours hides. That is the one thing to watch when this ships - see the
+ * note at ShCameraViewMode, which is where a view that has lost its near
+ * plane would show up. It is NOT to be answered by restoring this constant:
+ * a build that needs the weapon hidden wants a hide, the way S_VIS does it
+ * for the body, not a projection parameter.
+ *
+ * CAM_NEAR/CAM_FAR/CAM_ASPECT below stay as the map of the camera object;
+ * nothing writes them now, here or anywhere. */
 
 /* Skew and mode belong to the render camera, so they stay
  * on the camera build. Position, rotation and fov are all
@@ -333,26 +325,8 @@ static void ApplyFields(uint64_t cam) {
     }
     if (g_apply & SH_CAM_MODE)
         *(int *)(uintptr_t)(cam + CAM_MODE) = g_modeSet;
-    /* Constant policy: keyed on first person being ON, not on who
-     * owns the camera this frame. See FpNearHeld above. The write is
-     * still skipped when already at CAM_NEAR_FP (kept from before). */
-    if (FpNearHeld()) {
-        float nearPlane = *(const float *)(uintptr_t)(cam + CAM_NEAR);
-        /* Capture the stock plane once, from a plausible gameplay value;
-         * a scope already engaged must not become the restore target. */
-        if (!g_nearStockValid && nearPlane >= 0.05f && nearPlane < 5.0f) {
-            g_nearStock = nearPlane;
-            g_nearStockValid = 1;
-        }
-        if (g_nearStockValid && nearPlane > CAM_NEAR_FP) {
-            *(float *)(uintptr_t)(cam + CAM_NEAR) = CAM_NEAR_FP;
-            if (!g_nearLoggedHeld) {
-                g_nearLoggedHeld = 1;
-                Log("near: held at %.4f (stock %.4f)", CAM_NEAR_FP,
-                    g_nearStock);
-            }
-        }
-    }
+    /* The near plane is not written here any more, and must not be brought
+     * back without reading the note above. */
 }
 
 /* Runs on the engine's own thread, immediately before the
@@ -372,19 +346,8 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
 
     g_cam = rcx;
     g_calls++;
-    /* The near plane first person pulled in goes back on the first
-     * frame first person is OFF - keyed on the switch (CAM_HEAD_BIT),
-     * not on who owns the camera: the aim frames keep the bit and keep
-     * the plane. Every way the switch can be dropped - the plugin's
-     * release, an orbit / free claim - ends in this callback next, so
-     * this one place retires it for all of them. */
-    if (!FpNearHeld()) {
-        if (g_nearLoggedHeld && !g_nearLoggedStock) {
-            g_nearLoggedStock = 1;
-            Log("near: restored to stock (first person off)");
-        }
-        NearRestore();
-    }
+    /* The near plane is not restored here any more: nothing pulls it in, so
+     * there is nothing to give back. See the note where FpNearHeld stood. */
     /* When we last owned the eye, for the hand over grace in
      * ShCameraViewMode. */
     if (g_apply & CAM_HEAD_BIT) g_headHeldAt = GetTickCount64();
