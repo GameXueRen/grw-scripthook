@@ -441,8 +441,59 @@ static void __attribute__((ms_abi)) CamCallback(uint64_t rcx) {
 static volatile float g_aimRig[3];
 static volatile int   g_aimRigHave;
 
+/* MEASURE 2026-10-01: the switch, OFF by default.
+ *
+ * The walk onto the aim rig is the only thing in this module that moves the
+ * eye somewhere other than the eye, and it is also the only thing that can be
+ * felt: with it on, the camera sits 14-22 cm toward the engine's weapon seat
+ * for the whole aim, which is what centres the sights - and with it off the
+ * camera stays on the eye and the sights carry a small FIXED offset instead.
+ *
+ * The field's own report decided the default. The 2026-10-01 session ran the
+ * walk while its slot was doubling (see the note at the assignment below), and
+ * what the player saw was a silencer sliding back into place and a scope
+ * flashing on the right - a moving offset, which reads far worse than a still
+ * one. The session before it ran with the walk disabled by accident and was
+ * reported as good. A fixed offset is the better failure mode, so the walk
+ * ships off and the switch is how it gets judged rather than assumed.
+ *
+ * Learning still runs with the switch off, and the log still prints what the
+ * walk WOULD apply - so the numbers a decision needs stay available without
+ * the eye being moved to get them. */
+static volatile int g_aimRigOn = 0;
+
+/** 1 when the eye is walked onto the engine's aim seat. Off by default. */
+SH_API int ShCameraAimRigOn(void) { return g_aimRigOn ? 1 : 0; }
+
+/** Turn the walk onto the aim seat on (1) or off (0). Read once a frame by
+ *  the manager callback, so a change is in force on the next frame. Nothing
+ *  is cleared either way: the learned slots survive a toggle, so an A/B in
+ *  one session compares the same numbers. */
+SH_API int ShCameraAimRigSet(int on) {
+    g_aimRigOn = on ? 1 : 0;
+    Log("aim rig: walk %s by request (slots kept)", g_aimRigOn ? "ON" : "OFF");
+    return 1;
+}
+
 static float *__attribute__((ms_abi)) MgrCallback(uint64_t cm) {
     float *m, *p;
+
+    /* MEASURE 2026-10-01: the engine's own position for this frame, taken HERE
+     * - the first thing this callback does, before any branch and before the
+     * early return below, and before ShFp2PlaceEye can write the eye over it.
+     * The manager's transform and position vector are the same memory the eye
+     * goes into, so every later reader of p[] in this frame is reading our own
+     * write; this is the frame's baseline, and the rig learning measures
+     * against it instead of against itself.
+     *
+     * It has to be unconditional and it has to be first. An earlier attempt
+     * put this call inside the head branch, where it ran on the frames the eye
+     * is PLACED and was read on the frames the placement DECLINES - which is
+     * exactly the frame it is needed on - and every one of the session's 495
+     * probes logged raw=0 with the residual starting from the origin. One
+     * capture per frame, here, and nothing downstream re-captures. See
+     * ShFp2EngineRawCapture. */
+    if (cm) ShFp2EngineRawCapture((const float *)(uintptr_t)(cm + MGR_POS));
 
     /* The head's visibility has a claim every frame whether
      * first person runs or not: the show window that follows a
@@ -468,11 +519,34 @@ static float *__attribute__((ms_abi)) MgrCallback(uint64_t cm) {
     if ((g_apply & CAM_HEAD_BIT) && ShFp2Ready()) {
         static float lastEye[3];
         static float lastBasis[9];
+        /* The engine's own position for this frame, captured above before the
+         * placement could overwrite it. Read into locals here, before the
+         * branch, because the walk inside the placed branch moves p[] a second
+         * time and the rig learning in the declined branch measures against
+         * this baseline. MEASURE 2026-10-01. */
+        float eg0, eg1, eg2;
+        float dx, dy, dz;
+        float rx, ry, rz;
+        float fw, up;
+        /* 0 until this frame's capture is read: the rig probe logs it, and a
+         * frame that reaches the log without one must print "no capture"
+         * rather than an uninitialised byte that reads as a yes. */
+        int   engOk = 0;
+
+        /* MEASURE 2026-10-01: the engine's own position for this frame, read
+         * from the capture taken at the top of this callback - NOT p[], which
+         * holds our eye by now. Read once, before the branch, so the placed and
+         * the declined frames measure the same baseline. */
+        {
+            float raw[3];
+            engOk = ShFp2EngineRaw(raw);
+            if (engOk) { eg0 = raw[0]; eg1 = raw[1]; eg2 = raw[2]; }
+            else       { eg0 = p[0];   eg1 = p[1];   eg2 = p[2];   }
+        }
 
         if (ShFp2PlaceEye(cm, m, p)) {
             static float rigTop = 9.9f, rigLow = 9.9f, rigProg;
             float fv = *(const float *)(uintptr_t)(cm + MGR_FOV);
-            float rx, ry, rz;
 
             g_headWroteAt = GetTickCount64();
             g_writes++;
@@ -557,6 +631,25 @@ static float *__attribute__((ms_abi)) MgrCallback(uint64_t cm) {
                     rigTop = rigLow = 9.9f;
                     rigProg = 0.0f;
                 }
+                /* MEASURE 2026-10-01: the switch gates the APPLY only. The
+                 * learning above runs either way, so the numbers a decision
+                 * needs stay in the log - and one line per half second says
+                 * what the walk WOULD have moved, which is what makes the two
+                 * settings comparable inside a single session. See g_aimRigOn. */
+                if (!g_aimRigOn) {
+                    static uint64_t offAt;
+
+                    if (rigProg > 0.0f && GetTickCount64() - offAt >= 500) {
+                        offAt = GetTickCount64();
+                        Log("aim rig: walk is OFF - would move %.1f,%.1f,%.1f mm "
+                            "at prog=%.2f",
+                            (double)(g_aimRig[0] * rigProg * 1000.0f),
+                            (double)(g_aimRig[1] * rigProg * 1000.0f),
+                            (double)(g_aimRig[2] * rigProg * 1000.0f),
+                            (double)rigProg);
+                    }
+                    rigProg = 0.0f;
+                }
                 if (rigProg > 0.0f) {
                     rx = g_aimRig[0] * rigProg;
                     ry = g_aimRig[1] * rigProg;
@@ -627,22 +720,27 @@ static float *__attribute__((ms_abi)) MgrCallback(uint64_t cm) {
                 if (GetTickCount64() - rigAt >= 100) {
                     rigAt = GetTickCount64();
                     Log("rig probe: engineRig=(%.3f,%.3f,%.3f) lastEye=(%.3f,%.3f,%.3f) "
-                        "aimRig=(%.1f,%.1f,%.1f)mm fov=%.4f",
-                        (double)p[0], (double)p[1], (double)p[2],
+                        "aimRig=(%.1f,%.1f,%.1f)mm fov=%.4f raw=%d polluted=(%.3f,%.3f,%.3f)",
+                        (double)eg0, (double)eg1, (double)eg2,
                         (double)lastEye[0], (double)lastEye[1], (double)lastEye[2],
                         (double)(g_aimRig[0] * 1000.0f),
                         (double)(g_aimRig[1] * 1000.0f),
                         (double)(g_aimRig[2] * 1000.0f),
-                        (double)*(const float *)(uintptr_t)(cm + MGR_FOV));
+                        (double)*(const float *)(uintptr_t)(cm + MGR_FOV),
+                        engOk,
+                        (double)p[0], (double)p[1], (double)p[2]);
                 }
             }
 
-            float dx = p[0] - lastEye[0];
-            float dy = p[1] - lastEye[1];
-            float dz = p[2] - lastEye[2];
-            float rx = dx * lastBasis[0] + dy * lastBasis[1] + dz * lastBasis[2];
-            float fw = dx * lastBasis[3] + dy * lastBasis[4] + dz * lastBasis[5];
-            float up = dx * lastBasis[6] + dy * lastBasis[7] + dz * lastBasis[8];
+            /* The engine's own position for this frame, from the capture taken
+             * before the placement - NOT p[], which holds our eye by now. See
+             * eg0 above. */
+            dx = eg0 - lastEye[0];
+            dy = eg1 - lastEye[1];
+            dz = eg2 - lastEye[2];
+            rx = dx * lastBasis[0] + dy * lastBasis[1] + dz * lastBasis[2];
+            fw = dx * lastBasis[3] + dy * lastBasis[4] + dz * lastBasis[5];
+            up = dx * lastBasis[6] + dy * lastBasis[7] + dz * lastBasis[8];
 
             if (rx == rx && fw == fw && up == up) {
                 if (rx * rx + fw * fw + up * up < 1.0f) {
@@ -751,13 +849,36 @@ static float *__attribute__((ms_abi)) MgrCallback(uint64_t cm) {
                     } else if (fabsf(rx - last[use][0]) > 0.002f ||
                                fabsf(fw - last[use][1]) > 0.002f ||
                                fabsf(up - last[use][2]) > 0.002f) {
+                        /* MEASURE 2026-10-01: ASSIGN, never accumulate.
+                         *
+                         * rx/fw/up is the COMPLETE vector from the eye we last
+                         * placed to the engine's seat - not a small correction
+                         * to add on top of one. The seat is fixed; our eye is
+                         * what moves, and the walk above moves it onto the
+                         * slot. So this vector is already "how far is left",
+                         * and it shrinks on its own as the eye arrives. Adding
+                         * it to what the slot holds instead makes every aim
+                         * double the offset: the 2026-10-01 session walked the
+                         * pistol from (49, 210, -59) mm to (241, 1013, -298)
+                         * and the rifle to (369, -666, -254), which is the
+                         * scope ghost on the right and the silencer trail the
+                         * field reported that day.
+                         *
+                         * The earlier "+=" carried a note saying each residual
+                         * was added once. It was not: the guard below is a
+                         * 1.2 s window and two hand-overs a second apart both
+                         * pass it, and the residual comes back the same size
+                         * every time because the eye starts each aim from the
+                         * same place - so the slot grew by one full offset per
+                         * aim. Assignment has no such failure mode: the same
+                         * sample twice is the same value twice. */
                         lastLearn = now;
                         last[use][0] = rx;
                         last[use][1] = fw;
                         last[use][2] = up;
-                        acc[use][0] += rx;
-                        acc[use][1] += fw;
-                        acc[use][2] += up;
+                        acc[use][0] = rx;
+                        acc[use][1] = fw;
+                        acc[use][2] = up;
                     } else {
                         lastLearn = now;
                     }

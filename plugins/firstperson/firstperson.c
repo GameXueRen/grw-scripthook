@@ -158,6 +158,11 @@ static const ShText kEn[] = {
       "If the head is not hidden by itself, aim with the right mouse "
       "button or switch first person off and on again." },
     { "@fp.say.enabled", "View change toast" },
+    { "@fp.aimrig", "Line up the sights (moves the view)" },
+    { "@fp.aimrig.on", "On: aiming moves the view onto the gun - truer sights, "
+                       "but the view sits off the eye" },
+    { "@fp.aimrig.off", "Off: the view stays at the eye - steadier, with a "
+                        "small fixed sight offset" },
     { "@fp.say.on",
       "First person on (aim or toggle again if the head shows)" },
     { "@fp.say.off", "Third person on" }
@@ -196,6 +201,9 @@ static const ShText kZh[] = {
     { "@fp.hint",
       "头部若未自动隐藏，请按右键瞄准或重新切换解决。" },
     { "@fp.say.enabled",   "启用切换提示" },
+    { "@fp.aimrig",        "瞄准镜对正（会挪动视角）" },
+    { "@fp.aimrig.on",     "已开启：瞄准时视角会挪向枪，准星更准，但画面会有偏移" },
+    { "@fp.aimrig.off",    "已关闭：视角待在眼睛位置，画面最稳，准星会有一点偏" },
     { "@fp.say.on",
       "第一人称已开启（头部若未隐藏，请按右键瞄准或重切一次）" },
     { "@fp.say.off", "第三人称已开启" }
@@ -265,6 +273,10 @@ typedef int      (*Fp2HeadOk_t)(void);
 typedef void     (*Fp2HeadShow_t)(int);
 typedef int      (*Fp2Bow_t)(void);
 typedef uint32_t (*Fp2Age_t)(void);
+/* The aim-rig walk's switch, added 2026-10-01. Resolved by name because it is
+ * newer than the rest: a framework without it leaves the row reading its own
+ * stored value and doing nothing, rather than failing to load. */
+typedef int      (*AimRigSet_t)(int);
 typedef int      (*PluginAllowed_t)(void);
 /* The camera field release, the one hand-back this plugin makes. It is for
  * SH_CAM_HEAD and nothing else now: taking the eye leaves the camera's own
@@ -315,6 +327,7 @@ static Fp2HeadOk_t    g_fpxHeadOk;
 static Fp2HeadShow_t  g_fpxHeadShow;
 static Fp2Bow_t       g_fpxBow;
 static Fp2Age_t       g_fpxAge;
+static AimRigSet_t    g_aimRigSet;
 static int            g_fpxUp = 0;   /* engine sites are patched */
 /* The camera field release, late bound like everything else, used once and
  * only for this plugin's own SH_CAM_HEAD claim (see Hold). */
@@ -566,7 +579,14 @@ enum {
     SAY_NONE = 0,
     SAY_FP_ON,         /* first person on                     brief */
     SAY_FP_AWAY,       /* the view belongs to the engine      hold  */
-    SAY_TP             /* third person                        brief */
+    SAY_TP,            /* third person                        brief */
+    /* The aim-rig row, which is not a change of view and must not be filed as
+     * one: Say() only speaks when the state VALUE changes, so a row that
+     * passed SAY_TP for both on and off said its first line and then went
+     * quiet for every later toggle. Two states, one per direction, is what
+     * makes the row answer every time it is touched. */
+    SAY_AIMRIG_ON,
+    SAY_AIMRIG_OFF
 };
 static volatile int      g_said = SAY_NONE;
 static uint32_t          g_toastId = 0;
@@ -576,6 +596,13 @@ static uint32_t          g_toastId = 0;
  * A line across the top is not everyone's idea of help, and all it does is
  * confirm a flip the player can see for himself in the view. */
 static volatile LONG     g_sayOn = 1;
+
+/* The aim-rig walk, OFF by default - the framework's own default, and the one
+ * the 2026-10-01 field report argues for: the walk moves the eye onto the
+ * engine's weapon seat, which centres the sights but puts the camera 14-22 cm
+ * off the eye for the whole aim, and a moving offset reads much worse than a
+ * fixed one. Off is the fixed offset. The row is how it gets judged. */
+static volatile LONG     g_aimRig = 0;
 
 /* Green once it is done, amber while something is being waited
  * for, plain white for a plain change of view. */
@@ -697,6 +724,26 @@ static void OnSayToggle(uint32_t menu, uint32_t item, int value,
             SetText(fp ? "@fp.say.on" : "@fp.say.off"),
             SAY_RGB_PLAIN, SH_TOAST_MS_DEFAULT);
     }
+}
+
+/* The aim-rig walk: it moves the eye onto the engine's weapon seat while an
+ * aim is up, which centres the sights and makes the frame the engine takes at
+ * the end of an aim a frame it already agrees with. The cost is the camera
+ * sitting 14-22 cm off the eye for the whole aim, so this row is the way it
+ * gets judged rather than assumed - see the framework's own note. */
+static void OnAimRig(uint32_t menu, uint32_t item, int value, void *user) {
+    int on = value ? 1 : 0;
+
+    (void)menu; (void)item; (void)user;
+    InterlockedExchange(&g_aimRig, on);
+    SaveIni();
+    if (g_aimRigSet) g_aimRigSet(on);
+    Diag("aim rig: %s", on ? "on" : "off");
+    /* Its own two states, not SAY_TP: see the enum. A row that reused a view
+     * state was silenced by Say()'s de-duplication after its first use. */
+    Say(on ? SAY_AIMRIG_ON : SAY_AIMRIG_OFF,
+        SetText(on ? "@fp.aimrig.on" : "@fp.aimrig.off"),
+        on ? SAY_RGB_DONE : SAY_RGB_PLAIN, SH_TOAST_MS_DEFAULT);
 }
 
 /* Each category owns its own three sliders; user carries the
@@ -1316,6 +1363,14 @@ static void LoadIni(void) {
      * existed - a session that never touches it keeps its line. */
     InterlockedExchange(&g_sayOn,
                         IniBool(g_iniPath, "switch_toast", 1) ? 1 : 0);
+    /* The aim-rig walk: default OFF, and handed to the framework here rather
+     * than only when the row is touched, so the stored value is in force from
+     * the first aim of the session. A dinput8 without the call keeps the
+     * framework's own default, which is off. */
+    InterlockedExchange(&g_aimRig,
+                        IniBool(g_iniPath, "aim_rig", 0) ? 1 : 0);
+    if (g_aimRigSet)
+        g_aimRigSet(InterlockedCompareExchange(&g_aimRig, 0, 0) ? 1 : 0);
 }
 
 /* A slider row fires on every change, and SaveIni is about thirty-six
@@ -1364,6 +1419,9 @@ static void SaveIni(void) {
                                g_iniPath);
     snprintf(buf, sizeof(buf), "%d", (int)g_sayOn);
     WritePrivateProfileStringA("Settings", "switch_toast", buf,
+                               g_iniPath);
+    snprintf(buf, sizeof(buf), "%d", (int)g_aimRig);
+    WritePrivateProfileStringA("Settings", "aim_rig", buf,
                                g_iniPath);
     snprintf(buf, sizeof(buf), "%d", g_diagOn);
     WritePrivateProfileStringA("Settings", "diag", buf,
@@ -1451,6 +1509,9 @@ static DWORD WINAPI BindThread(LPVOID p) {
     *(FARPROC *)&g_fpxHeadShow = GetProcAddress(m, "ShFp2HeadShow");
     *(FARPROC *)&g_fpxBow = GetProcAddress(m, "ShFp2Bow");
     *(FARPROC *)&g_fpxAge = GetProcAddress(m, "ShFp2Age");
+    /* Newer than the rest: optional, so this loads on a framework that has no
+     * aim-rig walk to switch. */
+    *(FARPROC *)&g_aimRigSet = GetProcAddress(m, "ShCameraAimRigSet");
     /* Optional, and the only camera field call left: the release of this
      * plugin's own SH_CAM_HEAD claim on the way down (see Hold). The camera's
      * fov is never touched, so there is no fov call to bind. Without this one
@@ -1519,6 +1580,12 @@ static DWORD WINAPI BindThread(LPVOID p) {
                  HOTKEYS, g_hotKey, OnHotKey, NULL);
     /* Under it: whether a change of view says anything on screen. */
     menuToggle(g_menu, "@fp.say.enabled", (int)g_sayOn, OnSayToggle, NULL);
+    /* The aim-rig walk, which the framework now ships off. Optional by name:
+     * a dinput8 without the call leaves this row recording a preference the
+     * framework's own default already agrees with. */
+    menuToggle(g_menu, "@fp.aimrig",
+               InterlockedCompareExchange(&g_aimRig, 0, 0) ? 1 : 0,
+               OnAimRig, NULL);
     /* No fov row: the view keeps the game's own fov so the engine's own
      * sight-up transition shows (see the note at the top of this file). */
     /* Which set of offsets is in force: Auto follows what the

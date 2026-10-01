@@ -2181,6 +2181,52 @@ int ShFp2PlaceEye(uint64_t cm, float *m, float *p) {
     return 1;
 }
 
+/* ---- the engine's own position, captured once per frame, before us -----
+ *
+ * MEASURE 2026-10-01, the capture pollution. The manager's transform and its
+ * position vector are the SAME memory we write the eye into, so any reading of
+ * them taken after a placement is a reading of our own write. The rig learning
+ * in scripthook_camera.c measured its residual that way - "the seat" minus
+ * "our eye" - and with our own eye standing in for the seat the residual came
+ * back the same size every frame and was added every frame: the 2026-10-01
+ * session walked the rifle's offset from (83, -88, -65) mm to (632, -871,
+ * -455) mm in two minutes, doubling whole entries on the way ((48.5, 202.4,
+ * -59.7) -> (96.3, 412.6, -121.0)), which is the same defect the note at the
+ * accumulator describes and the same one Firejumper93's VR mod records as
+ * "half the time it reads back its own write, and the error COMPOUNDS when a
+ * polluted capture is itself written from".
+ *
+ * So the engine's position is taken ONCE, by the camera module, at the top of
+ * its manager callback - before ShFp2PlaceEye can touch anything - and every
+ * later reader in the frame uses this copy. Nothing here decides or writes:
+ * it is the frame's baseline, and a negative or denormal value is kept as it
+ * came rather than filtered, because a filter on this is a second thing that
+ * can drift.
+ */
+static float g_engRaw[3];
+static int   g_engRawHave = 0;
+
+/** Called by scripthook_camera.c at the top of its manager callback, before
+ *  the eye is placed. The three numbers are the engine's own position for
+ *  this frame. */
+void ShFp2EngineRawCapture(const float *pos) {
+    if (!pos) { g_engRawHave = 0; return; }
+    g_engRaw[0] = pos[0];
+    g_engRaw[1] = pos[1];
+    g_engRaw[2] = pos[2];
+    g_engRawHave = 1;
+}
+
+/** 1 when this frame's engine position was captured, with it copied out.
+ *  READ ONLY: this is the frame's baseline, never a place to write. */
+int ShFp2EngineRaw(float *out) {
+    if (!g_engRawHave || !out) return 0;
+    out[0] = g_engRaw[0];
+    out[1] = g_engRaw[1];
+    out[2] = g_engRaw[2];
+    return 1;
+}
+
 /* ---- install and the plugin facing API ------------------- */
 
 /* The eye, the head and the gates. These are the table: without

@@ -1827,6 +1827,28 @@ SH_API int  ShCameraFirstPersonActive(void);
  */
 SH_API void ShCameraHandoverClear(void);
 
+/** Whether the eye is walked onto the engine's own aim seat while an
+ *  aim is up, and the switch for it. OFF by default.
+ *
+ *  What the walk is for: the engine places the weapon and its sights from a
+ *  camera of its own, roughly 14 to 22 cm from the eye at the settled end of
+ *  an aim, so with the eye left alone the reticle carries a small offset that
+ *  differs per weapon. The walk measures that gap and moves the eye onto the
+ *  engine's seat over the aim's own transition, which centres the sights and
+ *  makes the frame the engine takes at the end of an aim a frame it already
+ *  agrees with.
+ *
+ *  What it costs: for the whole aim the camera is no longer on the eye, and a
+ *  moving offset reads far worse than a still one. That is why it ships off -
+ *  see the note at g_aimRigOn in scripthook_camera.c.
+ *
+ *  Learning runs with the walk off and the log still reports what it would
+ *  have moved, so the two settings can be compared inside one session. The
+ *  learned slots are kept across a toggle.
+ */
+SH_API int  ShCameraAimRigOn(void);
+SH_API int  ShCameraAimRigSet(int on);
+
 /** @} */
 /** @addtogroup state
  *  @{ */
@@ -2169,6 +2191,17 @@ SH_API uint32_t ShFp2Age(void);
  */
 int ShFp2PlaceEye(uint64_t cm, float *m, float *p);
 void ShFp2HeadFrame(void);
+
+/* Not exported either. The engine's own camera position for one frame, taken
+ * by scripthook_camera.c at the top of its manager callback - BEFORE
+ * ShFp2PlaceEye writes the eye into that same memory - and read back by the
+ * rig learning, which otherwise measures "the engine's seat minus our eye"
+ * against our own write and grows instead of converging (2026-10-01: a
+ * rifle's offset walked to 632 mm in two minutes, doubling entries on the
+ * way). Capture copies the three numbers out; Raw answers 0 until one has
+ * been captured this frame, and never writes. */
+void ShFp2EngineRawCapture(const float *pos);
+int  ShFp2EngineRaw(float *out);
 
 /** @defgroup cpu Processor scheduling
  *  The processor set and the process priority the framework holds for each
