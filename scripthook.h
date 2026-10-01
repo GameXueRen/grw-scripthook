@@ -154,7 +154,7 @@ extern "C" {
  *  to it, the menu stops paying for idle work every frame, and the plugin scan
  *  no longer writes the [plugins] section back - a missing line means load,
  *  and a line the player wrote is left as it is. */
-#define SH_VERSION "1.0-beta5"
+#define SH_VERSION "1.0-beta6"
 
 /** Where this build's source lives, in one place for the same reason the
  *  version is: the About page formats it in rather than typing it, so a
