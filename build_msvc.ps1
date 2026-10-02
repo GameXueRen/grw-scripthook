@@ -429,13 +429,11 @@ Build-Plugin -Name 'NvProbe' -Source 'NvProbe.c' -LinkArgs @(
 # the beta set.
 #
 # The replacement shaders themselves are built separately, because fxc and not
-# cl - one compile per combination, all from the same source:
-#   cd plugins/NvFilter
-#   fxc /T ps_5_0 /O3 /DNV_DEFAULT_MODE=1 /DNV_ALL_MODES=0 /Fo nv_bw.cso        nv_filter_ps.hlsl
-#   fxc /T ps_5_0 /O3 /DNV_DEFAULT_MODE=2 /DNV_ALL_MODES=0 /Fo nv_yg.cso        nv_filter_ps.hlsl
-#   fxc /T ps_5_0 /O3 /DNV_DEFAULT_MODE=1 /DNV_ALL_MODES=1 /Fo nv_bw_all.cso    nv_filter_ps.hlsl
-#   fxc /T ps_5_0 /O3 /DNV_DEFAULT_MODE=2 /DNV_ALL_MODES=1 /Fo nv_yg_all.cso    nv_filter_ps.hlsl
-#   python ../../tools/embed_nv_filters.py     # regenerates nv_filters.h
+# cl. One tool owns both halves - the look list, the compiles and the header -
+# so what gets compiled and what gets embedded cannot drift:
+#   python tools/embed_nv_filters.py --build
+# The generated nv_filter_ps.hlsl include, nv_looks.hlsl, comes from the same
+# place; see .codebuddy/plans/nightvision-more-looks_3f7c21d0.md.
 Build-Plugin -Name 'NvFilter' -Source 'NvFilter.c' -LinkArgs @(
     $libPath, 'libscripthook.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib'
 ) -ExtraSources @(

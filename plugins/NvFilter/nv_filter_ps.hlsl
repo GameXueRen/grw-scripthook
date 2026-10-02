@@ -30,8 +30,9 @@
  * -------------
  * The look is chosen by remapping the mode selector:
  *
- *   NV_DEFAULT_MODE   which of the two looks every replaced mode gets
- *                     1 = black and white, 2 = yellow-green
+ *   NV_DEFAULT_MODE   which look every replaced mode gets
+ *                     1 = black and white, 2 = yellow-green,
+ *                     3 = sepia (a table look - see nv_looks.hlsl)
  *   NV_ALL_MODES      how far that reach goes
  *                     0 = only the mode the ordinary goggles use, so headgear
  *                         with a look of its own keeps it
@@ -40,8 +41,10 @@
  *
  *   /D=1 /D=0   ordinary goggles -> black and white
  *   /D=2 /D=0   ordinary goggles -> yellow-green
+ *   /D=3 /D=0   ordinary goggles -> sepia
  *   /D=1 /D=1   everything -> black and white
  *   /D=2 /D=1   everything -> yellow-green
+ *   /D=3 /D=1   everything -> sepia
  *
  * There is deliberately no build that leaves the modes as they are: "the game's
  * own look" is what the plugin's first row means by OFF, and it reaches that by
@@ -70,6 +73,16 @@
  * A new look means a new branch on `mode` plus another compile of this file,
  * not a new plugin: teach this file to produce it, build it as another variant
  * (see tools/embed_nv_filters.py), and add a row to the plugin's choice table.
+ *
+ * Two ways to teach it, and both are in use:
+ *
+ *   an expression   a few lines of maths on `g` - that is what modes 1 and 2
+ *                   are, and it is the right shape for a look that is a tint
+ *                   or a ramp
+ *   a table         a 32-entry grey-axis curve plus one lerp, generated into
+ *                   nv_looks.hlsl - that is what mode 3 is, and it is the only
+ *                   shape that follows a grade with a colour cast that changes
+ *                   across the range (blue shadows, warm highlights)
  */
 
 #ifndef NV_DEFAULT_MODE
@@ -79,6 +92,51 @@
 #ifndef NV_ALL_MODES
 #define NV_ALL_MODES 0
 #endif
+
+/* The white point of a table look: the `g` at which the table's last entry is
+ * reached. Mode 1 puts white at 0.95, so a table look that is meant to keep the
+ * brightness the player already knows has to land on its last sample at the
+ * same g. This is the one number in here that is a judgement rather than a
+ * transcription - raise it and the look darkens, lower it and it blows out -
+ * so it is a define and not baked into the generated tables. */
+#ifndef NV_G_WHITE
+#define NV_G_WHITE 0.95
+#endif
+
+/* The three looks that are arithmetic rather than a table. `white` is the same
+ * white point the tables get, and `t` is the luminance mapped onto it, so all
+ * of these agree about where black and white are.
+ *
+ * They exist because the game's own twelve cover grading, not the two things a
+ * night-vision player actually asks for: a colour that keeps dark adaptation
+ * (long wavelength, no blue) and a cooler one for a screen that is too warm. */
+
+/* Amber. Classic NVG: almost no blue, and no white point at all - an image
+ * tube that has been given a colour like this stays that colour at full
+ * brightness, which is what makes it recognisable. */
+float3 LookAMBER(float g, float white) {
+    float t = saturate(g / white);
+    return saturate(pow(t, 0.85) * float3(1.10, 0.68, 0.26));
+}
+
+/* Cool blue, the other direction: green pulled down, blue pushed up. */
+float3 LookCOOLBLUE(float g, float white) {
+    float t = saturate(g / white);
+    return saturate(pow(t, 1.05) * float3(0.62, 0.90, 1.25));
+}
+
+/* High-contrast green: the classic look with the contrast the game's own
+ * green never had, and without its tint. Clips earlier, so shadows go black
+ * and anything lit goes to full green. */
+float3 LookCONTRAST(float g, float white) {
+    float t = saturate(g / white);
+    return saturate((t - 0.5) * 1.9 + 0.5) * float3(0.45, 1.35, 0.45);
+}
+
+/* The twelve Photo Mode grades, as 32-entry grey-axis tables, and the
+ * compile-time dispatch that picks one. Generated; see the file header for
+ * where those numbers come from. It references the three functions above. */
+#include "nv_looks.hlsl"
 
 
 cbuffer CB1 : register(b1) { float4 cb1[161]; };
@@ -100,16 +158,14 @@ float4 main(float4 v0 : SV_Position, float2 v1 : TEXCOORD0) : SV_Target
 {
     /* The selector is an integer in a float4 slot, so it has to be read back
      * as bits. The engine tests it with ieq against l(1)/l(2), which only works
-     * if the bits are compared. */
+     * if the bits are compared.
+     *
+     * It is NOT remapped here any more. Which look this build substitutes is
+     * decided before the shader is compiled (LookSelected, in nv_looks.hlsl),
+     * and all this value does now is say whether the engine asked for one of
+     * its own two looks - 1 and 2 - which a "ordinary goggles only" build
+     * leaves alone. */
     int mode = asint(cb5[13].y);
-#if NV_ALL_MODES
-    /* Every mode, so the look stops depending on what is equipped. */
-    mode = NV_DEFAULT_MODE;
-#else
-    /* Only the ordinary goggles; headgear with a look of its own keeps it. */
-    if (mode == 0)
-        mode = NV_DEFAULT_MODE;
-#endif
 
     /* The sample point. The original offsets it by a small radial amount while
      * the selector is 0 (movc r1.zw, cb5[13].yyyy, l(0,0,0,0), r1.zzzw), and
@@ -193,15 +249,8 @@ float4 main(float4 v0 : SV_Position, float2 v1 : TEXCOORD0) : SV_Target
     picked        = (band != 0u) ? picked : bandA;
     tint          = (asint(cb5[0].z) != 0) ? tint : picked;
 
-    /* The mix that lands on (0.95, 1.05, 0.98) - a hair of green. */
-    float3 mono = lerp(gray, tint, 0.35) * float3(0.95, 1.05, 0.98);
-
-    /* The mode 2 ramp: yellow when bright, green when dark. */
-    float3 ramp = (g * g) * float3(1.568628, 2.000000, 0.619608)
-                + (g + 0.1) * float3(0.298039, 0.450980, 0.070588);
-
-    float3 rgb = (mode == 2) ? ramp : tint;
-    rgb        = (mode == 1) ? mono : rgb;
-
-    return float4(rgb, alpha);
+    /* Everything the look needs: the luminance, plus the two colours modes 1
+     * and 2 are built from, since an "ordinary goggles only" build has to be
+     * able to hand those two back untouched. */
+    return float4(LookSelected(mode, g, gray, tint), alpha);
 }

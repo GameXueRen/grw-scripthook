@@ -23,7 +23,7 @@
  * THE TWO ROWS
  * ------------
  *   "Night vision filter replace"    off / the ordinary goggles only / everything
- *   "Night vision filter"            black and white / yellow-green
+ *   "Night vision filter"            black and white / yellow-green / sepia
  *
  * The replace row comes first and is the master switch: OFF is the only state in
  * which the plugin does nothing at all, and it is what restores the game's own
@@ -32,8 +32,15 @@
  * out because this plugin was restructured to get there: when "green" doubled
  * as both "the game's own look" and "do nothing", choosing it with "everything"
  * quietly did nothing at all - a reach that could not reach. The look row now
- * offers only the two looks the player might actually want, and "the game's own
- * look" left it for the switch above, where it is unambiguous.
+ * offers only looks, and "the game's own look" left it for the switch above,
+ * where it is unambiguous.
+ *
+ * Two of the looks are arithmetic - a tint and a ramp. Sepia is neither: it is
+ * the game's own Photo Mode "sepia" grade, which exists in the archives as a
+ * 32^3 look-up cube. Night vision works on one scalar, so only that cube's grey
+ * axis can ever reach the screen, and the axis is what nv_looks.hlsl tabulates.
+ * More of those grades can be added the same way; see
+ * .codebuddy/plans/nightvision-more-looks_3f7c21d0.md.
  *
  * Dropping it also removed machinery: a shader variant that folded mode 0 onto
  * itself, and with it a transcription of mode 0's branch, which does not draw
@@ -112,11 +119,18 @@
  *
  * ADDING A LOOK
  * -------------
- * Teach nv_filter_ps.hlsl to produce it, build it as another variant (see
- * tools/embed_nv_filters.py), add one row to kLooks below, and add its label to
- * lang.ini. Nothing else changes: rows are matched to the generated table by
- * name, and a variant that no pair of rows offers is reported in the log rather
- * than silently compiled in.
+ * Four places, and three of them are lists that have to agree: the look list in
+ * gen_looks.py's LOOKS (which generates nv_looks.hlsl), the VARIANTS list in
+ * tools/embed_nv_filters.py (which compiles them and writes the header), one row
+ * in kLooks below, and its label in lang.ini. Then
+ *
+ *   python tools/embed_nv_filters.py --build
+ *
+ * Which is one command because embed_nv_filters.py owns both the compiles and
+ * the header. check_looks.py compares all four lists and refuses a drift; run it
+ * after touching any of them. Nothing else changes: rows are matched to the
+ * generated table by name, and a variant that no pair of rows offers is reported
+ * in the log rather than silently compiled in.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -150,11 +164,40 @@ typedef struct Row {
     const char *label;          /* lang key */
 } Row;
 
-/* The look. Both are substitutions; leaving the engine's own look alone is what
- * the replace row's OFF does, so there is no "green" row here. */
+/* The look. All of them are substitutions; leaving the engine's own look alone
+ * is what the replace row's OFF does, so there is no "green" row here.
+ *
+ * Two families, and the order below is the order the row presents them in:
+ * the two the framework can draw as arithmetic (a tint and a ramp, modes 1 and
+ * 2 in the shader), then the twelve grades the game itself ships for Photo
+ * Mode - each of those is a 32^3 look-up cube in the archives, reduced to its
+ * grey axis because night vision works on one scalar - then three more that are
+ * arithmetic (amber, cool blue, high contrast). The names are ours: the assets
+ * are codenamed (BURNER, LIGHTHOUSE, ...) and a menu wants what it looks like.
+ *
+ * Seventeen is past what a single left/right row is comfortable with - the
+ * value column holds about five CJK characters, and reaching the last entry
+ * takes eight presses. It works, and every step changes the screen immediately,
+ * but this is the row that will want a second level (family, then look) before
+ * much else is added. */
 static const Row kLooks[] = {
-    { "black-and-white", "@nvf.bw"    },
-    { "yellow-green",    "@nvf.yg"    }
+    { "black-and-white", "@nvf.bw"       },   /* 1  engine, as arithmetic  */
+    { "yellow-green",    "@nvf.yg"       },   /* 2                         */
+    { "sepia",           "@nvf.sepia"    },   /* 3  Photo Mode cubes       */
+    { "apollo",          "@nvf.apollo"   },   /* 4                         */
+    { "lighthouse",      "@nvf.lighthouse" }, /* 5                         */
+    { "tennessee",       "@nvf.tennessee" },  /* 6                         */
+    { "arlington",       "@nvf.arlington" },  /* 7                         */
+    { "bridge",          "@nvf.bridge"   },   /* 8                         */
+    { "montenegro",      "@nvf.montenegro" }, /* 9                         */
+    { "chief",           "@nvf.chief"    },   /* 10                        */
+    { "songbird",        "@nvf.songbird" },   /* 11                        */
+    { "madre",           "@nvf.madre"    },   /* 12                        */
+    { "burner",          "@nvf.burner"   },   /* 13                        */
+    { "neutral",         "@nvf.neutral"  },   /* 14                        */
+    { "amber",           "@nvf.amber"    },   /* 15 arithmetic             */
+    { "cool-blue",       "@nvf.cool"     },   /* 16                        */
+    { "contrast",        "@nvf.contrast" }    /* 17                        */
 };
 #define LOOK_N ((int)(sizeof(kLooks) / sizeof(kLooks[0])))
 
@@ -308,7 +351,7 @@ static PVOID CreateVariant(ID3D11Device *dev, const NvFilterShader *v) {
     if (n != (int)v->bytes ||
         blob[0] != 'D' || blob[1] != 'X' || blob[2] != 'B' || blob[3] != 'C') {
         Log("%s/%s: blob is malformed (%d bytes decoded, wanted %u) - re-run "
-            "tools/embed_nv_filters.py", v->look, v->reach, n, v->bytes);
+            "tools/embed_nv_filters.py --build", v->look, v->reach, n, v->bytes);
         free(blob);
         return NULL;
     }
@@ -317,7 +360,7 @@ static PVOID CreateVariant(ID3D11Device *dev, const NvFilterShader *v) {
      * showing up as a strange picture. */
     if (Crc32(blob, v->bytes) != v->crc) {
         Log("%s/%s: the embedded bytes do not match the CRC in the header "
-            "(%08X) - re-run tools/embed_nv_filters.py",
+            "(%08X) - re-run tools/embed_nv_filters.py --build",
             v->look, v->reach, (unsigned)v->crc);
         free(blob);
         return NULL;
@@ -728,6 +771,22 @@ static void OnLook(uint32_t menu, uint32_t item, int value, void *user) {
 /* Match an ini value to a row. Exact keys only, plus the obvious short
  * aliases - the log prints the valid set when nothing matches, which is more
  * use than guessing at what the author meant. */
+/* The keys of a row table as one comma-separated line. Built from the table so
+ * a row added later cannot leave the log naming a set that no longer exists. */
+static void JoinKeys(const Row *rows, int n, char *out, size_t cap) {
+    size_t used = 0;
+    int i;
+
+    if (cap == 0) return;
+    out[0] = 0;
+    for (i = 0; i < n; i++) {
+        int w = snprintf(out + used, cap - used, "%s%s", i ? ", " : "",
+                         rows[i].key);
+        if (w < 0 || (size_t)w >= cap - used) return;
+        used += (size_t)w;
+    }
+}
+
 static int LookFromKey(const char *s) {
     int i;
     if (!s || !s[0]) return -1;
@@ -799,8 +858,10 @@ static int IniLoad(void) {
                                  g_iniPath) && buf[0])
         row = ReplaceFromKey(buf);
     if (buf[0] && row < 0) {
-        Log("replace=\"%s\" is not one of the rows; using \"off\". Valid: "
-            "off, default, all", buf);
+        char valid[128];
+        JoinKeys(kReplaces, REPLACE_N, valid, sizeof valid);
+        Log("replace=\"%s\" is not one of the rows; using \"%s\". Valid: %s",
+            buf, kReplaces[0].key, valid);
         row = 0;
     }
     InterlockedExchange(&g_replace, row < 0 ? 0 : row);
@@ -811,9 +872,11 @@ static int IniLoad(void) {
                                  g_iniPath) && buf[0])
         row = LookFromKey(buf);
     if (buf[0] && row < 0) {
-        Log("look=\"%s\" is not one of the rows; using \"black-and-white\". "
-            "Valid: black-and-white, yellow-green. The game's own look is the "
-            "replace row's \"off\", not a look.", buf);
+        char valid[128];
+        JoinKeys(kLooks, LOOK_N, valid, sizeof valid);
+        Log("look=\"%s\" is not one of the rows; using \"%s\". Valid: %s. "
+            "The game's own look is the replace row's \"off\", not a look.",
+            buf, kLooks[0].key, valid);
         row = 0;
     }
     InterlockedExchange(&g_look, row < 0 ? 0 : row);
@@ -839,7 +902,22 @@ static const ShText kEn[] = {
     { "@nvf.replace.all",    "Everything" },
     { "@nvf.look",           "Night vision filter" },
     { "@nvf.bw",             "Black and white" },
-    { "@nvf.yg",             "Yellow-green" }
+    { "@nvf.yg",             "Yellow-green" },
+    { "@nvf.sepia",          "Sepia" },
+    { "@nvf.apollo",         "Filmic" },
+    { "@nvf.lighthouse",     "Teal" },
+    { "@nvf.tennessee",      "Violet" },
+    { "@nvf.arlington",      "Cold" },
+    { "@nvf.bridge",         "Magenta" },
+    { "@nvf.montenegro",     "Faded" },
+    { "@nvf.chief",          "Umber" },
+    { "@nvf.songbird",       "Soft" },
+    { "@nvf.madre",          "Olive" },
+    { "@nvf.burner",         "Crimson" },
+    { "@nvf.neutral",        "Neutral" },
+    { "@nvf.amber",          "Amber" },
+    { "@nvf.cool",           "Cool blue" },
+    { "@nvf.contrast",       "Contrast" }
 };
 
 static const ShText kZh[] = {
@@ -851,7 +929,22 @@ static const ShText kZh[] = {
     { "@nvf.replace.all",    "全部替换" },
     { "@nvf.look",           "夜视滤镜" },
     { "@nvf.bw",             "黑白" },
-    { "@nvf.yg",             "黄绿" }
+    { "@nvf.yg",             "黄绿" },
+    { "@nvf.sepia",          "棕褐" },
+    { "@nvf.apollo",         "胶片" },
+    { "@nvf.lighthouse",     "青影" },
+    { "@nvf.tennessee",      "紫调" },
+    { "@nvf.arlington",      "冷调" },
+    { "@nvf.bridge",         "洋红" },
+    { "@nvf.montenegro",     "褪色" },
+    { "@nvf.chief",          "土黄" },
+    { "@nvf.songbird",       "柔和" },
+    { "@nvf.madre",          "橄榄" },
+    { "@nvf.burner",         "绯红" },
+    { "@nvf.neutral",        "中性" },
+    { "@nvf.amber",          "琥珀" },
+    { "@nvf.cool",           "冷蓝" },
+    { "@nvf.contrast",       "高对比" }
 };
 
 static void FilterText(void) {
