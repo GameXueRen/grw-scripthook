@@ -79,17 +79,33 @@ static void RAppend(Resp *r, const char *fmt, ...) {
 
 /* ---- safe memory access ---- */
 
-/* cached readable ranges; avoids per-read VirtualQuery */
+/* Cached readable ranges; avoids a per-read VirtualQuery.
+ *
+ * Thread safety: RunWithTimeout() runs every command on its own worker and
+ * abandons it after CMD_TIMEOUT_MS, so a slow command keeps running while
+ * the server is already accepting the next one -- two workers can be inside
+ * CanRead() at the same time (the overlay/hook paths may read too).  The
+ * table used to be free()d and rebuilt with no lock at all, so one caller
+ * could walk a 4 MB block that another had just handed back to the OS; the
+ * observed symptom was C0000005 on the g_ranges[mid] load below.  One lock
+ * covers both the rebuild and every lookup, so the free can no longer race
+ * a reader -- nobody holds a shared lock while the exclusive one rebuilds. */
 typedef struct { uintptr_t lo, hi; } Range;
-static Range  *g_ranges = NULL;
-static int     g_nranges = 0;
+static Range   *g_ranges = NULL;
+static int      g_nranges = 0;
+static SRWLOCK  g_rangesLock = SRWLOCK_INIT;
 
+/* Rebuilds the table, taking the lock itself -- call it before doing any
+ * lookup, but never while also holding g_rangesLock: SRWLOCK is not
+ * recursive across modes. */
 static void RefreshRanges(void) {
+    AcquireSRWLockExclusive(&g_rangesLock);
+
     if (g_ranges) free(g_ranges);
     int cap = 262144;
     g_ranges = (Range *)malloc(cap * sizeof(Range));
     g_nranges = 0;
-    if (!g_ranges) return;
+    if (!g_ranges) { ReleaseSRWLockExclusive(&g_rangesLock); return; }
 
     MEMORY_BASIC_INFORMATION mbi;
     uint8_t *scan = NULL;
@@ -108,20 +124,28 @@ static void RefreshRanges(void) {
         }
         scan = next;
     }
+
+    ReleaseSRWLockExclusive(&g_rangesLock);
 }
 
 static int CanRead(const void *addr, size_t len) {
     uintptr_t a = (uintptr_t)addr;
     if (a < 0x1000) return 0;
     if (!g_ranges) RefreshRanges();
-    int lo = 0, hi = g_nranges - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        if (a < g_ranges[mid].lo) hi = mid - 1;
-        else if (a >= g_ranges[mid].hi) lo = mid + 1;
-        else return (a + len) <= g_ranges[mid].hi;
+
+    int ok = 0;
+    AcquireSRWLockShared(&g_rangesLock);
+    if (g_ranges) {
+        int lo = 0, hi = g_nranges - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            if (a < g_ranges[mid].lo) hi = mid - 1;
+            else if (a >= g_ranges[mid].hi) lo = mid + 1;
+            else { ok = (a + len) <= g_ranges[mid].hi; break; }
+        }
     }
-    return 0;
+    ReleaseSRWLockShared(&g_rangesLock);
+    return ok;
 }
 
 static uint64_t SafeReadPtr(const void *addr) {
@@ -454,6 +478,14 @@ static void CmdDis(Resp *r, uint8_t *addr, int len) {
     RAppend(r, "%d bytes at %p for disassembly:\n", len, addr);
     for (int row = 0; row < len; row += 16) {
         int cols = (len - row < 16) ? len - row : 16;
+        /* Read via CanRead: a bare deref here takes the whole game down when
+         * the page is not resident -- the .srdata streamed-code region pages
+         * in and out, and a fault inside this worker is fatal, not a first
+         * chance.  Seen 2026-10-02 disassembling a call target in .srdata. */
+        if (!CanRead(addr + row, (size_t)cols)) {
+            RAppend(r, "%p: <unreadable>\n", addr + row);
+            continue;
+        }
         RAppend(r, "%p: ", addr + row);
         for (int c = 0; c < cols; c++)
             RAppend(r, "%02x ", addr[row + c]);
@@ -466,6 +498,12 @@ static void CmdStrings(Resp *r, uint8_t *addr, size_t len) {
     int found = 0;
     size_t i = 0;
     while (i < len && found < 200) {
+        /* Same reason as CmdDis: never touch a page without asking CanRead
+         * first.  Checked once per page, so the scan stays cheap. */
+        if ((i & 0xFFF) == 0 && !CanRead(addr + i, 1)) {
+            i = (i | 0xFFF) + 1;
+            continue;
+        }
         if (addr[i] >= 32 && addr[i] <= 126) {
             size_t start = i;
             while (i < len && addr[i] >= 32 && addr[i] <= 126) i++;
