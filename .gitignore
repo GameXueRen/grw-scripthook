@@ -5,6 +5,9 @@ out/
 *.obj
 *.lib
 *.exp
+# Compiled shader objects. plugins/NvFilter builds four with fxc and folds the
+# bytes into nv_filters.h; the .cso is only the intermediate step.
+*.cso
 
 # Editor and tool state
 .claude/

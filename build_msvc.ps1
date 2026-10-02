@@ -411,6 +411,40 @@ Build-Plugin -Name 'NvProbe' -Source 'NvProbe.c' -LinkArgs @(
     (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 )
 
+# NvFilter force-replaces the look of the in-game night vision filter. The
+# engine draws night vision with one pixel shader in the HDR lighting pass and
+# that shader picks its look from cb5[13].y - 0 the game's own ordinary look,
+# 1 black and white, 2 yellow-green - with the number chosen from the headgear.
+# NvFilter hands the device rewritten copies of that shader in which the
+# selector is folded onto a look of the player's choosing, and the menu has two
+# rows: how far the replacement reaches (off / the ordinary goggles only /
+# everything) and which look to put there (black and white / yellow-green).
+# Off is the only state in which nothing is substituted, and it is also how the
+# game's own look is restored; the look row used to offer a "green" value that
+# meant both "a look" and "do nothing", which made choosing it fail silently, so
+# it is gone. Detection is by the shader's length and CRC32, both overridable in
+# NvFilter.ini so a game patch does not need a rebuild. Hooks d3d11.dll's two
+# device creation exports plus CreatePixelShader and PSSetShader; nothing is
+# written to the game. MinHook because the framework already carries it. Not in
+# the beta set.
+#
+# The replacement shaders themselves are built separately, because fxc and not
+# cl - one compile per combination, all from the same source:
+#   cd plugins/NvFilter
+#   fxc /T ps_5_0 /O3 /DNV_DEFAULT_MODE=1 /DNV_ALL_MODES=0 /Fo nv_bw.cso        nv_filter_ps.hlsl
+#   fxc /T ps_5_0 /O3 /DNV_DEFAULT_MODE=2 /DNV_ALL_MODES=0 /Fo nv_yg.cso        nv_filter_ps.hlsl
+#   fxc /T ps_5_0 /O3 /DNV_DEFAULT_MODE=1 /DNV_ALL_MODES=1 /Fo nv_bw_all.cso    nv_filter_ps.hlsl
+#   fxc /T ps_5_0 /O3 /DNV_DEFAULT_MODE=2 /DNV_ALL_MODES=1 /Fo nv_yg_all.cso    nv_filter_ps.hlsl
+#   python ../../tools/embed_nv_filters.py     # regenerates nv_filters.h
+Build-Plugin -Name 'NvFilter' -Source 'NvFilter.c' -LinkArgs @(
+    $libPath, 'libscripthook.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib'
+) -ExtraSources @(
+    (Join-Path $root 'third_party/minhook/src/buffer.c'),
+    (Join-Path $root 'third_party/minhook/src/hook.c'),
+    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
+    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
+)
+
 # ModeExitProbe answered its question - the mode-switch exit is the
 # engine's design, not a defect; see its header - so it is no longer
 # deployed. The source stays for the next question of this kind.
