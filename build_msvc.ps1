@@ -393,6 +393,24 @@ Build-Plugin -Name 'GhostNoWipe' -Source 'GhostNoWipe.c' -LinkArgs @($libPath, '
 # ini, so it registers nothing until asked.
 Build-Plugin -Name 'GhostRevive' -Source 'GhostRevive.c' -LinkArgs @()
 
+# NvProbe answers one question before any night-vision work is done: which
+# D3D11 pixel shader the engine binds for the HDR lighting pass while night
+# vision is on. The filter is not a resource - no archive carries an
+# HDRLighting entry - so replacing it means replacing that shader, and the
+# shader has to be identifiable first. NvProbe hooks d3d11.dll's two device
+# creation exports plus the device's CreatePixelShader and the context's
+# PSSetShader, and only counts: it never binds or rewrites a shader, writes
+# no engine memory and leaves the swapchain alone. MinHook because the
+# framework already carries it. Not in the beta set.
+Build-Plugin -Name 'NvProbe' -Source 'NvProbe.c' -LinkArgs @(
+    $libPath, 'libscripthook.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib'
+) -ExtraSources @(
+    (Join-Path $root 'third_party/minhook/src/buffer.c'),
+    (Join-Path $root 'third_party/minhook/src/hook.c'),
+    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
+    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
+)
+
 # ModeExitProbe answered its question - the mode-switch exit is the
 # engine's design, not a defect; see its header - so it is no longer
 # deployed. The source stays for the next question of this kind.
