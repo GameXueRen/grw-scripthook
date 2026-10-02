@@ -37,6 +37,13 @@
  * ShMenuRow.name and ShMenuView.title are the same string on the way to
  * the renderer and are sized to match. */
 #define LABEL       160
+/* Room for the value side of a row: "< option >" for a list, "[on]" for a
+ * switch. Sized for somebody else's text, not ours - a list's options are a
+ * plugin's lang strings and a CJK one costs three bytes a character, so the
+ * ceiling has to sit well past the framework's own "on"/"off"/"< 12 >". At
+ * 48 a twenty-character Chinese option was cut, and cut without a word
+ * anywhere. ShMenuRow.value in scripthook.h is sized to match. */
+#define VALUE       96
 #define VISIBLE     12
 #define TICK_MS     40
 /* Options a list row can carry. A list WRAPS at the ends - one step past
@@ -286,22 +293,39 @@ static void BackOutOfHiddenPage(const Menu *m) {
 static void ValueText(const char *owner, const Item *it, char *out, int n) {
     out[0] = 0;
     if (it->kind == IT_SUB) snprintf(out, n, ">");
-    else if (it->kind == IT_TOGGLE)
-        snprintf(out, n, "[%s]", it->value
-                                      ? ShLangText(owner, "@menu.on")
-                                      : ShLangText(owner, "@menu.off"));
-    else if (it->kind == IT_NUMBER)
+    else if (it->kind == IT_TOGGLE) {
+        /* The same treatment as a list option, for the same reason: the
+         * on/off word is translated, and how long a translation is is the
+         * translation's business. The framework's own "@menu.on"/"@menu.off"
+         * are one character each, which is why this branch sat unnoticed -
+         * a lang.ini that spells them out would have been cut exactly the
+         * way the list option was. */
+        char tmp[LABEL + 16];
+        snprintf(tmp, sizeof tmp, "[%s]",
+                 ShLangText(owner, it->value ? "@menu.on" : "@menu.off"));
+        SafeCopy(out, (size_t)n, tmp);
+    } else if (it->kind == IT_NUMBER)
         /* Integer step with a whole current value renders as an
          * integer (< 30 >); fractional steps keep two decimals. */
         if (it->step >= 1.0f && it->num == (float)(int)it->num)
             snprintf(out, n, "< %.0f >", it->num);
         else
             snprintf(out, n, "< %.2f >", it->num);
-    else if (it->kind == IT_LIST && it->nopts)
-        snprintf(out, n, "< %s >",
+    else if (it->kind == IT_LIST && it->nopts) {
+        /* Composed wide, then cut by SafeCopy. snprintf would cut the
+         * assembled string at whatever byte came last, and for a translated
+         * option that byte can be the middle of a character - the option is
+         * in the player's language, so its length is not something this file
+         * gets to reason about. SafeCopy walks back to a boundary, which
+         * turns a too-long option into a shorter one rather than a broken
+         * one. */
+        char tmp[LABEL + 16];
+        snprintf(tmp, sizeof tmp, "< %s >",
                  ShLangText(owner,
                             it->opts[((it->value % it->nopts) +
                                       it->nopts) % it->nopts]));
+        SafeCopy(out, (size_t)n, tmp);
+    }
 }
 
 /* A plugin callback can be heavy (a heap scan, a node walk,

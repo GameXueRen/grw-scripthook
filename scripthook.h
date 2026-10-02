@@ -1344,10 +1344,19 @@ SH_API void ShMenuOpen(int open);
 /** One row of the menu, copied for the overlay renderer. The sizes here
  *  are the contract with the menu model: a row label is a full row, and
  *  the longest one the framework builds - a plugin switch, reading
- *  "<folder>(<page name>)" - has to fit. See LABEL in scripthook_menu.c. */
+ *  "<folder>(<page name>)" - has to fit. See LABEL in scripthook_menu.c.
+ *
+ *  `value` holds the rendered value side - "< option >" for a list, "[on]"
+ *  for a switch - and is sized well past anything the framework itself
+ *  ships, because a list's options are a plugin's strings and a translated
+ *  one costs three bytes per CJK character. It was 48, which held the
+ *  framework's own options and cut a twenty-character Chinese option
+ *  silently; 96 holds a thirty-character one. The capture now cuts on a
+ *  character boundary too, so an overlong option can only come out shorter
+ *  than asked for, never with a broken character in it. */
 typedef struct ShMenuRow {
     char name[160];
-    char value[48];
+    char value[96];
     int  selected;
 } ShMenuRow;
 

@@ -150,6 +150,8 @@ static void AddLangEntry(const char *section, const char *key,
 
 `AddPlangEntry`（`:845`）同样直接 `return`。渲染侧还有**第二组截断点**（与解析侧不同）：`ShMenuRow.name[96]`、`ShMenuRow.value[32]`、`ShMenuView.title[48]`/`hint[128]`/`status[96]`/`footer[16]`（`scripthook.h:1073-1090`），以及 `Item.label[LABEL]`、`Menu.title[LABEL]` 的 `LABEL 48`（`scripthook_menu.c:30`、`:50`、`:62`）。
 
+> **2026-10-02 更新**：`ShMenuRow.value` 已由 48 改到 **96**（`scripthook.h`），`scripthook_menu.c` 加了对应的 `VALUE` 常量，并把 `ValueText()` 的列表分支和开关分支改成先宽格式化再经 `SafeCopy` 落盘（原来直接 `snprintf`，按字节截断，中文会在字符中间被切断；开关行的 `[on]`/`[off]` 同样是译文，只是框架自带的译文各只有一个字才一直没暴露）。触发它的是一次实机截断：中文列表项 `仅替换默认（特殊装备保留原滤镜）`（48 B）渲染成 `"< %s >"` 需要 53 B，被截到 47 B，屏幕上丢掉尾部 `）`。同一轮扫描发现另有 3 行本来就超限（`AmmoControl` 的 `@ac.mult` 60 B、`@ac.key` 51 B，`cnchat` 的 `@chat.startkey` 60 B）。本文其余处引用的 `value[32]`/`name[96]`/`title[48]` 是更早一版的尺寸，行号亦已漂移，仅作审计留痕。
+
 ### 1.5 懒加载与锁
 
 `PluginLangsLoad`（`scripthook_config.c:895-934`）**每 owner 只加载一次**（含"文件不存在"也记为已加载）：
@@ -885,7 +887,7 @@ ShLangDeclare("firstperson", "zh-CN", kZh, N);
 | **UTF-8 BOM 是否使整表失效** | **是（推导）**：`ParseIniLine:511-519` 把 `[` 与 `]` 之间原样取为段名；带 BOM 时首段名 = `\xEF\xBB\xBFzh-CN`，`IsLangSection:669-675` 前缀不匹配 → 该段所有行既不进译文表，也不报错（会被当作配置键吞掉） | 复制一份插件 `lang.ini` 加 BOM，只用它提供一条易观察的键（例如页面标题），开一局看是否回落英文；再删 BOM 复核 |
 | 现有文件是否已有 BOM | — | **已实测：0 个**（23 份插件 ini + `scripthook.ini` 首字节非 `EF BB BF`） |
 | `value[256]` 截断长模板 | `:750-751` 的 `strncpy` 截断且无日志 | 造一条 > 256 B 的中文状态行模板，看实际显示是否被截 |
-| 渲染侧截断 | `ShMenuRow.name[96]`、`value[32]`、`title[48]` | 造长中文页面标题/列表项（> 32 B 的 `value`）观察 |
+| 渲染侧截断 | ~~`ShMenuRow.name[96]`、`value[32]`、`title[48]`~~ **已实测并修复（2026-10-02）**：`value` 当时是 48 B，装饰 `"< %s >"` 吃掉 5 B ⇒ 列表项上限 43 B | 实测：中文 `仅替换默认（特殊装备保留原滤镜）`（48 B）显示成 `仅替换默认（特殊装备保留原滤镜`，丢掉 `） >`；`value` 已改 96 B 且改为按字符边界截断，复测通过 |
 | 超限丢弃 | `:729`、`:845` 静默返回 | 造 > `LANGS_MAX` 条译文，观察菜单回落英文且日志（改造后应有记录） |
 | 热切换一致性 | — | 切语言后逐页翻看：标题/hint/status 是否全为新语言；连续快速切换 10 次不崩 |
 | 自实现格式化器（方案 B） | — | 两条链各编一次，跑五条用例：`%1$s` 重排、`%2$.0f`、同一参数重复引用、裸 `%`、未知索引；逐条与 §8.5 第 1 条的实测表对齐，非法模板必须回落英文模板并落日志 |
