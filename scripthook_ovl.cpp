@@ -40,7 +40,6 @@
 #include "scripthook_tick.h"
 #include "scripthook_draw.h"
 #include "log.h"
-#include "third_party/minhook/include/MinHook.h"   // dxgi's Present, in code
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -2876,33 +2875,24 @@ static HRESULT STDMETHODCALLTYPE PresentCodeHook(IDXGISwapChain* pSwap, UINT syn
 
 static void InstallPresentCodeHook(void)
 {
-    MH_STATUS s;
+    int rc;
 
     if (InterlockedExchange(&g_codeHookTried, 1)) return;
     if (!g_origPresent) return;
 
-    s = MH_Initialize();
-    if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED)
+    /* By address: the target is the Present the swapchain's table pointed
+     * at, not an export. The shared layer keeps MinHook's state and the
+     * registry, so this hook and every other one in the DLL are in one
+     * place - which is also what makes ShHookStatus a whole-session answer
+     * instead of a per-module guess. */
+    rc = ShHookAddAt("ovl:present", (void *)g_origPresent, "dxgi!Present",
+                     (void *)PresentCodeHook, (void **)&g_codeTramp);
+    if (rc != SH_HOOK_OK)
     {
-        OvlLogFloor("present code hook: MH_Initialize failed (%s) - the table "
-                    "hooks are all that is left", MH_StatusToString(s));
-        return;
-    }
-    s = MH_CreateHook((LPVOID)g_origPresent, (LPVOID)PresentCodeHook,
-                      (LPVOID*)&g_codeTramp);
-    if (s != MH_OK)
-    {
-        OvlLogFloor("present code hook: MH_CreateHook on %p failed (%s) - the "
-                    "table hooks are all that is left", (void*)g_origPresent,
-                    MH_StatusToString(s));
-        return;
-    }
-    s = MH_EnableHook((LPVOID)g_origPresent);
-    if (s != MH_OK)
-    {
-        OvlLogFloor("present code hook: MH_EnableHook failed (%s) - backing off",
-                    MH_StatusToString(s));
-        MH_RemoveHook((LPVOID)g_origPresent);
+        OvlLogFloor("present code hook: on %p refused (%s) - the table hooks "
+                    "are all that is left", (void*)g_origPresent,
+                    rc == SH_HOOK_DUP ? "owned by somebody else"
+                                      : "see scripthook_hooks.log");
         g_codeTramp = nullptr;
         return;
     }
@@ -3647,6 +3637,70 @@ static HWND CapturedWindow()
                                                    nullptr);
 }
 
+/* The other overlays in the room, said once, before the first hook of ours
+ * goes in. A black-screen report from a player is only answerable with this
+ * line: the one variable that cannot be reproduced on the development
+ * machine is the hooking order between two overlays, and the module list is
+ * where it shows. Known names are matched by substring, so a new entry in
+ * the list costs a word rather than a code change; the total goes in as
+ * well, because a machine with forty injected modules is a different
+ * machine from one with twelve. Floor level, so a player who never raised
+ * the log level still has it - this is the line a "black screen, cannot
+ * reproduce" report is read against. */
+static void NoteOtherOverlays(void)
+{
+    HMODULE mods[512];
+    HANDLE  h = GetCurrentProcess();
+    DWORD   need = 0, i, total;
+    char    line[512];
+    int     n = 0;
+
+    if (!EnumProcessModules(h, mods, sizeof(mods), &need) || !need) return;
+    total = need / (DWORD)sizeof(HMODULE);
+    if (total > 512) total = 512;
+
+    line[0] = 0;
+    for (i = 0; i < total; i++) {
+        char name[MAX_PATH], low[MAX_PATH];
+        int  j;
+
+        name[0] = 0;
+        if (!GetModuleBaseNameA(h, mods[i], name, (DWORD)sizeof(name)))
+            continue;
+        for (j = 0; name[j] && j < MAX_PATH - 1; j++) {
+            char c = name[j];
+
+            low[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+        }
+        low[j] = 0;
+
+        /* Steam (gameoverlayrenderer and the newer igo), Discord, RTSS and
+         * Afterburner, the NVIDIA and AMD stacks, the Ubisoft overlay, the
+         * other launchers, and the two shader injectors a player is most
+         * likely to have beside this one. */
+        if (strstr(low, "gameoverlay") || strstr(low, "igo64") ||
+            strstr(low, "igo32") || strstr(low, "discord_hook") ||
+            strstr(low, "rtsshooks") || strstr(low, "afterburner") ||
+            strstr(low, "nvapi") || strstr(low, "nvspcap") ||
+            strstr(low, "amdvlk") || strstr(low, "aticfx") ||
+            strstr(low, "uplay") || strstr(low, "ubisoft") ||
+            strstr(low, "origin") || strstr(low, "gamebar") ||
+            strstr(low, "reshade") || strstr(low, "specialk") ||
+            strstr(low, "overlay")) {
+            char one[MAX_PATH + 8];
+
+            snprintf(one, sizeof(one), "%s%s", n ? ", " : "", name);
+            if (strlen(line) + strlen(one) < sizeof(line) - 4) {
+                strcat(line, one);
+                n++;
+            }
+        }
+    }
+    OvlLogFloor("overlay scan: %lu module(s) in the process, known overlays: %s",
+                (unsigned long)(need / (DWORD)sizeof(HMODULE)),
+                n ? line : "none");
+}
+
 // ---------------------------------------------------------------------------
 // init thread
 // ---------------------------------------------------------------------------
@@ -3681,6 +3735,10 @@ static DWORD WINAPI InitThread(LPVOID)
      * the game's first window (four seconds in, measured on both the field
      * machine and this one) and long after the loader is done. */
     Sleep(1000);
+    /* Who else is in the process, said before the first hook of ours goes
+     * in: a conflict between two overlays is the one failure that cannot be
+     * reproduced on the development machine, and this is its evidence. */
+    NoteOtherOverlays();
     InstallFactoryCapture();
 
     for (;;)

@@ -834,6 +834,20 @@ SH_API int ShHitHookInstall(void) {
     VirtualProtect((void *)(uintptr_t)fn, n, old, &old);
     FlushInstructionCache(GetCurrentProcess(),
                           (void *)(uintptr_t)fn, n);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    {
+        char tag[64];
+
+        /* Two sites come through here, so the tag carries the address and
+         * the label says what it is. */
+        snprintf(tag, sizeof(tag), "hit:%llX",
+                 (unsigned long long)(uintptr_t)fn);
+        ShHookClaim(tag, (void *)(uintptr_t)fn, "hit site");
+    }
     g_hitStub = s;
     if (!g_pump) {
         g_pump = CreateThread(NULL, 0, HitPump, NULL, 0, NULL);

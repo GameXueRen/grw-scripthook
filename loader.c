@@ -91,6 +91,12 @@ extern void ShForgeProbeStartup(void);
 /* Forge Mod Loader: reads [forgemod], scans mods\ and registers its
  * menu. The file I/O half installs from the loader thread too. */
 extern void ShForgeStartup(void);
+/* The shared hook layer: one MinHook state and one hook per target for
+ * the whole DLL, which is what lets a plugin ask for a hook instead of
+ * carrying MinHook of its own. It has no work of its own until a plugin
+ * asks, and the lock it hands out has to exist before the first ask -
+ * which can come from any thread at any time after this. */
+extern void ShHookStartup(void);
 
 /* Plugins live one folder each under plugins\, named after
  * the plugin:
@@ -506,6 +512,10 @@ static DWORD WINAPI LoaderThread(LPVOID p) {
     /* Forge Mod Loader: scan mods\ and build the per-archive overrides
      * before the plugins load, so the menu is up with the rest. */
     ShForgeStartup();
+    /* The shared hook layer, before the plugins load: a plugin's first
+     * ShHookAdd can come from any thread, and the registry lock has to
+     * exist by then. The layer itself installs nothing until asked. */
+    ShHookStartup();
     /* Which play mode the session is in: hooks the game's own mode
      * manager, so it has to be up before anything asks, and it is what
      * the plugin blacklist decides from. */

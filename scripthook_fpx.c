@@ -342,6 +342,18 @@ static int PatchCall(uint64_t site, uint64_t want, uint8_t *stub) {
     *(int32_t *)(at + 1) = (int32_t)rel;
     VirtualProtect(at, 5, old, &old);
     FlushInstructionCache(GetCurrentProcess(), at, 5);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    {
+        char tag[64];
+
+        snprintf(tag, sizeof(tag), "fpx:%llX",
+                 (unsigned long long)(uintptr_t)at);
+        ShHookClaim(tag, (void *)at, "fpx patch site");
+    }
     return 1;
 }
 
@@ -363,6 +375,18 @@ static int PatchJmp(uint64_t site, int len, uint8_t *stub) {
     memcpy(at, patch, (size_t)len);
     VirtualProtect(at, (size_t)len, old, &old);
     FlushInstructionCache(GetCurrentProcess(), at, (size_t)len);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    {
+        char tag[64];
+
+        snprintf(tag, sizeof(tag), "fpx:%llX",
+                 (unsigned long long)(uintptr_t)site);
+        ShHookClaim(tag, (void *)(uintptr_t)site, "fpx patch site");
+    }
     return 1;
 }
 
@@ -380,6 +404,18 @@ static int PatchNop(uint64_t site, int len) {
     memcpy(at, patch, (size_t)len);
     VirtualProtect(at, (size_t)len, old, &old);
     FlushInstructionCache(GetCurrentProcess(), at, (size_t)len);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    {
+        char tag[64];
+
+        snprintf(tag, sizeof(tag), "fpx:%llX",
+                 (unsigned long long)(uintptr_t)site);
+        ShHookClaim(tag, (void *)(uintptr_t)site, "fpx patch site");
+    }
     return 1;
 }
 

@@ -70,7 +70,7 @@
 #include "scripthook.h"
 #include "scripthook_tick.h"
 #include "log.h"
-#include "third_party/minhook/include/MinHook.h"
+
 
 #define ARRAY_LEN(a)     (sizeof(a) / sizeof((a)[0]))
 
@@ -1456,22 +1456,6 @@ static void FileLogInit(void)
     Log("--- file interception layer ---");
 }
 
-static int MinHookReady(void)
-{
-    static volatile LONG tried = 0;
-    MH_STATUS s;
-
-    if (InterlockedCompareExchange(&tried, 0, 0)) return 1;
-    s = MH_Initialize();
-    if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
-        Log("files: MH_Initialize failed (%s) - the layer stays out",
-            MH_StatusToString(s));
-        return 0;
-    }
-    InterlockedExchange(&tried, 1);
-    return 1;
-}
-
 static void SyncTargets(void)
 {
     uint32_t need;
@@ -1481,14 +1465,13 @@ static void SyncTargets(void)
     need = (uint32_t)InterlockedCompareExchange(&g_mask, 0, 0);
     was  = (int)InterlockedCompareExchange(&g_installed, 0, 0);
 
-    if (need && !MinHookReady()) { SyncUnlock(); return; }
-
     for (i = 0; i < (int)ARRAY_LEN(g_api); i++) {
         FileApi *a = &g_api[i];
         int want = (need & a->group) != 0;
 
         if (want && !a->hooked) {
-            MH_STATUS s;
+            char tag[80];
+            int  rc;
 
             if (!a->target) {
                 a->target = (void *)GetProcAddress(
@@ -1499,25 +1482,30 @@ static void SyncTargets(void)
                     continue;
                 }
             }
-            s = MH_CreateHook(a->target, a->detour, a->real);
-            if (s != MH_OK) {
+            /* The shared layer owns the install, MinHook's state and the
+             * registry: one hook per target for the whole DLL, and a target
+             * another module or plugin already owns is answered DUP with
+             * that owner's name in scripthook_hooks.log. The tag is this
+             * layer's own, so the release path below takes back exactly
+             * what this call took - and the rules can keep coming and
+             * going all session without touching anybody else's hooks. */
+            snprintf(tag, sizeof(tag), "files:%s", a->name);
+            rc = ShHookAdd(tag, GetModuleHandleA("kernel32.dll"), a->name,
+                           a->detour, a->real);
+            if (rc != SH_HOOK_OK) {
                 LogAlways("files: hooking %s failed (%s)", a->name,
-                    MH_StatusToString(s));
-                continue;
-            }
-            s = MH_EnableHook(a->target);
-            if (s != MH_OK) {
-                LogAlways("files: enabling %s failed (%s)", a->name,
-                    MH_StatusToString(s));
-                MH_RemoveHook(a->target);
-                *(a->real) = NULL;  /* the trampoline went with it */
+                    rc == SH_HOOK_DUP ? "owned by somebody else"
+                                      : "refused, see scripthook_hooks.log");
+                *(a->real) = NULL;
                 continue;
             }
             a->hooked = 1;
             changed++;
         } else if (!want && a->hooked) {
-            MH_DisableHook(a->target);
-            MH_RemoveHook(a->target);
+            char tag[80];
+
+            snprintf(tag, sizeof(tag), "files:%s", a->name);
+            ShHookRemove(tag);
             a->hooked = 0;
             *(a->real) = NULL;      /* never leave a freed trampoline set */
             changed++;

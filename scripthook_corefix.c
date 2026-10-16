@@ -115,7 +115,7 @@
 #include "scripthook.h"
 #include "scripthook_tick.h"
 #include "log.h"
-#include "third_party/minhook/include/MinHook.h"
+
 
 /* The framework's single error channel lives in scripthook_api.c, and the
  * modules that use it declare it themselves - the same line the blacklist
@@ -814,34 +814,32 @@ static LONG WINAPI hook_NtSIP(HANDLE proc, ULONG cls, PVOID info, ULONG len)
 /* ========================================================================= */
 /* Installation.                                                              */
 /* ========================================================================= */
-/* Created and enabled one target at a time, and never with
- * MH_EnableHook(MH_ALL_HOOKS): that call switches on every hook this DLL
- * owns, including one another module created but has not enabled yet -
- * scripthook_files.c creates its file hooks when the first rule asks for
- * them, and a future module that wants one armed later would be broken by
- * it. MinHook keeps its state per module, so this is about this DLL's own
- * hooks, not a plugin's. */
+/* One target at a time, through the shared hook layer - which is also where
+ * the rule about MH_ALL_HOOKS lives now: it switches on every hook this DLL
+ * owns, including one another module created but has not enabled yet, so
+ * the layer enables each target by its own address and that call is never
+ * made. scripthook_files.c creates its file hooks when the first rule asks
+ * for them and NvFilter's own PSSetShader hook is armed and disarmed at
+ * will; both would be broken by a global enable. */
 static int hook_api(const wchar_t *mod, const char *name, LPVOID detour, LPVOID *real_out)
 {
-    HMODULE   h;
-    void     *target;
-    MH_STATUS s;
+    HMODULE h;
+    char    tag[88];
+    int     rc;
 
     h = GetModuleHandleW(mod);
     if (!h) { core_log("  hook %-32s FAILED (no %ls)", name, mod); return 0; }
 
-    target = (void *)GetProcAddress(h, name);
-    if (!target) { core_log("  hook %-32s FAILED (not exported)", name); return 0; }
-
-    s = MH_CreateHook(target, detour, real_out);
-    if (s != MH_OK) { core_log("  hook %-32s FAILED (MH_STATUS=%d)", name, (int)s); return 0; }
-
-    s = MH_EnableHook(target);
-    if (s != MH_OK) {
-        core_log("  enable %-30s FAILED (MH_STATUS=%d)", name, (int)s);
-        /* A created-but-disabled hook still owns its trampoline; giving it
-         * back keeps this symmetric with the files/ammocap installers. */
-        MH_RemoveHook(target);
+    /* Into the one registry, under this module's own tag: MinHook's state
+     * initialized once for the whole DLL, one hook per target, and a target
+     * somebody else owns answered DUP with their name in the layer's log
+     * instead of a silent refusal from inside MinHook. */
+    snprintf(tag, sizeof(tag), "corefix:%s", name);
+    rc = ShHookAdd(tag, h, name, detour, real_out);
+    if (rc != SH_HOOK_OK) {
+        core_log("  hook %-32s FAILED (%s)", name,
+                 rc == SH_HOOK_DUP ? "owned by somebody else"
+                                   : "refused, see scripthook_hooks.log");
         *real_out = NULL;
         return 0;
     }
@@ -850,7 +848,6 @@ static int hook_api(const wchar_t *mod, const char *name, LPVOID detour, LPVOID 
 
 static int install_hooks(void)
 {
-    if (MH_Initialize() != MH_OK) { core_log("MH_Initialize failed"); return 0; }
     int ok = 1;
     /* Count */
     ok &= hook_api(L"kernel32", "GetSystemInfo",                (LPVOID)hook_GetSystemInfo,                (LPVOID *)&real_GetSystemInfo);

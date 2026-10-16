@@ -508,6 +508,12 @@ static int InstallHook(void) {
     *(int32_t *)(t + 1) = (int32_t)rel;
     VirtualProtect(t, 5, old, &old);
     FlushInstructionCache(GetCurrentProcess(), t, 5);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    ShHookClaim("scene:render", (void *)t, "render thunk");
     return 1;
 }
 

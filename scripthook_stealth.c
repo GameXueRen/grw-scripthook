@@ -70,6 +70,12 @@ static int Patch(void) {
     memcpy(at, patch, VIS_LEN);
     VirtualProtect(at, VIS_LEN, old, &old);
     FlushInstructionCache(GetCurrentProcess(), at, VIS_LEN);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    ShHookClaim("stealth:vis", (void *)at, "visibility site");
     return 1;
 }
 

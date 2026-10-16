@@ -862,6 +862,12 @@ static int InstallHook(void) {
     memcpy((void *)(uintptr_t)fn, patch, n);
     VirtualProtect((void *)(uintptr_t)fn, n, old, &old);
     FlushInstructionCache(GetCurrentProcess(), (void *)(uintptr_t)fn, n);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    ShHookClaim("physics:ray", (void *)(uintptr_t)fn, "ray chain site");
 
     g_stub = s;
     g_site = fn;

@@ -55,6 +55,14 @@ extern "C" {
  *  2  ShGetAmmoObject: the weapon a rounds reading is about.
  *     ShNpcSpawnSetLayout / ShNpcSpawnGetLayout: how a batch is turned and
  *     which way it looks (see the exception above).
+ *     The ShHook* group (ShHookAdd / ShHookAddAt / ShHookAddLate /
+ *     ShHookClaim / ShHookEnable / ShHookRemove / ShHookStatus) is the
+ *     exception above in its plainest form: the shared hook layer was
+ *     added to this line while 2 was still unreleased, so it stays under
+ *     2 and that is the number its callers declare. The cost is the one
+ *     written down above - a caller naming 2 has to read a missing
+ *     ShHookAdd as "this framework predates the hook layer", never as an
+ *     error.
  */
 #define SH_API_VERSION 2
 
@@ -62,6 +70,8 @@ extern "C" {
  *  function:
  *
  *      SH_REQUIRES_API(2);                // only what version 2 added
+ *                                         // (which is also the hook layer -
+ *                                         //  see the note below)
  *      SH_REQUIRES_API(SH_API_VERSION);   // whatever this header is
  *
  *  Name the last thing you use, not the header you happened to build against:
@@ -2587,6 +2597,115 @@ SH_API const char *ShFileActionName(int action);
 SH_API int      ShFileStatus(char *buf, int n);
 
 /** @} */
+
+/** @defgroup hooks Shared hooks
+ *  The one MinHook state and the one-hook-per-target rule, owned by the
+ *  framework, so no plugin carries MinHook of its own.
+ *
+ *  MinHook keeps one hook per target per module: a second installer of a
+ *  target is refused from inside the library and silently does nothing,
+ *  and the first one to shut MinHook down takes every hook in the DLL with
+ *  it. Both are invisible until they are not. This group is the answer to
+ *  both - a target is recorded by tag the moment it is hooked, a second
+ *  request for the same target is answered #SH_HOOK_DUP with the owner
+ *  named in the log, and MinHook's state is initialized here once (already
+ *  initialized being the normal answer) and never shut down.
+ *
+ *  The plugin owns the detour and the feature; this group owns the install.
+ *  Every entry point is safe from any thread - but not from inside a hook
+ *  detour, because creating a hook allocates and writes code pages.
+ */
+
+/** Longest tag a caller may pass: the caller's own name for the hook, which
+ *  is what the log and ShHookStatus show. Longer is truncated, not refused. */
+#define HOOK_TAG_MAX 64
+
+/** ShHookAdd / ShHookAddLate / ShHookRemove results. */
+#define SH_HOOK_OK   0   /**< installed, or already in place under this tag */
+#define SH_HOOK_DUP  1   /**< the target is hooked by someone else; not installed */
+#define SH_HOOK_ERR (-1)/**< refused: bad arguments, no export, MinHook said no */
+
+/** Install and enable a hook over `mod`'s export `fn`, atomically.
+ *
+ *  `tag` is the caller's name for the hook - it is what the log and
+ *  ShHookStatus show, and it is the handle ShHookRemove takes back. The
+ *  same tag twice is idempotent and reference counted: one hook, counted
+ *  twice, gone when the last caller removes it.
+ *
+ *  On #SH_HOOK_OK, `*orig` is the trampoline to call through, valid from
+ *  the moment the call returns. On #SH_HOOK_DUP the detour is not in the
+ *  chain at all and `*orig` is NULL: back off, or the feature quietly does
+ *  nothing. On #SH_HOOK_ERR `*orig` is NULL as well.
+ *
+ *  Never MH_ALL_HOOKS: each target is enabled by its own address, so a hook
+ *  another module of this DLL created and deliberately left disabled stays
+ *  disabled. */
+SH_API int ShHookAdd(const char *tag, HMODULE mod, const char *fn,
+                     void *detour, void **orig);
+
+/** ShHookAdd for a module that is not loaded yet.
+ *
+ *  Waits for `modname` on the calling thread - a quarter second for the
+ *  first minute, a second after that, about five minutes in total - and
+ *  then does what ShHookAdd does. It exists for the loader DLLs
+ *  (uplay_r1_loader64.dll and friends) that arrive whenever the game gets
+ *  round to them: a hook over the function's own entry point works whether
+ *  or not the game already holds the pointer, which is the only kind that
+ *  is not a race.
+ *
+ *  The result is the install's, with one addition: #SH_HOOK_ERR also means
+ *  the module never arrived. */
+SH_API int ShHookAddLate(const char *tag, const char *modname,
+                         const char *fn, void *detour, void **orig);
+
+/** Release one reference to `tag`'s hook; the hook leaves when the last
+ *  one does. Teardown, not a switch: a detour that checks its own flag and
+ *  calls through is the cheap way to be off, and removing a hook that is
+ *  mid-call is not supported. Returns #SH_HOOK_ERR when the tag is not
+ *  installed. */
+SH_API int ShHookAddAt(const char *tag, void *target, const char *label,
+                        void *detour, void **orig);
+
+SH_API int ShHookClaim(const char *tag, void *target, const char *label);
+
+/** Enable or disable a hook without giving it back: hidden, reference
+ *  counted, and the trampoline stays valid across both - MinHook does not
+ *  write the jump while a hook is disabled, so a hot-path hook that is off
+ *  costs nothing per call. What this is for: a detour that is only worth
+ *  having while a feature is on (NvFilter's PSSetShader, which runs for
+ *  every draw when armed and for none while off).
+ *
+ *  A claimed tag (the hand-patched sites) has nothing to enable and is
+ *  answered #SH_HOOK_ERR. */
+SH_API int ShHookEnable(const char *tag, int on);
+
+SH_API int ShHookRemove(const char *tag);
+
+/** ShHookAdd for a target that has no export name: the playmode and
+ *  ammocap targets are addresses inside the game image, reached through
+ *  the framework's own RVA machinery. `label` is what the log and
+ *  ShHookStatus show ("playmode:mode_mgr" and the like); pass NULL and
+ *  the address itself is shown. */
+SH_API int ShHookAddAt(const char *tag, void *target, const char *label,
+                       void *detour, void **orig);
+
+/** Record that `target` is owned, without hooking it.
+ *
+ *  For the nine framework modules that patch game code by hand - an E9
+ *  into a stub of their own, no trampoline, no call-through. The patch
+ *  stays exactly where it is; the claim takes the address out of
+ *  circulation, so the next caller asking for the same target is told who
+ *  owns it instead of writing a second jump over the first one's. A claim
+ *  is removed by ShHookRemove like any other tag. */
+SH_API int ShHookClaim(const char *tag, void *target, const char *label);
+
+/** One line about what is hooked, for a log or a status row: how many are
+ *  hooked, how many are claimed by hand-written patches, and which tags.
+ *  Returns the length written, 0 when `buf` is too small. */
+SH_API int ShHookStatus(char *buf, int n);
+
+/** @} */
+
 
 /** @addtogroup state
  *  @{ */

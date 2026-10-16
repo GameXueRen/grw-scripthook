@@ -96,7 +96,7 @@
 #include "scripthook_tick.h"
 #include "log.h"
 #include "image.h"
-#include "third_party/minhook/include/MinHook.h"
+
 
 /* GameModeManager::SetCurrentGameMode and ::CreateGameMode, and the log
  * line inside each that is used as proof of identity. */
@@ -268,20 +268,20 @@ static void *CmDetour(void *self, void *desc, void *a3, void *a4) {
 static int ArmOne(uint32_t site, uint32_t proof, void *detour, void **orig,
                   const char *what) {
     void *target = (void *)SH_IMG(site);
-    MH_STATUS s;
+    char  tag[80];
+    int   rc;
 
     if (!RefVerified(SH_IMG(site), SH_IMG(proof))) return 0;
-    s = MH_CreateHook(target, detour, orig);
-    if (s != MH_OK) {
-        LogAlways("playmode: hook %s at %08X failed (%d)", what, site, (int)s);
-        return -1;
-    }
-    s = MH_EnableHook(target);
-    if (s != MH_OK) {
-        /* Not left half-installed: a created-but-disabled hook still owns
-         * the trampoline *orig points at, and this install is retried. */
-        LogAlways("playmode: enabling %s at %08X failed (%d)", what, site, (int)s);
-        MH_RemoveHook(target);
+    /* A game-code address has no export to resolve, so this goes in by
+     * address; `what` is the label the registry and its log show. The
+     * shared layer owns the trampoline bookkeeping, so a site this install
+     * has to retry never leaves a half-installed hook behind. */
+    snprintf(tag, sizeof(tag), "playmode:%s", what);
+    rc = ShHookAddAt(tag, target, what, detour, orig);
+    if (rc != SH_HOOK_OK) {
+        LogAlways("playmode: hook %s at %08X failed (%s)", what, site,
+                  rc == SH_HOOK_DUP ? "owned by somebody else"
+                                    : "refused, see scripthook_hooks.log");
         *orig = NULL;
         return -1;
     }
@@ -290,7 +290,6 @@ static int ArmOne(uint32_t site, uint32_t proof, void *detour, void **orig,
 
 static void GmInstall(void) {
     LONG n;
-    MH_STATUS s;
     int a, b;
 
     if (g_gmArmed && g_gmCmArmed) return;
@@ -311,14 +310,6 @@ static void GmInstall(void) {
                 "verifiable (SetCurrentGameMode %08X, CreateGameMode "
                 "%08X)", GM_SITE_RVA, CM_SITE_RVA);
         return;                         /* not yet, or not this build */
-    }
-    s = MH_Initialize();
-    if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
-        LogAlways("playmode: minhook init failed (%d) - the mode stays unknown",
-            (int)s);
-        InterlockedExchange(&g_gmArmed, -1);
-        InterlockedExchange(&g_gmCmArmed, -1);
-        return;
     }
     a = ArmOne(GM_SITE_RVA, GM_PROOF_RVA, (void *)GmDetour, &g_gmOrig,
                "SetCurrentGameMode");

@@ -1212,6 +1212,12 @@ static int MgrInstall(void) {
     *(int32_t *)(at + 1) = (int32_t)rel;
     VirtualProtect(at, MGR_LEN, old, &old);
     FlushInstructionCache(GetCurrentProcess(), at, MGR_LEN);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    ShHookClaim("camera:mgr", (void *)at, "camera manager site");
     g_mgrHooked = 1;
     Log("manager site: %llX hooked, calls on to %llX",
         (unsigned long long)MGR_SITE, (unsigned long long)MGR_NEXT);
@@ -1256,6 +1262,12 @@ static int PatchThunk(void) {
     *(int32_t *)(t + 1) = (int32_t)rel;
     VirtualProtect(t, 5, old, &old);
     FlushInstructionCache(GetCurrentProcess(), t, 5);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    ShHookClaim("camera:thunk", (void *)t, "camera manager thunk");
     return 1;
 }
 

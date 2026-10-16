@@ -29,7 +29,7 @@
 #include "scripthook.h"
 #include "image.h"
 #include "log.h"
-#include "third_party/minhook/include/MinHook.h"
+
 
 /* The thunk the old plugin validates against: it scans for a call site's
  * E8 rel32, resolves the target, and requires it to be base + 0x614CB0. */
@@ -248,7 +248,7 @@ static void LogOnce(void) {
 
 static int Install(void) {
     void *tgt = (void *)(uintptr_t)SH_IMG(CAP_RVA);
-    MH_STATUS s;
+    int   rc = SH_HOOK_ERR;
     uint8_t bytes[5];
 
     LogOnce();
@@ -279,24 +279,17 @@ static int Install(void) {
     Log("ammocap: target %p bytes %02X %02X %02X %02X %02X", tgt,
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
 
-    s = MH_Initialize();
-    if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
-        Log("ammocap: MH_Initialize failed (%s)", MH_StatusToString(s));
-        ShSetError(SH_ERR_HOOK_FAILED);
-        return 0;
-    }
-    s = MH_CreateHook(tgt, (LPVOID)CapDetour, (LPVOID *)&g_orig);
-    if (s != MH_OK) {
-        Log("ammocap: MH_CreateHook failed (%s)", MH_StatusToString(s));
-        ShSetError(SH_ERR_HOOK_FAILED);
-        return 0;
-    }
-    s = MH_EnableHook(tgt);
-    if (s != MH_OK) {
-        Log("ammocap: MH_EnableHook failed (%s)", MH_StatusToString(s));
-        /* Do not leave a created-but-disabled hook behind: the trampoline
-         * it handed us goes away with it. */
-        MH_RemoveHook(tgt);
+    /* By address (there is no export to resolve here - the target is an
+     * RVA inside the game image), through the shared layer, so this hook
+     * lives in the same one registry as the file layer's and the mode
+     * machine's: MinHook's state initialized once, one hook per target,
+     * and the trampoline given back by the layer instead of by hand. */
+    rc = ShHookAddAt("ammocap:capacity", tgt, "ammo capacity computation",
+                     (void *)CapDetour, (void **)&g_orig);
+    if (rc != SH_HOOK_OK) {
+        Log("ammocap: the hook failed (%s) - the scale stays out",
+            rc == SH_HOOK_DUP ? "owned by somebody else"
+                              : "refused, see scripthook_hooks.log");
         g_orig = NULL;
         ShSetError(SH_ERR_HOOK_FAILED);
         return 0;

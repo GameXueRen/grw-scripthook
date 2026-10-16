@@ -149,6 +149,12 @@ static int Install(void) {
     memcpy(at, patch, HK_ALLOC_LEN);
     VirtualProtect(at, HK_ALLOC_LEN, old, &old);
     FlushInstructionCache(GetCurrentProcess(), at, HK_ALLOC_LEN);
+    /* Registered in the shared layer's book: this address is spoken
+     * for by a hand-written patch, so a plugin asking for the same
+     * site is told who owns it instead of writing a second jump over
+     * this one. The patch itself is the lines above - the claim does
+     * not touch a byte of it. */
+    ShHookClaim("havok:alloc", (void *)at, "havok alloc body");
     g_hooked = 1;
     return 1;
 }
