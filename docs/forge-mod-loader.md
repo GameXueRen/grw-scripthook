@@ -9,24 +9,31 @@ given a modified file, it is *redirected*. Here that redirect happens at the
 last possible moment - when the engine reads the archive - so the archive on
 disk stays exactly as shipped and nothing is written anywhere.
 
+This is **not the only route**, and it is not the one to reach for when an entry
+has to get bigger: the game also mounts `<family>_patch_NN.forge` files of its
+own accord, where an entry's size is whatever you write into it. See
+[native-patch-archives.md](native-patch-archives.md) - that route needs no
+framework at all, and `tools/forge_patch.py` builds the archive.
+
 ---
 
 ## Requirements and limits, read this first
 
-- **A replacement larger than the room the entry already has takes the room of
-  the entries that follow it**, with `strict=0`. Payloads in this container are
-  stored back to back with no gaps, so an entry's room is its own length; a
-  larger payload therefore covers the payloads after it, and their own bytes
-  are spliced back into the payload's patch at the offsets they came from. Every
-  offset the engine asks for is still an offset the file really holds, nothing
-  is invented past the end of the archive, and a read that spans the boundary
-  (the engine streams, it does not read one entry at a time) gets the right
-  bytes everywhere. With `strict=1` - the default - such a replacement is still
-  refused with a line in the log. It may not run past the end of the archive, it
-  may not cover an entry that a mod of its own is replacing, and it may not
-  cover more than 32 entries.
+- **A replacement larger than the room the entry already has cannot be served,
+  and `strict=0` does not rescue it.** `strict=1` (the default) refuses it with a
+  line in the log. `strict=0` accepts it and serves one patch covering the whole
+  longer range, but `PlaceServed` first reads every entry that range covers and
+  `memcpy`s those entries' **own** bytes into the payload at the offsets they came
+  from - and those offsets are inside *our* payload, because a container is read
+  end to end and its spill region is exactly the region the entries that follow
+  occupy. Measured on the bootstrap entry: growing it by 886,909 bytes had entries
+  1-9 written over its last 886,909 bytes, and the game hung at the loading
+  screen. **The room is a hard ceiling.** To go past it, put the container in a
+  patch archive of its own instead - see
+  [native-patch-archives.md](native-patch-archives.md).
 - **Entries are replaced, not added or deleted.** There is no `grow` and no
-  new entry. A `.delete` file is recognised and skipped.
+  new entry. A `.delete` file is recognised and skipped. (Adding entries is what
+  the native patch route is for.)
 - **The whole entry payload is the unit.** A mod file is a complete forge
   entry (what `wlcli entry` writes out), not a single resource inside one.
   Rebuilding the payload after changing a resource inside it is a job for
@@ -106,6 +113,21 @@ powershell -c "(Get-Item out\9_-_....data).Length"
 ```
 
 Then drop it under `mods\<archive name>\` and restart the game.
+
+A worked example of a change that is **inside** an entry rather than being the
+whole of one: `Game Bootstrap Settings.data` carries the wardrobe catalogue, and
+one slot is one 8-byte id in a fixed-stride array, so a redirect is a two-byte
+edit paid for with the container's own slack. Adding one is a ten-byte insert,
+paid for with an equal delete elsewhere in the payload so the container's length
+does not change - and **that is the only way to add one**: a container past its
+entry's room cannot be served here. With `strict=0` the loader does accept it and
+`PlaceServed` copies the covered entries' own bytes *into* the payload at the
+offsets they came from, which is where a container that is read end to end keeps
+its own data - measured, it overwrote the last 887 KB of a container grown by
+889 KB and hung the game at the loading screen. So `strict=1` (the default) is the
+safer setting: an oversized payload is then skipped with a log line instead of
+being served corrupt. See [character-lists.md](character-lists.md) for the
+layout, the tool (`tools/bootstrap_edit.py`) and what was verified.
 
 ---
 

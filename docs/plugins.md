@@ -184,21 +184,92 @@ keeps a session that goes wrong diagnosable. A plugin that needs an
 effect the API does not have is the reason the API grows a call for it -
 `ShSetAmmoScale` is the most recent one, written because a plugin wanted
 the magazine capacity and only a hook over the engine's own computation
-can reach it (docs/ammocapacity-reverse.md - a write-up kept out of the
+can reach it (../../GameXueRen/documents/scripthook-docs-20261016/ammocapacity-reverse.md - a write-up kept out of the
 repository). When the effect is a rule
 over someone else's calls - a file that must look missing, a read that
 must be answered differently - a plugin registers with the layer that
 already owns those calls instead (@ref files).
 
-Five plugin sources still carry MinHook of their own, from before this
-rule: `skipintro`, `ModeExitProbe`, `ModeCallProbe`, `AllLanguages` and
-`micfix`. Each is a convergence item, not a licence. `micfix` is the most
-recent one and the only one aimed outside the game: it hooks
-`ole32!CoCreateInstance` and patches the vtable slots of the DirectShow and
-MMDevice objects that call returns, so the recording-device names the game
-walks through both doors come back ASCII
-(`plugins/micfix/micfix.c` says why, and what would
-move it into the framework: a second consumer of the device list).
+The rule has one history worth knowing, because it is what the current
+tree is the result of - and it is a history with a correction in it.
+
+Five plugin sources carried MinHook of their own before the rule:
+`skipintro`, `ModeExitProbe`, `ModeCallProbe`, `AllLanguages` and
+`micfix`, plus `NoCorruptionPopup`, a sixth from after that sentence was
+written. On 2026-10-14 the list was cleared the obvious way: the
+features were folded into the framework as `scripthook_uplay.c`,
+`scripthook_popup.c` and `scripthook_mic.c`, and the plugin folders
+were deleted.
+
+That was the wrong shape, and it was undone the same week. An optional
+feature is a plugin's business: a player who does not need the language
+unlock should not have its hook, its thread and its log in every
+session, and a framework that grows a module per opt-in feature is not
+light. What the rule actually asks for is that two things never tread on
+the same byte - and that is a property of the installer, not of the
+feature's address. So on 2026-10-16 the framework grew
+`scripthook_hooks.c` instead: one MinHook state and one hook per target
+for the whole DLL, behind the `ShHook*` API group
+(`ShHookAdd` / `ShHookAddLate` / `ShHookRemove` / `ShHookStatus`). A
+plugin asks for a hook; the layer records it by tag, refuses a second
+installer of the same target with the first owner's name in the log,
+reference counts, and never shuts MinHook down - the two mistakes that
+made carrying the library a hazard are the layer's problem now, not
+every plugin's.
+
+The plugins are back, each owning its feature end to end and asking for
+its hooks through that API:
+
+- `AllLanguages` hooks uplay_r1_loader64's UPLAY_USER_IsOwned through
+  `ShHookAddLate` (which waits for the module, so the hook does not
+  depend on load order), and links nothing at all - every framework
+  call is bound by name.
+- `NoCorruptionPopup` asks for its user32 message-box hooks (plus the
+  probe-only ones when probe is on) one `ShHookAdd` per target, and
+  keeps its own ini, menu and watchers.
+- `micfix` owns the whole microphone fix again - the device scan, the
+  alias strategy, the two-door matching, the COM vtable slot patches -
+  and asks for its ten function hooks the same way. The slot patches
+  stay its own: they patch objects, not code, and nothing else walks
+  those objects.
+- `skipintro` had moved to the rule layer before all of this - its four
+  HIDE rules are the file interception layer's, and the plugin owns no
+  hook.
+- `ModeExitProbe` and `ModeCallProbe` retired: their questions are
+  answered - the mode-switch exit is the engine's design (relaunched by
+  Uplay from outside the process), and the mode load is hooked by the
+  framework's own playmode module, self-verifiably. The tooling that
+  made them is kept in ../../GameXueRen/documents/scripthook-docs-20261016/mode-probes-retired.md, and a one-shot
+  probe is written when a question needs one, not shipped resident.
+
+On 2026-10-16 the convergence went all the way through, and the shape it
+took is the one above rather than "move the feature into the framework":
+
+- The framework's own hook owners went onto the layer too - the file
+  interception layer, the CPU-scheduling spoof (`scripthook_corefix.c`,
+  sixteen kernel32/ntdll targets), the mode machine, the ammo-capacity
+  hook and the overlay's Present code hook. Five copies of "initialize
+  MinHook and hope it is not already initialized" became one, and a target
+  owned by one module is now visible to every other.
+- The nine modules that patch game code by hand (an E9 into a stub of
+  their own: the fov clamp, the visibility check, the ray chain, the
+  camera and render thunks, the hit site, fpx, frame, havok) do not
+  change mechanism - a hand patch has no trampoline to call through and
+  some sites are too tight for a longer one. They *claim* their target
+  instead, so the address is out of circulation and the log names the
+  owner.
+- `NvProbe` retired: its question is answered (the night-vision pixel
+  shader is bytecode 4864 / CRC32 `B4230EAA`, measured twice) and its two
+  D3D11 targets overlapped `NvFilter`'s exactly, with only an ini line
+  keeping them apart. `NvFilter` asks for its four targets through the
+  layer now - two by export name, two by the addresses its device and
+  context tables carry - and arms its hot-path `PSSetShader` hook only
+  while a replacement is selected (`ShHookEnable`).
+
+The result: **MinHook is included and called in exactly one place**
+(`scripthook_hooks.c`), no plugin carries it, and `ShHookStatus` answers
+"what is hooked in this process" for the whole session in one line -
+which is what a black-screen report from a player is read against.
 
 ## Credits
 
