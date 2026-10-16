@@ -23,8 +23,11 @@ GAMEDIR = ../..
 
 # Sources live one folder per plugin under plugins/<name>/: its .c, its
 # own <name>.ini if it has one, and lang.ini for its text. Plugins land
-# in $(GAMEDIR)/plugins/<name>/<name>.asi, one folder per plugin, which
-# is what the loader scans for. Logs go into <gamedir>/logs at runtime.
+# in $(GAMEDIR)/plugins/<name>/<name>.asi, which is one of the two shapes
+# the loader reads - an .asi on its own under plugins\ is the other, and
+# a plugin is named after its .asi rather than its folder, so this layout
+# keeps the name, the folder and the config in step. Logs go into
+# <gamedir>/logs at runtime.
 
 .PHONY: all roulette fling spawner timeweather ammocontrol ammoprobe enemyreinforce \
         frameprobe modeprobe modecallprobe blacklistsample filewatchsample drawsample \

@@ -1,7 +1,7 @@
 # Writing a plugin {#mainpage}
 
-A plugin is a DLL renamed to `.asi`, placed in its own folder
-under `plugins\` next to `GRW.exe`:
+A plugin is a DLL renamed to `.asi`, under `plugins\` next to
+`GRW.exe` - on its own, or in a folder of its own:
 
 ```
 <gamedir>/
@@ -11,27 +11,41 @@ under `plugins\` next to `GRW.exe`:
 │                        (the build never creates this; see below)
 ├── logs/                every log file, timestamps on each line
 └── plugins/
-    └── firstperson/
+    ├── firstperson.asi        a plugin on its own ...
+    ├── firstperson.ini
+    ├── lang.ini               ... with the text for this folder
+    └── firstperson/           or with a folder of its own
         ├── firstperson.asi
-        ├── firstperson.ini    the plugin's own config
-        └── lang.ini           the plugin's text, one section per language
+        ├── firstperson.ini
+        └── lang.ini
 ```
 
-The loader walks `plugins\` and loads `plugins\<name>\<name>.asi`
-for every folder. A plugin's settings belong beside it as
-`plugins\<name>\<name>.ini`; `ShPluginIniPath()` hands you that
-path so the lookup is not the plugin's problem. If a plugin fails
-to load, `logs/scripthook.log` records the reason.
+The loader reads `plugins\` and one level of folder under it, and every
+`.asi` it finds is a plugin. A plugin is named after its **file**, not
+after the folder it sits in: `plugins\firstperson.asi` and
+`plugins\firstperson\firstperson.asi` are the same plugin under the same
+name. A folder may hold several `.asi` - a pack that ships together - or
+none at all, and nothing is required to be called after anything.
 
-`lang.ini` beside it holds the plugin's text: page titles, row
+A plugin's settings belong **beside its `.asi`, under the same base name**:
+`plugins\firstperson.asi` reads `plugins\firstperson.ini`, and
+`plugins\pack\firstperson.asi` reads `plugins\pack\firstperson.ini`.
+`ShPluginIniPath()` hands you that path so the lookup is not the plugin's
+problem. If a plugin fails to load, `logs/scripthook.log` records the
+reason, and it also says so when two `.asi` claim the same name.
+
+`lang.ini` **in the plugin's own folder** holds its text: page titles, row
 labels, hints, status templates. One section per language
 (`[zh-CN]`, `[en-US]`), each key either a stable ID (`@fp.page`) or
 the English string itself - the second form is what translates a
-plugin whose source you do not have. The framework only ever reads
-it, so a translation can be edited in place, and `lang.ini` and the
-config can be deleted independently. This repo keeps that same
-layout under its own `plugins\<name>\`, so a plugin's source, its
-config and its text travel together. See docs/i18n-refactor.md.
+plugin whose source you do not have. Plugins that share a folder share
+this one file, and each plugin's owner (the name it declares) keeps its
+rows apart inside it, so a pack of small plugins can keep one `lang.ini`
+between them. The framework only ever reads it, so a translation can be
+edited in place, and `lang.ini` and the config can be deleted
+independently. This repo keeps one folder per plugin under its own
+`plugins\<name>\`, so a plugin's source, its config and its text travel
+together. See docs/i18n-refactor.md.
 
 A plugin's own text is **compiled in** (English and Chinese) once its
 source is in this repo, so its `lang.ini` is an override: delete it and
@@ -66,8 +80,8 @@ features will take their switches from the same file.
 
 What deleting it does **not** touch is the text: the compiled-in tables
 (the framework's in `scripthook_text.c`, each plugin's own) carry English
-and Chinese on their own, and any `lang.ini` - `plugins\<name>\lang.ini`
-or a `<gamedir>\lang.ini` you wrote yourself - only overrides that. The
+and Chinese on their own, and any `lang.ini` - the one beside a plugin, or
+a `<gamedir>\lang.ini` you wrote yourself - only overrides that. The
 framework never writes one, so the menu keeps reading, in both languages,
 whichever of those files exist.
 Plugins can read it too through `ShConfigGetInt` /
