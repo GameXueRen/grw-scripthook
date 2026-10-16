@@ -45,11 +45,12 @@
  * when it is loaded before the game asks is a race, and that one lost
  * it the moment its name changed.
  *
- * So MinHook (which the framework already carries) rewrites the
- * function's own entry point instead. The module is waited for and
- * hooked whenever it appears - if the game already holds a pointer to
- * it, that pointer is to the entry point that was rewritten, so every
- * call lands here either way. Nothing about the game's timing matters.
+ * So the hook goes on the function's own entry point instead, through
+ * the framework's shared hook layer (ShHookAddLate): the module is waited
+ * for and hooked whenever it appears - if the game already holds a pointer
+ * to it, that pointer is to the entry point that was rewritten, so every
+ * call lands here either way. Nothing about the game's timing matters, and
+ * this plugin no longer carries MinHook of its own.
  *
  * Settings, in AllLanguages.ini beside the .asi:
  *
@@ -69,19 +70,33 @@
 #include <stdarg.h>
 #include <string.h>
 
-#include "third_party/minhook/include/MinHook.h"
 #include "scripthook.h"
 
-/* What this plugin needs of the framework: nothing newer than the first
- * version of the plugin API, so any ScriptHook that carries the API at all can
- * load this (see SH_REQUIRES_API). The header is included for that declaration
- * and for the shared types; this plugin still binds every entry point it calls
- * by name at run time, so including it imports nothing. */
-SH_REQUIRES_API(1);
+/* What this plugin needs of the framework: the shared hook layer (the
+ * ShHook* group), which this line carries under version 2 - see the
+ * exception in the header's version note. The header is included for that
+ * declaration and for the shared types; this plugin still binds every entry
+ * point it calls by name at run time, so including it imports nothing, and
+ * a missing ShHookAddLate reads as null rather than as an error. */
+SH_REQUIRES_API(2);
 
 /* The module and the one export that answers "is this owned". */
 #define TARGET_DLL "uplay_r1_loader64.dll"
 #define TARGET_FN  "UPLAY_USER_IsOwned"
+
+/* This plugin's name for its one hook: the shared layer's registry, its log
+ * and ShHookRemove all take it. */
+#define HOOK_TAG "AllLanguages:uplay_owned"
+
+/* The two entry points of the shared hook layer this plugin uses, bound by
+ * name like the rest of the framework calls here: the plugin links nothing,
+ * so an older framework without them reads as null and the install is
+ * skipped rather than crashing. */
+typedef int (*HookAddLate_t)(const char *, const char *, const char *,
+                             void *, void **);
+typedef int (*HookRemove_t)(const char *);
+static HookAddLate_t pHookAddLate;
+static HookRemove_t pHookRemove;
 
 /* The one id this plugin knows about - the entry this build answers 0 to,
  * measured on 2026-09-11 and again on 2026-09-21. Built in rather than
@@ -195,9 +210,7 @@ static void SaveIni(void) {
  * answers a uint32 and not a BOOL. */
 typedef uint32_t (*IsOwned_t)(const int aUplayId);
 
-static IsOwned_t g_realIsOwned;
-/* Where the hook went, so unload can take it back. */
-static LPVOID     g_hookedAt;
+static IsOwned_t g_realIsOwned;   /* the trampoline, to call through */
 
 static uint32_t HookIsOwned(const int aUplayId) {
     uint32_t real = g_realIsOwned ? g_realIsOwned(aUplayId) : 0;
@@ -222,62 +235,30 @@ static uint32_t HookIsOwned(const int aUplayId) {
  * function's entry point, which is the address any pointer taken
  * earlier already holds. */
 static void InstallHook(void) {
-    MH_STATUS st;
-    int i;
+    int rc;
 
-    st = MH_Initialize();
-    if (st != MH_OK) {
-        Log("install: MH_Initialize failed (%d) - not one call is "
-            "touched, the game keeps its own answers", (int)st);
-        return;
-    }
-
-    for (i = 0; i < 480; i++) {
-        HMODULE up = GetModuleHandleA(TARGET_DLL);
-        LPVOID fn;
-
-        if (!up) {
-            if (i == 0)
-                Log("waiting for %s to be loaded...", TARGET_DLL);
-            Sleep(i < 240 ? 250 : 1000);
-            continue;
-        }
-
-        fn = (LPVOID)GetProcAddress(up, TARGET_FN);
-        if (!fn) {
-            Log("install: %s has no %s export - not one call is "
-                "touched, the game keeps its own answers",
-                TARGET_DLL, TARGET_FN);
-            MH_Uninitialize();
-            return;
-        }
-        st = MH_CreateHook(fn, (LPVOID)HookIsOwned,
-                           (LPVOID *)&g_realIsOwned);
-        if (st != MH_OK) {
-            Log("install: MH_CreateHook failed (%d) - not one call is "
-                "touched, the game keeps its own answers", (int)st);
-            MH_Uninitialize();
-            return;
-        }
-        st = MH_EnableHook(fn);
-        if (st != MH_OK) {
-            Log("install: MH_EnableHook failed (%d) - not one call is "
-                "touched, the game keeps its own answers", (int)st);
-            /* Not a half-installed state: the trampoline goes with the
-             * hook, and MinHook is shut down again. */
-            MH_RemoveHook(fn);
-            g_realIsOwned = NULL;
-            MH_Uninitialize();
-            return;
-        }
-        g_hookedAt = fn;
-        Log("install: %s!%s hooked at %p (original %p)",
-            TARGET_DLL, TARGET_FN, fn, (void *)g_realIsOwned);
+    /* One call: the shared layer waits for the module (a quarter second for
+     * the first minute, a second after that - the policy this plugin's own
+     * loop used, moved rather than reinvented), hooks the export's own
+     * entry point and hands back the trampoline. What used to be four
+     * failure paths with an MH_Uninitialize each is now the layer's
+     * problem: it owns MinHook's state for the whole DLL and never shuts it
+     * down, which is the other reason a plugin must not carry the library. */
+    rc = pHookAddLate(HOOK_TAG, TARGET_DLL, TARGET_FN,
+                      (void *)HookIsOwned, (void **)&g_realIsOwned);
+    if (rc == SH_HOOK_OK) {
+        Log("install: %s!%s asked for, the framework installs it "
+            "(original %p)", TARGET_DLL, TARGET_FN,
+            (void *)g_realIsOwned);
         Log("install: id %d alone will be answered owned", TARGET_ID);
         return;
     }
-    Log("gave up waiting for %s - not one call is touched", TARGET_DLL);
-    MH_Uninitialize();
+    g_realIsOwned = NULL;
+    Log("install: %s!%s -> %s - not one call is touched, the game keeps "
+        "its own answers", TARGET_DLL, TARGET_FN,
+        rc == SH_HOOK_DUP ? "already hooked by somebody else"
+                          : "refused (the reason is in "
+                            "scripthook_hooks.log)");
 }
 
 /* ---- menu -------------------------------------------------------------- */
@@ -372,6 +353,22 @@ static DWORD WINAPI InitThread(LPVOID p) {
      * switch off installs no hook, changes no answer and leaves no
      * file behind. The menu row is still built, because that row is
      * where the switch lives. */
+    {
+        HMODULE di = GetModuleHandleA("dinput8.dll");
+
+        /* The shared hook layer's two entry points, by name. A framework
+         * old enough not to have them leaves these null and the install is
+         * skipped with a line saying so - the plugin stays loadable, it
+         * just does nothing, which is the same contract as every other
+         * late binding here. */
+        if (di) {
+            *(FARPROC *)&pHookAddLate =
+                GetProcAddress(di, "ShHookAddLate");
+            *(FARPROC *)&pHookRemove =
+                GetProcAddress(di, "ShHookRemove");
+        }
+    }
+
     if (Enabled()) {
         OpenLog();
         Log("--- AllLanguages: the RU/CN language lock ---");
@@ -379,7 +376,12 @@ static DWORD WINAPI InitThread(LPVOID p) {
         Log("config: unlock=on, id %d (built in), ini=%s",
             TARGET_ID, g_iniPath[0] ? g_iniPath : "(none)");
 
-        InstallHook();
+        if (pHookAddLate)
+            InstallHook();
+        else
+            Log("install: the framework carries no shared hook layer - "
+                "not one call is touched, the game keeps its own "
+                "answers");
     }
 
     {
@@ -403,12 +405,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         /* The detour is this module's code, so an unload that left it in
          * place would be a jump into unmapped memory the next time the game
          * asked. There is no thread of ours left that could take it back,
-         * so it happens here. */
-        if (g_hookedAt && g_realIsOwned) {
-            MH_DisableHook(g_hookedAt);
-            MH_RemoveHook(g_hookedAt);
+         * so it happens here: the shared layer takes back this plugin's own
+         * hook by tag, and nobody else's. */
+        if (pHookRemove) {
+            pHookRemove(HOOK_TAG);
             g_realIsOwned = NULL;
-            g_hookedAt = NULL;
         }
     }
     return TRUE;

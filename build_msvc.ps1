@@ -86,15 +86,9 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 #                     what would move it in.
 #
 # AllLanguages is IN the set: a RU/CN player should get the language list back
-# (it is the renamed LastRites_dlcfix). CameraPresets is IN the set: the aim
-# yield and the preset names it carries are player facing, and it is the PR #2
-# plugin that ships.
-#
-# PredatorMelee is IN the set from 2026-09-27: it is what a player reaches for
-# once the catalogue question has an answer, the archetype is an ini setting
-# rather than a constant so it works with whatever a player's own copy holds, and
-# it ships off until its own ini says enabled=1. What it cannot do is stated on
-# its page instead of implied.
+# (it is the renamed LastRites_dlcfix). It asks the framework's shared hook
+# layer for its one hook (ShHookAddLate, which waits for the loader DLL), so
+# no .asi carries MinHook and the plugin links nothing at all.
 $betaSet = @(
     'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat', 'micfix',
     'AllLanguages', 'CameraPresets', 'AmmoControl', 'TimeWeatherControl',
@@ -356,16 +350,13 @@ Build-Plugin 'firstperson'  'firstperson.c'  @('gdi32.lib', 'user32.lib')
 Build-Plugin 'chaos'        'chaos.c'        @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib', 'winmm.lib')
 Build-Plugin 'fov_changer'  'fov_changer.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')
 Build-Plugin 'skipintro'     'skipintro.c'    @($libPath, 'libscripthook.lib')
-# AllLanguages hooks the function's own entry point rather than the
-# game's lookup of it, so the hook does not depend on being installed
-# before the game asks. That needs MinHook, which the framework already
-# carries; the plugin target picks up its four sources here.
-Build-Plugin -Name 'AllLanguages' -Source 'AllLanguages.c' -LinkArgs @() -ExtraSources @(
-    (Join-Path $root 'third_party/minhook/src/buffer.c'),
-    (Join-Path $root 'third_party/minhook/src/hook.c'),
-    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
-    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
-)
+# AllLanguages is IN the set: a RU/CN player should get the language list back
+# (it is the renamed LastRites_dlcfix). It hooks the function's own entry
+# point rather than the game's lookup of it, so the hook does not depend on
+# being installed before the game asks - and it asks the framework's shared
+# hook layer for it (ShHookAddLate), so no MinHook here: every framework call
+# is bound by name at run time and the target links nothing.
+Build-Plugin -Name 'AllLanguages' -Source 'AllLanguages.c' -LinkArgs @()
 
 # GhostWipeProbe is the second round of evidence, for the question
 # GhostNoWipe cannot answer on its own: why the slot stays hidden for the
@@ -381,6 +372,16 @@ Build-Plugin -Name 'GhostWipeProbe' -Source 'GhostWipeProbe.c' -LinkArgs @($libP
 # GhostNoWipe keeps a Ghost Mode save when a death ends the run: the
 # rename the game performs is turned into a copy. MinHook as well.
 Build-Plugin -Name 'GhostNoWipe' -Source 'GhostNoWipe.c' -LinkArgs @($libPath, 'libscripthook.lib')
+
+# NoCorruptionPopup answers the "A corruption of the game files was
+# detected" box that follows any patch mod, so that it is never shown: the
+# box is a plain MessageBoxW whose CONTINUE button is the No answer, so a
+# matching call is answered with IDNO and MessageBoxW is never called. No
+# game code or game file is touched, every switch defaults to off, and with
+# all of them off nothing is hooked and nothing is watched. The hooks go in
+# through the framework's shared layer (ShHookAdd), so no MinHook here
+# either; user32 is the only import.
+Build-Plugin -Name 'NoCorruptionPopup' -Source 'NoCorruptionPopup.c' -LinkArgs @('user32.lib')
 
 # GhostRevive asked whether a Ghost Mode death could be sent down the
 # reviving path instead of the run-ending one. It cannot: the branch is
@@ -540,21 +541,16 @@ Build-Plugin 'test_plugin'  'test_plugin.c'  @('ws2_32.lib', 'gdi32.lib', 'user3
 # micfix hands the game ASCII names for recording devices whose own name is
 # not ASCII - the in-process form of the community fix for "the game finds no
 # microphone on a Chinese Windows" - and adds the device picker the game has
-# none of. It hooks ole32!CoCreateInstance with MinHook and patches the vtable
-# slots of the DirectShow objects that call returns; see the source header.
-# It links the import library for the menu/text/paths, oleaut32 for the BSTR
-# it writes back into a VARIANT, and ole32 for CoInitializeEx/CoUninitialize -
-# its scan runs on a plugin thread and has to initialize COM there itself.
+# none of. Its hooks (ole32!CoCreateInstance, the winmm capture calls, the
+# debug strings) go in through the framework's shared layer, so no MinHook
+# here; the COM vtable patches and the device scan are its own. It links the
+# import library for the menu/text/paths, oleaut32 for the BSTR it writes
+# back into a VARIANT, and ole32 for CoInitializeEx/CoUninitialize - its
+# scan runs on a plugin thread and has to initialize COM there itself.
 # CoCreateInstance is still resolved by name at run time rather than linked,
 # so the plugin's own scan can reach the original with the hook installed.
 Build-Plugin -Name 'micfix' -Source 'micfix.c' `
-    -LinkArgs @($libPath, 'libscripthook.lib', 'ole32.lib', 'oleaut32.lib') `
-    -ExtraSources @(
-    (Join-Path $root 'third_party/minhook/src/buffer.c'),
-    (Join-Path $root 'third_party/minhook/src/hook.c'),
-    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
-    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
-)
+    -LinkArgs @($libPath, 'libscripthook.lib', 'ole32.lib', 'oleaut32.lib')
 
 # Ballistics and CameraPresets came in with PR #2 (R4333).  They were wired into
 # the MinGW Makefile only, and the MSVC build is the one that ships here: without

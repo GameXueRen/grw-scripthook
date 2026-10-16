@@ -101,11 +101,11 @@
  *
  * ---- how the interception is done ------------------------------------
  *
- * MinHook owns exactly one target, ole32!CoCreateInstance: everything else
- * on the chain is a COM object reached at run time, so the vtable slots are
- * patched instead (VirtualProtect + the original kept to call through).
- * Slot patches are idempotent per (vtable, slot) and are undone in
- * DLL_PROCESS_DETACH.
+ * The framework's shared hook layer owns exactly one target,
+ * ole32!CoCreateInstance: everything else on the chain is a COM object
+ * reached at run time, so the vtable slots are patched instead
+ * (VirtualProtect + the original kept to call through). Slot patches are
+ * idempotent per (vtable, slot) and are undone in DLL_PROCESS_DETACH.
  *
  * The bag slot is the one that must not misfire: an IPropertyBag vtable
  * can be shared with bags that have nothing to do with audio, so Read is
@@ -150,19 +150,21 @@
  * off, so "loaded but doing nothing" still holds in the only sense that
  * matters: the game sees exactly what it would see without this plugin.
  *
- * ---- why a plugin and not the framework (a convergence item) ----------
+ * ---- how this stopped being a convergence item ------------------------
  *
  * docs/plugins.md says a plugin does not install a hook: anything that
- * patches code belongs to the framework, in front of an API, so two plugins
- * cannot tread on the same byte. This one carries MinHook of its own, like
- * skipintro, ModeExitProbe, ModeCallProbe and AllLanguages before it,
- * and it is the fifth entry on that list - not a licence to add a sixth.
- * What makes it defensible here: the targets are ole32 and system COM
- * objects, nothing in this process writes engine memory through them, and
- * there is exactly one consumer, so a framework call in front of it would
- * be an API with one caller. If a second plugin ever wants the device
- * enumeration, the layer belongs in the framework and this file becomes its
- * first customer.
+ * patches code belongs to the framework, so two plugins cannot tread on the
+ * same byte. This plugin used to carry MinHook of its own, the fifth and
+ * last entry on that list. What settled it was not moving the microphone
+ * fix into the framework - the feature is optional, a player who does not
+ * need it should not have it loaded at all - but giving the framework a
+ * shared hook layer (scripthook_hooks.c, the ShHook* group): one MinHook
+ * state and one hook per target for the whole DLL, so a plugin asks for a
+ * hook instead of carrying the library. This file does exactly that: the
+ * feature, the device table and the alias strategy stay here, and every
+ * hook goes in through ShHookAdd. The COM vtable slot patches below are
+ * this plugin's own mechanism and stay its own: they patch objects, not
+ * code, and nothing else in the process walks those objects.
  */
 #include <windows.h>
 #include <objbase.h>
@@ -174,13 +176,13 @@
 
 #include "scripthook.h"
 
-/* What this plugin needs of the framework: nothing newer than the first
- * version of the plugin API, so any ScriptHook that carries the API at all can
- * load this (see SH_REQUIRES_API). Name the last thing you use, not the header
- * you happened to build against. */
-SH_REQUIRES_API(1);
+/* What this plugin needs of the framework: the shared hook layer (the
+ * ShHook* group), which this line carries under version 2 - see the
+ * exception in the header's version note. MinHook itself is not included
+ * and not linked: the framework owns it now, and the plugin asks for its
+ * hooks through ShHookAdd like any other caller. */
+SH_REQUIRES_API(2);
 #include "log.h"
-#include "third_party/minhook/include/MinHook.h"
 
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 
@@ -260,7 +262,7 @@ typedef HRESULT (STDMETHODCALLTYPE *MicRead_t)(void *, const WCHAR *, VARIANT *,
                                                void *);
 typedef ULONG   (STDMETHODCALLTYPE *MicRelease_t)(void *);
 
-/* The one MinHook target, kept from the moment it is hooked: the detour
+/* The one hook target, kept from the moment it is asked for: the detour
  * calls it through, and the plugin's own scan wants the unhooked one. */
 static MicCoCreateInstance_t g_realCoCreateInstance;
 
@@ -2080,7 +2082,7 @@ static HRESULT STDMETHODCALLTYPE HookGetDevice(void *self, const WCHAR *id,
     return hr;
 }
 
-/* The one MinHook target. A fast path, because every caller in the process
+/* The one hook target. A fast path, because every caller in the process
  * comes through here: one GUID compare, and the original call out. */
 static HRESULT WINAPI HookCoCreateInstance(const GUID *rclsid, void *outer,
                                            DWORD ctx, const GUID *riid,
@@ -2329,29 +2331,29 @@ static void InstallWaveInHooks(void) {
         return;
     }
 
+    /* One ShHookAdd per row: the framework owns the install, the registry
+     * and the per-address enable, and answers DUP with the owner's name if
+     * somebody else got to a target first. The trampoline comes back in
+     * *original and is what the detour calls through; it is NULL whenever
+     * the call did not say OK, which is also the "this detour is not in the
+     * chain" case - the detours all check their original before using it. */
     for (i = 0; i < (int)ARRAY_LEN(table); i++) {
-        void     *fn = (void *)GetProcAddress(winmm, table[i].name);
-        MH_STATUS st;
+        char tag[80];
+        void *orig = NULL;
+        int   rc;
 
-        if (!fn) continue;
-        st = MH_CreateHook(fn, table[i].detour, table[i].original);
-        if (st != MH_OK) {
-            Log("MH_CreateHook(winmm!%s): %s", table[i].name,
-                MH_StatusToString(st));
-            continue;
-        }
-        st = MH_EnableHook(fn);
-        if (st != MH_OK) {
-            /* MinHook tears the hook down without touching the global, and
-             * the trampoline it handed back goes with it: a later call
-             * through that pointer would be a jump into freed memory. */
-            Log("MH_EnableHook(winmm!%s): %s", table[i].name,
-                MH_StatusToString(st));
-            MH_RemoveHook(fn);
-            *(table[i].original) = NULL;
-            continue;
-        }
-        Log("hook installed: winmm!%s at %p", table[i].name, fn);
+        snprintf(tag, sizeof(tag), "micfix:%s", table[i].name);
+        rc = ShHookAdd(tag, winmm, table[i].name, table[i].detour, &orig);
+        *(table[i].original) = (rc == SH_HOOK_OK) ? orig : NULL;
+        if (rc == SH_HOOK_OK)
+            Log("hook asked for: winmm!%s (the framework installs it)",
+                table[i].name);
+        else if (rc == SH_HOOK_DUP)
+            Log("hook taken: winmm!%s is hooked by somebody else - this "
+                "detour is not in the chain", table[i].name);
+        else
+            Log("hook refused: winmm!%s (see scripthook_hooks.log)",
+                table[i].name);
     }
 }
 
@@ -2420,19 +2422,22 @@ static void InstallDebugHooks(void) {
 
     if (!k32) return;
     for (i = 0; i < (int)ARRAY_LEN(table); i++) {
-        void     *fn = (void *)GetProcAddress(k32, table[i].name);
-        MH_STATUS st;
+        char tag[80];
+        void *orig = NULL;
+        int   rc;
 
-        if (!fn) continue;
-        st = MH_CreateHook(fn, table[i].detour, table[i].original);
-        if (st != MH_OK) continue;
-        if (MH_EnableHook(fn) != MH_OK) {
-            MH_RemoveHook(fn);
-            *(table[i].original) = NULL;
-            continue;
-        }
-        Log("hook installed: kernel32!%s (the game's own log goes to micfix_dbg.log)",
-            table[i].name);
+        snprintf(tag, sizeof(tag), "micfix:%s", table[i].name);
+        rc = ShHookAdd(tag, k32, table[i].name, table[i].detour, &orig);
+        *(table[i].original) = (rc == SH_HOOK_OK) ? orig : NULL;
+        if (rc == SH_HOOK_OK)
+            Log("hook asked for: kernel32!%s (the game's own log goes to "
+                "micfix_dbg.log)", table[i].name);
+        else if (rc == SH_HOOK_DUP)
+            Log("hook taken: kernel32!%s is hooked by somebody else",
+                table[i].name);
+        else
+            Log("hook refused: kernel32!%s (see scripthook_hooks.log)",
+                table[i].name);
     }
 }
 
@@ -2441,8 +2446,9 @@ static void InstallDebugHooks(void) {
 static void *g_cciTarget;
 
 static void InstallHooks(void) {
-    MH_STATUS st;
-    HMODULE   ole32 = GetModuleHandleA("ole32.dll");
+    HMODULE ole32 = GetModuleHandleA("ole32.dll");
+    void   *orig = NULL;
+    int     rc;
 
     if (!ole32) ole32 = LoadLibraryA("ole32.dll");
     if (!ole32) {
@@ -2455,28 +2461,23 @@ static void InstallHooks(void) {
         return;
     }
 
-    st = MH_Initialize();
-    if (st != MH_OK) {
-        Log("MH_Initialize: %s", MH_StatusToString(st));
-        g_cciTarget = NULL;
-        return;
-    }
-
-    st = MH_CreateHook(g_cciTarget, (void *)HookCoCreateInstance,
-                       (void **)&g_realCoCreateInstance);
-    if (st == MH_OK) {
-        MH_STATUS en = MH_EnableHook(g_cciTarget);
-
-        if (en != MH_OK) {
-            Log("MH_EnableHook(CoCreateInstance): %s", MH_StatusToString(en));
-            MH_RemoveHook(g_cciTarget);
-            g_realCoCreateInstance = NULL;
-        } else {
-            Log("hook installed: ole32!CoCreateInstance at %p", g_cciTarget);
-        }
+    /* No MH_Initialize here and none anywhere in this file: the shared
+     * layer initializes MinHook once for the whole DLL and never shuts it
+     * down, which is the other half of why carrying the library was a
+     * hazard - a plugin that uninitialized it took the framework's own
+     * hooks with it. */
+    rc = ShHookAdd("micfix:CoCreateInstance", ole32, "CoCreateInstance",
+                   (void *)HookCoCreateInstance, &orig);
+    if (rc == SH_HOOK_OK) {
+        g_realCoCreateInstance = (MicCoCreateInstance_t)orig;
+        Log("hook asked for: ole32!CoCreateInstance (the framework installs "
+            "it)");
     } else {
-        Log("MH_CreateHook(CoCreateInstance): %s", MH_StatusToString(st));
         g_realCoCreateInstance = NULL;
+        Log("hook %s: ole32!CoCreateInstance%s", rc == SH_HOOK_DUP ?
+            "taken" : "refused", rc == SH_HOOK_DUP ?
+            " is hooked by somebody else" :
+            " (see scripthook_hooks.log)");
     }
 
     InstallWaveInHooks();
@@ -2484,37 +2485,27 @@ static void InstallHooks(void) {
 }
 
 static void UninstallHooks(void) {
-    /* Every hook, not only the one this file keeps a target for. The waveIn
-     * and debug detours are torn down by MH_Uninitialize in any case, but that
-     * leaves the pointers this file calls through aimed at freed trampolines;
-     * removing them here and clearing the pointers means nothing this plugin
-     * owns can call into a trampoline that no longer exists. */
-    static const char *const others[] = {
-        "waveInGetNumDevs", "waveInGetDevCapsW", "waveInGetDevCapsA",
-        "waveInOpen", "waveInStart", "waveInStop", "waveInClose",
-        "OutputDebugStringA", "OutputDebugStringW"
+    /* Every hook this plugin asked for, by tag: the shared layer keeps one
+     * registry for the whole DLL, so removing by tag takes back this
+     * plugin's own hooks and nobody else's. The pointers this file calls
+     * through are cleared as well, so nothing this plugin owns can call
+     * into a trampoline that no longer exists. MinHook's state itself is
+     * deliberately left alone: it is shared, and shutting it down here
+     * would take the framework's hooks with it. */
+    static const char *const tags[] = {
+        "micfix:CoCreateInstance",
+        "micfix:waveInGetNumDevs", "micfix:waveInGetDevCapsW",
+        "micfix:waveInGetDevCapsA", "micfix:waveInOpen",
+        "micfix:waveInStart", "micfix:waveInStop", "micfix:waveInClose",
+        "micfix:OutputDebugStringA", "micfix:OutputDebugStringW"
     };
-    HMODULE mm  = GetModuleHandleA("winmm.dll");
-    HMODULE k32 = GetModuleHandleA("kernel32.dll");
-    int     i;
+    int i;
 
-    if (g_cciTarget) {
-        MH_DisableHook(g_cciTarget);
-        MH_RemoveHook(g_cciTarget);
-        g_cciTarget = NULL;
-        g_realCoCreateInstance = NULL;
-    }
+    for (i = 0; i < (int)ARRAY_LEN(tags); i++)
+        ShHookRemove(tags[i]);
 
-    for (i = 0; i < (int)ARRAY_LEN(others); i++) {
-        void *fn = NULL;
-
-        if (mm)  fn = (void *)GetProcAddress(mm, others[i]);
-        if (!fn && k32) fn = (void *)GetProcAddress(k32, others[i]);
-        if (!fn) continue;
-        MH_DisableHook(fn);
-        MH_RemoveHook(fn);
-    }
-
+    g_cciTarget            = NULL;
+    g_realCoCreateInstance = NULL;
     g_waveInNum   = NULL;
     g_waveInCapsW = NULL;
     g_waveInCapsA = NULL;
@@ -2525,7 +2516,6 @@ static void UninstallHooks(void) {
     g_realOdsA    = NULL;
     g_realOdsW    = NULL;
 
-    MH_Uninitialize();
     RestoreSlots();
 }
 
