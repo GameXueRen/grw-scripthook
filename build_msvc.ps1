@@ -395,23 +395,13 @@ Build-Plugin -Name 'NoCorruptionPopup' -Source 'NoCorruptionPopup.c' -LinkArgs @
 # ini, so it registers nothing until asked.
 Build-Plugin -Name 'GhostRevive' -Source 'GhostRevive.c' -LinkArgs @()
 
-# NvProbe answers one question before any night-vision work is done: which
-# D3D11 pixel shader the engine binds for the HDR lighting pass while night
-# vision is on. The filter is not a resource - no archive carries an
-# HDRLighting entry - so replacing it means replacing that shader, and the
-# shader has to be identifiable first. NvProbe hooks d3d11.dll's two device
-# creation exports plus the device's CreatePixelShader and the context's
-# PSSetShader, and only counts: it never binds or rewrites a shader, writes
-# no engine memory and leaves the swapchain alone. MinHook because the
-# framework already carries it. Not in the beta set.
-Build-Plugin -Name 'NvProbe' -Source 'NvProbe.c' -LinkArgs @(
-    $libPath, 'libscripthook.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib'
-) -ExtraSources @(
-    (Join-Path $root 'third_party/minhook/src/buffer.c'),
-    (Join-Path $root 'third_party/minhook/src/hook.c'),
-    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
-    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
-)
+# NvProbe retired on 2026-10-16: its question is answered (the night-vision
+# pixel shader is bytecode 4864 / CRC32 B4230EAA, measured twice), the answer
+# lives in NvFilter's own target_crc, and its two D3D11 targets overlapped
+# NvFilter's exactly - the ini's NvProbe=0 was the only thing keeping them
+# apart. The method and the finding are kept in
+# ../documents/scripthook-docs-20261016/nvprobe-retired.md.
+#Build-Plugin -Name 'NvProbe' -Source 'NvProbe.c' -LinkArgs @()
 
 # NvFilter force-replaces the look of the in-game night vision filter. The
 # engine draws night vision with one pixel shader in the HDR lighting pass and
@@ -438,16 +428,12 @@ Build-Plugin -Name 'NvProbe' -Source 'NvProbe.c' -LinkArgs @(
 # place; see .codebuddy/plans/nightvision-more-looks_3f7c21d0.md.
 Build-Plugin -Name 'NvFilter' -Source 'NvFilter.c' -LinkArgs @(
     $libPath, 'libscripthook.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib'
-) -ExtraSources @(
-    (Join-Path $root 'third_party/minhook/src/buffer.c'),
-    (Join-Path $root 'third_party/minhook/src/hook.c'),
-    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
-    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
 )
 
-# ModeExitProbe answered its question - the mode-switch exit is the
-# engine's design, not a defect; see its header - so it is no longer
-# deployed. The source stays for the next question of this kind.
+# ModeExitProbe retired on 2026-10-14 with the MinHook convergence: its
+# question is answered (the mode-switch exit is the engine's design, and
+# the relaunch is Uplay's, decided outside the process - see
+# ../documents/scripthook-docs-20261016/mode-probes-retired.md). The source is gone; the findings are not.
 #Build-Plugin -Name 'ModeExitProbe' -Source 'ModeExitProbe.c' -LinkArgs @() -ExtraSources @(
 #    (Join-Path $root 'third_party/minhook/src/buffer.c'),
 #    (Join-Path $root 'third_party/minhook/src/hook.c'),

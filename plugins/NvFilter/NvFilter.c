@@ -67,8 +67,12 @@
  *
  * HOW THE SUBSTITUTION IS DONE
  * ----------------------------
- *   - MinHook the two d3d11.dll exports a process creates its device through,
- *     to hold the ID3D11Device and its immediate context.
+ *   - Hook the two d3d11.dll exports a process creates its device through,
+ *     to hold the ID3D11Device and its immediate context. Every hook this
+ *     plugin needs goes in through the framework's shared hook layer
+ *     (ShHookAdd / ShHookAddAt / ShHookEnable): one MinHook state and one
+ *     hook per target for the whole DLL, which is why this plugin carries
+ *     no MinHook of its own and must not.
  *   - Hook that device's CreatePixelShader, and keep it hooked: this is a cold
  *     path (a few thousand calls in a whole session). When the bytecode being
  *     created is the night-vision shader - recognised by its length and a
@@ -142,7 +146,13 @@
 
 #include "scripthook.h"
 #include "log.h"
-#include "third_party/minhook/include/MinHook.h"
+
+/* What this plugin needs of the framework: the shared hook layer (the
+ * ShHook* group), which this line carries under version 2 - see the
+ * exception in the header's version note. Its four targets are two d3d11
+ * exports, gone in by name, and two function addresses taken out of the
+ * device's and the context's own tables, gone in by address. */
+SH_REQUIRES_API(2);
 
 #include "nv_filters.h"
 
@@ -493,9 +503,10 @@ static void STDMETHODCALLTYPE HookSetPs(
  * selected and takes it back out when the replace row returns to off, so the
  * off state costs this process nothing rather than one detour per call.
  *
- * Creating a hook patches nothing - MinHook only writes the jump when the hook
- * is enabled - so having it sitting here disabled is free. */
+ * Creating a hook patches nothing - the layer only writes the jump when
+ * the hook is enabled - so having it sitting here disabled is free. */
 static void InstallShaderHooks(void) {
+    int    rc;
     void **dvt = *(void ***)g_dev;
     void **cvt = *(void ***)g_ctx;
     void  *fnCreate = dvt[offsetof(ID3D11DeviceVtbl, CreatePixelShader)
@@ -503,23 +514,34 @@ static void InstallShaderHooks(void) {
     void  *fnSet = cvt[offsetof(ID3D11DeviceContextVtbl, PSSetShader)
                        / sizeof(void *)];
 
-    if (MH_CreateHook(fnCreate, (LPVOID)HookCreatePs,
-                      (LPVOID *)&g_origCreatePs) != MH_OK) {
-        Log("MH_CreateHook(CreatePixelShader) failed - nothing substituted");
+    /* Both targets are addresses taken out of the device's and the
+     * context's own tables, so they go in by address. CreatePixelShader is
+     * live from here - the engine must not get to compile the night-vision
+     * shader before this - while PSSetShader is the hot one and is disabled
+     * again immediately: ApplyArm enables it only while a replacement is
+     * selected. The trampolines stay valid across enable/disable, so the
+     * detours keep the pointers handed back here. */
+    rc = ShHookAddAt("nvfilter:CreatePixelShader", fnCreate,
+                     "CreatePixelShader (device table)",
+                     (void *)HookCreatePs, (void **)&g_origCreatePs);
+    if (rc != SH_HOOK_OK) {
+        Log("hook CreatePixelShader failed (%s) - nothing substituted",
+            rc == SH_HOOK_DUP ? "owned by somebody else"
+                              : "refused, see scripthook_hooks.log");
         return;
     }
-    if (MH_CreateHook(fnSet, (LPVOID)HookSetPs,
-                      (LPVOID *)&g_origSetPs) != MH_OK) {
-        Log("MH_CreateHook(PSSetShader) failed - nothing substituted");
+    rc = ShHookAddAt("nvfilter:PSSetShader", fnSet,
+                     "PSSetShader (context table)",
+                     (void *)HookSetPs, (void **)&g_origSetPs);
+    if (rc != SH_HOOK_OK) {
+        Log("hook PSSetShader failed (%s) - nothing substituted",
+            rc == SH_HOOK_DUP ? "owned by somebody else"
+                              : "refused, see scripthook_hooks.log");
         return;
     }
     g_fnSet = fnSet;
-
-    if (MH_EnableHook(fnCreate) != MH_OK) {
-        Log("MH_EnableHook(CreatePixelShader) failed - nothing substituted");
-        return;
-    }
-    Log("hooks: CreatePixelShader %p live; PSSetShader %p created but left "
+    ShHookEnable("nvfilter:PSSetShader", 0);
+    Log("hooks: CreatePixelShader %p live; PSSetShader %p hooked but left "
         "disabled until a replacement is selected", fnCreate, fnSet);
 }
 
@@ -547,12 +569,12 @@ static void ApplyArm(void) {
         g_repl = NULL;
         g_armedLook = g_armedRep = -1;
         if (g_hookOn && g_fnSet) {
-            if (MH_DisableHook(g_fnSet) == MH_OK) {
+            if (ShHookEnable("nvfilter:PSSetShader", 0) == SH_HOOK_OK) {
                 InterlockedExchange(&g_hookOn, 0);
                 Log("substitution off - PSSetShader is unhooked and the game "
                     "pays nothing for this plugin");
             } else {
-                Log("MH_DisableHook(PSSetShader) failed - the hook stays in "
+                Log("disabling PSSetShader failed - the hook stays in "
                     "place but substitutes nothing");
             }
         }
@@ -564,9 +586,9 @@ static void ApplyArm(void) {
 
     was = (int)g_hookOn;
     if (!was) {
-        if (MH_EnableHook(g_fnSet) != MH_OK) {
+        if (ShHookEnable("nvfilter:PSSetShader", 1) != SH_HOOK_OK) {
             g_armFailed = 1;
-            Log("MH_EnableHook(PSSetShader) failed - nothing will be "
+            Log("enabling PSSetShader failed - nothing will be "
                 "substituted");
             return;
         }
@@ -640,29 +662,25 @@ static int HookDeviceCreation(void) {
     fnDevSc = (void *)GetProcAddress(d3d, "D3D11CreateDeviceAndSwapChain");
     if (!fnDev && !fnDevSc) return 0;
 
+    /* These two are d3d11.dll's own exports, so they go in by name. */
     if (fnDev) {
-        if (MH_CreateHook(fnDev, (LPVOID)HookCreateDev,
-                          (LPVOID *)&g_origCreateDev) != MH_OK) {
-            Log("MH_CreateHook(D3D11CreateDevice) failed");
+        if (ShHookAdd("nvfilter:CreateDevice", d3d, "D3D11CreateDevice",
+                      (void *)HookCreateDev,
+                      (void **)&g_origCreateDev) != SH_HOOK_OK) {
+            Log("hook D3D11CreateDevice failed - see scripthook_hooks.log");
             return 0;
         }
         g_hookedDev = fnDev;
-        if (MH_EnableHook(fnDev) != MH_OK) {
-            Log("MH_EnableHook(D3D11CreateDevice) failed");
-            return 0;
-        }
     }
     if (fnDevSc) {
-        if (MH_CreateHook(fnDevSc, (LPVOID)HookCreateDevSc,
-                          (LPVOID *)&g_origCreateDevSc) != MH_OK) {
-            Log("MH_CreateHook(...AndSwapChain) failed");
+        if (ShHookAdd("nvfilter:CreateDeviceAndSwapChain", d3d,
+                      "D3D11CreateDeviceAndSwapChain",
+                      (void *)HookCreateDevSc,
+                      (void **)&g_origCreateDevSc) != SH_HOOK_OK) {
+            Log("hook ...AndSwapChain failed - see scripthook_hooks.log");
             return 0;
         }
         g_hookedDevSc = fnDevSc;
-        if (MH_EnableHook(fnDevSc) != MH_OK) {
-            Log("MH_EnableHook(...AndSwapChain) failed");
-            return 0;
-        }
     }
     Log("holding D3D11CreateDevice=%p AndSwapChain=%p", fnDev, fnDevSc);
     return 1;
@@ -966,11 +984,6 @@ static DWORD WINAPI InitThread(LPVOID p) {
     LogInitAlways(LOG_NAME);
 
     if (!IniLoad()) return 0;
-
-    if (MH_Initialize() != MH_OK) {
-        Log("MH_Initialize failed - nothing can be hooked");
-        return 0;
-    }
 
     Log("NvFilter up: the first row decides whether to replace anything and how "
         "far it reaches, the second which look to put there");
