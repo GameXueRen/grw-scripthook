@@ -5,13 +5,23 @@
  *
  *   <gamedir>\scripthook.ini        main config
  *   <gamedir>\logs\                 every log file
- *   <gamedir>\plugins\<name>\       one folder per plugin
- *       <name>.asi
- *       <name>.ini                  the plugin's own config
+ *   <gamedir>\lang.ini              the framework's own text
+ *   <gamedir>\plugins\              the plugins, each with its files beside
+ *       <name>.asi                  its .asi: at the root ...
+ *       <name>.ini
+ *       <name>\                     ... or one folder in
+ *           <name>.asi
+ *           <name>.ini
+ *           lang.ini
+ *
+ * What counts as a plugin, and what its name is, is plugin_scan.h's; the
+ * two helpers below ask that scan where a plugin's .asi ended up rather
+ * than building a folder name out of the plugin name, because the folder is
+ * no longer always called after the plugin.
  *
  * The main config is parsed once by the loader, before any
  * plugin loads. Plugins can query it as well, and keep their
- * own settings in plugins\<name>\<name>.ini (see
+ * own settings in the .ini beside their .asi (see
  * ShPluginIniPath).
  */
 #include <windows.h>
@@ -23,6 +33,7 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "log.h"
+#include "plugin_scan.h"
 
 extern void ShSetError(int err);
 
@@ -117,22 +128,43 @@ SH_API int ShLogPath(const char *name, char *buf, int size) {
     return 1;
 }
 
-/** plugins\<name>\<name>.ini, the config file that belongs
- *  beside the plugin of the same name. */
+/* The config file that belongs beside the plugin of that name: its folder
+ * plus its name plus .ini.
+ *
+ * The folder is the one the .asi was installed in, and it comes from the one
+ * scan (plugin_scan.h) rather than being built out of the name - because it
+ * is no longer always a folder called after the plugin. plugins\foo.asi and
+ * plugins\pack\foo.asi are both plugin "foo", and each reads the .ini sitting
+ * next to its own .asi. For the layout that has always been used, plugins\
+ * <name>\<name>.asi, the scan's answer and the old `plugins\<name>\<name>.ini`
+ * are the same string, so nothing about an existing install moves.
+ *
+ * There is deliberately no second guess: the name either is an installed
+ * plugin's or it is not. A name that is not gets 0 and SH_ERR_NO_PLUGIN
+ * rather than a path that was merely formatted - the old form always handed
+ * back a path, and a plugin could not tell "my config is here" from "my
+ * config would be here if I existed". */
 SH_API int ShPluginIniPath(const char *plugin, char *buf, int size) {
+    const ShPluginEnt *e;
     int n;
 
     if (!plugin || !buf || size <= 0) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
+    e = ShPluginFind(plugin);
+    if (!e) {
+        buf[0] = 0;
+        ShSetError(SH_ERR_NO_PLUGIN);
+        return 0;
+    }
     /* A cut path is not a path. snprintf only reports failure with a
      * negative return, so a long install directory used to hand back a
      * truncated name, and the plugin silently read a file nobody had
-     * written. */
-    n = snprintf(buf, size, "%splugins\\%s\\%s.ini",
-                 GameDir(), plugin, plugin);
+     * written. Emptying the buffer says so as plainly as the 0 does. */
+    n = snprintf(buf, size, "%s%s.ini", e->dir, e->name);
     if (n < 0 || n >= size) {
+        buf[0] = 0;
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
@@ -140,18 +172,30 @@ SH_API int ShPluginIniPath(const char *plugin, char *buf, int size) {
     return 1;
 }
 
-/** plugins\<name>\lang.ini, the text file beside the plugin. Read by
- *  the framework for that plugin's menus; see @ref lang. */
+/* <the plugin's folder>\lang.ini, the text file beside it. Read by the
+ * framework for that plugin's menus; see @ref lang.
+ *
+ * Same folder lookup as ShPluginIniPath, which is also what makes a shared
+ * lang.ini work: plugins that live in one folder resolve to one file, and
+ * the owner each of them declares (ShLangDeclare) is what keeps their rows
+ * apart inside it. */
 SH_API int ShPluginLangPath(const char *plugin, char *buf, int size) {
+    const ShPluginEnt *e;
     int n;
 
     if (!plugin || !buf || size <= 0) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
-    n = snprintf(buf, size, "%splugins\\%s\\lang.ini",
-                 GameDir(), plugin);
+    e = ShPluginFind(plugin);
+    if (!e) {
+        buf[0] = 0;
+        ShSetError(SH_ERR_NO_PLUGIN);
+        return 0;
+    }
+    n = snprintf(buf, size, "%slang.ini", e->dir);
     if (n < 0 || n >= size) {
+        buf[0] = 0;
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }

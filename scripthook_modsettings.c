@@ -37,6 +37,7 @@
 #define SH_BUILD 1
 #include "scripthook.h"
 #include "scripthook_tick.h"
+#include "plugin_scan.h"
 
 /* ---- the exposed settings -------------------------------------- */
 
@@ -218,55 +219,24 @@ static void OnLanguage(uint32_t menu, uint32_t item, int value,
 
 /* ---- plugin list ------------------------------------------------ */
 
-/* Scan plugins\ for <folder>\<folder>.asi, mirroring the loader's
- * own scan, and keep the names sorted. The names are borrowed by the
- * toggle rows (and used as ini keys), so they live in a static
- * buffer for the whole session. */
+/* The installed plugins, for the toggle rows. The list comes from the one
+ * scan (plugin_scan.h) - this used to walk plugins\ itself, mirroring the
+ * loader's walk, and the two had to keep agreeing by hand. The names are
+ * borrowed by the toggle rows (and used as ini keys), so they live in a
+ * static buffer for the whole session. */
 static void ScanPlugins(void) {
-    char pluginsDir[MAX_PATH], asi[MAX_PATH];
-    WIN32_FIND_DATAA fd;
-    HANDLE h;
-    int i;
+    const ShPluginEnt *ents;
+    int n, i;
 
     g_nplugins = 0;
-    if (!ShPluginsDir(pluginsDir, sizeof(pluginsDir))) return;
-    {
-        size_t n = strlen(pluginsDir);
-        if (n > 0 && pluginsDir[n - 1] == '\\') pluginsDir[n - 1] = 0;
-    }
-    snprintf(asi, sizeof(asi), "%s\\*", pluginsDir);
-
-    h = FindFirstFileA(asi, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        const char *name = fd.cFileName;
-
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        if (name[0] == '.') continue;
-
-        snprintf(asi, sizeof(asi), "%s\\%s\\%s.asi",
-                 pluginsDir, name, name);
-        if (GetFileAttributesA(asi) == INVALID_FILE_ATTRIBUTES)
-            continue;
-        if (g_nplugins >= PLUGIN_MAX) break;
-
-        strncpy(g_plugins[g_nplugins], name, NAME_MAX - 1);
+    n = ShPluginScan(&ents, NULL);
+    for (i = 0; i < n && g_nplugins < PLUGIN_MAX; i++) {
+        strncpy(g_plugins[g_nplugins], ents[i].name, NAME_MAX - 1);
         g_plugins[g_nplugins][NAME_MAX - 1] = 0;
         g_nplugins++;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-
-    /* Keep the menu stable across launches: sort by name. */
-    for (i = 1; i < g_nplugins; i++) {
-        char tmp[NAME_MAX];
-        int j = i;
-        while (j > 0 && strcmp(g_plugins[j - 1], g_plugins[j]) > 0) {
-            memcpy(tmp, g_plugins[j - 1], sizeof(tmp));
-            memcpy(g_plugins[j - 1], g_plugins[j], sizeof(tmp));
-            memcpy(g_plugins[j], tmp, sizeof(tmp));
-            j--;
-        }
     }
+    /* Already sorted by the scan, which is what keeps the menu stable across
+     * launches. */
 }
 
 /* ---- menu construction ------------------------------------------ */

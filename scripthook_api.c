@@ -103,6 +103,8 @@ SH_API const char *ShErrorString(int err) {
     case SH_ERR_REGISTRY_FULL:
         return "the registry is full: 64 plugins are already "
                "registered with the mode blacklist";
+    case SH_ERR_NO_PLUGIN:
+        return "no installed plugin has that name";
     default:               return "unknown";
     }
 }

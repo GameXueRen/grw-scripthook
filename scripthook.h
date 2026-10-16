@@ -63,6 +63,14 @@ extern "C" {
  *     written down above - a caller naming 2 has to read a missing
  *     ShHookAdd as "this framework predates the hook layer", never as an
  *     error.
+ *     SH_ERR_NO_PLUGIN, and a failure the two plugin-path helpers did not
+ *     have before: ShPluginIniPath / ShPluginLangPath now answer 0 for a
+ *     name no installed plugin carries, where they used to answer 1 with a
+ *     path that was merely formatted (see the note on each). That is what
+ *     the layout change needs - they resolve the folder the scan found
+ *     rather than build one out of the name - and for every layout that
+ *     existed before it is the same string, so a caller that passes a name
+ *     it took from its own module file sees no change at all.
  */
 #define SH_API_VERSION 2
 
@@ -525,7 +533,8 @@ enum ShError {
     SH_ERR_UI_PROP,        /**< no such property on the class */
     SH_ERR_UI_ASSET,       /**< font or texture not loaded */
     SH_ERR_REGISTRY_FULL,  /**< a fixed table is full (blacklist: 64) */
-    SH_ERR_NO_EFFECT       /**< the engine took the call and nothing changed */
+    SH_ERR_NO_EFFECT,      /**< the engine took the call and nothing changed */
+    SH_ERR_NO_PLUGIN       /**< no installed plugin has that name */
 };
 
 /** @} */
@@ -3376,8 +3385,8 @@ SH_API int  ShScriptsDir(char *buf, int size);
  *  missing. Name may include a subfolder. */
 SH_API int  ShLogPath(const char *name, char *buf, int size);
 
-/** <gamedir>\plugins\<name>\<name>.ini, the config file that
- *  belongs beside a plugin of the same name.
+/** The config file that belongs beside a plugin of the same name:
+ *  `<its folder>\<name>.ini`.
  *
  *  Plugin config convention (follow this in every plugin):
  *  the .ini lives in the SAME folder as the .asi and uses the
@@ -3385,14 +3394,32 @@ SH_API int  ShLogPath(const char *name, char *buf, int size);
  *  plugins\foo\bar.ini. Derive <name> from your own module
  *  path rather than hardcoding it, so the pairing survives a
  *  rename: GetModuleFileNameA(instance, path, MAX_PATH), take
- *  the file part and strip the ".asi". */
+ *  the file part and strip the ".asi".
+ *
+ *  `<its folder>` is where the .asi was installed, which is not always a
+ *  folder named after the plugin: a plugin may sit at the root of plugins\
+ *  (plugins\foo.asi reads plugins\foo.ini) or share a folder with others
+ *  (plugins\pack\foo.asi reads plugins\pack\foo.ini). "Beside the .asi" is
+ *  the rule; the folder is looked up, not built from the name.
+ *
+ *  <name> is the .asi's stem, and only an installed plugin has one: 0 with
+ *  SH_ERR_NO_PLUGIN when nothing under plugins\ carries that name, and
+ *  SH_ERR_BAD_ARG for a NULL argument or a buffer the path does not fit.
+ *  A name taken from your own module file is always one the scan knows, so
+ *  the failure means the file was renamed or moved after it loaded. */
 SH_API int  ShPluginIniPath(const char *plugin, char *buf, int size);
 
-/** <gamedir>\plugins\<name>\lang.ini, the text file that belongs
+/** `<the plugin's folder>\lang.ini`, the text file that belongs
  *  beside a plugin of the same name. The framework reads it for a
  *  menu that plugin created (see @ref lang); a plugin does not have
  *  to ship one, and should not write one - the framework never does.
- *  Handy for a tool that wants to seed or inspect it. */
+ *  Handy for a tool that wants to seed or inspect it.
+ *
+ *  Plugins that share a folder share this file, which is what lets a pack
+ *  of small plugins keep one lang.ini between them: the owner a plugin
+ *  declares (ShLangDeclare) is what keeps their rows apart inside it.
+ *
+ *  Same resolution and the same two failures as ShPluginIniPath. */
 SH_API int  ShPluginLangPath(const char *plugin, char *buf, int size);
 
 /** @} */

@@ -70,6 +70,7 @@
 #include "scripthook.h"
 #include "scripthook_tick.h"
 #include "log.h"
+#include "plugin_scan.h"
 
 /* The framework's single error channel lives in scripthook_api.c, and the
  * modules that use it declare it themselves - the same line
@@ -509,10 +510,8 @@ static DWORD WINAPI WatchThread(LPVOID p) {
 /* Called by the loader after the play mode module and before the plugins
  * load, so a plugin's declaration has somewhere to go. */
 void ShBlacklistStartup(void) {
-    char dir[MAX_PATH], pattern[MAX_PATH];
-    WIN32_FIND_DATAA fd;
-    HANDLE h;
-    int n = 0;
+    const ShPluginEnt *ents;
+    int count, i, n = 0;
 
     if (InterlockedExchange(&g_started, 1)) return;
 
@@ -520,29 +519,17 @@ void ShBlacklistStartup(void) {
      * scan line below is the one worth keeping. */
     LogInit("scripthook_blacklist.log");
 
+    /* What is installed comes from the one scan (plugin_scan.h). This used to
+     * be its own walk of plugins\ - the second of the three copies - and it
+     * had to agree with the loader's about what counts as a plugin. The
+     * entries are already sorted by name, which is the order the registry is
+     * filled in now; the walk it replaces came back in file system order. */
+    count = ShPluginScan(&ents, NULL);
+
     Lock();
-    if (ShPluginsDir(dir, sizeof(dir))) {
-        size_t l = strlen(dir);
-
-        while (l > 0 && dir[l - 1] == '\\') dir[--l] = 0;
-        snprintf(pattern, sizeof(pattern), "%s\\*", dir);
-        h = FindFirstFileA(pattern, &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-            do {
-                char asi[MAX_PATH];
-
-                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-                    continue;
-                if (fd.cFileName[0] == '.') continue;
-                snprintf(asi, sizeof(asi), "%s\\%s\\%s.asi", dir,
-                         fd.cFileName, fd.cFileName);
-                if (GetFileAttributesA(asi) == INVALID_FILE_ATTRIBUTES)
-                    continue;
-                if (!AddLocked(fd.cFileName)) break;
-                n++;
-            } while (FindNextFileA(h, &fd));
-            FindClose(h);
-        }
+    for (i = 0; i < count; i++) {
+        if (!AddLocked(ents[i].name)) break;
+        n++;
     }
     Unlock();
 

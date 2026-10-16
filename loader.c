@@ -3,6 +3,7 @@
 #include <string.h>
 #include "log.h"
 #include "scripthook.h"
+#include "plugin_scan.h"
 
 /* The play mode module (scripthook_playmode.c): not a plugin facing
  * export beyond ShSelectedPlayMode and friends, so it is declared here. */
@@ -98,15 +99,10 @@ extern void ShForgeStartup(void);
  * which can come from any thread at any time after this. */
 extern void ShHookStartup(void);
 
-/* Plugins live one folder each under plugins\, named after
- * the plugin:
- *
- *   plugins/<name>/<name>.asi
- *   plugins/<name>/<name>.ini
- *
- * The folder scan means a plugin's assets, config and log
- * stay together and nothing from the game root is touched.
- * plugins\ is created if this is a fresh install.
+/* Where plugins live, and what a plugin's name is, belongs to plugin_scan.h
+ * now: the settings page and the plugin blacklist need the same answer and
+ * used to walk plugins\ themselves, each with its own copy of the rule. The
+ * scan below is the one that reads it; the other two ask for the result.
  *
  * A plugin loads unless a [plugins] line says otherwise: NO LINE MEANS ON, so
  * a plugin that was just added - dropped in by the player, or shipped by an
@@ -124,7 +120,290 @@ extern void ShHookStartup(void);
  * "everything in plugins\ loads" - what ruling a plugin out really takes is the
  * menu switch, or taking its folder away.
  */
-#define PLUGIN_SCAN_MAX 64
+
+/* ---- discovery: what is under plugins\ -------------------------------
+ *
+ * The one reader of plugins\. See plugin_scan.h for what the layout is, what
+ * a plugin's name is, and why this is not in each of the three callers.
+ *
+ * The scan runs once and is kept: the table is filled inside the lock on the
+ * first call and only read afterwards, so a reader takes no lock and the
+ * pointer it is handed stays good for the life of the process. `info` is kept
+ * too, not just recomputed for the caller that happened to scan - the loader
+ * reads its counts for the "N skipped" line, and the blacklist gets there
+ * first at start up, so a caller that only saw `count` would print a
+ * different summary depending on which module asked first.
+ */
+static ShPluginEnt      g_pluginTable[SH_PLUGIN_MAX];
+static ShPluginScanInfo g_pluginInfo;
+static volatile LONG    g_pluginScanned;
+static CRITICAL_SECTION g_pluginLock;
+static volatile LONG    g_pluginLockReady;
+
+/* The lock is made by whoever gets here first, as the shared hook layer's log
+ * lock is: this runs on the start up path where two threads can arrive at the
+ * same moment (the loader thread and the first thing that asks), and the
+ * window is a few instructions wide. */
+static void PluginLockInit(void) {
+    static volatile LONG once;
+
+    if (InterlockedCompareExchange(&once, 1, 0) == 0) {
+        InitializeCriticalSection(&g_pluginLock);
+        InterlockedExchange(&g_pluginLockReady, 1);
+    }
+    while (!g_pluginLockReady) Sleep(0);
+}
+
+/* What the log and the [plugins] section have always been built in: by name,
+ * so two launches load in the same order and a menu row does not move because
+ * the file system enumerated a folder differently.
+ *
+ * The comparison is strcmp, not _stricmp, and that is deliberate: this is the
+ * order [plugins] lines and menu rows have been in since before the scan was
+ * one function, and it puts capitals first. The name's *identity* is
+ * case-insensitive (see the collision pass below) - the order it is read in
+ * is not, so nothing about an existing install's menu moves.
+ *
+ * Ties, which only exist when two files carry the same name: the one nearer
+ * to plugins\ first (the root beats a folder), then the path - case-
+ * insensitively, as Windows compares paths, and then case-sensitively so that
+ * two files differing only by case are still ordered by the path itself and
+ * not by whichever the file system listed first.
+ *
+ * The depth is a field and not one strchr over `rel`: it is a fact the scan
+ * knows when it takes the file, and reading it back out of a path - which can
+ * be truncated for a folder with a very long name - would make the sort depend
+ * on how much of the path fitted. */
+static int PluginCmp(const ShPluginEnt *a, const ShPluginEnt *b) {
+    int c = strcmp(a->name, b->name);
+
+    if (c) return c;
+    if (a->depth != b->depth) return a->depth - b->depth;  /* shallower first */
+    c = _stricmp(a->asi, b->asi);
+    if (c) return c;
+    return strcmp(a->asi, b->asi);
+}
+
+static void PluginSort(ShPluginEnt *a, int n) {
+    int i;
+
+    for (i = 1; i < n; i++) {
+        ShPluginEnt tmp = a[i];
+        int j = i;
+
+        while (j > 0 && PluginCmp(&a[j - 1], &tmp) > 0) {
+            a[j] = a[j - 1];
+            j--;
+        }
+        a[j] = tmp;
+    }
+}
+
+/* One file, as an entry. `sub` is "" at the root of plugins\ and "<folder>\\"
+ * one level in.
+ *
+ *   1  taken
+ *   0  not a plugin at all: not an .asi, or a stem that cannot be a name
+ *      (empty, as ".asi" alone would be, or longer than the table holds - a
+ *      truncated name could not be the key of a [plugins] line)
+ *  -1  it is a plugin, but a path built for it does not fit (see below)
+ *
+ * snprintf reports truncation only through its return, and the paths here are
+ * the ones LoadLibraryA is handed - so a return that says "the buffer was too
+ * small" has to be a failure, not a silent short path. The distinction
+ * matters: before the layout allowed a plugin in a shared folder, a path that
+ * did not fit came back truncated and the file was simply not found, so the
+ * folder read as "no plugin in it". That answer was wrong but harmless; now
+ * the caller is told, because a plugin that is announced and then does not
+ * load is the hardest kind of report to act on. */
+static int PluginTake(ShPluginEnt *e, const char *pluginsDir, const char *sub,
+                      const char *file) {
+    const char *dot = strrchr(file, '.');
+    size_t stem;
+
+    if (!dot || _stricmp(dot, ".asi") != 0) return 0;
+    stem = (size_t)(dot - file);
+    if (stem == 0 || stem >= sizeof(e->name)) return 0;
+
+    memcpy(e->name, file, stem);
+    e->name[stem] = 0;
+    if (snprintf(e->dir, sizeof(e->dir), "%s%s", pluginsDir, sub) >=
+            (int)sizeof(e->dir) ||
+        snprintf(e->asi, sizeof(e->asi), "%s%s%s", pluginsDir, sub, file) >=
+            (int)sizeof(e->asi) ||
+        snprintf(e->rel, sizeof(e->rel), "%s%s", sub, file) >=
+            (int)sizeof(e->rel))
+        return -1;
+
+    /* How many folders deep the file is, which is what decides a name
+     * collision. A field rather than a strchr over `rel`, so it cannot be
+     * lost to a long folder name - see PluginCmp. */
+    e->depth = sub[0] ? 1 : 0;
+    return 1;
+}
+
+/* One candidate, offered to the raw table and counted. The counting is here
+ * because all three outcomes (not a plugin, does not fit, table full) have to
+ * come out of the same place for the numbers in ShPluginScanInfo to add up:
+ * found = count + dupes + overflow. */
+static void PluginOffer(ShPluginEnt *table, int *raw, const char *pluginsDir,
+                        const char *sub, const char *file) {
+    ShPluginEnt e;
+    int taken = PluginTake(&e, pluginsDir, sub, file);
+
+    if (taken == 0) return;
+    g_pluginInfo.found++;
+    if (taken < 0) {
+        Log("plugins\\%s%s: the path is too long for this build, not loaded",
+            sub, file);
+        g_pluginInfo.overflow++;
+        return;
+    }
+    if (*raw >= SH_PLUGIN_MAX) {
+        Log("plugins\\%s%s: scan table full (%d), not loaded",
+            sub, file, SH_PLUGIN_MAX);
+        g_pluginInfo.overflow++;
+        return;
+    }
+    table[(*raw)++] = e;
+}
+
+int ShPluginScan(const ShPluginEnt **ents, ShPluginScanInfo *info) {
+    char pluginsDir[MAX_PATH], pat[MAX_PATH];
+    WIN32_FIND_DATAA fd, kidFd;
+    HANDLE h, kidH;
+    int raw = 0, i;
+
+    if (info) memset(info, 0, sizeof(*info));
+    if (!ents) return 0;
+
+    PluginLockInit();
+    EnterCriticalSection(&g_pluginLock);
+
+    if (g_pluginScanned) {
+        LeaveCriticalSection(&g_pluginLock);
+        if (info) *info = g_pluginInfo;
+        *ents = g_pluginTable;
+        return g_pluginInfo.count;
+    }
+
+    if (!ShPluginsDir(pluginsDir, sizeof(pluginsDir))) {
+        LogAlways("cannot find the game directory");
+        goto done;
+    }
+
+    /* Fresh install: make the folder the player is told to fill, rather than
+     * reporting that there is nowhere to put a plugin. It used to be made by
+     * the loader just before the scan; the scan is the thing that needs it
+     * existing, and the blacklist gets here first, so it is made here. */
+    {
+        char dir[MAX_PATH];
+        size_t len = strlen(pluginsDir);
+
+        if (len > 0 && pluginsDir[len - 1] == '\\') len--;
+        memcpy(dir, pluginsDir, len);
+        dir[len] = 0;
+        CreateDirectoryA(dir, NULL);
+    }
+
+    if (snprintf(pat, sizeof(pat), "%s*", pluginsDir) >= (int)sizeof(pat))
+        goto done;
+
+    h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        LogAlways("no plugins in %s", pluginsDir);
+        goto done;
+    }
+
+    /* One walk of plugins\. A file is a candidate; a folder is looked into
+     * once, and its own files are the candidates one level in. Nothing deeper
+     * is opened - plugins\a\b\x.asi is not looked for at all.
+     *
+     * The inner listing has its own handle and buffer, so the outer walk keeps
+     * its place in `fd` while that runs. */
+    do {
+        char kid[MAX_PATH], kidPat[MAX_PATH];
+
+        if (fd.cFileName[0] == '.') continue;
+
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            PluginOffer(g_pluginTable, &raw, pluginsDir, "", fd.cFileName);
+            continue;
+        }
+
+        if (snprintf(kid, sizeof(kid), "%s\\", fd.cFileName) >=
+            (int)sizeof(kid))
+            continue;
+        if (snprintf(kidPat, sizeof(kidPat), "%s%s*", pluginsDir, kid) >=
+            (int)sizeof(kidPat))
+            continue;
+
+        kidH = FindFirstFileA(kidPat, &kidFd);
+        if (kidH == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (kidFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (kidFd.cFileName[0] == '.') continue;
+            PluginOffer(g_pluginTable, &raw, pluginsDir, kid, kidFd.cFileName);
+        } while (FindNextFileA(kidH, &kidFd));
+        FindClose(kidH);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    PluginSort(g_pluginTable, raw);
+
+    /* Settle the names, and in the order the sort produced - so the winner of
+     * a collision is the shallower path, then the one that sorts first, and
+     * the table that comes out is still in name order.
+     *
+     * The comparison is _stricmp - the identity is case-insensitive, because
+     * it is a [plugins] key, a menu row and a lang owner, and Windows would
+     * not keep two files apart on case either. That is also why this looks at
+     * every entry that was kept rather than only the one before it: the sort
+     * above is case-sensitive, so "Foo" and "foo" are not necessarily
+     * neighbours ("FooBar" sorts between them). The table is at most 64 long,
+     * so the whole search costs nothing.
+     *
+     * Compacting in place: `count` never passes `i`, because it only advances
+     * on the entries that are kept. */
+    for (i = 0; i < raw; i++) {
+        ShPluginEnt *cand = &g_pluginTable[i];
+        const ShPluginEnt *owner = NULL;
+        int k;
+
+        for (k = 0; k < g_pluginInfo.count; k++)
+            if (_stricmp(g_pluginTable[k].name, cand->name) == 0) {
+                owner = &g_pluginTable[k];
+                break;
+            }
+        if (owner) {
+            Log("plugins\\%s: REFUSED - the name \"%s\" is already "
+                "plugins\\%s. Two plugins cannot share a name: the [plugins] "
+                "switch, the menu row and the lang owner are one slot each",
+                cand->rel, cand->name, owner->rel);
+            g_pluginInfo.dupes++;
+            continue;
+        }
+        g_pluginTable[g_pluginInfo.count++] = *cand;
+    }
+
+done:
+    g_pluginScanned = 1;
+    LeaveCriticalSection(&g_pluginLock);
+    if (info) *info = g_pluginInfo;
+    *ents = g_pluginTable;
+    return g_pluginInfo.count;
+}
+
+const ShPluginEnt *ShPluginFind(const char *name) {
+    const ShPluginEnt *ents;
+    int n, i;
+
+    if (!name || !name[0]) return NULL;
+    n = ShPluginScan(&ents, NULL);
+    for (i = 0; i < n; i++)
+        if (_stricmp(ents[i].name, name) == 0) return &ents[i];
+    return NULL;
+}
 
 /* ---- the API a plugin asks for --------------------------------------
  *
@@ -199,88 +478,37 @@ static DWORD WINAPI RefusedApiNotice(LPVOID p) {
 }
 
 static void LoadASIPlugins(void) {
-    char pluginsDir[MAX_PATH], pat[MAX_PATH], full[MAX_PATH];
-    static char names[PLUGIN_SCAN_MAX][MAX_PATH];
-    WIN32_FIND_DATAA fd;
-    HANDLE h;
+    const ShPluginEnt *ents;
+    ShPluginScanInfo   info;
     uint32_t need;
-    int n = 0, nSkipped = 0, nDefaultOn = 0, count = 0, i, j;
-
-    if (!ShPluginsDir(pluginsDir, sizeof(pluginsDir))) {
-        LogAlways("cannot find the game directory");
-        return;
-    }
-    /* Fresh install: make the layout the loader expects.
-     * CreateDirectoryA dislikes the trailing backslash. */
-    {
-        char dir[MAX_PATH];
-        size_t len = strlen(pluginsDir);
-        if (len > 0 && pluginsDir[len - 1] == '\\') len--;
-        memcpy(dir, pluginsDir, len);
-        dir[len] = 0;
-        CreateDirectoryA(dir, NULL);
-    }
+    int count, n = 0, nSkipped = 0, nDefaultOn = 0, i;
 
     if (!ShConfigGetBool("loader", "load_plugins", 1)) {
         LogAlways("plugin loading disabled in scripthook.ini");
         return;
     }
 
-    snprintf(pat, sizeof(pat), "%s*", pluginsDir);
-    h = FindFirstFileA(pat, &fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        LogAlways("no plugin folders in %s", pluginsDir);
-        return;
-    }
+    /* What is installed is not this function's question any more - one scan
+     * answers it for the loader, the settings page and the blacklist alike
+     * (plugin_scan.h). The entries arrive sorted by name, so the log and the
+     * [plugins] section come out in the same order on every launch, which is
+     * what the sort here used to be for. */
+    count = ShPluginScan(&ents, &info);
 
-    /* Phase one: the folders that actually hold a <name>.asi, sorted,
-     * so the log and the lines written back to the ini come out in the
-     * same order on every launch. */
-    do {
-        const char *name = fd.cFileName;
+    /* A plugin over the ceiling, and one whose name another file already has,
+     * are skipped before anything is decided - the scan counted and logged
+     * them on the way past. */
+    nSkipped = info.overflow + info.dupes;
 
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-            continue;
-        if (name[0] == '.') continue;
-
-        snprintf(full, sizeof(full), "%s%s\\%s.asi",
-                 pluginsDir, name, name);
-        if (GetFileAttributesA(full) == INVALID_FILE_ATTRIBUTES) {
-            Log("plugins\\%s: no %s.asi, skipping", name, name);
-            nSkipped++;
-            continue;
-        }
-        if (count >= PLUGIN_SCAN_MAX) {
-            Log("plugins\\%s: scan table full (%d), not loaded",
-                name, PLUGIN_SCAN_MAX);
-            nSkipped++;
-            continue;
-        }
-        snprintf(names[count], sizeof(names[count]), "%s", name);
-        count++;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-
-    for (i = 1; i < count; i++) {
-        char tmp[MAX_PATH];
-        j = i;
-        while (j > 0 && strcmp(names[j - 1], names[j]) > 0) {
-            memcpy(tmp, names[j - 1], sizeof(tmp));
-            memcpy(names[j - 1], names[j], sizeof(tmp));
-            memcpy(names[j], tmp, sizeof(tmp));
-            j--;
-        }
-    }
-
-    /* Phase two: decide, and write nothing. -1 is "no line at all"
-     * (ShConfigGetInt cannot tell that apart from a 0, which is why this asks
-     * for an int), and a folder with no line is ON: a plugin that was just
-     * added works without a trip to the menu first, and the ini is left as the
-     * player wrote it. A 0 put there by the Plugins page is what keeps one off
-     * from then on; the default is counted so the scan's summary says how many
+    /* Decide, and write nothing. -1 is "no line at all" (ShConfigGetInt
+     * cannot tell that apart from a 0, which is why this asks for an int),
+     * and a plugin with no line is ON: a plugin that was just added works
+     * without a trip to the menu first, and the ini is left as the player
+     * wrote it. A 0 put there by the Plugins page is what keeps one off from
+     * then on; the default is counted so the scan's summary says how many
      * plugins are on that way, without a line each to say it. */
     for (i = 0; i < count; i++) {
-        const char *name = names[i];
+        const char *name = ents[i].name;
         int on = ShConfigGetInt("plugins", name, -1);
 
         if (on < 0) {
@@ -293,12 +521,9 @@ static void LoadASIPlugins(void) {
             continue;
         }
 
-        snprintf(full, sizeof(full), "%s%s\\%s.asi",
-                 pluginsDir, name, name);
-
         /* What this plugin asks of the framework, read without running any of
          * it. Nothing declared is 0, and 0 is loaded as it always was. */
-        need = PluginNeedsApi(full);
+        need = PluginNeedsApi(ents[i].asi);
         if (need > (uint32_t)ShGetVersion()) {
             Log("plugins\\%s: REFUSED - it needs API %u and this framework is "
                 "%u (SH_API_VERSION); load a newer ScriptHook, or an older "
@@ -310,9 +535,9 @@ static void LoadASIPlugins(void) {
         }
 
         n++;
-        Log("loading plugin: plugins\\%s\\%s.asi", name, name);
+        Log("loading plugin: plugins\\%s", ents[i].rel);
         {
-            HMODULE mod = LoadLibraryA(full);
+            HMODULE mod = LoadLibraryA(ents[i].asi);
             if (mod)
                 Log("  loaded at %p", (void *)mod);
             else
