@@ -509,17 +509,14 @@ Build-Plugin 'ModeProbe'    'ModeProbe.c'    @('user32.lib')
 # nothing itself - the framework installs the hook when it registers.
 # Not in the beta set: it ships to nobody.
 Build-Plugin 'FrameProbe'   'FrameProbe.c'   @()
-# ModeCallProbe dumps the method tables of the front end objects (the
-# GameFlow machine, its sub objects, the HybridMenu) and names as many
-# entries as a crc32 dictionary resolves, so the function behind the
-# mode selection can be found by name and hooked. Read only.
-Build-Plugin -Name 'ModeCallProbe' -Source 'ModeCallProbe.c' `
-    -LinkArgs @('user32.lib') -ExtraSources @(
-    (Join-Path $root 'third_party/minhook/src/buffer.c'),
-    (Join-Path $root 'third_party/minhook/src/hook.c'),
-    (Join-Path $root 'third_party/minhook/src/trampoline.c'),
-    (Join-Path $root 'third_party/minhook/src/hde/hde64.c')
-)
+# ModeCallProbe and ModeExitProbe retired on 2026-10-14 with the MinHook
+# convergence: ModeCallProbe's question is answered by the framework's own
+# playmode module (which hooks the mode manager self-verifiably), and
+# ModeExitProbe's is answered negatively - the mode-switch exit is the
+# engine's design, relaunched by Uplay from outside the process. The
+# write-up that keeps both toolchains reusable is
+# ../documents/scripthook-docs-20261016/mode-probes-retired.md; a future one-shot probe is written when a
+# question needs one, not shipped as a resident self-hooked plugin.
 Build-Plugin 'CrazyCars'    'crazycars.c'    @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tpgun'        'tpgun.c'        @('gdi32.lib', 'user32.lib')
 Build-Plugin 'tp_roulette'  'tp_roulette.c'  @($libPath, 'libscripthook.lib', 'gdi32.lib', 'user32.lib')

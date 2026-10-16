@@ -195,23 +195,11 @@ $(GAMEDIR)/plugins/ModeProbe/ModeProbe.asi: plugins/ModeProbe/ModeProbe.c script
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -o $@ plugins/ModeProbe/ModeProbe.c -luser32
 
-modecallprobe: $(GAMEDIR)/plugins/ModeCallProbe/ModeCallProbe.asi
-
-# ModeCallProbe.ini sits beside the source and is seeded into the plugin
-# folder by build_msvc.ps1; this target only builds the .asi. MinHook is
-# compiled in: it keeps its state per DLL, so each plugin that hooks
-# carries its own copy. Contrast: GhostWipeProbe / ModeExitProbe.
-$(GAMEDIR)/plugins/ModeCallProbe/ModeCallProbe.asi: plugins/ModeCallProbe/ModeCallProbe.c scripthook.h \
-        third_party/minhook/src/buffer.c third_party/minhook/src/hook.c \
-        third_party/minhook/src/trampoline.c \
-        third_party/minhook/src/hde/hde64.c
-	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -o $@ plugins/ModeCallProbe/ModeCallProbe.c \
-		third_party/minhook/src/buffer.c \
-		third_party/minhook/src/hook.c \
-		third_party/minhook/src/trampoline.c \
-		third_party/minhook/src/hde/hde64.c \
-		-Ithird_party/minhook/include -luser32
+# ModeCallProbe and ModeExitProbe retired on 2026-10-14 with the MinHook
+# convergence: their questions are answered (the framework's playmode
+# module owns the mode hooks; the mode-switch exit is the engine's
+# design), and the write-up that keeps the tooling reusable is
+# docs/mode-probes-retired.md. No target builds either any more.
 
 crazycars: $(GAMEDIR)/plugins/CrazyCars/CrazyCars.asi
 
