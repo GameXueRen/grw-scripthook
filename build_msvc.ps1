@@ -546,6 +546,16 @@ Build-Plugin 'Ballistics'    'Ballistics.c'    @($libPath, 'libscripthook.lib')
 # Makefile never had to say so; this line does.
 Build-Plugin 'CameraPresets' 'CameraPresets.c' @($libPath, 'libscripthook.lib', 'user32.lib')
 
+# MoreHudControl is the per-layer HUD switch: a menu row for every HUD_* phoenix
+# scene, hidden or shown from the next frame on, through the framework's
+# ShGameHudSceneShow. Its roster is compiled in (85 rows from the creator
+# census of GR_BasicHUD / GR_CoopHUD plus the string pool), so the ini carries
+# state rather than a list. The three probes it still carries - the render
+# node chain, image create, widget colour - are what the marker kind question
+# is being asked with, and they hook through the framework's shared layer
+# (ShHookAddAt), so libscripthook is linked and MinHook is not.
+Build-Plugin 'MoreHudControl' 'MoreHudControl.c' @($libPath, 'libscripthook.lib', 'user32.lib')
+
 # A plugin's own files are seeded next to its .asi the first time only:
 # a later build must never overwrite settings changed in game, and never
 # a lang.ini that was edited in place. Both sit in the plugin's source
