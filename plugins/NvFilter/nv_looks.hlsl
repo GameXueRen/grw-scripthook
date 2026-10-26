@@ -13,6 +13,9 @@
  * The expression looks (see nv_filter_ps.hlsl, which defines them before this
  * file is included) are referenced from the dispatch the same way.
  *
+ * One table is ours rather than the game's - predator-thermal, an ironbow ramp
+ * built in gen_looks.py - which is why that one says so in its own comment.
+ *
  * Regenerate with `python gen_looks.py` after re-running extract_all.py.
  */
 
@@ -37,6 +40,8 @@
 #define NV_LOOK_AMBER           15 /* amber */
 #define NV_LOOK_COOLBLUE        16 /* cool-blue */
 #define NV_LOOK_CONTRAST        17 /* contrast */
+#define NV_LOOK_CLASSICNV       18 /* classic-nv */
+#define NV_LOOK_SPLINTERCELL    19 /* splinter-cell */
 
 /* sepia - the grey axis of the Photo Mode "SEPIA" look-up cube. */
 static const float3 kLookSEPIA[32] = {
@@ -271,8 +276,8 @@ float3 LookSelected(int mode, float g, float3 gray, float3 tint)
     if (mode == 2) return ramp;
 #else
     /* Every mode, so the look stops depending on what is equipped. `mode` is
-     * simply not consulted here, and drops out of the shader with it - HLSL
-     * has no (void) cast, so an unused parameter is left as one. */
+     * not consulted for the LOOK here - main still reads it, for the mode 0
+     * sampling branch, which follows what is worn rather than the look. */
 #endif
 #if NV_DEFAULT_MODE == 1
     return mono;
@@ -312,9 +317,25 @@ float3 LookSelected(int mode, float g, float3 gray, float3 tint)
     return LookCOOLBLUE(g, NV_G_WHITE);
 #elif NV_DEFAULT_MODE == 17
     return LookCONTRAST(g, NV_G_WHITE);
+#elif NV_DEFAULT_MODE == 18
+    return LookCLASSICNV(g, NV_G_WHITE);
+#elif NV_DEFAULT_MODE == 19
+    return LookSPLINTERCELL(g, NV_G_WHITE);
 #else
 #error NV_DEFAULT_MODE names no look this build knows
 #endif
 }
+
+/* The grain a look asks for, in thousandths of full scale (16 = 0.016). An
+ * integer, because the preprocessor cannot compare floats - and 0 is not a
+ * small amount: it removes the expression from main entirely, so every look
+ * written before this existed compiles to what it always did. */
+#if NV_DEFAULT_MODE == 18
+#define NV_GRAIN_MILLI 16
+#elif NV_DEFAULT_MODE == 19
+#define NV_GRAIN_MILLI 45
+#else
+#define NV_GRAIN_MILLI 0
+#endif
 
 #endif /* NV_LOOKS_HLSL */

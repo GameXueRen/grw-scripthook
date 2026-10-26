@@ -48,16 +48,23 @@
  *
  * There is deliberately no build that leaves the modes as they are: "the game's
  * own look" is what the plugin's first row means by OFF, and it reaches that by
- * substituting nothing at all. A fifth variant that folded mode 0 onto itself
- * would be a copy of the original shader, and mode 0 is not just a colour
- * choice - it swaps the scene colour for a blurred luminance and shifts the
- * sample point radially - so reproducing it would have meant transcribing a
- * branch nothing can reach. Dropping that variant dropped the branch with it.
+ * substituting nothing at all. A variant that folded mode 0 onto itself would
+ * just be a copy of the original shader, which is the OFF row spelled differently.
+ *
+ * Mode 0's own sampling is deliberately NOT reproduced. While the selector
+ * is 0 the original shifts the sample point radially and then throws the colour
+ * away for the luminance of a five-tap blur whose taps are re-placed every frame
+ * (cb5[10].xy). That was transcribed on 2026-10-19 and taken back out the same
+ * day: it changes the brightness and the sharpness of EVERY look - throwing the
+ * colour away is the whole point of it - and a measured comparison of two
+ * consecutive frames found nothing in it that a still could see (1.5 grey levels
+ * in a static, textured patch, which is JPEG quantisation). If the drifting scan
+ * noise a player remembers is ever located, it is not in this branch.
  *
  * Everything else - the vignette, the ACES-ish tonemap, the gain, the two
- * texture lookups, the mode 2 ramp - is carried over unchanged. Because the
- * per-pixel jitter is multiplied by a literal 0.0 in this build (see the note
- * on the sample point below) there is no hash to transcribe.
+ * texture lookups, the mode 2 ramp - is carried over unchanged. The per-pixel
+ * jitter is multiplied by a literal 0.0 in this build (see the note in main), so
+ * there is no hash to transcribe and nothing per-pixel is lost.
  *
  * THE ONE THING THIS DOES NOT OVERRIDE
  * ------------------------------------
@@ -83,6 +90,13 @@
  *                   nv_looks.hlsl - that is what mode 3 is, and it is the only
  *                   shape that follows a grade with a colour cast that changes
  *                   across the range (blue shadows, warm highlights)
+ *
+ * A look may also ask for static grain. That is not part of the tone curve - it
+ * is noise added to the final colour in main - so it travels as NV_GRAIN_MILLI,
+ * one number the generated dispatch sets per look, and 0 preprocesses the whole
+ * expression away so no other variant changes. Modes 18 and 19 are the two that
+ * use it: the classic intensifier and the Splinter Cell one, which without it
+ * look like clean screenshots of a green room.
  */
 
 #ifndef NV_DEFAULT_MODE
@@ -133,10 +147,58 @@ float3 LookCONTRAST(float g, float white) {
     return saturate((t - 0.5) * 1.9 + 0.5) * float3(0.45, 1.35, 0.45);
 }
 
+/* Classic night vision: the P43 phosphor an image intensifier actually uses
+ * (545 nm, which is why every NVG is green). Gain first, then contrast: a tube
+ * lifts the bottom of the range - which is where a night scene lives, so a
+ * curve that crushes it would show the player nothing - and then steepens what
+ * it lifted. The pivot sits above the middle so the lift survives it. The top
+ * drifts to near-white, because an intensifier being overdriven stops being
+ * green. */
+float3 LookCLASSICNV(float g, float white) {
+    float t = saturate(g / white);
+    float s = pow(t, 0.62);
+    s = saturate((s - 0.55) * 1.30 + 0.55);
+    float3 col = s * float3(0.60, 1.00, 0.52);
+    col = lerp(col, float3(0.93, 1.00, 0.90), smoothstep(0.88, 1.00, s));
+    return saturate(col);
+}
+
+/* Splinter Cell's green, the Chaos Theory one. What makes it recognisable is
+ * not the tint but the tube: it never reaches black, so the whole image sits
+ * high and looks soft, and the lights bloom into pale green rather than
+ * clipping. The tint is a pea green, a little yellow, not the pure green the
+ * classic look uses. */
+float3 LookSPLINTERCELL(float g, float white) {
+    float t = saturate(g / white);
+    float s = 0.075 + 0.925 * pow(t, 0.90);
+    s = s / (1.0 + 0.40 * s);          /* a soft shoulder, not a clip */
+    s *= 1.50;                          /* and back to the brightness it had */
+    float3 col = s * float3(0.56, 0.96, 0.38);
+    col = lerp(col, float3(0.86, 1.00, 0.78), smoothstep(0.58, 1.00, saturate(s)));
+    return saturate(col);
+}
+
+/* Per-pixel hash in [0,1). The engine's own look jitters its sample point
+ * through one of these - that is the grain the retail goggles were supposed to
+ * show - and the shipped shader multiplies it by a literal 0.0, so it has no
+ * grain at all. A substituted look has none either, which is most of what makes
+ * a screenshot read as "clean" instead of "through goggles". */
+float NvHash(float2 p) {
+    return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+}
+
 /* The twelve Photo Mode grades, as 32-entry grey-axis tables, and the
  * compile-time dispatch that picks one. Generated; see the file header for
- * where those numbers come from. It references the three functions above. */
+ * where those numbers come from. It references the five functions above. */
 #include "nv_looks.hlsl"
+
+/* How much grain this build adds, in thousandths of full scale. Generated by
+ * the same dispatch: every look that predates it is 0, and the two that want
+ * grain say so. Zero is not a small amount here - it removes the expression.
+ * An integer, because the preprocessor cannot compare floats. */
+#ifndef NV_GRAIN_MILLI
+#define NV_GRAIN_MILLI 0
+#endif
 
 
 cbuffer CB1 : register(b1) { float4 cb1[161]; };
@@ -167,18 +229,17 @@ float4 main(float4 v0 : SV_Position, float2 v1 : TEXCOORD0) : SV_Target
      * leaves alone. */
     int mode = asint(cb5[13].y);
 
-    /* The sample point. The original offsets it by a small radial amount while
-     * the selector is 0 (movc r1.zw, cb5[13].yyyy, l(0,0,0,0), r1.zzzw), and
-     * the per-pixel hash that fed that offset is dead in this build - the
-     * disassembly multiplies it by a literal 0.0. No build here leaves a mode
-     * as 0, so that offset is not transcribed: it belongs to the branch that
-     * draws the game's own look, and that look is reached by substituting
-     * nothing rather than by a variant of this shader. */
     float2 uv = float2(v1.x * cb1[160].x, v1.y);
 
     /* Sampled before the branch in the original; it is the output alpha. */
     float alpha = t7.Sample(s10, uv).x;
 
+    /* The sample point. The original shifts it radially while the selector
+     * is 0, and then replaces the colour with the luminance of a five-tap blur
+     * whose taps are re-placed every frame. Neither is reproduced here - see
+     * the note at the top of this file for why, and for the measurement that
+     * decided it. The per-pixel hash that used to scale that shift is
+     * multiplied by a literal 0.0 in this build, so no hash is lost either. */
     float3 scene = t0.Sample(s10, uv).rgb;
 
     /* Original guard: x with an all-ones exponent (inf or NaN) becomes 65000
@@ -192,8 +253,8 @@ float4 main(float4 v0 : SV_Position, float2 v1 : TEXCOORD0) : SV_Target
          * ignores the selector entirely, and the selector demonstrably changes
          * what is on screen - but it is carried over so this file stands in for
          * the original in every case. Output is (t7.x, luma, t6.x, t7.x). */
-        float lut   = t6.Sample(s7, float2(v1.x * 10.0 - 0.5,
-                                          v1.y * 10.0 - 0.5)).x;
+        float  lut  = t6.Sample(s7, float2(v1.x * 10.0 - 0.5,
+                                           v1.y * 10.0 - 0.5)).x;
         float3 wide = t8.Sample(s10, v1.xy).rgb;
         return float4(alpha,
                       dot(wide, float3(0.2126, 0.7152, 0.0722)),
@@ -252,5 +313,18 @@ float4 main(float4 v0 : SV_Position, float2 v1 : TEXCOORD0) : SV_Target
     /* Everything the look needs: the luminance, plus the two colours modes 1
      * and 2 are built from, since an "ordinary goggles only" build has to be
      * able to hand those two back untouched. */
+#if NV_GRAIN_MILLI > 0
+    /* Grain goes on the final colour, not on the luminance: the tube's noise is
+     * in the display, and adding it here is what makes it read as noise rather
+     * than as banding in the shadows. */
+    float3 col = LookSelected(mode, g, gray, tint);
+    col += (NvHash(v0.xy) - 0.5) * (NV_GRAIN_MILLI * 0.001);
+    return float4(col, alpha);
+#else
+    /* The same expression the shader ended with before grain existed, kept
+     * verbatim rather than routed through a local: fxc allocates registers
+     * differently for the two spellings, and this way a look that does not want
+     * grain compiles to the very bytes it always did. */
     return float4(LookSelected(mode, g, gray, tint), alpha);
+#endif
 }

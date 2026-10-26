@@ -185,11 +185,11 @@ typedef struct Row {
  * arithmetic (amber, cool blue, high contrast). The names are ours: the assets
  * are codenamed (BURNER, LIGHTHOUSE, ...) and a menu wants what it looks like.
  *
- * Seventeen is past what a single left/right row is comfortable with - the
+ * Nineteen is well past what a single left/right row is comfortable with - the
  * value column holds about five CJK characters, and reaching the last entry
- * takes eight presses. It works, and every step changes the screen immediately,
- * but this is the row that will want a second level (family, then look) before
- * much else is added. */
+ * takes ten presses. It works, and every step changes the screen
+ * immediately, but the next thing added here wants a second level (family,
+ * then look) rather than another row entry. */
 static const Row kLooks[] = {
     { "black-and-white", "@nvf.bw"       },   /* 1  engine, as arithmetic  */
     { "yellow-green",    "@nvf.yg"       },   /* 2                         */
@@ -207,7 +207,9 @@ static const Row kLooks[] = {
     { "neutral",         "@nvf.neutral"  },   /* 14                        */
     { "amber",           "@nvf.amber"    },   /* 15 arithmetic             */
     { "cool-blue",       "@nvf.cool"     },   /* 16                        */
-    { "contrast",        "@nvf.contrast" }    /* 17                        */
+    { "contrast",        "@nvf.contrast"    }, /* 17                        */
+    { "classic-nv",      "@nvf.classic"     }, /* 18 arithmetic             */
+    { "splinter-cell",   "@nvf.sc"          }  /* 19 arithmetic             */
 };
 #define LOOK_N ((int)(sizeof(kLooks) / sizeof(kLooks[0])))
 
@@ -935,7 +937,9 @@ static const ShText kEn[] = {
     { "@nvf.neutral",        "Neutral" },
     { "@nvf.amber",          "Amber" },
     { "@nvf.cool",           "Cool blue" },
-    { "@nvf.contrast",       "Contrast" }
+    { "@nvf.contrast",       "Contrast" },
+    { "@nvf.classic",        "Classic NV" },
+    { "@nvf.sc",             "Splinter Cell" }
 };
 
 static const ShText kZh[] = {
@@ -962,7 +966,9 @@ static const ShText kZh[] = {
     { "@nvf.neutral",        "中性" },
     { "@nvf.amber",          "琥珀" },
     { "@nvf.cool",           "冷蓝" },
-    { "@nvf.contrast",       "高对比" }
+    { "@nvf.contrast",       "高对比" },
+    { "@nvf.classic",        "经典夜视" },
+    { "@nvf.sc",             "细胞分裂" }
 };
 
 static void FilterText(void) {

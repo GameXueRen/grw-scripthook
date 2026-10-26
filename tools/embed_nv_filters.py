@@ -4,8 +4,8 @@
 Every look the plugin offers is one compile of plugins/NvFilter/nv_filter_ps.hlsl
 with a different pair of defines - which look, and how far it reaches - and the
 plugin carries all of them, swapping pointers, rather than shipping one plugin
-per look. Seventeen looks over two reaches is thirty-four builds of 3.2 to 4.7
-KB, embedding to about 320 KB of hex.
+per look. Nineteen looks over two reaches is thirty-eight builds of 3.2 to
+5.4 KB, embedding to about 360 KB of hex.
 
     python tools/embed_nv_filters.py --build    # compile, then embed
     python tools/embed_nv_filters.py            # embed what is already there
@@ -76,6 +76,10 @@ VARIANTS = [
     ("cool-blue",        "all",     "nv_coolblue_all.cso"),
     ("contrast",         "default", "nv_contrast.cso"),
     ("contrast",         "all",     "nv_contrast_all.cso"),
+    ("classic-nv",       "default", "nv_classic.cso"),
+    ("classic-nv",       "all",     "nv_classic_all.cso"),
+    ("splinter-cell",    "default", "nv_sc.cso"),
+    ("splinter-cell",    "all",     "nv_sc_all.cso"),
 ]
 
 WRAP = 96          # hex characters per line
