@@ -2382,9 +2382,9 @@ static const char *IniEol(const char *whole, long len) {
  * what copying the blanks as they came would look like.
  * The file is treated as opaque bytes, so UTF-8 content is preserved.
  * Returns 1 when the file was rewritten. */
-static int IniWriteValue(const char *section, const char *key,
-                         const char *value) {
-    char path[GAME_DIR_MAX], tmp[GAME_DIR_MAX];
+static int IniWriteValueTo(const char *path, const char *section,
+                           const char *key, const char *value) {
+    char tmp[GAME_DIR_MAX];
     FILE *f;
     long len;
     char *whole;
@@ -2404,22 +2404,22 @@ static int IniWriteValue(const char *section, const char *key,
     size_t outLen = 0, outCap = 0;
     int ok = 0;
 
-    if (!section || !key || !value) {
-        ShSetError(SH_ERR_BAD_ARG);
-        return 0;
-    }
-    if (!IniPath(path, sizeof(path))) {
+    if (!path || !path[0] || !section || !key || !value) {
         ShSetError(SH_ERR_BAD_ARG);
         return 0;
     }
 
+    /* A missing file is an empty file: the section and the key are then
+     * created from nothing, which is what a plugin's first save needs.
+     * The main config keeps its old behaviour of laying down the default
+     * file first - see IniWriteValue below. */
     f = fopen(path, "rb");
     if (!f) {
-        /* A missing main ini means config was never parsed; let
-         * LoadConfig write the default first. */
-        LoadConfig();
-        f = fopen(path, "rb");
-        if (!f) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+        len = 0;
+        whole = (char *)malloc(1);
+        if (!whole) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+        whole[0] = 0;
+        goto have_file;
     }
     fseek(f, 0, SEEK_END);
     len = ftell(f);
@@ -2444,6 +2444,7 @@ static int IniWriteValue(const char *section, const char *key,
     fclose(f);
     whole[len] = 0;
 
+have_file:
     end = whole + len;
     p = whole;
     eol = IniEol(whole, len);
@@ -2621,6 +2622,186 @@ done:
     if (whole) free(whole);
     ShSetError(ok ? SH_OK : SH_ERR_BAD_ARG);
     return ok;
+}
+
+/* The main config's writer: same engine, path fixed to scripthook.ini, and
+ * a missing file is created from the defaults first (unchanged behaviour). */
+static int IniWriteValue(const char *section, const char *key,
+                         const char *value) {
+    char path[GAME_DIR_MAX];
+    FILE *f;
+
+    if (!IniPath(path, sizeof(path))) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    f = fopen(path, "rb");
+    if (!f) LoadConfig();          /* lay down the default file first */
+    else fclose(f);
+    return IniWriteValueTo(path, section, key, value);
+}
+
+/* One key out of one section of one file. Deliberately no table and no
+ * cache: a plugin ini is a couple of kilobytes and this is called at
+ * startup and on a preset switch, not per frame. */
+static int IniReadValueFrom(const char *path, const char *section,
+                            const char *key, char *out, int n) {
+    FILE *f;
+    char line[1024];
+    char cur[64];
+    int inSec = 0, got = 0;
+
+    if (!path || !section || !key || !out || n <= 0) return 0;
+    out[0] = 0;
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    cur[0] = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char *s = line, *e;
+        size_t kl, vl;
+
+        while (*s == ' ' || *s == '\t') s++;
+        e = s + strlen(s);
+        while (e > s && (e[-1] == '\n' || e[-1] == '\r' ||
+                         e[-1] == ' ' || e[-1] == '\t'))
+            *--e = 0;
+        if (!*s || *s == ';' || *s == '#') continue;
+        if (*s == '[') {
+            char *c = strchr(s, ']');
+            size_t ln;
+            if (!c) continue;
+            ln = (size_t)(c - s - 1);
+            if (ln >= sizeof(cur)) ln = sizeof(cur) - 1;
+            memcpy(cur, s + 1, ln);
+            cur[ln] = 0;
+            inSec = (strcmp(cur, section) == 0);
+            continue;
+        }
+        if (!inSec) continue;
+        {
+            char *eq = strchr(s, '=');
+            char *v, *c;
+
+            if (!eq) continue;
+            kl = (size_t)(eq - s);
+            while (kl > 0 && (s[kl - 1] == ' ' || s[kl - 1] == '\t')) kl--;
+            if (kl != strlen(key) || strncmp(s, key, kl) != 0) continue;
+            v = eq + 1;
+            while (*v == ' ' || *v == '\t') v++;
+            c = strstr(v, " ;");            /* keep "a ; note" working */
+            if (!c) c = strstr(v, "\t;");
+            vl = c ? (size_t)(c - v) : strlen(v);
+            while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+            if (vl >= (size_t)n) vl = (size_t)n - 1;
+            memcpy(out, v, vl);
+            out[vl] = 0;
+            got = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return got;
+}
+
+/* Where a plugin's own ini is. The loader's answer only: it knows which
+ * folder the .asi was found in, and it deliberately refuses to guess a
+ * path for a name it never scanned - a guess would make a plugin write a
+ * file nothing reads. */
+static int PluginIniPath(const char *plugin, char *buf, int size) {
+    if (!plugin || !plugin[0] || !buf || size <= 0) return 0;
+    return ShPluginIniPath(plugin, buf, size);
+}
+
+static int PluginCfgGet(const char *plugin, const char *section,
+                        const char *key, const char *def, char *out, int n) {
+    char path[GAME_DIR_MAX];
+
+    if (!plugin || !section || !key || !out || n <= 0) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    out[0] = 0;
+    if (def) {
+        strncpy(out, def, (size_t)n - 1);
+        out[n - 1] = 0;
+    }
+    if (!PluginIniPath(plugin, path, sizeof(path))) return 0;
+    if (!IniReadValueFrom(path, section, key, out, n)) return 0;
+    ShSetError(SH_OK);
+    return 1;
+}
+
+/** @addtogroup config
+ *  A plugin's own ini, section by section. Same engine and same file
+ *  layout rules as the main config: the key is replaced where it is,
+ *  a missing key is appended to its section, a missing section is
+ *  created, and every other line - other keys, other sections,
+ *  comments - survives byte for byte. */
+SH_API int ShPluginConfigGetStr(const char *plugin, const char *section,
+                                const char *key, const char *def,
+                                char *out, int size) {
+    return PluginCfgGet(plugin, section, key, def, out, size);
+}
+
+SH_API int ShPluginConfigGetInt(const char *plugin, const char *section,
+                                const char *key, int def) {
+    char buf[64];
+
+    if (!PluginCfgGet(plugin, section, key, NULL, buf, sizeof(buf)))
+        return def;
+    return (int)strtol(buf, NULL, 0);
+}
+
+SH_API int ShPluginConfigGetBool(const char *plugin, const char *section,
+                                 const char *key, int def) {
+    char buf[64];
+
+    if (!PluginCfgGet(plugin, section, key, NULL, buf, sizeof(buf)))
+        return def ? 1 : 0;
+    if (!buf[0]) return def ? 1 : 0;
+    if (!_stricmp(buf, "true") || !_stricmp(buf, "yes") ||
+        !_stricmp(buf, "on"))
+        return 1;
+    if (!_stricmp(buf, "false") || !_stricmp(buf, "no") ||
+        !_stricmp(buf, "off"))
+        return 0;
+    return atoi(buf) ? 1 : 0;
+}
+
+SH_API int ShPluginConfigSetStr(const char *plugin, const char *section,
+                                const char *key, const char *value) {
+    char path[GAME_DIR_MAX];
+
+    if (!plugin || !section || !key || !value) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    if (!PluginIniPath(plugin, path, sizeof(path))) {
+        ShSetError(SH_ERR_NO_PLUGIN);
+        return 0;
+    }
+    EnsureConfigLock();
+    EnterCriticalSection(&g_cfgLock);
+    if (!IniWriteValueTo(path, section, key, value)) {
+        LeaveCriticalSection(&g_cfgLock);
+        return 0;
+    }
+    LeaveCriticalSection(&g_cfgLock);
+    ShSetError(SH_OK);
+    return 1;
+}
+
+SH_API int ShPluginConfigSetInt(const char *plugin, const char *section,
+                                const char *key, int value) {
+    char buf[32];
+
+    snprintf(buf, sizeof(buf), "%d", value);
+    return ShPluginConfigSetStr(plugin, section, key, buf);
+}
+
+SH_API int ShPluginConfigSetBool(const char *plugin, const char *section,
+                                 const char *key, int value) {
+    return ShPluginConfigSetStr(plugin, section, key, value ? "1" : "0");
 }
 
 /** Write a string value back to scripthook.ini and refresh the

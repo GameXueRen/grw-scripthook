@@ -1336,7 +1336,12 @@ void RenderMenu(const ShMenuView* v)
         const ShMenuRow* r = &v->row[i];
         float ry = top + ROW_H * (float)i;
         float rTop = TextTopForRow(font, fs, ry, ROW_H);
-        ImU32 c = r->selected ? Col(0x8CF0FFu) : Col(0xD2D2D2u);
+        // A disabled row is dimmed but still readable, and still takes the
+        // selection colour when it is the current row - the player has to be
+        // able to find it again after looking away.
+        ImU32 c = r->disabled
+                      ? (r->selected ? Col(0x6C8E96u) : Col(0x777777u))
+                      : (r->selected ? Col(0x8CF0FFu) : Col(0xD2D2D2u));
         dl->AddText(font, fs, ImVec2(x + PAD + 8.0f * s, rTop), c, r->name);
         if (r->value[0]) {
             ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r->value);

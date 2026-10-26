@@ -1298,6 +1298,21 @@ SH_API int  ShMenuList(uint32_t menu, const char *label,
  *  the truth. Matches on the label inside that one menu. */
 SH_API int  ShMenuSetValue(uint32_t menu, const char *label,
                            int value);
+/** Draw a row as unavailable, and refuse to change it.
+ *
+ *  A disabled row is still listed and still navigable - the player can see
+ *  what it is and what it is set to - but the left/right keys and Enter do
+ *  nothing on it, and the renderer draws it dimmed. It is the answer to
+ *  "this setting has no effect while that master switch is off": hiding the
+ *  row instead loses the information that the setting exists and what it
+ *  was left at.
+ *
+ *  Matches on the label inside that one menu, the same way
+ *  ShMenuSetValue does. A row can be disabled and enabled again at any
+ *  time; the flag lives with the row, so it survives the menu being
+ *  captured every frame. */
+SH_API int  ShMenuDisable(uint32_t menu, const char *label,
+                          int disabled);
 /** Drop a menu's items, keeping the row, so a plugin can
  *  rebuild its own menu without stacking duplicates. */
 SH_API int  ShMenuClear(uint32_t menu);
@@ -1377,6 +1392,7 @@ typedef struct ShMenuRow {
     char name[160];
     char value[96];
     int  selected;
+    int  disabled;   /**< drawn dim; left/right and Enter do nothing */
 } ShMenuRow;
 
 /** One frame of the current menu, captured under the lock for
@@ -3248,6 +3264,17 @@ SH_API int      ShGameScenes(char *buf, int n);
  *  scenes remain visible either way. */
 SH_API int      ShGameHudShow(int visible);
 
+/** One HUD scene at a time. `name` is one of the names ShGameHudScenes
+ *  lists ("HUD_Minimap", "HUD_CrossHair", ...). `visible` is 1/0, or
+ *  SH_HUD_INHERIT to drop the override and follow ShGameHudShow again.
+ *  Overrides only affect HUD_* layers; anything else is ignored. */
+#define SH_HUD_INHERIT 2
+SH_API int      ShGameHudSceneShow(const char *name, int visible);
+/** What the renderer will do for this scene right now. */
+SH_API int      ShGameHudSceneVisible(const char *name);
+/** The HUD_* scenes drawn last frame, comma separated; returns the count. */
+SH_API int      ShGameHudScenes(char *buf, int n);
+
 /** @} */
 /** @defgroup widgets The engine's widget tree
  *  Every widget the engine has, ours and the game's own,
@@ -3283,9 +3310,44 @@ SH_API int      ShWidgetGetV(uint64_t widget, uint32_t prop, float *out,
 SH_API int      ShWidgetGetS(uint64_t widget, uint32_t prop, char *out,
                              int n);
 
+/** What a widget class actually exposes, instead of a guess at ids.
+ *
+ *  The table is the engine's own: one record per (class, property id), with
+ *  the value type and the accessor addresses. ShPropCount() is how many
+ *  records there are; ShPropAt() reads one.
+ *
+ *  This is for finding a PRECISE discriminator: a plugin that needs to tell
+ *  two widgets apart lists the properties of the class in front of it and
+ *  picks the field that differs (an atlas rect, an author-set tint, a layout
+ *  flag) rather than probing ids blindly or matching on colour.
+ *
+ *  `cls` receives the owning class name, `id` the property id - the same
+ *  numbers the SH_P_* defines carry - `type` its value type, and `set`/`get`
+ *  the accessor addresses (0 when absent, which is how a read-only property
+ *  shows up). Reads go through ShWidgetGetF/U/V/S with that id.
+ *
+ *  Returns 0 for an index out of range, 1 on success. */
+SH_API int      ShPropCount(void);
+SH_API int      ShPropAt(int index, char *cls, int n, uint32_t *id,
+                         int *type, uint64_t *set, uint64_t *get);
+
 /** The handle behind one of our own ids, so a widget made
  *  with ShUiCreate reads back the same way. */
 SH_API uint64_t ShUiHandle(uint32_t id);
+
+/** The three properties it is safe to write, and the only ones these accept:
+ *  SH_P_ALPHA (float), SH_P_VISIBLE (bool/uint), SH_P_SCALE (vec3). Every
+ *  write goes through the widget class's own setter - the same call the game
+ *  animates these with - not through a field offset, so a scene cannot be left
+ *  in a shape its own code does not expect. Structure (text, image, position,
+ *  size) is refused.
+ *
+ *  Game thread only: call from ShRegisterFrameCallback or a menu callback.
+ *  Returns 0 when the class has no setter for that property, which is also how
+ *  a build where these are not exposed answers. */
+SH_API int ShWidgetSetF(uint64_t widget, uint32_t prop, float v);
+SH_API int ShWidgetSetU(uint64_t widget, uint32_t prop, uint32_t v);
+SH_API int ShWidgetSetV(uint64_t widget, uint32_t prop, const float *v, int n);
 
 /** @} */
 /** @addtogroup core
@@ -3368,6 +3430,36 @@ SH_API int  ShConfigSetInt(const char *section, const char *key,
                            int value);
 SH_API int  ShConfigSetBool(const char *section, const char *key,
                             int value);
+
+/** A plugin's own ini, read and written by section.
+ *
+ *  Same engine and same rules as the main config: a key is replaced where
+ *  it already sits, a missing key is appended to the end of its section, a
+ *  section that is not there yet is created, and every other line - other
+ *  keys, other sections, comments, the byte order mark - survives byte for
+ *  byte. The file is the one `ShPluginIniPath` names, so a plugin never has
+ *  to know where it was installed.
+ *
+ *  `plugin` is the plugin's name as the loader knows it (its .asi name),
+ *  the same string `ShPluginIniPath` takes. A name that was never scanned
+ *  gets no path: the Get calls answer the default and the Set calls fail
+ *  with SH_ERR_NO_PLUGIN, rather than writing a file nothing would read.
+ *
+ *  Reads are not cached. A plugin ini is a couple of kilobytes and this is
+ *  meant for startup and for a settings change, not for a frame. */
+SH_API int  ShPluginConfigGetStr(const char *plugin, const char *section,
+                                 const char *key, const char *def,
+                                 char *out, int size);
+SH_API int  ShPluginConfigGetInt(const char *plugin, const char *section,
+                                 const char *key, int def);
+SH_API int  ShPluginConfigGetBool(const char *plugin, const char *section,
+                                  const char *key, int def);
+SH_API int  ShPluginConfigSetStr(const char *plugin, const char *section,
+                                 const char *key, const char *value);
+SH_API int  ShPluginConfigSetInt(const char *plugin, const char *section,
+                                 const char *key, int value);
+SH_API int  ShPluginConfigSetBool(const char *plugin, const char *section,
+                                  const char *key, int value);
 
 /** The folder containing GRW.exe, no trailing backslash. */
 SH_API int  ShGameDir(char *buf, int size);

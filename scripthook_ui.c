@@ -140,8 +140,8 @@ extern int ShPropGetV(uint64_t h, uint32_t id, float *out, int n);
 extern uint64_t ShPropGetS(uint64_t h, uint32_t id);
 extern int ShPropMeasure(uint64_t h, float *w, float *hgt);
 extern int ShPropType(uint64_t h, uint32_t id);
-extern int ShPropCount(void);
-extern int ShPropAt(int i, char *cls, int n, uint32_t *id, int *type,
+SH_API int ShPropCount(void);
+SH_API int ShPropAt(int i, char *cls, int n, uint32_t *id, int *type,
                     uint64_t *set, uint64_t *get);
 
 extern void ShSceneFree(uint64_t p);
@@ -2200,6 +2200,58 @@ SH_API int ShWidgetGetS(uint64_t widget, uint32_t prop, char *out,
     memcpy(out, (void *)(uintptr_t)(block + 12), len);
     out[len] = 0;
     return 1;
+}
+
+/* ---- the three properties it is safe to write ----
+ *
+ * The getters above are read only for a reason, and it still holds: a scene is
+ * corrupted by writing into its tree. These three are the exception because
+ * they are not structure - they are presentation, they are the same three the
+ * game animates itself, and every write goes through the widget class's own
+ * setter (ShPropSetF/U/V resolve the accessor out of the engine's property
+ * table), never through a field offset.
+ *
+ *   SH_P_ALPHA     invisible without touching the tree
+ *   SH_P_VISIBLE   the engine's own show/hide flag
+ *   SH_P_SCALE     zero collapses the layout instead of hiding it
+ *
+ * Anything else - text, image, position, size - is refused: those are the
+ * writes that leave a scene in a state its own code does not expect.
+ *
+ * Game thread only: the setters run engine code on the widget, so a plugin
+ * calls these from ShRegisterFrameCallback or a menu callback, never from its
+ * own worker. */
+static int WritableF(uint32_t prop) { return prop == SH_P_ALPHA; }
+static int WritableU(uint32_t prop) { return prop == SH_P_VISIBLE; }
+/* SCALE only. POSITION was opened for one experiment (compensating the drift
+ * of a scaled layer); the measurement showed the drift does not need
+ * compensating - the minimap is pinned by its bottom-right corner - so the
+ * whitelist goes back to what it was. */
+static int WritableV(uint32_t prop) { return prop == SH_P_SCALE; }
+
+SH_API int ShWidgetSetF(uint64_t widget, uint32_t prop, float v) {
+    if (!Sane(widget) || !WritableF(prop)) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    return ShPropSetF(widget, prop, v);
+}
+
+SH_API int ShWidgetSetU(uint64_t widget, uint32_t prop, uint32_t v) {
+    if (!Sane(widget) || !WritableU(prop)) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    return ShPropSetU(widget, prop, v);
+}
+
+SH_API int ShWidgetSetV(uint64_t widget, uint32_t prop, const float *v,
+                        int n) {
+    if (!Sane(widget) || !v || !WritableV(prop) || n != 3) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    return ShPropSetV(widget, prop, v, n);
 }
 
 /* The engine handle behind one of our own ids, so the two

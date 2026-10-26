@@ -75,6 +75,7 @@ typedef struct {
     int      nopts;
     ShMenuFn fn;
     void    *user;
+    int      disabled;   /* listed and navigable, but not changeable */
 } Item;
 
 typedef struct {
@@ -594,6 +595,10 @@ static void Navigate(void) {
 
     it = &m->items[m->sel];
     r = HoldTick(&g_holdVal, valDown, valDir);
+    /* A disabled row still navigates and still shows its value; the only
+     * thing it does not do is change. Holding the key must not build up a
+     * repeat either, so the tick is consumed and dropped. */
+    if (it->disabled && r) r = -1;
     if (r == 1) {
         if (it->kind == IT_NUMBER) {
             float was = it->num;
@@ -620,7 +625,7 @@ static void Navigate(void) {
         if (it->kind == IT_SUB && it->sub && RowVisible(m, m->sel)) {
             g_current = it->sub;
             HoldReset();
-        } else if (it->kind == IT_TOGGLE) {
+        } else if (it->kind == IT_TOGGLE && !it->disabled) {
             it->value = !it->value;
             Fire(g_current, m->sel, it);
         } else {
@@ -1117,6 +1122,7 @@ void ShMenuCaptureView(ShMenuView *v) {
                      LabelText(rowOwner, it->label));
             ValueText(owner, it, r->value, sizeof(r->value));
             r->selected = (i == m->sel);
+            r->disabled = it->disabled;
             if (r->selected) v->sel = v->rows;
             v->rows++;
         }
@@ -1428,6 +1434,27 @@ SH_API int ShMenuList(uint32_t menu, const char *label,
  * on the row label inside that one menu, so identical labels
  * in different submenus do not collide. No-op on IT_NUMBER
  * rows, whose state only the slider owns. */
+/** Dim a row and stop it changing, without hiding it. */
+SH_API int ShMenuDisable(uint32_t menu, const char *label, int disabled) {
+    Menu *m;
+    int i;
+
+    Lock();
+    m = MenuOf(menu);
+    if (!m || !label) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
+    for (i = 0; i < m->count; i++) {
+        Item *it = &m->items[i];
+        if (strcmp(it->label, label) != 0) continue;
+        it->disabled = disabled ? 1 : 0;
+        Unlock();
+        ShSetError(SH_OK);
+        return 1;
+    }
+    Unlock();
+    ShSetError(SH_ERR_NO_CANDIDATE);
+    return 0;
+}
+
 SH_API int ShMenuSetValue(uint32_t menu, const char *label,
                           int value) {
     Menu *m;
@@ -1448,6 +1475,21 @@ SH_API int ShMenuSetValue(uint32_t menu, const char *label,
         if (it->kind == IT_LIST && it->nopts > 0) {
             /* Same sign rule as ShMenuList: normalize negatives. */
             it->value = ((value % it->nopts) + it->nopts) % it->nopts;
+            Unlock();
+            ShSetError(SH_OK);
+            return 1;
+        }
+        if (it->kind == IT_NUMBER) {
+            float f = (float)value;
+
+            /* A number row is a slider: the caller hands the value it
+             * holds, and the row is moved onto it without firing - the
+             * plugin already has that value, it is the MENU that is out
+             * of date. Clamped the way the slider clamps, so a stale
+             * setting cannot put a row past its bounds. */
+            if (f < it->lo) f = it->lo;
+            if (f > it->hi) f = it->hi;
+            it->num = f;
             Unlock();
             ShSetError(SH_OK);
             return 1;

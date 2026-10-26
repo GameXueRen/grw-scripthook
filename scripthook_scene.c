@@ -97,6 +97,9 @@ static SceneSlot g_s[MAX_SCENES];
 static CRITICAL_SECTION g_slock;
 static volatile LONG g_slockInit = 0;
 static uint8_t *g_stub;
+static volatile LONG g_hookTried;
+static int InstallHook(void);
+static void EnsureHook(void);
 static uint8_t g_thunkOrig[5];
 static volatile uint32_t g_lastStamp;
 static volatile int64_t g_lastRender;
@@ -263,6 +266,16 @@ static void TickAll(void) {
     int64_t dt;
     int i;
 
+    /* The render hook can now be installed by the HUD scene API alone
+     * (EnsureHook), i.e. without any scene ever being allocated - in that
+     * case Init() has never run and g_qpcFreq is still 0. Dividing by it
+     * raised C0000094 (integer divide by zero) on the first frame. */
+    if (!g_qpcFreq) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        g_qpcFreq = f.QuadPart ? f.QuadPart : 1;
+    }
+
     QueryPerformanceCounter(&now);
     dt = g_lastTick ? (now.QuadPart - g_lastTick) * 1000 / g_qpcFreq : TICK_MS;
     g_lastTick = now.QuadPart;
@@ -402,6 +415,7 @@ SH_API int ShGameScenes(char *buf, int n) {
     int i, used = 0, count = 0;
     if (!buf || n < 1) return 0;
     buf[0] = 0;
+    EnsureHook();
     for (i = 0; i < g_nActivePrev; i++) {
         const char *nm = SceneName(g_activePrev[i]);
         int l = (int)strlen(nm);
@@ -424,6 +438,178 @@ static volatile LONG g_gameHudVisible = 1;
 SH_API int ShGameHudShow(int visible) {
     InterlockedExchange(&g_gameHudVisible, visible ? 1 : 0);
     return 1;
+}
+
+/* ---- one HUD scene at a time -------------------------------------------
+ *
+ * ShGameHudShow is all or nothing: every HUD_* layer goes at once. What a
+ * settings screen wants is a switch per element - minimap here, crosshair
+ * there - so the table below overrides the global answer for a named scene.
+ *
+ * A name that is not in the table follows ShGameHudShow, which is what
+ * keeps this backwards compatible: with an empty table the render hook
+ * behaves exactly as before.
+ *
+ * The lookup is a handful of strcmp against a table that is almost always
+ * empty, once per HUD scene per frame; SceneName already caches the string,
+ * so nothing here allocates or touches the engine. */
+
+/* 192, not 64: a settings page that lists every HUD layer the game has (the
+ * plugin's roster is 85 rows) must be able to hold the player's whole
+ * selection at once. A hidden layer costs one entry and a shown one costs
+ * none - the override is removed instead of being written as a 1 - so this is
+ * the ceiling on "how many layers can be hidden together", and 64 was low
+ * enough that a full sweep silently stopped applying after the table filled.
+ * 192 x 52 bytes is 10 KB of .bss, which is not worth a second thought. */
+#define HUD_OVR_MAX  192
+#define HUD_OVR_NAME 48
+
+typedef struct {
+    char name[HUD_OVR_NAME];
+    int  visible;
+} HudOvr;
+
+static HudOvr g_hudOvr[HUD_OVR_MAX];
+static volatile LONG g_nHudOvr;
+
+/* -1: no entry for this name, 0: hidden, 1: shown.
+ * The render hook asks this for every scene it sees, so the common case
+ * (nothing has been overridden yet) must return without taking the lock. */
+static int HudSceneOverride(const char *name) {
+    int i, n;
+    if (g_nHudOvr <= 0) return -1;
+    SLock();
+    n = g_nHudOvr;
+    for (i = 0; i < n; i++)
+        if (strcmp(g_hudOvr[i].name, name) == 0) {
+            int v = g_hudOvr[i].visible;
+            SUnlock();
+            return v;
+        }
+    SUnlock();
+    return -1;
+}
+
+static int HudSceneVisible(const char *name) {
+    int ovr = HudSceneOverride(name);
+    return ovr < 0 ? g_gameHudVisible : ovr;
+}
+
+/* The render hook used to be installed only when a plugin built a scene of
+ * its own (CreateJob), which meant that on a plain install nothing was
+ * watching the game's scenes at all: ShGameScenes answered with an empty
+ * list and ShGameHudShow was a no-op. Anything that wants to read, or
+ * suppress, a game scene has to ask for it. Idempotent and cheap. */
+static void EnsureHook(void) {
+    if (g_stub) return;
+    if (InterlockedCompareExchange(&g_hookTried, 1, 0) != 0) return;
+    if (InstallHook())
+        Log("scene: render hook installed (game scenes observable)");
+    else
+        Log("scene: render hook install failed - HUD control will not work");
+}
+
+SH_API int ShGameHudSceneShow(const char *name, int visible) {
+    int i, n;
+    if (!name || !name[0] || strlen(name) >= HUD_OVR_NAME) return 0;
+    EnsureHook();
+    SLock();
+    n = g_nHudOvr;
+    for (i = 0; i < n; i++)
+        if (strcmp(g_hudOvr[i].name, name) == 0) {
+            if (visible == SH_HUD_INHERIT) {
+                memmove(&g_hudOvr[i], &g_hudOvr[i + 1],
+                        (size_t)(n - i - 1) * sizeof(HudOvr));
+                g_nHudOvr = n - 1;
+            } else {
+                g_hudOvr[i].visible = visible ? 1 : 0;
+            }
+            SUnlock();
+            return 1;
+        }
+    if (visible != SH_HUD_INHERIT && n < HUD_OVR_MAX) {
+        strcpy(g_hudOvr[n].name, name);
+        g_hudOvr[n].visible = visible ? 1 : 0;
+        g_nHudOvr = n + 1;
+        SUnlock();
+        return 1;
+    }
+    SUnlock();
+    return 0;
+}
+
+SH_API int ShGameHudSceneVisible(const char *name) {
+    if (!name || !name[0]) return 0;
+    return HudSceneVisible(name);
+}
+
+/* Every HUD_* scene seen since the world came up, in the order it first drew.
+ *
+ * ShGameScenes only answers for the last frame, and a HUD layer is not always
+ * drawn (the drone layer exists while you walk), so a settings page built from
+ * that list would be missing rows. This one accumulates. The render thread is
+ * the only writer; the count is published after the name is copied, so a
+ * reader that sees n never reads a half written entry. */
+#define HUD_SEEN_MAX 128
+static char g_hudSeen[HUD_SEEN_MAX][HUD_OVR_NAME];
+static volatile LONG g_nHudSeen;
+
+/* Not every HUD layer carries the HUD_ prefix - the crosshair scene is just
+ * "CrossHair" - so a prefix test alone silently loses rows. MENU_* belongs to
+ * the front end and is deliberately left alone. */
+static int IsHudLayer(const char *name) {
+    if (!name || !name[0]) return 0;
+    if (strncmp(name, "HUD_", 4) == 0) return 1;
+    if (strcmp(name, "CrossHair") == 0) return 1;
+    return 0;
+}
+
+static void NoteHudScene(const char *name) {
+    int i, n;
+    if (!IsHudLayer(name)) return;
+
+    /* This runs on the render thread but the game renders from more than one
+     * of them. Publishing the count before the name had been copied let a
+     * second thread see a half written (empty) slot, decide the layer was new
+     * and append it again - the table filled up with duplicates within a few
+     * minutes and later layers (HUD_Minimap) never got in. */
+    SLock();
+    n = g_nHudSeen;
+    for (i = 0; i < n; i++)
+        if (strcmp(g_hudSeen[i], name) == 0) { SUnlock(); return; }
+    if (n < HUD_SEEN_MAX) {
+        strncpy(g_hudSeen[n], name, HUD_OVR_NAME - 1);
+        g_hudSeen[n][HUD_OVR_NAME - 1] = 0;
+        g_nHudSeen = n + 1;
+    }
+    SUnlock();
+}
+
+/* The HUD_* scenes seen this session, comma separated; returns the count.
+ * This is the list a settings page is built from. */
+SH_API int ShGameHudScenes(char *buf, int n) {
+    int i, used = 0, count = 0;
+    if (!buf || n < 1) return 0;
+    buf[0] = 0;
+    EnsureHook();
+    for (i = 0; i < g_nHudSeen; i++) {
+        const char *nm = g_hudSeen[i];
+        int l, j, dup = 0;
+        if (!nm[0]) continue;
+        /* The table is meant to be unique already; the check keeps a list
+         * built by an older build from showing the same row many times. */
+        for (j = 0; j < i; j++)
+            if (g_hudSeen[j][0] && strcmp(g_hudSeen[j], nm) == 0) { dup = 1; break; }
+        if (dup) continue;
+        l = (int)strlen(nm);
+        if (!l || used + l + 2 > n) break;
+        if (used) buf[used++] = ',';
+        memcpy(buf + used, nm, (size_t)l);
+        used += l;
+        buf[used] = 0;
+        count++;
+    }
+    return count;
 }
 
 static void PassEnded(uint64_t last) {
@@ -464,12 +650,24 @@ static int32_t *__attribute__((ms_abi)) RenderHook(uint64_t scene,
     /* under the game: before each pass's first scene */
     if (passStart && renderer) RenderOurs(renderer, 1);
     /* Preserve scene tracking, but suppress the game's HUD layers on
-     * request; framework and menu scenes still draw (ShGameHudShow). */
-    if (!g_gameHudVisible && strncmp(SceneName(scene), "HUD_", 4) == 0) {
-        if (res) *res = 0;
-        r = res;
-    } else
-    r = ((Scene3)F_SCENE_RENDER)(scene, res, renderer);
+     * request; framework and menu scenes still draw (ShGameHudShow, and
+     * per-scene overrides through ShGameHudSceneShow). */
+    {
+        const char *nm = SceneName(scene);
+        int ovr = nm ? HudSceneOverride(nm) : -1;
+
+        /* An explicit override wins for any name, prefix or not; without one
+         * only the game's HUD layers are touched (ShGameHudShow). */
+        if (nm && (ovr >= 0 || IsHudLayer(nm))) {
+            NoteHudScene(nm);
+            if (ovr == 0 || (ovr < 0 && !g_gameHudVisible)) {
+                if (res) *res = 0;
+                r = res;
+            } else
+                r = ((Scene3)F_SCENE_RENDER)(scene, res, renderer);
+        } else
+            r = ((Scene3)F_SCENE_RENDER)(scene, res, renderer);
+    }
     g_prevCall = scene;
     /* over the game: after each pass's last scene */
     if (renderer) {
@@ -490,9 +688,17 @@ static int InstallHook(void) {
     int o = 0;
 
     if (g_stub) return 1;
-    if (!ShReadableAddr(RENDER_THUNK, 5) || t[0] != 0xE9) return 0;
+    if (!ShReadableAddr(RENDER_THUNK, 5) || t[0] != 0xE9) {
+        Log("scene: render thunk %llx is not a jmp - pins are stale",
+            (unsigned long long)RENDER_THUNK);
+        return 0;
+    }
     cur = (int64_t)RENDER_THUNK + 5 + *(int32_t *)(t + 1);
-    if ((uint64_t)cur != F_SCENE_RENDER) return 0;
+    if ((uint64_t)cur != F_SCENE_RENDER) {
+        Log("scene: render thunk jumps to %llx, expected %llx - pins are stale",
+            (unsigned long long)cur, (unsigned long long)F_SCENE_RENDER);
+        return 0;
+    }
 
     g_stub = (uint8_t *)ShAllocNear(RENDER_THUNK);
     if (!g_stub) return 0;
@@ -650,7 +856,7 @@ static void Init(void) {
     LARGE_INTEGER f;
     if (!g_qpcFreq) {
         QueryPerformanceFrequency(&f);
-        g_qpcFreq = f.QuadPart;
+        g_qpcFreq = f.QuadPart ? f.QuadPart : 1;   /* never leave it 0: TickAll divides */
     }
 }
 

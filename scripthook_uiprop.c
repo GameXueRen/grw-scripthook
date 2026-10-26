@@ -32,24 +32,53 @@ static int  g_resolved;
 static int  g_sections;
 static uint64_t g_bytes;
 
+/* ---- vtable -> class cache ---------------------------------------------
+ *
+ * Every property call goes Find() -> ShPropClassOf() -> RttiName(), and RttiName
+ * walks vtable-8 -> locator -> type descriptor, validating each pointer with
+ * VirtualQuery. Measured 2026-10-23: 10-30us per call, which is what made a
+ * scene-tree walk cost tens of milliseconds (MoreHudControl's icon pass spent its
+ * whole 40ms budget on ~1100 widgets).
+ *
+ * The answer only depends on the vtable, and a vtable lives in the loaded image
+ * for the life of the process, so it can be cached by vtable alone. Direct
+ * mapped: a collision overwrites, which costs a recompute and nothing else.
+ * Game thread only, like every other call in this file - no lock, by design.
+ */
+#define VT_CACHE 1024
+typedef struct { uint64_t vt; int cls; } VtSlot;
+static VtSlot g_vt[VT_CACHE];
+
+static int ClassIndexOfVt(uint64_t vt);
+
+/* ---- (class,id) -> property bucket -------------------------------------
+ * Find() used to scan the whole property table twice per call. The table is
+ * built once by ShPropResolve(), so the buckets are built there too.
+ */
+#define PROP_BUCKETS 512
+static int g_bucket[PROP_BUCKETS];    /* first index + 1, 0 = empty */
+static int g_next[MAX_PROPS];         /* next index + 1, 0 = end */
+static int g_widgetCls = -1;
+
 static uint64_t RQ(uint64_t a) {
     uint64_t v = 0;
     if (ShReadableAddr(a, 8)) memcpy(&v, (void *)(uintptr_t)a, 8);
     return v;
 }
 
-/* The image this build actually loaded - not the one the RVAs were
- * pinned against. The 2026-09-23 title update replaced GRW.exe with a
- * rebuild whose SizeOfImage is 0x185BA000, where the old bound here
- * still said 0x18B09000: an address up to 5 MB past the end of the
- * image therefore still read as "inside" it, and a property table
- * walk that followed a stale pointer there would have dereferenced
- * whatever is mapped next instead of refusing. loader.c's
- * kKnownBuilds carries both sizes. image.h's ShInImage reads
- * SizeOfImage out of the PE header at run time and is the better test
- * if this is ever touched again. */
+/* The image this build actually loaded - not the one the RVAs were pinned
+ * against.
+ *
+ * This used to hardcode 0x185BA000, the SizeOfImage of the 2026-09-23 rebuild.
+ * That is wrong on every other build, and wrong in the expensive direction: on
+ * the older 0x18B09000 image the last 5 MB still read as "outside", so a
+ * property getter/setter that really lives there was refused and the property
+ * silently read as unsupported. That is exactly the shape of "SH_P_SCALE
+ * answers nothing on this class" a plugin sees. image.h's ShInImage reads
+ * SizeOfImage out of the PE header at run time, which is the only answer that
+ * survives a title update. */
 static int InImage(uint64_t a) {
-    return a >= SH_IMG(0) && a < SH_IMG(0x185BA000);
+    return ShInImage(a);
 }
 
 /* RTTI: vtable, then object locator, then type descriptor,
@@ -77,16 +106,14 @@ int ShPropRttiOf(uint64_t obj, char *out, int n) {
     return 1;
 }
 
-/* ".?AVLabelWidget@phoenix@@" to "LabelWidget" */
+/* ".?AVLabelWidget@phoenix@@" to "LabelWidget".
+ * Goes through the vtable cache: the name is resolved once per vtable. */
 int ShPropClassOf(uint64_t handle, char *out, int n) {
-    const char *nm = RttiName(RQ(handle));
-    const char *e;
-    if (!nm || strncmp(nm, ".?AV", 4) != 0) return 0;
-    nm += 4;
-    e = strchr(nm, '@');
-    if (!e || e - nm >= n) return 0;
-    memcpy(out, nm, e - nm);
-    out[e - nm] = 0;
+    int ci = ClassIndexOfVt(RQ(handle));
+
+    if (ci < 0 || ci >= g_nCls) return 0;
+    strncpy(out, g_cls[ci], n - 1);
+    out[n - 1] = 0;
     return 1;
 }
 
@@ -98,6 +125,46 @@ static int ClassIndex(const char *name) {
     strncpy(g_cls[g_nCls], name, NAME_LEN - 1);
     g_cls[g_nCls][NAME_LEN - 1] = 0;
     return g_nCls++;
+}
+
+/* The class index behind a vtable, from the cache when it has been seen. */
+static int ClassIndexOfVt(uint64_t vt) {
+    VtSlot *slot;
+    const char *nm, *e;
+    char cls[NAME_LEN];
+    int ci;
+
+    if (!vt) return -1;
+    slot = &g_vt[(unsigned)((vt >> 4) & (VT_CACHE - 1))];
+    if (slot->vt == vt) return slot->cls;
+    nm = RttiName(vt);
+    if (!nm || strncmp(nm, ".?AV", 4) != 0) return -1;
+    nm += 4;
+    e = strchr(nm, '@');
+    if (!e || e == nm || e - nm >= NAME_LEN) return -1;
+    memcpy(cls, nm, (size_t)(e - nm));
+    cls[e - nm] = 0;
+    ci = ClassIndex(cls);
+    if (ci < 0) return -1;
+    slot->vt = vt;
+    slot->cls = ci;
+    return ci;
+}
+
+static unsigned PropHash(int cls, uint32_t id) {
+    return ((id * 2654435761u) ^ ((unsigned)cls * 40503u)) & (PROP_BUCKETS - 1);
+}
+
+static void BuildPropHash(void) {
+    int i;
+
+    memset(g_bucket, 0, sizeof(g_bucket));
+    for (i = 0; i < g_nProps; i++) {
+        unsigned b = PropHash(g_props[i].cls, g_props[i].id);
+        g_next[i] = g_bucket[b];
+        g_bucket[b] = i + 1;
+    }
+    g_widgetCls = ClassIndex("Widget");
 }
 
 /* .?AV?$ValuePropertyAccessor@VWidget@phoenix@@M@phoenix@@
@@ -195,21 +262,22 @@ int ShPropResolve(void) {
             done += (got > 0x18) ? got - 0x18 : got;
         }
     }
+    if (g_nProps) BuildPropHash();
     return g_nProps > 0;
 }
 
 /* The widget's own class first, then Widget. */
 static const Prop *Find(uint64_t handle, uint32_t id) {
-    char cls[NAME_LEN];
     int ci, wi, i;
 
     if (!ShPropResolve()) return NULL;
-    if (!ShPropClassOf(handle, cls, sizeof(cls))) return NULL;
-    ci = ClassIndex(cls);
-    wi = ClassIndex("Widget");
-    for (i = 0; i < g_nProps; i++)
+    ci = ClassIndexOfVt(RQ(handle));
+    if (ci < 0) return NULL;
+    for (i = g_bucket[PropHash(ci, id)] - 1; i >= 0; i = g_next[i] - 1)
         if (g_props[i].id == id && g_props[i].cls == ci) return &g_props[i];
-    for (i = 0; i < g_nProps; i++)
+    wi = g_widgetCls;
+    if (wi < 0 || wi == ci) return NULL;
+    for (i = g_bucket[PropHash(wi, id)] - 1; i >= 0; i = g_next[i] - 1)
         if (g_props[i].id == id && g_props[i].cls == wi) return &g_props[i];
     return NULL;
 }
@@ -219,7 +287,7 @@ int ShPropType(uint64_t handle, uint32_t id) {
     return p ? p->type : 0;
 }
 
-int ShPropCount(void) {
+SH_API int ShPropCount(void) {
     ShPropResolve();
     return g_nProps;
 }
@@ -229,13 +297,15 @@ void ShPropStats(int *sections, uint64_t *bytes, int *records) {
     *sections = g_sections; *bytes = g_bytes; *records = g_nProps;
 }
 
-int ShPropAt(int i, char *cls, int n, uint32_t *id, int *type,
-             uint64_t *set, uint64_t *get) {
+SH_API int ShPropAt(int i, char *cls, int n, uint32_t *id, int *type,
+                    uint64_t *set, uint64_t *get) {
+    if (!cls || !id || !type || n < 2) return 0;
     if (!ShPropResolve() || i < 0 || i >= g_nProps) return 0;
     strncpy(cls, g_cls[g_props[i].cls], n - 1);
     cls[n - 1] = 0;
     *id = g_props[i].id; *type = g_props[i].type;
-    *set = g_props[i].set; *get = g_props[i].get;
+    if (set) *set = g_props[i].set;
+    if (get) *get = g_props[i].get;
     return 1;
 }
 
