@@ -306,10 +306,37 @@ static int InList(const uint64_t *l, int n, uint64_t v) {
     return 0;
 }
 
-/* the game scenes rendered last frame: the UI state */
+/* the game scenes rendered last frame: the UI state
+ *
+ * Two buffers and a sequence number, because the writer (the render hook,
+ * once per frame) and the readers (any thread: the chat thread's 15ms
+ * poll, a plugin's own worker, the menu's callback thread) do not share a
+ * lock. Plain double buffering is not enough: the publish of the count and
+ * the copy of the array are two separate stores, so a reader could see the
+ * new count over a half-copied array - `ShGameSceneAt(i)` then answers with
+ * a scene handle belonging to the *previous* frame, which is dead, and every
+ * caller treats a dead handle as "nothing there".
+ *
+ * The sequence makes the copy and the publish one thing:
+ *   writer  seq++ (odd)  copy  publish count  seq++ (even)
+ *   reader  seq  n+element  seq   retry if either seq was odd or they differ
+ * The cost is two interlocked increments a frame for the writer and two
+ * interlocked reads per element for the reader; the reader's retry path is
+ * bounded and, when it gives up, it answers "no scene" rather than a handle
+ * from a frame nobody can reason about. */
 #define MAX_ACTIVE 64
 static uint64_t g_activeCur[MAX_ACTIVE], g_activePrev[MAX_ACTIVE];
-static int g_nActiveCur, g_nActivePrev;
+static int g_nActiveCur;
+static volatile LONG g_nActivePrev;   /* published by the seqlock below */
+static volatile LONG g_sceneSeq;
+
+/* Writer side, called once per frame by the render hook. */
+static void PublishActive(void) {
+    InterlockedIncrement(&g_sceneSeq);            /* odd: copy in progress */
+    memcpy(g_activePrev, g_activeCur, sizeof(g_activePrev));
+    InterlockedExchange(&g_nActivePrev, (LONG)g_nActiveCur);
+    InterlockedIncrement(&g_sceneSeq);            /* even: stable again    */
+}
 
 static void NoteActive(uint64_t scene) {
     if (g_nActiveCur < MAX_ACTIVE && !InList(g_activeCur, g_nActiveCur, scene))
@@ -377,23 +404,63 @@ static const char *SceneName(uint64_t scene) {
 }
 
 SH_API int ShGameSceneActive(const char *name) {
-    int i;
+    int i, n;
     if (!name) return 0;
-    for (i = 0; i < g_nActivePrev; i++)
-        if (strcmp(SceneName(g_activePrev[i]), name) == 0) return 1;
+    n = ShGameSceneCount();
+    for (i = 0; i < n; i++) {
+        uint64_t sc = ShGameSceneAt(i);
+
+        if (sc && strcmp(SceneName(sc), name) == 0) return 1;
+    }
     return 0;
 }
 
 /* The scenes the game drew last frame, as engine handles.
  * Everything under one is reachable with the ShWidget
  * calls, so a plugin can read the game's own UI. */
+/* Frames the render hook has counted. Internal: the state cache keys on it,
+ * so one frame is one read of the state machine however many threads ask.
+ * Not exported on purpose - a plugin has no business reasoning about frames,
+ * and adding an export costs an API version. */
+uint32_t ShSceneFrame(void) {
+    return (uint32_t)InterlockedCompareExchange(&g_frame, 0, 0);
+}
+
+/* The name of a scene, as the pointer the name cache already holds - no
+ * copy, no buffer. Internal (not in proxy.def): the UI-state table hashes
+ * this, and asking "is HUD_Drone up" fourteen times used to walk the same
+ * scene list fourteen times, each time comparing strings. */
+const char *ShSceneNameRef(uint64_t scene) {
+    return SceneName(scene);
+}
+
 SH_API int ShGameSceneCount(void) {
-    return g_nActivePrev;
+    int n = (int)InterlockedCompareExchange(&g_nActivePrev, 0, 0);
+
+    /* The count and the array are published together; a reader that lands
+     * mid-copy sees an odd sequence and is answered 0 by ShGameSceneAt, so
+     * the count on its own is never a promise about the elements. */
+    return n;
 }
 
 SH_API uint64_t ShGameSceneAt(int i) {
-    if (i < 0 || i >= g_nActivePrev) return 0;
-    return g_activePrev[i];
+    uint64_t v;
+    int tries, seq0, seq1, n;
+
+    if (i < 0 || i >= MAX_ACTIVE) return 0;
+    for (tries = 0; tries < 4; tries++) {
+        seq0 = (int)InterlockedCompareExchange(&g_sceneSeq, 0, 0);
+        if (seq0 & 1) { YieldProcessor(); continue; }   /* copy in flight */
+        n = (int)InterlockedCompareExchange(&g_nActivePrev, 0, 0);
+        if (i >= n) return 0;
+        v = g_activePrev[i];
+        seq1 = (int)InterlockedCompareExchange(&g_sceneSeq, 0, 0);
+        if (seq0 == seq1) return v;
+        YieldProcessor();
+    }
+    /* Four passes and the writer is still copying: a handle read out of a
+     * frame nobody can reason about is worse than "no scene here". */
+    return 0;
 }
 
 SH_API int ShGameSceneName(uint64_t scene, char *buf, int n) {
@@ -411,14 +478,79 @@ SH_API uint64_t ShSceneRoot(uint64_t scene) {
     return priv ? RQ(priv + SP_ROOT) : 0;
 }
 
+/* Is this handle the root of a scene that is live right now?
+ *
+ * A scene root has no parent - that is what "root" means - so the framework's
+ * write-liveness test (parent != 0) refuses it, and one plugin writes the
+ * minimap's opacity exactly there. Answering "yes, and it is a root" is what
+ * lets that write through while still refusing a widget whose tree detached.
+ * Internal: not exported, so the API version does not move.
+ *
+ * Two tables, because there are two kinds of scene and the first version of
+ * this only looked at one of them:
+ *
+ *  - g_s[] holds the scenes the framework itself created through
+ *    ShSceneCreate (the CreateJob path sets live and rootH). That is where
+ *    the overlay scenes live.
+ *  - The scenes the GAME creates - every HUD_* layer among them - never enter
+ *    g_s[]; they only exist in the active list the render hook fills. Asking
+ *    the wrong one made ShSceneIsRoot answer 0 for HUD_Minimap's root every
+ *    time, which is why the opacity write stayed refused on 2026-10-27 even
+ *    after this check was added.
+ *
+ * The second loop resolves the root exactly the way a plugin does it
+ * (ShSceneRoot is RQ(RQ(scene + 8) + SP_ROOT)), so the handle a plugin got
+ * from ShSceneRoot is the handle compared here - two different chains would
+ * be the same mistake in a new place. */
+/* A scene's root, resolved without the readability query.
+ *
+ * ShSceneRoot (the exported one) guards both hops with ShReadableAddr, which
+ * costs a kernel transition - measured 2026-10-27, about 8us here. This
+ * check runs on every write to a root, about fifty times a second, and it
+ * resolves fourteen scenes per ask: 28 transitions, 10us on top of a 3us
+ * write. Two reads inside objects the caller has already validated do not
+ * need the query, and __try answers 0 on the one frame a world is torn down. */
+static uint64_t RootOf(uint64_t scene) {
+    uint64_t priv = 0, root = 0;
+
+    if (!scene) return 0;
+    __try {
+        memcpy(&priv, (void *)(uintptr_t)(scene + 8), 8);
+        if (priv) memcpy(&root, (void *)(uintptr_t)(priv + SP_ROOT), 8);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        root = 0;
+    }
+    return root;
+}
+
+int ShSceneIsRoot(uint64_t handle) {
+    int i, n;
+
+    if (!handle) return 0;
+    for (i = 0; i < MAX_SCENES; i++)
+        if (g_s[i].live && g_s[i].rootH == handle) return 1;
+    n = ShGameSceneCount();
+    for (i = 0; i < n; i++) {
+        uint64_t sc = ShGameSceneAt(i);
+
+        if (sc && RootOf(sc) == handle) return 1;
+    }
+    return 0;
+}
+
 SH_API int ShGameScenes(char *buf, int n) {
     int i, used = 0, count = 0;
     if (!buf || n < 1) return 0;
     buf[0] = 0;
     EnsureHook();
-    for (i = 0; i < g_nActivePrev; i++) {
-        const char *nm = SceneName(g_activePrev[i]);
-        int l = (int)strlen(nm);
+    for (i = 0; i < ShGameSceneCount(); i++) {
+        uint64_t sc = ShGameSceneAt(i);
+        const char *nm;
+        int l;
+
+        if (!sc) continue;
+        nm = SceneName(sc);
+        l = (int)strlen(nm);
         if (!l) continue;
         if (used + l + 2 > n) break;
         if (used) buf[used++] = ',';
@@ -634,8 +766,7 @@ static int32_t *__attribute__((ms_abi)) RenderHook(uint64_t scene,
         memcpy(g_ends, g_endsNext, sizeof(g_ends));
         g_nEnds = g_nEndsNext;
         g_nEndsNext = 0;
-        memcpy(g_activePrev, g_activeCur, sizeof(g_activePrev));
-        g_nActivePrev = g_nActiveCur;
+        PublishActive();
         g_nActiveCur = 0;
         g_doneThisFrame = 0;
         InterlockedIncrement(&g_frame);
