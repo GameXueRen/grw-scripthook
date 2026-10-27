@@ -160,3 +160,103 @@ int ShDecideTake(void) {
     return (int)((uint64_t)ticks * 1000000000ull /
                  (uint64_t)g_freq.QuadPart / 1000ull);
 }
+
+/* ---- per-entry API counters --------------------------------------------
+ *
+ * Off unless [loader] api_stats=1. Deliberately not a TSC-based sampler:
+ * what these answer is "did this fix lower what a caller waited for", and
+ * that has to include the time spent inside a lock or a job wait, which is
+ * where the interesting costs are. Two QPC reads per instrumented call is
+ * fine at the rates involved (the hottest entry point measured 66 calls a
+ * second, not 66 thousand).
+ */
+volatile LONG ShApiStatsOn = 0;
+
+typedef struct {
+    const char     *name;
+    volatile LONG64 calls;
+    volatile LONG64 usTotal;   /* microseconds, summed               */
+    volatile LONG   usMax;     /* the worst single call in the window */
+} ApiStat;
+
+static ApiStat g_api[SH_API_MAX] = {
+    { "state" },
+    { "player" },
+    { "player.scan" },
+    { "widget.set" },
+    { "menu.status" },
+    { "ui.get" },
+    { "toast" },
+    { "spawn" },
+    { "state.hit" },
+    { "wset.rej" },
+    { "state.hash" },
+    { "state.ui" }
+};
+
+void ShApiNote(int slot, uint64_t t0) {
+    ApiStat *s;
+    int us, max;
+
+    if (slot < 0 || slot >= SH_API_MAX || !t0) return;
+    s = &g_api[slot];
+    us = ShTickUsSince(t0);
+    if (us < 0) us = 0;
+    InterlockedIncrement64(&s->calls);
+    InterlockedExchangeAdd64(&s->usTotal, (LONG64)us);
+    /* A plain compare-then-store: two threads can both see the old max and
+     * both write, and the larger one wins by luck of ordering. Worst case
+     * the window reports 1us low, which is not worth a CAS loop on a path
+     * that is measured. */
+    max = (int)InterlockedCompareExchange(&s->usMax, 0, 0);
+    if (us > max) InterlockedExchange(&s->usMax, (LONG)us);
+}
+
+/* The frame counter the state cache keys on, printed as a delta so the line
+ * says how many cache keys the window contained. frames/5s is the most
+ * ShGetGameState hits the cache can possibly give: if the rate of state
+ * calls is far above it and state.hit is not, the key is too fine. */
+extern uint32_t ShSceneFrame(void);
+static uint32_t g_drainFrame;
+
+int ShApiDrain(char *buf, int n, DWORD ms) {
+    int i, w = 0;
+    uint32_t f;
+
+    if (!buf || n < 8) return 0;
+    buf[0] = 0;
+    if (ms < 1) ms = 1;
+
+    f = ShSceneFrame();
+    if (g_drainFrame) {
+        /* No trailing ", " - the slot loop below adds the separator itself,
+         * and a prefix that already ends in one produced "frames +288, , state". */
+        w = snprintf(buf, (size_t)n, "frames +%u", (unsigned)(f - g_drainFrame));
+        if (w < 0) w = 0;
+    }
+    g_drainFrame = f;
+    for (i = 0; i < SH_API_MAX; i++) {
+        ApiStat *s = &g_api[i];
+        LONG64 calls = InterlockedExchangeAdd64(&s->calls, 0);
+        LONG64 total;
+        int max, room;
+
+        if (calls <= 0) continue;
+        /* Taken back, not reset to zero: a call that lands between the read
+         * and the subtraction is counted in the next window. */
+        InterlockedExchangeAdd64(&s->calls, -calls);
+        total = InterlockedExchangeAdd64(&s->usTotal, 0);
+        if (total > 0) InterlockedExchangeAdd64(&s->usTotal, -total);
+        if (total < 0) total = 0;
+        max = (int)InterlockedCompareExchange(&s->usMax, 0, 0);
+        InterlockedExchange(&s->usMax, 0);
+
+        room = n - w;
+        if (room < 24) break;
+        w += snprintf(buf + w, (size_t)room, "%s%s %lld/s %.1f/%dus",
+                      w ? ", " : "", s->name,
+                      (long long)(calls * 1000 / (LONG64)ms),
+                      calls ? (double)total / (double)calls : 0.0, max);
+    }
+    return w;
+}

@@ -185,6 +185,11 @@ static volatile LONG g_drawers = 0;
  * disabled it costs one branch per frame and nothing else. */
 static int g_leakProbe = 0;
 
+/* [loader] api_stats: the per-entry API counters (scripthook_tick.c) ride on
+ * the same 5s heartbeat. Off by default - when off, an instrumented entry
+ * point pays one branch and this file pays one branch per frame. */
+static int g_apiStats = 0;
+
 // Bold CJK font used for the chat UI (input text, composition, hints
 // and the candidate list).  Loaded next to the default font; falls back
 // to the normal font when no bold variant exists.
@@ -2570,6 +2575,9 @@ static HRESULT STDMETHODCALLTYPE PresentBody(IDXGISwapChain* pSwap, UINT sync,
                 ShDrawSetVtbl(&g_drawVtbl);
                 g_leakProbe = ShConfigGetBool("loader", "leak_probe", 0)
                             ? 1 : 0;
+                g_apiStats = ShConfigGetBool("loader", "api_stats", 0)
+                           ? 1 : 0;
+                InterlockedExchange(&ShApiStatsOn, g_apiStats);
                 InterlockedExchange(&g_ready, 1);
                 retryAt = 0;
                 OvlLogFloor("imgui ready: hwnd=%llx device=%llx font=%p",
@@ -2578,6 +2586,8 @@ static HRESULT STDMETHODCALLTYPE PresentBody(IDXGISwapChain* pSwap, UINT sync,
                        (void*)ImGui::GetFont());
                 OvlLog("leak probe %s ([loader] leak_probe)",
                        g_leakProbe ? "on" : "off");
+                OvlLog("api counters %s ([loader] api_stats)",
+                       g_apiStats ? "on" : "off");
                 MenuScaleLoadConfig();
             }
             else
@@ -2744,6 +2754,18 @@ static HRESULT STDMETHODCALLTYPE PresentBody(IDXGISwapChain* pSwap, UINT sync,
     // pays a single branch per frame.  When on, it runs on the render
     // thread so a long session shows whether private memory, UI
     // widgets/zombies/textures or scene slots grow.
+    if (g_ready && g_apiStats)
+    {
+        static DWORD apiAt = GetTickCount();
+        DWORD now = GetTickCount();
+        if ((int)(now - apiAt) > 5000)
+        {
+            char line[512];
+            int wrote = ShApiDrain(line, (int)sizeof(line), now - apiAt);
+            apiAt = now;
+            if (wrote) OvlLog("api: %s", line);
+        }
+    }
     if (g_ready && g_leakProbe)
     {
         static DWORD leakAt = GetTickCount();
