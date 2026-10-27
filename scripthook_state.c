@@ -10,6 +10,7 @@
 #include "scripthook.h"
 #include "scripthook_tick.h"
 #include "image.h"
+#include "log.h"
 
 /* FUN_146E02C00 returns *(DAT_144B87978 + 0x20), the
  * GR_GameFlow machine. Current state is machine+0x260.
@@ -60,25 +61,45 @@ static int Sane(uint64_t p) {
     return p >= 0x10000ULL && p < 0x800000000000ULL;
 }
 
-/* The engine puts these objects high, well above the
- * heap window ShReadableAddr allows, so query directly.
- */
-static int Readable(uint64_t addr, size_t len) {
-    MEMORY_BASIC_INFORMATION mbi;
-    if (!Sane(addr)) return 0;
-    if (!VirtualQuery((void *)(uintptr_t)addr, &mbi, sizeof(mbi)))
-        return 0;
-    if (mbi.State != MEM_COMMIT) return 0;
-    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
-    return (uint64_t)(uintptr_t)mbi.BaseAddress + mbi.RegionSize
-           >= addr + len;
-}
-
+/* Reads that tolerate a bad address, without asking the kernel first.
+ *
+ * This file used to put VirtualQuery in front of every read, one per hop of a
+ * pointer chain. Measured 2026-10-27: VirtualQuery costs about 8us in this
+ * process, the state read made seven of them, and that was 70us of the 25us
+ * a call the framework had left (and 190-280us before the descriptor cache).
+ * What the query was buying - "do not fault on a freed or unmapped page" - is
+ * what __try gives for nothing when no fault happens, and the callers check
+ * the pointers they get back anyway (Sane, the owner field, ShInImage).
+ *
+ * A faulting read here is not an error path worth optimising: it happens on
+ * the frame a world is torn down and answers 0, which is what the old code
+ * did too. */
 static uint64_t ReadQ(uint64_t addr) {
     uint64_t v = 0;
-    if (!Readable(addr, 8)) return 0;
-    memcpy(&v, (void *)(uintptr_t)addr, 8);
+
+    if (!addr) return 0;
+    __try {
+        memcpy(&v, (void *)(uintptr_t)addr, 8);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        v = 0;
+    }
     return v;
+}
+
+/* Same, 4 bytes, and tells the caller whether it got them: the descriptor's
+ * hash is the one read where "0" is also a legal value. */
+static int ReadD(uint64_t addr, uint32_t *out) {
+    uint32_t v = 0;
+    int ok = 1;
+
+    if (!addr) return 0;
+    __try {
+        memcpy(&v, (void *)(uintptr_t)addr, 4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = 0;
+    }
+    if (ok && out) *out = v;
+    return ok;
 }
 
 /* Set once, when the flow machine has been found and reported. Interlocked
@@ -89,10 +110,10 @@ static volatile LONG g_flowNoted;
 uint64_t ShGetStateMachine(void) {
     uint64_t holder, m;
 
-    if (!Readable(GAMEFLOW_HOLDER, 8)) return 0;
+    /* GAMEFLOW_HOLDER is a fixed address in the game image, mapped for the
+     * life of the process; the two hops after it are checked by Sane. */
     holder = ReadQ(GAMEFLOW_HOLDER);
     if (!Sane(holder)) return 0;
-    if (!Readable(holder + OFF_HOLDER_FLOW, 8)) return 0;
     m = ReadQ(holder + OFF_HOLDER_FLOW);
     if (!Sane(m)) return 0;
 
@@ -113,27 +134,121 @@ uint64_t ShGetStateMachine(void) {
 static uint64_t CurrentState(void) {
     uint64_t m = ShGetStateMachine(), s;
 
-    if (!m || !Readable(m + OFF_CURSTATE, 8)) return 0;
+    if (!m) return 0;
     s = ReadQ(m + OFF_CURSTATE);
-    if (!Sane(s) || !Readable(s + OFF_STATE_OWNER, 8)) return 0;
+    if (!Sane(s)) return 0;
     if (ReadQ(s + OFF_STATE_OWNER) != m) return 0;
     return s;
 }
 
-static uint32_t StateHash(uint64_t state) {
-    uint64_t vt, fn, desc;
-    uint32_t h = 0;
+/* ---- the descriptor cache -----------------------------------------------
+ *
+ * GetDesc is a virtual call into the game, and it is not cheap: measured
+ * 2026-10-27, with every other cost in this file already cut down, it was
+ * 190-280us per call while the state entry is asked about 90 times a second -
+ * 17-25 ms a second, the largest single cost the framework had left, and the
+ * one that showed up in every plugin's ShGetPlayer and ShIsInGame too.
+ *
+ * What it returns is a descriptor object belonging to the *state object*, and
+ * the state object only changes when the flow moves. So the pair (state
+ * object, descriptor) is remembered. The hash itself is NOT cached: it is read
+ * out of the descriptor on every call, so anything the game changes inside
+ * that descriptor is still seen on the next call. What is saved is the call
+ * that hands the descriptor over.
+ *
+ * Three guards, because a stale descriptor means a wrong game state, and a
+ * wrong state moves the world under a plugin's feet:
+ *   - the pair is published under a sequence number, so no reader can see a
+ *     half-written (state, desc) pair;
+ *   - the descriptor must still be readable before it is used, so one the game
+ *     freed falls back to a fresh resolve instead of being read anyway;
+ *   - one call in 256 resolves again and compares. If the same state object
+ *     ever answers a different descriptor, that is logged, taken, and the
+ *     assumption is disproved in the field rather than in theory.
+ */
+static struct {
+    uint64_t state;
+    uint64_t desc;
+    LONG     seq;
+} g_desc;
+static volatile LONG g_descTick;
+static volatile LONG g_descDrift;
+/* One writer at a time. Two threads that both missed would otherwise
+ * interleave the two stores and publish a pair that belongs to neither -
+ * state A with descriptor B - which reads as a perfectly valid answer and is
+ * exactly the failure this cache must not introduce. Held only on a miss or
+ * on the one-in-256 check, never on the hit path. */
+static volatile LONG g_descBusy;
 
-    if (!state) return 0;
+/* The call itself, unchanged - the only part that costs. */
+static uint64_t DescResolve(uint64_t state) {
+    uint64_t vt, fn;
+
     vt = ReadQ(state);
     if (!ShInImage(vt)) return 0;
-    if (!Readable(vt + VT_GETDESC, 8)) return 0;
     fn = ReadQ(vt + VT_GETDESC);
     if (!fn) return 0;
-    desc = ((GetDesc_t)fn)(state);
-    if (!desc || !Readable(desc + OFF_DESC_HASH, 4)) return 0;
-    memcpy(&h, (void *)(uintptr_t)(desc + OFF_DESC_HASH), 4);
-    return h;
+    return ((GetDesc_t)fn)(state);
+}
+
+static uint32_t StateHash(uint64_t state) {
+    uint64_t desc;
+    uint32_t h = 0;
+    int seq0, seq1, verify, ok = 0;
+
+    if (!state) return 0;
+
+    verify = ((InterlockedIncrement(&g_descTick) & 0xFF) == 0);
+
+    seq0 = (int)InterlockedCompareExchange(&g_desc.seq, 0, 0);
+    desc = (!(seq0 & 1) && g_desc.state == state) ? g_desc.desc : 0;
+    seq1 = (int)InterlockedCompareExchange(&g_desc.seq, 0, 0);
+
+    /* The hit: no kernel call, no game call - read the hash out of the
+     * descriptor and go. `verify` skips the shortcut on one call in 256 so
+     * the assumption behind the cache is re-tested rather than trusted. */
+    if (desc && seq0 == seq1 && !verify)
+        ok = ReadD(desc + OFF_DESC_HASH, &h);
+
+    if (!ok) {
+        int spins = 0, got = 0;
+
+        while (InterlockedCompareExchange(&g_descBusy, 1, 0) != 0) {
+            YieldProcessor();
+            if (++spins > 20000) break;
+        }
+        got = spins <= 20000;
+
+        /* Somebody may have filled exactly this one while we waited - but not
+         * on a verify pass, which has to do the work to have answered. */
+        if (got && !verify && !(g_desc.seq & 1) && g_desc.state == state &&
+            g_desc.desc && ReadD(g_desc.desc + OFF_DESC_HASH, &h)) {
+            desc = g_desc.desc;
+            ok = 1;
+        } else {
+            uint64_t fresh = DescResolve(state);
+
+            if (verify && desc && fresh && fresh != desc && !g_descDrift &&
+                InterlockedExchange(&g_descDrift, 1) == 0)
+                LogFirst("state-desc-drift",
+                         "state: the same state object answered a different "
+                         "descriptor (%llx -> %llx); the cache follows it - "
+                         "the assumption behind caching it is approximate "
+                         "rather than exact",
+                         (unsigned long long)desc, (unsigned long long)fresh);
+            if (got) {
+                InterlockedIncrement(&g_desc.seq);      /* odd: updating    */
+                g_desc.state = state;
+                g_desc.desc  = fresh;
+                InterlockedIncrement(&g_desc.seq);      /* even: published  */
+            }
+            desc = fresh;
+            ok = desc && ReadD(desc + OFF_DESC_HASH, &h);
+        }
+        if (got) InterlockedExchange(&g_descBusy, 0);
+    }
+
+    return ok ? h : 0;
 }
 
 SH_API uint32_t ShGetGameStateHash(void) {
@@ -158,11 +273,91 @@ static const struct { const char *scene; uint32_t bit; } g_uiBits[] = {
     { "Menu_Popup",         SH_UI_POPUP },
 };
 
-SH_API uint32_t ShGetUiState(void) {
+/* One pass over the scenes the game drew, not one pass per bit.
+ *
+ * The old shape asked ShGameSceneActive() fourteen times, and each of those
+ * walked the whole active list and compared the name of every scene in it:
+ * 14 x 14 lookups, each a linear scan of the 64-slot name cache. Measured on
+ * 2026-10-27 that was the bulk of ShGetGameState's 60-100us, which is the
+ * entry point plugins poll 222 times a second.
+ *
+ * Now the fourteen names are hashed once into a fixed table and the scenes
+ * are walked once: 14 hash lookups instead of 196 string comparisons. The
+ * table is built on first use; a caller that arrives while it is being built
+ * falls back to the old loop rather than reading a half-filled table, because
+ * a missing bit here is read as "that screen is not up" and a wrong answer
+ * moves the game state under a plugin's feet. */
+extern const char *ShSceneNameRef(uint64_t scene);
+
+static uint32_t UiNameHash(const char *s) {
+    uint32_t h = 2166136261u;
+
+    while (s && *s) { h ^= (uint32_t)(unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
+
+#define UI_HASH 64        /* 14 names, open addressing, never more than 1/4 full */
+static struct { uint32_t hash; uint32_t bit; } g_uiTab[UI_HASH];
+static volatile LONG g_uiBuilt;   /* 0 = no, 1 = built, -1 = being built */
+
+static void UiTabBuild(void) {
+    size_t i;
+
+    for (i = 0; i < sizeof(g_uiBits) / sizeof(g_uiBits[0]); i++) {
+        uint32_t h = UiNameHash(g_uiBits[i].scene);
+        uint32_t j = h & (UI_HASH - 1);
+
+        while (g_uiTab[j].hash && g_uiTab[j].hash != h) j = (j + 1) & (UI_HASH - 1);
+        g_uiTab[j].hash = h;
+        g_uiTab[j].bit  = g_uiBits[i].bit;
+    }
+}
+
+static int UiTabReady(void) {
+    LONG s = InterlockedCompareExchange(&g_uiBuilt, 0, 0);
+
+    if (s == 1) return 1;
+    if (s == 0 && InterlockedCompareExchange(&g_uiBuilt, -1, 0) == 0) {
+        UiTabBuild();
+        InterlockedExchange(&g_uiBuilt, 1);
+        return 1;
+    }
+    return 0;
+}
+
+/* The old shape, kept for the once-in-a-session window while the table is
+ * being built on another thread. Correct, just slower. */
+static uint32_t UiStateByAsking(void) {
     uint32_t bits = 0;
     size_t i;
+
     for (i = 0; i < sizeof(g_uiBits) / sizeof(g_uiBits[0]); i++)
         if (ShGameSceneActive(g_uiBits[i].scene)) bits |= g_uiBits[i].bit;
+    return bits;
+}
+
+SH_API uint32_t ShGetUiState(void) {
+    uint32_t bits = 0;
+    int n, i;
+
+    if (!UiTabReady()) return UiStateByAsking();
+
+    n = ShGameSceneCount();
+    for (i = 0; i < n; i++) {
+        uint64_t sc = ShGameSceneAt(i);
+        const char *nm;
+        uint32_t h, j;
+
+        if (!sc) continue;
+        nm = ShSceneNameRef(sc);
+        if (!nm || !nm[0]) continue;
+        h = UiNameHash(nm);
+        j = h & (UI_HASH - 1);
+        while (g_uiTab[j].hash) {
+            if (g_uiTab[j].hash == h) { bits |= g_uiTab[j].bit; break; }
+            j = (j + 1) & (UI_HASH - 1);
+        }
+    }
     return bits;
 }
 
@@ -252,21 +447,21 @@ SH_API int ShGetGameStateName(char *buf, int len) {
 /* The root global below is the local player's controller,
  * shared with the slot index lookup. dispatcher + 0x9C0 is
  * the int32 active context. Wine maps the dispatcher high,
- * so read through the direct VirtualQuery path. */
+ * so the reads are guarded by __try rather than by a query:
+ * see the note on ReadQ above. */
 #define SH_INPUT_ROOT SH_IMG(0x4D84F18)
 
 SH_API int ShInputContext(void) {
     uint64_t root, disp;
+    uint32_t u32 = 0;
     int32_t idx = -1;
 
-    if (!Readable(SH_INPUT_ROOT, 8)) return -1;
     root = ReadQ(SH_INPUT_ROOT);
     if (!Sane(root)) return -1;
-    if (!Readable(root + OFF_CTX_DISPATCHER, 8)) return -1;
     disp = ReadQ(root + OFF_CTX_DISPATCHER);
     if (!Sane(disp)) return -1;
-    if (!Readable(disp + OFF_CTX_ACTIVE, 4)) return -1;
-    memcpy(&idx, (void *)(uintptr_t)(disp + OFF_CTX_ACTIVE), 4);
+    if (!ReadD(disp + OFF_CTX_ACTIVE, &u32)) return -1;
+    idx = (int32_t)u32;
     if (idx < SH_CTX_EMPTY || idx > SH_CTX_POPUP) return -1;
     return (int)idx;
 }
@@ -274,7 +469,30 @@ SH_API int ShInputContext(void) {
 /* Everything cached belongs to the old session, and the
  * physics world has to be ready before plugins call.
  */
+/* One read of the state machine per frame, however many threads ask.
+ *
+ * Measured before this: 66 calls a second from cnchat's 15ms poll, 62 from
+ * freecam's 16ms, 30 each from chaos's two loops, 20 from the Ghost Mode
+ * pair - every one of them paying StateHash (which calls a virtual function
+ * inside the game), TrackState, and twelve scene-name lookups, and every one
+ * from a different thread. The answer cannot change between two asks inside
+ * one frame, so one 64-bit word carries (frame << 32 | state) and the first
+ * asker of the frame does the work. Published with one interlocked exchange:
+ * no lock, no torn read, and OnStateChanged clears it so a transition is
+ * visible to the very next caller rather than on the next frame.
+ *
+ * A frame counter that is not moving (no render hook, or a build where the
+ * overlay never presents) would freeze the cache - that cannot happen here
+ * because the state watch thread runs TrackState every 100ms and clears this
+ * on every hash change, which is also the only way the value can go stale. */
+static volatile LONG64 g_stateCache;
+
+static void StateCacheClear(void) {
+    InterlockedExchange64(&g_stateCache, 0);
+}
+
 static void OnStateChanged(uint32_t h) {
+    StateCacheClear();
     ShInvalidate();
     ShInvalidateHealth();
     ShUiOnEnterPlaying();
@@ -307,29 +525,64 @@ static void TrackState(uint32_t h) {
     InterlockedExchange(&busy, 0);
 }
 
-SH_API int ShGetGameState(void) {
+/* The work: one hash, one tracking call, one UI-state read. Called at most
+ * once per frame now - see the cache above. */
+static int ComputeGameState(void) {
+    uint64_t th = ShApiStatsOn ? ShTickNow() : 0;
     uint32_t h = StateHash(CurrentState());
+    int r;
 
+    if (th) ShApiNote(SH_API_STATE_HASH, th);
     TrackState(h);
     if (h == HASH_PLAYING || h == HASH_INGAME) {
         /* the flow stays Playing through all of these; one
          * ShGetUiState per call - it is 12 scene lookups and the
          * chat thread polls here every 15ms */
+        uint64_t tu = ShApiStatsOn ? ShTickNow() : 0;
         uint32_t ui = ShGetUiState();
         int cam;
-        if (ui & SH_UI_LOADING) return SH_STATE_RELOADING;
-        if (ui & SH_UI_GAMEOVER) return SH_STATE_GAMEOVER;
+
+        if (tu) ShApiNote(SH_API_STATE_UI, tu);
+        if (ui & SH_UI_LOADING) r = SH_STATE_RELOADING;
+        else if (ui & SH_UI_GAMEOVER) r = SH_STATE_GAMEOVER;
         /* Ahead of the pause check: the drone is live play,
          * so it reports as the drone, never as paused. */
-        cam = EngineCamera(ui);
-        if (cam) return cam;
-        if (Paused(ui)) return SH_STATE_PAUSED;
-        return SH_STATE_INGAME;
+        else if ((cam = EngineCamera(ui)) != 0) r = cam;
+        else if (Paused(ui)) r = SH_STATE_PAUSED;
+        else r = SH_STATE_INGAME;
+    } else if (h == HASH_MENU) {
+        r = SH_STATE_MENU;
+    } else if (h == HASH_LOADING) {
+        r = SH_STATE_LOADING;
+    } else if (h == HASH_ENDOFGAME) {
+        r = SH_STATE_MENU;
+    } else {
+        r = SH_STATE_UNKNOWN;
     }
-    if (h == HASH_MENU) return SH_STATE_MENU;
-    if (h == HASH_LOADING) return SH_STATE_LOADING;
-    if (h == HASH_ENDOFGAME) return SH_STATE_MENU;
-    return SH_STATE_UNKNOWN;
+    return r;
+}
+
+extern uint32_t ShSceneFrame(void);
+
+/* One exit, so the API counter sees every path: this is the entry point the
+ * plugins poll the most (66 calls a second, measured) and a counter that
+ * only counted the common branch would be worse than none. */
+SH_API int ShGetGameState(void) {
+    uint64_t t0 = ShApiStatsOn ? ShTickNow() : 0;
+    uint32_t f = ShSceneFrame();
+    LONG64 c = InterlockedCompareExchange64(&g_stateCache, 0, 0);
+    int r;
+
+    if (c && (uint32_t)(c >> 32) == f) {
+        r = (int)(uint32_t)c;
+        if (t0) ShApiNote(SH_API_STATE_HIT, t0);
+    } else {
+        r = ComputeGameState();
+        if (f) InterlockedExchange64(&g_stateCache,
+                                     ((LONG64)f << 32) | (uint32_t)r);
+    }
+    if (t0) ShApiNote(SH_API_STATE, t0);
+    return r;
 }
 
 /* Paused still counts: the world is loaded and every read
