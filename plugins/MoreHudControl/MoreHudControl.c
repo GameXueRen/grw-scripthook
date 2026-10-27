@@ -183,6 +183,10 @@ static volatile LONG g_markOff;
 static int g_mmAlpha = 100;
 static int g_mmScale = 100;
 static int g_mmTold;
+/* Set when the alpha write has been refused: says so once, in words, because
+ * "(set=0)" on a line that is itself suppressed by g_mmTold was a diagnostic
+ * that could not report the one failure it existed for. */
+static int g_mmFailTold;
 /* Passes to wait before reading the layout back. Writing SCALE is picked up by
  * the engine's layout pass, so a read on the same pass would show the value
  * from before; four passes later it shows what the engine actually did. */
@@ -3440,7 +3444,7 @@ static void MmRebuildCache(void) {
 }
 
 static void ApplyMinimapFx(void) {
-    int i, applied = 0;
+    int i, applied = 0, forced;
 
     /* The forced flag has to win here: a slider dragged back to 100% is a
      * change like any other, and this early return used to skip the write that
@@ -3464,9 +3468,19 @@ static void ApplyMinimapFx(void) {
     /* Both values stick in the engine, so rewriting them 60 times a second was
      * cost without effect. Ten hertz survives a scene rebuild; a setting change
      * forces the very next frame. */
-    if (!g_mmForce && ++g_mmWriteAge < 6) return;
+    forced = g_mmForce;
+    if (!forced && ++g_mmWriteAge < 6) return;
     g_mmForce = 0;
     g_mmWriteAge = 0;
+    /* A changed setting is exactly when the answer matters, so the line below
+     * gets to speak again: g_mmTold is also set by the "not drawing right now"
+     * branch above, which used to silence the (set=0) report for the whole
+     * session - the one line that would have shown the opacity write being
+     * refused. */
+    if (forced) {
+        g_mmTold = 0;
+        g_mmFailTold = 0;     /* a new setting: report a failure again */
+    }
     for (i = 0; i < g_nMmCache; i++) {
         int okA = 0, okS = 0;
 
@@ -3488,6 +3502,15 @@ static void ApplyMinimapFx(void) {
             Log("minimap fx: %s root=%llX alpha=%d%% (set=%d) scale=%d%% (set=%d)",
                 g_mmCache[i].nm, (unsigned long long)g_mmCache[i].root,
                 g_mmAlpha, okA, g_mmScale, okS);
+        if (!okA && !g_mmFailTold) {
+            Log("minimap fx: the ALPHA write to %s (root %llX) was refused, and "
+                "the scale write beside it %s", g_mmCache[i].nm,
+                (unsigned long long)g_mmCache[i].root,
+                okS ? "went through - so the handle is live and only the root "
+                      "was refused" : "was refused too - the whole handle is "
+                      "considered dead");
+            g_mmFailTold = 1;
+        }
     }
     if (applied) g_mmTold = 1;
 
@@ -3609,6 +3632,65 @@ static int       g_walkAge;      /* passes since the last rebuild */
 
 /* `nNow` is the scene count the caller just read - passed in so a rebuild does
  * not ask for it twice. */
+/* ---- per scene: is this walk still buying anything? ----------------------
+ *
+ * One scene in a real session is enormous and answers nothing: measured
+ * 2026-10-27, 550 widgets for the pass at ~10ms, 0 images, 0 matches, and
+ * 202 of 570 passes ended TIME-CUT before they finished. Walking it twenty
+ * times a second to learn the same "nothing" is what kept the pass from ever
+ * completing.
+ *
+ * So a scene that is big and produces nothing is walked once every DRY_SKIP
+ * passes instead of every pass. The conditions that end the holiday are the
+ * ones that make it safe: any image at all, a widget count that moved (the
+ * pool changed shape), or any switch being touched - a switch change has to
+ * be answered on the next pass, not in six seconds.
+ */
+/* 80, not 150: the instance that goes dry starts at about 150 widgets and
+ * grows with the session (330 by the end of one, measured), while the small
+ * one that actually carries the icons sits at 42-88. Eighty separates them
+ * with room on both sides, and 40 passes（about 13 seconds at 3 a second）
+ * spreads the one walk it does get thinner than 20 did. */
+#define DRY_WIDGETS 80
+#define DRY_SKIP    40
+#define WSTAT_MAX   8
+
+typedef struct {
+    char     nm[24];
+    uint64_t root;  /* two scenes can share a name: the big and the small
+                     * HUD_MinimapIcons do, and one of them reporting images
+                     * must not lift the other one's holiday (measured
+                     * 2026-10-27: the "is dry" line fired twice a second
+                     * apart with 166 and 198 widgets, which is how the
+                     * shared slot gave itself away) */
+    int      widgets;
+    int      images;
+    int      skip;      /* passes still to leave this scene out; 0 = walk it */
+    int      warned;
+} WalkStat;
+
+static WalkStat g_wstat[WSTAT_MAX];
+static int      g_nWstat;
+
+static WalkStat *WStatFind(const char *nm, uint64_t root, int make) {
+    int i;
+
+    for (i = 0; i < g_nWstat; i++)
+        if (g_wstat[i].root == root && strcmp(g_wstat[i].nm, nm) == 0)
+            return &g_wstat[i];
+    if (!make || g_nWstat >= WSTAT_MAX) return NULL;
+    memset(&g_wstat[g_nWstat], 0, sizeof(g_wstat[0]));
+    g_wstat[g_nWstat].root = root;
+    _snprintf(g_wstat[g_nWstat].nm, sizeof(g_wstat[0].nm), "%s", nm);
+    return &g_wstat[g_nWstat++];
+}
+
+static void WalkStatsReset(void) {
+    int i;
+
+    for (i = 0; i < g_nWstat; i++) g_wstat[i].skip = 0;
+}
+
 static void WalkListBuild(int nNow) {
     int i, n;
 
@@ -3736,6 +3818,7 @@ static void IconFrameBody(void *user) {
      * pass - it means the scenes are still coming up, and a pass with nothing
      * to walk costs nothing anyway. */
     n = pSceneCount();
+    if (kicked) WalkStatsReset();   /* a switch moved: answer it this pass */
     if (kicked || g_nWalk == 0 || ++g_walkAge >= 10 || n != g_walkFrom)
         WalkListBuild(n);
     start = g_nWalk ? g_sceneStart % g_nWalk : 0;
@@ -3748,9 +3831,32 @@ static void IconFrameBody(void *user) {
              * pass never reached the map" look the same in the summary line,
              * and telling them apart was the whole difficulty of this bug. */
             int w0 = g_passWidgets, i0 = g_passImages, m0 = g_passMatched;
+            WalkStat *st = WStatFind(g_walkList[si].nm, g_walkList[si].root, 1);
+
+            if (st && st->skip > 0) {
+                st->skip--;
+                continue;             /* dry for now - see WalkStat above */
+            }
             /* WalkIcons decrements the budget through the pointer; subtracting
              * its return value as well charged every widget twice. */
             WalkIcons(g_walkList[si].root, 0, 0, &budget, g_walkList[si].ctx);
+            if (st) {
+                st->widgets = g_passWidgets - w0;
+                st->images  = g_passImages - i0;
+                if (st->images > 0) {
+                    st->skip = 0;     /* it answers: keep walking it */
+                    st->warned = 0;
+                } else if (st->widgets >= DRY_WIDGETS && st->skip == 0) {
+                    st->skip = DRY_SKIP - 1;
+                    if (!st->warned) {
+                        st->warned = 1;
+                        Log("icon walk: %s is dry (%d widgets, 0 images, %d "
+                            "matched) - walking it once every %d passes until "
+                            "that changes", st->nm, st->widgets,
+                            g_passMatched - m0, DRY_SKIP);
+                    }
+                }
+            }
             if (g_dbg)
                 Log("   icon scene %-22s widgets %4d images %3d matched %3d",
                     g_walkList[si].nm, g_passWidgets - w0, g_passImages - i0,
