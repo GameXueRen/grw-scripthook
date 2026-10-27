@@ -296,6 +296,7 @@ static void SyncAll(void) {
 
 typedef struct {
     int      busy;
+    uint32_t id;      /* what ToastPut handed out - never a slot number */
     uint64_t born;    /* when it went up, for the fade in */
     uint64_t until;   /* 0 stays; else the tick count it leaves at */
     uint64_t ms;
@@ -304,6 +305,12 @@ typedef struct {
 } Toast;
 
 static Toast g_toast[TOAST_SLOTS];
+/* Handles are handed out in order and never reused, because a slot number
+ * is not an identity: with four slots and a full set, the fifth toast took
+ * the oldest slot *and its number*, so a plugin holding "2" started editing
+ * whatever the next plugin put there. Four plugins push toasts (firstperson,
+ * GhostNoWipe, GhostRevive, PredatorMelee) and they all keep the handle. */
+static uint32_t g_toastNext;
 
 static void EnsureHud(void);   /* starts the lock these share */
 
@@ -601,9 +608,12 @@ static void ToastLog(void) {
 }
 
 static Toast *ToastOf(uint32_t id) {
-    if (id == 0 || id > TOAST_SLOTS) return NULL;
-    if (!g_toast[id - 1].busy) return NULL;
-    return &g_toast[id - 1];
+    int i;
+
+    if (!id) return NULL;
+    for (i = 0; i < TOAST_SLOTS; i++)
+        if (g_toast[i].busy && g_toast[i].id == id) return &g_toast[i];
+    return NULL;
 }
 
 static uint32_t ToastPut(int slot, const char *text, uint32_t rgb,
@@ -623,15 +633,18 @@ static uint32_t ToastPut(int slot, const char *text, uint32_t rgb,
     } else {
         t->text[0] = 0;
     }
-    return (uint32_t)(slot + 1);
+    t->id = ++g_toastNext;
+    if (!t->id) t->id = ++g_toastNext;   /* 0 means "no handle" */
+    return t->id;
 }
 
 SH_API uint32_t ShToast(const char *text) {
     return ShToastEx(text, 0xFFFFFF, SH_TOAST_MS_DEFAULT);
 }
 
-SH_API uint32_t ShToastEx(const char *text, uint32_t rgb,
-                          uint32_t ms) {
+/* The body, so the entry point above it can be timed without a stamp on
+ * every one of its exits. */
+static uint32_t ToastExRaw(const char *text, uint32_t rgb, uint32_t ms) {
     uint32_t id;
     int i, slot = -1;
 
@@ -652,9 +665,18 @@ SH_API uint32_t ShToastEx(const char *text, uint32_t rgb,
     id = ToastPut(slot, text, rgb, ms);
     HudUnlock();
     ToastLog();
-    Log("toast %u \"%s\" %ums", (unsigned)id,
-        text ? text : "", (unsigned)ms);
+    /* No log line per toast: this is called from render and worker paths,
+     * and Log flushes every line. The exceptional path above still says what
+     * happened, and the id is in the caller's hands. */
     ShSetError(SH_OK);
+    return id;
+}
+
+SH_API uint32_t ShToastEx(const char *text, uint32_t rgb, uint32_t ms) {
+    uint64_t t0 = ShApiStatsOn ? ShTickNow() : 0;
+    uint32_t id = ToastExRaw(text, rgb, ms);
+
+    if (t0) ShApiNote(SH_API_TOAST, t0);
     return id;
 }
 

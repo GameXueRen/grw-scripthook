@@ -12,7 +12,9 @@
  * what keeps the keyboard, and every plugin that asks
  * ShMenuIsOpen(), out of a menu nobody can see. */
 #include <windows.h>
+#include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -28,7 +30,18 @@
  * count has to cover every plugin's submenus at once, not just
  * the rows on the root.
  */
-#define MENUS       64
+/* 160, not 64: measured on 2026-10-27, a normal session already had 62 pages
+ * in use before the last plugin asked for one (root + 8 vehicle categories
+ * from the spawner alone, 4 from NpcProbe, plus one or two per third-party
+ * mod), and MoreHudControl's "other" page was refused - a user-visible
+ * missing page. 160 leaves room for the set to grow.
+ *
+ * The rows are no longer inline in the slot: a page has room for ITEMS rows
+ * at ~736 bytes each, so 160 inline slots would have been 11 MB of .bss for
+ * a session that uses 62. Menu rows are now one allocation per page, made
+ * when the page is created and released when it is dropped, which keeps the
+ * static cost at 160 x ~800 bytes and the live cost where it was. */
+#define MENUS       160
 #define ITEMS       96
 /* Room for a whole row label. The longest one the framework builds itself
  * is a plugin switch - "<folder>(<page name>)" - where a folder is up to
@@ -85,13 +98,25 @@ typedef struct {
     char     hint[384];   /* a page's hint can be several long lines */
     char     status[192];
     uint32_t parent;
+    uint32_t id;        /* the handle a plugin holds - never a slot number */
     int      sel;
     int      top;
     int      count;
-    Item     items[ITEMS];
+    Item    *items;      /* ITEMS rows, allocated with the page (see MENUS) */
 } Menu;
 
 static Menu g_menus[MENUS];
+/* Why the last NewMenu answered 0: 0 = the table is full, 1 = no room for
+ * the page's rows. Read by the two callers after they drop the lock. */
+static int  g_menuAllocFail;
+/* Handles are handed out in order and never reused.
+ *
+ * A slot number is not an identity: a page destroyed while its handle was
+ * still in somebody's registry handed the same number to the next page
+ * created, and every later ShMenuStatusF/ShMenuDisable on the old handle
+ * quietly edited a stranger's page. With 28 plugins creating pages and
+ * 6 submenus on top, that window is not theoretical. */
+static uint32_t g_menuNext;
 static uint32_t g_root = 0;
 static volatile uint32_t g_current = 0;
 static volatile int g_open = 0;
@@ -111,18 +136,35 @@ static void Unlock(void) { if (g_lockReady) LeaveCriticalSection(&g_lock); }
 static void SafeCopy(char *dst, size_t cap, const char *src);
 
 static Menu *MenuOf(uint32_t h) {
-    if (h == 0 || h > MENUS) return NULL;
-    if (!g_menus[h - 1].used) return NULL;
-    return &g_menus[h - 1];
+    int i;
+
+    if (!h) return NULL;
+    for (i = 0; i < MENUS; i++)
+        if (g_menus[i].used && g_menus[i].id == h) return &g_menus[i];
+    return NULL;
 }
 
 static uint32_t NewMenu(const char *title, uint32_t parent,
                         const char *owner) {
     int i;
 
+    g_menuAllocFail = 0;
     for (i = 0; i < MENUS; i++) {
         if (g_menus[i].used) continue;
         memset(&g_menus[i], 0, sizeof(g_menus[i]));
+        /* Rows are per page now: 70 KB a page is fine for the sixty a
+         * session creates and was not fine for the 160 slots this table
+         * has. A failed allocation refuses the page rather than handing
+         * back a menu that cannot hold a row. */
+        g_menus[i].items = (Item *)calloc(ITEMS, sizeof(Item));
+        if (!g_menus[i].items) {
+            /* No log here: this runs under the menu lock, and a log line
+             * flushes. The caller says which of the two failures it was,
+             * outside the lock. */
+            memset(&g_menus[i], 0, sizeof(g_menus[i]));
+            g_menuAllocFail = 1;
+            continue;
+        }
         g_menus[i].used = 1;
         g_menus[i].parent = parent;
         if (title) SafeCopy(g_menus[i].title, sizeof(g_menus[i].title),
@@ -132,7 +174,9 @@ static uint32_t NewMenu(const char *title, uint32_t parent,
                     sizeof(g_menus[i].owner) - 1);
             g_menus[i].owner[sizeof(g_menus[i].owner) - 1] = 0;
         }
-        return (uint32_t)(i + 1);
+        g_menus[i].id = ++g_menuNext;
+        if (!g_menus[i].id) g_menus[i].id = ++g_menuNext;   /* 0 = no handle */
+        return g_menus[i].id;
     }
     return 0;
 }
@@ -186,6 +230,7 @@ static void DropMenu(uint32_t h) {
     for (i = 0; i < m->count; i++)
         if (m->items[i].kind == IT_SUB && m->items[i].sub)
             DropMenu(m->items[i].sub);
+    free(m->items);
     memset(m, 0, sizeof(*m));
 }
 
@@ -193,7 +238,7 @@ static Item *NewItem(Menu *m, int kind, const char *label,
                      ShMenuFn fn, void *user) {
     Item *it;
 
-    if (!m || m->count >= ITEMS) return NULL;
+    if (!m || !m->items || m->count >= ITEMS) return NULL;
     it = &m->items[m->count++];
     memset(it, 0, sizeof(*it));
     it->used = 1;
@@ -427,7 +472,11 @@ static DWORD WINAPI CallThread(LPVOID p) {
 }
 
 static void Fire(uint32_t menu, int idx, Item *it) {
-    int v = (it->kind == IT_NUMBER) ? (int)it->num : it->value;
+    /* lroundf, not a cast: the row can be shown with two decimals
+     * ("< 0.50 >") and a cast handed the plugin 0 - the value it was shown
+     * and the value it got disagreed. For the step>=1 rows every plugin in
+     * the tree uses, the two are identical. */
+    int v = (it->kind == IT_NUMBER) ? (int)lroundf(it->num) : it->value;
 
     CallPush(it->fn, it->user, menu, (uint32_t)idx, v);
 }
@@ -602,7 +651,12 @@ static void Navigate(void) {
     if (r == 1) {
         if (it->kind == IT_NUMBER) {
             float was = it->num;
-            it->num += it->step * valDir;
+            /* Quantised to the step, not accumulated: `num += step` drifts,
+             * and a row that lands on 0.30000001 renders as "< 0.30 >" one
+             * press and "< 0.3 >" the next because of it. */
+            it->num = it->lo + (float)((int)(((it->num - it->lo) / it->step)
+                                             + (valDir > 0 ? 0.5f : -0.5f)))
+                              * it->step;
             if (it->num < it->lo) it->num = it->lo;
             if (it->num > it->hi) it->num = it->hi;
             /* Nothing moved: sitting against a limit is no reason to
@@ -1296,7 +1350,20 @@ SH_API uint32_t ShMenuCreate(const char *title) {
         if (it) it->sub = h;
     }
     Unlock();
-    ShSetError(h ? SH_OK : SH_ERR_NO_CANDIDATE);
+    /* "No candidate" was the wrong answer for a full table: the caller reads
+     * it as "my arguments were bad" and retries with different ones. The
+     * header has had SH_ERR_REGISTRY_FULL for this all along. */
+    ShSetError(h ? SH_OK : SH_ERR_REGISTRY_FULL);
+    if (!h) {
+        if (g_menuAllocFail)
+            Log("menu: refused a page for '%s' (%s) - no room for its %d rows",
+                title ? title : "",
+                owner && owner[0] ? owner : "built-in", ITEMS);
+        else
+            Log("menu: refused a page for '%s' (%s) - all %d slots are in use",
+                title ? title : "",
+                owner && owner[0] ? owner : "built-in", MENUS);
+    }
     return h;
 }
 
@@ -1364,6 +1431,15 @@ SH_API uint32_t ShMenuSub(uint32_t parent, const char *label) {
         if (it) it->sub = h;
     }
     Unlock();
+    if (!h) {
+        ShSetError(SH_ERR_REGISTRY_FULL);
+        if (g_menuAllocFail)
+            Log("menu: refused a subpage for '%s' (%s) - no room for its %d rows",
+                label ? label : "", m ? m->owner : "", ITEMS);
+        else
+            Log("menu: refused a subpage for '%s' (%s) - all %d slots are in use",
+                label ? label : "", m ? m->owner : "", MENUS);
+    }
     return h;
 }
 
@@ -1393,6 +1469,19 @@ SH_API int ShMenuNumber(uint32_t menu, const char *label,
                         float step, ShMenuFn fn, void *user) {
     Item *it;
 
+    /* A row that cannot move is a caller bug, and saying so is better than
+     * a row that looks alive and does nothing: step<=0 made every press a
+     * no-op with no error at all, and lo>hi made the first press jump to hi
+     * because the two clamps ran in that order. */
+    if (!(step > 0.0f) || !(hi >= lo)) {
+        ShSetError(SH_ERR_BAD_ARG);
+        Log("menu: number row '%s' refused: step=%g lo=%g hi=%g",
+            label ? label : "", (double)step, (double)lo, (double)hi);
+        return 0;
+    }
+    if (initial < lo) initial = lo;
+    if (initial > hi) initial = hi;
+
     Lock();
     it = NewItem(MenuOf(menu), IT_NUMBER, label, fn, user);
     if (it) {
@@ -1402,6 +1491,7 @@ SH_API int ShMenuNumber(uint32_t menu, const char *label,
         it->step = step;
     }
     Unlock();
+    if (!it) ShSetError(SH_ERR_REGISTRY_FULL);
     return it != NULL;
 }
 
@@ -1506,6 +1596,32 @@ SH_API int ShMenuSetValue(uint32_t menu, const char *label,
 SH_API int ShMenuStatus(uint32_t menu, const char *text) {
     Menu *m;
 
+    /* The common call is a row refreshing the line it already shows: a status
+     * row with a live value is rewritten four to twenty-five times a second
+     * whether or not the value moved. Comparing first means that case never
+     * takes the menu lock at all.
+     *
+     * Measured 2026-10-27, with a live status row at 63 calls a second, this
+     * changed nothing: 7.4us before the compare was added, 7.4us after. The
+     * cost is inside ShMenuStatus itself - nowhere near the lock or the
+     * 192-byte copy - so this is not an optimisation and must not be cited as
+     * one. It stays because skipping a write that would store the same bytes
+     * is the correct thing to do, not because it bought a number.
+     *
+     * The compare is deliberately outside the lock. The buffer lives in the
+     * static menu table and is never freed, both texts are shorter than it
+     * and NUL-terminated, so a torn read can only ever answer "same" for a
+     * line whose next writer is about to store the same text - worst case one
+     * refresh interval of a stale line, and every caller rewrites on the next
+     * tick. */
+    if (text) {
+        m = MenuOf(menu);
+        if (m && strcmp(m->status, text) == 0) {
+            ShSetError(SH_OK);
+            return 1;
+        }
+    }
+
     Lock();
     m = MenuOf(menu);
     if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
@@ -1542,29 +1658,109 @@ void ShMenuStatusResetAll(void) {
  * conversion from reaching vsnprintf at all - the formatter in
  * scripthook_config.c checks it against `en` and falls back to it.
  */
+/* The translated template, remembered per (menu, fmt, language).
+ *
+ * ShTextEnUS and ShLangText are two passes over g_base[2048], each row three
+ * to four string comparisons, and the template cannot change except when the
+ * language does. The language layer already keeps a generation counter for
+ * exactly this - ShMenuStatusResetAll runs on a switch - so the generation is
+ * the whole invalidation, and a miss costs the two lookups once.
+ *
+ * This removes redundant work; it is not a measured speed-up. 2026-10-27, a
+ * live status row at 63 calls a second: 7.4us with the cache and 7.4us
+ * without it. The lookups were never where the time goes - ShMenuStatus is -
+ * so do not count on a number from this, and do not add to it on the
+ * assumption that it is doing something expensive.
+ *
+ * Eight entries: a page has one status line, so the only way to need more is
+ * several pages refreshing at once. */
+#define STS_CACHE 8
+static struct {
+    uint32_t    menu;
+    const char *fmt;
+    uint32_t    sum;      /* of the template: a stack buffer can reuse an address */
+    uint32_t    gen;
+    const char *en;
+    char        tmpl[512];
+} g_sts[STS_CACHE];
+
+/* A caller is allowed to build the template on the stack, and then the same
+ * address describes a different string on the next call. Comparing the
+ * pointer alone would serve the previous template - forty bytes of string
+ * sum is cheap next to the two table scans this cache exists to skip. */
+static uint32_t StatusSum(const char *s) {
+    uint32_t h = 2166136261u;
+
+    while (s && *s) { h ^= (uint32_t)(unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
+static int      g_stsNext;
+static uint32_t g_stsGen = 1;
+
+static void StatusCacheFlush(void) {
+    int i;
+
+    for (i = 0; i < STS_CACHE; i++) {
+        g_sts[i].fmt = NULL;
+        g_sts[i].gen = 0;
+    }
+}
+
 SH_API int ShMenuStatusF(uint32_t menu, const char *fmt, ...) {
-    char tmpl[512];              /* the template, in this menu's text */
+    uint64_t t0 = ShApiStatsOn ? ShTickNow() : 0;
     char text[384];              /* the line that template formats into */
-    const char *en;              /* the same template in en-US */
+    const char *en = NULL;       /* the same template in en-US */
+    const char *tmpl = NULL;
+    uint32_t gen = ShLangGeneration();
     va_list ap;
-    Menu *m;
+    int i, slot = -1;
 
     if (!fmt) return 0;
 
-    Lock();
-    m = MenuOf(menu);
-    if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
-    /* A caller that passes an ID has its en-US row; one that passes the
-     * English literal has no row, and the literal is the answer. */
-    en = ShTextEnUS(m->owner, fmt);
-    if (!en) en = fmt;
-    SafeCopy(tmpl, sizeof(tmpl), ShLangText(m->owner, fmt));
-    Unlock();
+    if (gen != g_stsGen) {       /* language switched: nothing cached is valid */
+        g_stsGen = gen;
+        StatusCacheFlush();
+    }
+    for (i = 0; i < STS_CACHE; i++) {
+        if (g_sts[i].fmt == fmt && g_sts[i].gen == gen &&
+            g_sts[i].menu == menu && g_sts[i].sum == StatusSum(fmt)) {
+            en = g_sts[i].en;
+            tmpl = g_sts[i].tmpl;
+            break;
+        }
+    }
+    if (!tmpl) {
+        Menu *m;
+
+        Lock();
+        m = MenuOf(menu);
+        if (!m) { Unlock(); ShSetError(SH_ERR_BAD_ARG); return 0; }
+        /* A caller that passes an ID has its en-US row; one that passes the
+         * English literal has no row, and the literal is the answer. */
+        en = ShTextEnUS(m->owner, fmt);
+        if (!en) en = fmt;
+        slot = g_stsNext++ % STS_CACHE;
+        g_sts[slot].menu = menu;
+        g_sts[slot].fmt  = fmt;
+        g_sts[slot].sum  = StatusSum(fmt);
+        g_sts[slot].gen  = gen;
+        g_sts[slot].en   = en;
+        SafeCopy(g_sts[slot].tmpl, sizeof(g_sts[slot].tmpl),
+                 ShLangText(m->owner, fmt));
+        en = g_sts[slot].en;
+        tmpl = g_sts[slot].tmpl;
+        Unlock();
+    }
 
     va_start(ap, fmt);
     ShTextFormatV(text, sizeof(text), en, tmpl, ap);
     va_end(ap);
-    return ShMenuStatus(menu, text);
+    {
+        int ok = ShMenuStatus(menu, text);
+
+        if (t0) ShApiNote(SH_API_MENU_STATUS, t0);
+        return ok;
+    }
 }
 
 /* The hint shown under the title of a submenu. The root menu always
