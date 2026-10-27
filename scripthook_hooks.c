@@ -99,8 +99,19 @@ typedef struct {
     void    *orig;                /* the trampoline, to call through       */
     LONG     refs;                /* how many Add calls under this tag     */
     int      used;
+    int      state;               /* HST_* - see below                     */
     int      claimed;             /* 1: owned, patched by hand elsewhere   */
 } HookRec;
+
+/* A slot is reserved *before* MinHook is called, and MinHook is called with
+ * the registry lock released. Without the reservation two installers of one
+ * target would both pass FindTarget (neither is recorded yet) and create two
+ * hooks on the same address; with it the second one is answered DUP by the
+ * same rule as always, and the window is honest about what it is. */
+#define HST_FREE    0
+#define HST_INSTALL 1             /* reserved; MinHook is being called      */
+#define HST_ACTIVE  2             /* installed (or claimed)                 */
+#define HST_REMOVE  3             /* teardown in flight                     */
 
 static HookRec          g_hooks[HOOK_MAX];
 static CRITICAL_SECTION g_lock;
@@ -177,6 +188,73 @@ static HookRec *FindTag(const char *tag) {
     return NULL;
 }
 
+/* ---- is the entry point already somebody else's? ------------------------
+ *
+ * Read only: twelve bytes of the target, a log line, and then the install
+ * goes ahead exactly as it did before. Nothing here can change a result,
+ * and no return value is touched.
+ *
+ * What it buys is a name for the one state this registry cannot see. It
+ * knows every hook installed through ShHookAdd*, and MinHook answers for
+ * the ones the framework's own layers create behind the registry's back
+ * (MH_ERROR_ALREADY_CREATED). What neither can see is a plugin - or a mod
+ * that is not built against this DLL at all - patching the function's first
+ * bytes with VirtualProtect. Measured 2026-10-27: none of the sixteen
+ * .asi in plugins\third_plugin carries MinHook, they all patch bytes
+ * directly. So the two collision cases are:
+ *
+ *   they patched first   our FindTarget has no record, the install below
+ *                        succeeds on top of their jump, and the two detours
+ *                        end up chained in an order nobody chose.
+ *   we hooked first      their patch lands on the entry later and our
+ *                        detour stops running. No install happens then, so
+ *                        nothing in this file can see it; that half is
+ *                        unobservable from here by construction.
+ *
+ * This is the first case only, and it cannot be more than a suspicion: a
+ * function may genuinely begin with a jump (a hotpatch thunk, a linker
+ * /Gy stub, call/pop). The bytes are logged with it so a support case can
+ * tell the two apart without a debugger. */
+extern int ShReadableAddr(uint64_t addr, size_t len);
+
+/* Sampling and reporting are split because the caller must not hold the
+ * registry lock while a log line is written: HLog takes the log lock and
+ * flushes, and a slow disk would then block every ShHookAdd and
+ * ShHookStatus for the duration. Sampling is twelve bytes and no I/O. */
+static int SampleEntryOwner(void *target, unsigned char *b) {
+    uint64_t a = (uint64_t)(uintptr_t)target;
+
+    if (!a || !ShReadableAddr(a, 12)) return 0;
+    __try {
+        memcpy(b, (void *)(uintptr_t)a, 12);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    if (b[0] == 0xE9) return 1;
+    if (b[0] == 0xEB) return 2;
+    if (b[0] == 0xCC) return 3;
+    if (b[0] == 0x48 && b[1] == 0xB8 && b[10] == 0xFF && b[11] == 0xE0) return 4;
+    return 0;
+}
+
+static void ReportEntryOwner(const char *tag, const char *label, int what,
+                             const unsigned char *b) {
+    static const char *const kWhat[5] = {
+        "", "a rel32 jump (E9)", "a rel8 jump (EB)", "int3 (CC)",
+        "a 64-bit jump (mov rax,imm64; jmp rax)"
+    };
+
+    if (what < 1 || what > 4) return;
+    HLog("hooks: %s -> %s starts with %s before this install - the entry is "
+         "already owned by something this registry cannot see (a framework "
+         "layer, or a mod that patches bytes itself: the ones in "
+         "plugins\\third_plugin carry no MinHook). Installing anyway; if this "
+         "feature or that one stops working, that is why. bytes %02X %02X "
+         "%02X %02X %02X %02X %02X %02X",
+         tag, label, kWhat[what], b[0], b[1], b[2], b[3], b[4], b[5], b[6],
+         b[7]);
+}
+
 /* ---- install ----------------------------------------------------------- */
 
 /* Shared by Add and by the Late waiter once the module has arrived. The
@@ -184,33 +262,59 @@ static HookRec *FindTag(const char *tag) {
 static int InstallLocked(const char *tag, const char *label,
                          void *target, void *detour, void **orig) {
     HookRec *r;
-    MH_STATUS s;
-    int      i, slot = -1;
+    MH_STATUS s, srem;
+    unsigned char bytes[12];
+    void    *tramp = NULL;
+    int      i, slot = -1, what;
+    LONG     refs = 0;
+    char     ltag[HOOK_TAG_MAX], llabel[96], owner[HOOK_TAG_MAX];
+
+    /* Everything the log lines below print is copied out while the lock is
+     * held: the record it comes from can be cleared by a concurrent
+     * ShHookRemove the moment the lock is released. */
+    snprintf(ltag, sizeof(ltag), "%s", tag);
+    snprintf(llabel, sizeof(llabel), "%s", label);
+    owner[0] = 0;
 
     Lock();
 
     r = FindTag(tag);
     if (r) {
+        if (r->state == HST_INSTALL) {
+            /* Another thread is inside MH_CreateHook for this very tag. Its
+             * trampoline does not exist yet, so there is nothing honest to
+             * hand back here; answering OK with a NULL orig is how a caller
+             * ends up calling through nothing. */
+            Unlock();
+            if (orig) *orig = NULL;
+            HLog("hooks: %s is being installed on another thread - not "
+                 "installed a second time", ltag);
+            return SH_HOOK_ERR;
+        }
         /* The same tag twice: one hook, counted twice. The trampoline is
          * handed back again so both callers call through the same one. */
         r->refs++;
-        if (orig) *orig = r->orig;
+        refs = r->refs;
+        tramp = r->orig;
         Unlock();
+        if (orig) *orig = tramp;
         HLog("hooks: %s -> %s (already in place under this tag, refs=%ld)",
-             tag, label, r->refs);
+             ltag, llabel, refs);
         return SH_HOOK_OK;
     }
 
     r = FindTarget(target);
     if (r) {
-        /* Somebody else got here first. Not installed, and the caller's
-         * detour is NOT in the chain - the log names the owner so the
-         * next question ("why is my detour not running") has an answer
-         * without a debugger. */
-        if (orig) *orig = NULL;
+        /* Somebody else got here first - installed, or reserved a moment ago
+         * by a thread that is inside MinHook right now. Not installed, and
+         * the caller's detour is NOT in the chain - the log names the owner
+         * so the next question ("why is my detour not running") has an
+         * answer without a debugger. */
+        snprintf(owner, sizeof(owner), "%s", r->tag);
         Unlock();
+        if (orig) *orig = NULL;
         HLog("hooks: %s -> %s is already owned by %s - not installed",
-             tag, label, r->tag);
+             ltag, llabel, owner);
         return SH_HOOK_DUP;
     }
 
@@ -221,7 +325,7 @@ static int InstallLocked(const char *tag, const char *label,
         Unlock();
         HLog("hooks: %s -> %s REFUSED: the registry is full (%d) - HOOK_MAX "
              "is too small for this build, and every install after this one "
-             "will be refused too", tag, label, HOOK_MAX);
+             "will be refused too", ltag, llabel, HOOK_MAX);
         return SH_HOOK_ERR;
     }
 
@@ -231,50 +335,79 @@ static int InstallLocked(const char *tag, const char *label,
         return SH_HOOK_ERR;
     }
 
+    /* Reserve the slot, then let go of the lock. Reserving first is what
+     * makes the window safe: a second installer of this target meets
+     * FindTarget (DUP), and a second caller of this tag meets the
+     * HST_INSTALL branch above, instead of both racing into MinHook. */
+    r = &g_hooks[slot];
+    memset(r, 0, sizeof(*r));
+    snprintf(r->tag, sizeof(r->tag), "%s", ltag);
+    snprintf(r->label, sizeof(r->label), "%s", llabel);
+    r->target = target;
+    r->state  = HST_INSTALL;
+    r->used   = 1;
+    Unlock();
+
+    /* Last look before the bytes are written: says so in the log when the
+     * entry already jumps somewhere this registry does not know about. Read
+     * only, and outside the lock - the report needs the log lock. */
+    what = SampleEntryOwner(target, bytes);
+    if (what) ReportEntryOwner(ltag, llabel, what, bytes);
+
+    /* MH_CreateHook writes into the target's prologue and keeps the
+     * trampoline in MinHook's own pool; it takes no registry lock of ours,
+     * and holding one across it is what lets a slow install block every
+     * other module's ShHookStatus. */
     s = MH_CreateHook(target, detour, orig);
-    if (s == MH_ERROR_ALREADY_CREATED) {
-        /* A hook nobody registered here: the framework's own layers still
-         * install theirs directly. Same answer as a DUP, with the reason
-         * this one is different spelled out. */
-        if (orig) *orig = NULL;
-        Unlock();
-        HLog("hooks: %s -> %s is already hooked outside this registry "
-             "(a framework layer owns it) - not installed", tag, label);
-        return SH_HOOK_DUP;
-    }
     if (s != MH_OK) {
+        Lock();
+        memset(&g_hooks[slot], 0, sizeof(g_hooks[slot]));
         Unlock();
         if (orig) *orig = NULL;
-        HLog("hooks: %s -> %s refused: MH_CreateHook %s",
-             tag, label, MH_StatusToString(s));
+        if (s == MH_ERROR_ALREADY_CREATED) {
+            /* A hook nobody registered here: the framework's own layers
+             * still install theirs directly. Same answer as a DUP, with the
+             * reason this one is different spelled out. */
+            HLog("hooks: %s -> %s is already hooked outside this registry "
+                 "(a framework layer owns it) - not installed", ltag,
+                 llabel);
+            return SH_HOOK_DUP;
+        }
+        HLog("hooks: %s -> %s refused: MH_CreateHook %s", ltag, llabel,
+             MH_StatusToString(s));
         return SH_HOOK_ERR;
     }
+    tramp = orig ? *orig : NULL;
 
     /* Per address, never MH_ALL_HOOKS - see the file head. A refusal here
      * leaves a created-but-disabled hook behind, which is the one state
-     * MinHook cannot recover from by itself, so it is removed again. */
+     * MinHook cannot recover from by itself, so it is removed again - and
+     * whether that removal worked is part of the answer, because a hook left
+     * in that state makes the next installer of this target report "already
+     * hooked outside this registry" and send the next person looking in the
+     * wrong place. */
     s = MH_EnableHook(target);
     if (s != MH_OK) {
-        MH_RemoveHook(target);
-        if (orig) *orig = NULL;
+        srem = MH_RemoveHook(target);
+        Lock();
+        memset(&g_hooks[slot], 0, sizeof(g_hooks[slot]));
         Unlock();
-        HLog("hooks: %s -> %s refused: MH_EnableHook %s",
-             tag, label, MH_StatusToString(s));
+        if (orig) *orig = NULL;
+        HLog("hooks: %s -> %s refused: MH_EnableHook %s; the created hook "
+             "was %s", ltag, llabel, MH_StatusToString(s),
+             srem == MH_OK ? "removed again"
+                           : MH_StatusToString(srem));
         return SH_HOOK_ERR;
     }
 
+    Lock();
     r = &g_hooks[slot];
-    memset(r, 0, sizeof(*r));
-    snprintf(r->tag, sizeof(r->tag), "%s", tag);
-    snprintf(r->label, sizeof(r->label), "%s", label);
-    r->target = target;
-    r->orig    = orig ? *orig : NULL;
-    r->refs    = 1;
-    r->used    = 1;
-
+    r->orig  = tramp;
+    r->refs  = 1;
+    r->state = HST_ACTIVE;
     Unlock();
-    HLog("hooks: %s -> %s at %p (trampoline %p)", tag, label, target,
-         r->orig);
+    HLog("hooks: %s -> %s at %p (trampoline %p)", ltag, llabel, target,
+         tramp);
     return SH_HOOK_OK;
 }
 
@@ -375,6 +508,7 @@ SH_API int ShHookClaim(const char *tag, void *target, const char *label) {
     r->orig    = NULL;
     r->refs    = 1;
     r->used    = 1;
+    r->state   = HST_ACTIVE;
     r->claimed = 1;
     Unlock();
     HLog("hooks: %s -> %s claimed (patched by hand, not hooked here)",
@@ -424,6 +558,7 @@ SH_API int ShHookEnable(const char *tag, int on) {
     HookRec  *r;
     MH_STATUS s;
     void     *target;
+    char      llabel[96];
 
     if (!tag || !*tag) return SH_HOOK_ERR;
 
@@ -447,21 +582,25 @@ SH_API int ShHookEnable(const char *tag, int on) {
         return SH_HOOK_ERR;
     }
     target = r->target;
+    /* The record can be cleared by a concurrent ShHookRemove the moment the
+     * lock goes, so what the log prints has to be a copy, not a pointer. */
+    snprintf(llabel, sizeof(llabel), "%s", r->label);
     Unlock();
 
     s = on ? MH_EnableHook(target) : MH_DisableHook(target);
     if (s != MH_OK) {
-        HLog("hooks: %s -> %s %s failed (%s)", tag, r->label,
+        HLog("hooks: %s -> %s %s failed (%s)", tag, llabel,
              on ? "enable" : "disable", MH_StatusToString(s));
         return SH_HOOK_ERR;
     }
-    HLog("hooks: %s -> %s %s", tag, r->label, on ? "enabled" : "disabled");
+    HLog("hooks: %s -> %s %s", tag, llabel, on ? "enabled" : "disabled");
     return SH_HOOK_OK;
 }
 
 SH_API int ShHookRemove(const char *tag) {
     HookRec *r;
     void    *target;
+    int      slot;
 
     if (!tag || !*tag) return SH_HOOK_ERR;
 
@@ -470,6 +609,15 @@ SH_API int ShHookRemove(const char *tag) {
     if (!r) {
         Unlock();
         HLog("hooks: %s is not installed - nothing to remove", tag);
+        return SH_HOOK_ERR;
+    }
+    if (r->state == HST_INSTALL) {
+        /* Its trampoline is still being made on another thread. Refusing is
+         * the only answer that cannot leave MinHook holding a hook nobody
+         * has a record of. */
+        Unlock();
+        HLog("hooks: %s is being installed on another thread - not removed",
+             tag);
         return SH_HOOK_ERR;
     }
     r->refs--;
@@ -481,14 +629,23 @@ SH_API int ShHookRemove(const char *tag) {
         return SH_HOOK_OK;
     }
 
-    /* Last one out. Disable before removing, and clear the record before
-     * the lock goes: a detour mid-flight reads its own orig pointer, and
-     * that pointer must not be the next record's. Teardown only - to be
-     * off without being gone, the detour checks its own flag. */
+    /* Last one out. The slot is marked first and the record is cleared
+     * before the lock goes back on, so a detour mid-flight reads its own
+     * orig pointer and never the next record's. MinHook itself is called
+     * with the lock released: MH_DisableHook suspends every other thread to
+     * rewrite the prologue, and a thread parked in ShHookStatus holding
+     * this lock would deadlock against it. Teardown only - to be off
+     * without being gone, the detour checks its own flag. */
     target = r->target;
+    r->state = HST_REMOVE;
+    slot = (int)(r - g_hooks);
+    Unlock();
+
     MH_DisableHook(target);
     MH_RemoveHook(target);
-    memset(r, 0, sizeof(*r));
+
+    Lock();
+    memset(&g_hooks[slot], 0, sizeof(g_hooks[slot]));
     Unlock();
     HLog("hooks: %s removed from %p", tag, target);
     return SH_HOOK_OK;
@@ -522,7 +679,7 @@ SH_API int ShHookStatus(char *buf, int n) {
         Lock();
         for (i = 0; i < HOOK_MAX; i++) {
             if (!g_hooks[i].used) continue;
-            if (g_hooks[i].claimed) claimed++; else hooked++;
+            if (g_hooks[i].claimed) claimed++; else hooked++;   /* INSTALL and ACTIVE both */
         }
         Unlock();
         snprintf(buf, (size_t)n, "%d hooked, %d claimed: %s", hooked, claimed,
