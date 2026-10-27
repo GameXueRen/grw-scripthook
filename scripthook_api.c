@@ -7,6 +7,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "image.h"
 #include "log.h"
 
@@ -192,9 +193,36 @@ int ShReadFast(uint64_t addr, void *out, size_t len) {
     }
 }
 
+/* A read that cannot fault the process and does not ask the kernel first.
+ *
+ * ShQ used to go through ReadProcessMemory: correct, but a kernel transition
+ * per hop, and the player chain makes about ten of them plus five
+ * VirtualQuery calls - measured 2026-10-27 at 28us for one ShGetPlayer, the
+ * most expensive entry point the framework has left now that the state read
+ * is down to a microsecond. __try answers 0 on a page that went away, which
+ * is what ReadProcessMemory reported as a failure, and the callers already
+ * check what they read (Sane, the entity table, the slot index range).
+ *
+ * ReadProcessMemory stays where it belongs: ShReadMem and ShReadBytes are
+ * the public "read this for me" calls, and the bulk scans need RPM's
+ * behaviour over pages nobody has validated. */
+static int ShPeek(uint64_t addr, void *out, size_t len) {
+    int ok = 1;
+
+    if (!addr || !out || !len) return 0;
+    if (addr < SH_HEAP_LO || addr >= SH_HEAP_HI) return 0;
+    __try {
+        memcpy(out, (const void *)(uintptr_t)addr, len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = 0;
+    }
+    return ok;
+}
+
 static uint64_t ShQ(uint64_t addr) {
-    uint64_t v;
-    if (!ShReadMem(addr, &v, 8)) return 0;
+    uint64_t v = 0;
+
+    if (!ShPeek(addr, &v, 8)) return 0;
     return v;
 }
 
@@ -290,17 +318,16 @@ static uint64_t ShParentOfT(uint64_t entity, uint32_t *outType) {
     node = ShQ(entity + OFF_ENT_NODE);
     if (!node) return 0;
     link = node + OFF_NODE_LINK;
-    if (!ShReadable(link, 0x20)) return 0;
-    memcpy(&type, (void *)(uintptr_t)(link + LINK_TYPE), 4);
+    if (!ShPeek(link + LINK_TYPE, &type, 4)) return 0;
 
     if (type == 1)      hp = ShQ(link + LINK_HANDLE_T1);
     else if (type == 2) hp = ShQ(link + LINK_HANDLE_T2);
     else                return 0;
     if (outType) *outType = type;
-    if (!hp || !ShReadable(hp, 0x10)) return 0;
-
-    memcpy(&val, (void *)(uintptr_t)(hp + HANDLE_VALUE), 8);
-    memcpy(&flags, (void *)(uintptr_t)(hp + HANDLE_FLAGS), 4);
+    if (!hp) return 0;
+    if (!ShPeek(hp + HANDLE_VALUE, &val, 8) ||
+        !ShPeek(hp + HANDLE_FLAGS, &flags, 4))
+        return 0;
 
     /* Negative flags means a raw pointer, otherwise
      * the value is masked with a per thread key.
@@ -377,6 +404,7 @@ SH_API float ShReadF32(uint64_t addr, int *ok) {
     return v;
 }
 
+int ShPlayerScan(ShPlayer *out);
 int ShPeekPlayer(ShPlayer *out);
 
 /* The SOLDIER, from its own matrix. The player global's
@@ -448,12 +476,11 @@ static uint64_t ShPlayerFromStatic(void) {
     if (!slots) return 0;
 
     idxp = ShQ(SH_SLOT_INDEX);
-    if (idxp && ShReadable(idxp + OFF_SLOT_IDX, 4))
-        memcpy(&idx, (void *)(uintptr_t)(idxp + OFF_SLOT_IDX), 4);
+    if (idxp) ShPeek(idxp + OFF_SLOT_IDX, &idx, 4);
     if (idx > 64) return 0;
 
     root = ShQ(slots + (uint64_t)idx * 8);
-    if (!root || (root & 7) || !ShReadable(root, 8)) return 0;
+    if (!root || (root & 7)) return 0;
     if (!ShIsEntity(root)) {
         /* The slot table is the framework's own anchor and it is not a
          * vtable test, so this is where the live vtable can be read. */
@@ -683,16 +710,59 @@ static int ShPlayerLocked(ShPlayer *out, int scan) {
     return 1;
 }
 
-SH_API int ShGetPlayer(ShPlayer *out) {
+/* The shared body. `scan` is the whole question: with it, a player the
+ * static path and the cache both miss sends this thread into the heap walk;
+ * without it, the caller is told "no player right now" and comes back next
+ * tick. */
+static int PlayerCall(ShPlayer *out, int scan, int slot) {
+    uint64_t t0 = ShApiStatsOn ? ShTickNow() : 0;
     int ok;
 
     if (!out) return ShFail(SH_ERR_BAD_ARG);
     if (!ShRequireInGame()) return 0;
 
     AcquireSRWLockExclusive(&g_playerLock);
-    ok = ShPlayerLocked(out, 1);
+    ok = ShPlayerLocked(out, scan);
     ReleaseSRWLockExclusive(&g_playerLock);
+    if (t0) ShApiNote(slot, t0);
     return ok;
+}
+
+/* Is the public entry point allowed to walk the heap?
+ *
+ * It used to be, unconditionally, and that is the one thing about this call a
+ * plugin cannot see coming: the walk reads every committed page in the
+ * process, is budgeted at 150ms (WALK_BUDGET_MS), and runs on whoever asked -
+ * which for the chat plugin is a 15ms polling thread and for a menu callback
+ * is the worker that also applies the row. Two pollers at 60Hz hitting it in
+ * the same second was a frame the player felt.
+ *
+ * The recovery it buys matters on exactly two occasions - the first spawn
+ * after a load, and after a vehicle change re-parents the player - and both
+ * are entered from the framework's own worker paths, which still scan (see
+ * ShPlayerScan). A plugin asking 60 times a second is not one of them.
+ * [api] player_scan=1 restores the old behaviour for anything that turns out
+ * to depend on it. */
+static int PlayerScanWanted(void) {
+    static volatile LONG on = -1;
+    LONG v = InterlockedCompareExchange(&on, 0, 0);
+
+    if (v < 0) {
+        v = ShConfigGetBool("api", "player_scan", 0) ? 1 : 0;
+        InterlockedExchange(&on, v);
+    }
+    return (int)v;
+}
+
+SH_API int ShGetPlayer(ShPlayer *out) {
+    return PlayerCall(out, PlayerScanWanted(), SH_API_PLAYER);
+}
+
+/* The scanning variant. Not exported: the framework's own recovery paths
+ * (health, ammo cap, havok, npc spawn) call it from their worker threads,
+ * where a 150ms budget is a stall nobody sees. */
+int ShPlayerScan(ShPlayer *out) {
+    return PlayerCall(out, 1, SH_API_PLAYER_SCAN);
 }
 
 /* For the frame path. Never scans, never blocks: a scan in
@@ -727,9 +797,8 @@ SH_API int ShPlaceEntity(uint64_t entity, const ShVec3 *pos,
 
     if (!entity || !pos) return ShFail(SH_ERR_BAD_ARG);
     if (!ShIsEntity(entity)) return ShFail(SH_ERR_NOT_ENTITY);
-    if (!ShReadable(entity + OFF_ENT_MATRIX, 64))
+    if (!ShPeek(entity + OFF_ENT_MATRIX, m, 64))
         return ShFail(SH_ERR_UNWRITABLE);
-    memcpy(m, (void *)(uintptr_t)(entity + OFF_ENT_MATRIX), 64);
 
     if (orient) {
         float f[3], r[3], u[3], len;
@@ -774,9 +843,8 @@ SH_API int ShPlaceEntityRot(uint64_t entity, const ShVec3 *pos,
 
     if (!entity || !pos) return ShFail(SH_ERR_BAD_ARG);
     if (!ShIsEntity(entity)) return ShFail(SH_ERR_NOT_ENTITY);
-    if (!ShReadable(entity + OFF_ENT_MATRIX, 64))
+    if (!ShPeek(entity + OFF_ENT_MATRIX, m, 64))
         return ShFail(SH_ERR_UNWRITABLE);
-    memcpy(m, (void *)(uintptr_t)(entity + OFF_ENT_MATRIX), 64);
 
     r[0] = cy;       r[1] = -sy;      r[2] = 0.0f;
     f[0] = sy * cp;  f[1] = cy * cp;  f[2] = sp;
@@ -1136,7 +1204,9 @@ SH_API int ShTeleportPlayerHops(const ShVec3 *pos,
     int guard;
 
     if (!pos) return ShFail(SH_ERR_BAD_ARG);
-    if (!ShGetPlayer(&p)) return 0;
+    /* A jump is an explicit action, not a poll: the scan is affordable here
+     * and a miss would mean the teleport silently does nothing. */
+    if (!ShPlayerScan(&p)) return 0;
 
     for (guard = 0; guard < SH_HOP_MAX; guard++) {
         float dx, dy, dist;

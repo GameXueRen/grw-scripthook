@@ -29,6 +29,7 @@
 #include "scripthook.h"
 #include "image.h"
 #include "log.h"
+extern int ShPlayerScan(ShPlayer *out);
 
 
 /* The thunk the old plugin validates against: it scans for a call site's
@@ -507,7 +508,7 @@ static uint64_t PlayerRoot(void) {
     ShPlayer p;
 
     memset(&p, 0, sizeof(p));
-    if (!ShGetPlayer(&p)) return 0;
+    if (!ShPlayerScan(&p)) return 0;
     return p.root ? p.root : p.entity;
 }
 

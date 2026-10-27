@@ -8,8 +8,11 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "image.h"
 #include "log.h"
+extern int ShPlayerScan(ShPlayer *out);
+extern int ShInGameThread(void);   /* physics.c: the engine callback thread */
 
 /* RVAs, so this survives a relocated image. Re-pinned for the 2026-09 build
  * one at a time - the whole block except the last three was still the
@@ -856,12 +859,29 @@ int ShDespawn(uint64_t entity) {
     return 0;
 }
 
-uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos) {
+/* The body, so the entry point below can be timed at one exit. This is the
+ * entry point that blocks for seconds when the pump stalls, which is exactly
+ * what the counter exists to show. */
+static uint64_t SpawnNpcRaw(uint64_t archetypeId, const ShVec3 *pos) {
     const void *mtx;
     uint64_t ent = 0, spec;
     int waited;
 
     if (!pos || !archetypeId) { ShSetError(SH_ERR_BAD_ARG); return 0; }
+    /* This call waits for the engine's own callback to come round - up to
+     * three seconds, and then up to three more waiting for the entity. From
+     * inside that callback the wait cannot end, because the callback has to
+     * return first: the game freezes and nothing in the log says why. The
+     * header has always said "not from the game thread"; nothing enforced
+     * it, and a frame callback is exactly where a plugin author puts it. */
+    if (ShInGameThread()) {
+        ShSetError(SH_ERR_HOOK_FAILED);
+        LogFirst("spawn-on-game-thread",
+                 "spawn refused: called from the engine's own thread, where "
+                 "the wait it needs can never complete (call it from a worker "
+                 "or a menu callback) - later attempts are refused silently");
+        return 0;
+    }
     if (!ShRequireInGame()) return 0;
 
     mtx = ShSpawnBuildMatrix(pos);
@@ -888,6 +908,14 @@ uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos) {
         if (!ent) Sleep(50);
     }
     if (!ent) ShSetError(SH_ERR_NO_CANDIDATE);
+    return ent;
+}
+
+uint64_t ShSpawnNpc(uint64_t archetypeId, const ShVec3 *pos) {
+    uint64_t t0 = ShApiStatsOn ? ShTickNow() : 0;
+    uint64_t ent = SpawnNpcRaw(archetypeId, pos);
+
+    if (t0) ShApiNote(SH_API_SPAWN, t0);
     return ent;
 }
 
@@ -1229,7 +1257,7 @@ static int SpawnBatch(const ShNpcSpawnRequest *req, uint64_t *out,
         }
     }
 
-    if (!ShGetPlayer(&pl) || !ShGetPlayerPosition(&pp) ||
+    if (!ShPlayerScan(&pl) || !ShGetPlayerPosition(&pp) ||
         !ShGetEntityTransform(pl.entity, &tmp, &yaw, &pitch, &roll)) {
         ShSetError(SH_ERR_NO_POSITION);
         return 0;

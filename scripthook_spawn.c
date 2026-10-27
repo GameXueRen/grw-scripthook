@@ -31,6 +31,7 @@ extern int ShReadMem(uint64_t addr, void *out, size_t len);
 extern void ShSetError(int err);
 extern int ShRequireInGame(void);
 extern int ShGetPlayer(ShPlayer *out);
+extern int ShPlayerScan(ShPlayer *out);   /* scans: spawn is a worker path */
 
 /* Defined further down, next to the scan they belong to. A dispatch waits
  * for the warm thread's scan rather than running one of its own. */
@@ -554,7 +555,7 @@ const void *ShSpawnBuildMatrix(const ShVec3 *pos) {
     uint8_t *slot;
     float t[4];
 
-    if (!ShGetPlayer(&p) || !p.root) return NULL;
+    if (!ShPlayerScan(&p) || !p.root) return NULL;
     if (!ShReadableAddr(p.root + 0x20, 64)) return NULL;
 
     slot = g_mtx[g_mtxNext];

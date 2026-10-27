@@ -9,6 +9,7 @@
 #include "scripthook.h"
 #include "image.h"
 #include "log.h"
+extern int ShPlayerScan(ShPlayer *out);
 
 #define OFF_OWNER      0x028
 #define OFF_MAXHP      0x0F0
@@ -203,7 +204,7 @@ static int ResolveComponent(uint64_t root, uint64_t *out) {
 static int PlayerComponent(uint64_t *out) {
     ShPlayer p;
     uint64_t root = 0;
-    if (!ShGetPlayer(&p)) return 0;
+    if (!ShPlayerScan(&p)) return 0;
     if (!ShWalkToRoot(p.entity, &root)) return 0;
     return ResolveComponent(root, out);
 }

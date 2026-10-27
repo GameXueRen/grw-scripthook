@@ -85,6 +85,27 @@ static volatile int   g_hitOk = 0;
 static HANDLE g_probeEv;
 static volatile LONG g_probeEvMade;
 
+/* ---- which thread is the game's own? -------------------------------- */
+
+static volatile LONG g_gameTid;
+
+/* Called from the engine's callback, once per cast. */
+void ShNoteGameThread(void) {
+    LONG cur = (LONG)GetCurrentThreadId();
+
+    if (InterlockedCompareExchange(&g_gameTid, 0, 0) == 0)
+        InterlockedCompareExchange(&g_gameTid, cur, 0);
+}
+
+/* 1 when the caller IS the thread the engine runs callbacks on. Anything that
+ * waits for that thread - the queued call, the spawn pump - must not be
+ * called from it, because the wait can only end when the caller returns. */
+int ShInGameThread(void) {
+    LONG t = InterlockedCompareExchange(&g_gameTid, 0, 0);
+
+    return t && t == (LONG)GetCurrentThreadId();
+}
+
 static HANDLE ProbeEvent(void) {
     if (!g_probeEv && InterlockedCompareExchange(&g_probeEvMade, 1, 0) == 0)
         g_probeEv = CreateEventA(NULL, FALSE, FALSE, NULL);
@@ -654,6 +675,11 @@ RayHookCallback(uint64_t rcx, uint64_t rdx, uint64_t r8) {
     InterlockedIncrement(&g_cbIn);
     InterlockedIncrement(&g_cbSeq);
     g_cbTick = (LONG64)GetTickCount64();
+    /* Remember which thread runs the engine's own callbacks: this is the
+     * thread the job queue and the spawn pump land on, and therefore the one
+     * thread that must never block waiting for them. Recorded once, from the
+     * callback itself, because that is the only place that knows. */
+    ShNoteGameThread();
     g_ctx = rcx;
     if (g_probeEv) SetEvent(g_probeEv);
     g_cbStage = 1;

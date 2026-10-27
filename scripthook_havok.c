@@ -13,6 +13,7 @@
 #include "scripthook.h"
 #include "image.h"
 #include "log.h"
+extern int ShPlayerScan(ShPlayer *out);
 
 /* hknpBodyManager::allocateBody. Its rcx is the manager,
  * and the manager is hknpWorld + 0x18.
@@ -341,7 +342,7 @@ static int IsController(uint64_t entity) {
     uint64_t root = 0;
 
     memset(&p, 0, sizeof(p));
-    if (!ShGetPlayer(&p)) return 0;
+    if (!ShPlayerScan(&p)) return 0;
     if (entity == p.entity) return 1;
     if (ShWalkToRoot(p.entity, &root) && root == entity && !ShIsInVehicle())
         return 1;

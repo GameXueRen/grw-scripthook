@@ -588,7 +588,14 @@ SH_API int  ShGetVersion(void);
 
 /** The local player. In a vehicle the root re-parents to
  *  the vehicle; the entity stays the soldier.
- */
+ *
+ *  Never scans and never blocks: if the framework has not resolved the
+ *  player yet (first spawn after a load, a moment after a vehicle change
+ *  re-parents it) this answers 0 and the caller tries again next tick. The
+ *  recovery walk it used to fall into reads every committed page in the
+ *  process, which is not something a plugin polling at 60Hz should be able
+ *  to ask for. [api] player_scan=1 in scripthook.ini restores the old
+ *  behaviour; the framework's own recovery paths still scan. */
 SH_API int  ShGetPlayer(ShPlayer *out);
 /** The live entity vtable. A game update moves it, and a stale value
  *  makes every entity test silently answer no - so the framework learns
@@ -3139,6 +3146,15 @@ SH_API uint32_t ShUiCreate(uint32_t parent, int cls, float x, float y,
 
 /** 0 when the widget's class has no such property. */
 SH_API int  ShUiPropType(uint32_t id, uint32_t prop);
+/** Every one of these is one round trip to the game thread: the write is
+ *  queued and the caller waits for it (up to JOB_WAIT_MS, 3s). Fine once per
+ *  action, wasteful in a loop - a row of twenty controls is twenty round
+ *  trips. ShUiBegin/ShUiCommit below batch them into one, and that is the
+ *  intended way to build or refresh a page.
+ *
+ *  Do not call from a frame callback or from the game thread: the wait can
+ *  only end when that thread runs the queue, which it cannot do while the
+ *  callback is still inside. */
 SH_API int  ShUiSetF(uint32_t id, uint32_t prop, float v);
 SH_API int  ShUiSetU(uint32_t id, uint32_t prop, uint32_t v);
 SH_API int  ShUiSetV(uint32_t id, uint32_t prop, const float *v, int n);
