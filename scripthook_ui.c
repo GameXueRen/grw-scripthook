@@ -8,6 +8,7 @@
 
 #define SH_BUILD 1
 #include "scripthook.h"
+#include "scripthook_tick.h"
 #include "image.h"
 #include "log.h"
 
@@ -1922,11 +1923,25 @@ static int PropJob(uint32_t id, PropCall *pc) {
         Unlock();
         return ok;
     }
+    /* g_lock is held across the wait on purpose, and that is the one cost
+     * this path still has: releasing it needs a busy protocol that
+     * ShUiDestroy, ShUiSceneDestroy and ShUiOnEnterPlaying all have to
+     * honour, and the only users today are the two sample plugins. The
+     * batching route (ShUiBegin/Commit, documented in the header) is the
+     * answer for anything that would call this in a loop. What is here
+     * instead is the diagnosis: which widget and which property sat in the
+     * wait, so a report of "the overlay froze" can be traced. */
     w->scratch = (uint64_t)(uintptr_t)pc;
     ok = RunJob(OP_PROP, w) && pc->ok;
     w->scratch = 0;
     Unlock();
-    if (!ok) ShSetError(SH_ERR_UI_PROP);
+    if (!ok) {
+        ShSetError(SH_ERR_UI_PROP);
+        if (ShLastError() == SH_ERR_HOOK_FAILED)
+            Log("ui: prop op %u on widget %u did not complete (see the job "
+                "line above for how long it waited)", (unsigned)pc->op,
+                (unsigned)id);
+    }
     return ok;
 }
 
@@ -2002,19 +2017,28 @@ SH_API int ShUiGetV(uint32_t id, uint32_t prop, float *out, int n) {
 }
 
 SH_API int ShUiGetS(uint32_t id, uint32_t prop, char *out, int n) {
+    uint64_t t0 = ShApiStatsOn ? ShTickNow() : 0;
     PropCall pc; memset(&pc, 0, sizeof(pc));
     uint32_t len;
-    if (!out || n < 1) { ShSetError(SH_ERR_BAD_ARG); return 0; }
-    pc.op = 8; pc.prop = prop;
-    if (!PropJob(id, &pc)) return 0;
-    if (!Readable(pc.block, 12)) return 0;
-    memcpy(&len, (void *)(uintptr_t)pc.block, 4);
-    if ((int)len > n - 1) len = (uint32_t)(n - 1);
-    if (!Readable(pc.block + 12, len)) return 0;
-    memcpy(out, (void *)(uintptr_t)(pc.block + 12), len);
-    out[len] = 0;
-    ShUtf8Trim(out);        /* a small caller buffer cuts, so cut clean */
-    return 1;
+    int ok = 0;
+
+    if (!out || n < 1) {
+        ShSetError(SH_ERR_BAD_ARG);
+    } else {
+        pc.op = 8; pc.prop = prop;
+        if (PropJob(id, &pc) && Readable(pc.block, 12)) {
+            memcpy(&len, (void *)(uintptr_t)pc.block, 4);
+            if ((int)len > n - 1) len = (uint32_t)(n - 1);
+            if (Readable(pc.block + 12, len)) {
+                memcpy(out, (void *)(uintptr_t)(pc.block + 12), len);
+                out[len] = 0;
+                ShUtf8Trim(out);   /* a small caller buffer cuts, so cut clean */
+                ok = 1;
+            }
+        }
+    }
+    if (t0) ShApiNote(SH_API_UI_GET, t0);
+    return ok;
 }
 
 SH_API int ShUiMeasure(uint32_t id, float *w, float *h) {
@@ -2229,29 +2253,112 @@ static int WritableU(uint32_t prop) { return prop == SH_P_VISIBLE; }
  * whitelist goes back to what it was. */
 static int WritableV(uint32_t prop) { return prop == SH_P_SCALE; }
 
+/* Does this handle still look like a widget that is attached to a tree?
+ *
+ * Two reads and no RTTI: the private block has to be reachable, and the
+ * widget has to have a parent. Attached is the part that matters - the
+ * engine clears P_PARENT when it detaches a widget (Detach, above), and a
+ * HUD rebuild detaches every handle a plugin is holding. Calling a class
+ * setter on one of those writes into whatever the allocation was reused
+ * for; the read paths cannot fault that way (Find -> RQ fails first and
+ * answers 0), which is why only the three writes need this.
+ *
+ * Deliberately not "is its scene drawn this frame": that would refuse a
+ * perfectly live widget in a scene the player has hidden, and hiding layers
+ * is most of what this framework does. A scene root has no parent either
+ * and is refused as well - the bulk writers (the marker collapse, the
+ * minimap fx) write to the containers under a root, never to the root. */
+extern int ShSceneIsRoot(uint64_t handle);   /* scripthook_scene.c */
+
+static int LiveWidget(uint64_t widget) {
+    uint64_t priv = PrivOf(widget), parent;
+
+    if (!priv || !Readable(priv + P_PARENT, 8)) return 0;
+    parent = RQ(priv + P_PARENT);
+    if (parent) return 1;
+    /* No parent is two different things, and only one of them is dead: a
+     * widget whose tree let go of it, and a scene root, which never has a
+     * parent at all. Writing to a root is how the minimap's opacity is
+     * applied - refusing it made the opacity slider do nothing at all while
+     * the scale slider next to it kept working (measured 2026-10-27: half of
+     * every widget write, ~50 a second, was one of these). Only the roots of
+     * scenes that are live right now are let through. */
+    return ShSceneIsRoot(widget);
+}
+
 SH_API int ShWidgetSetF(uint64_t widget, uint32_t prop, float v) {
+    uint64_t t0 = ShApiStatsOn ? ShTickNow() : 0;
+    int ok;
+
     if (!Sane(widget) || !WritableF(prop)) {
         ShSetError(SH_ERR_BAD_ARG);
-        return 0;
+        ok = 0;
+    } else if (!LiveWidget(widget)) {
+        /* Refused rather than attempted: see LiveWidget. The line is written
+         * once, because a rebuilt HUD would otherwise repeat it every frame a
+         * stale handle is still in somebody's table - but every refusal is
+         * counted in the api line (wset.rej), so "logged once" cannot hide a
+         * feature that stayed broken for the rest of the session. */
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        if (t0) ShApiNote(SH_API_WSET_REJ, t0);
+        LogFirst("widget-write-stale",
+                 "widget write refused: %llx is no longer attached to a tree "
+                 "(the HUD was rebuilt and the handle is stale) - every later "
+                 "one is refused the same way and not logged",
+                 (unsigned long long)widget);
+        ok = 0;
+    } else {
+        ok = ShPropSetF(widget, prop, v);
     }
-    return ShPropSetF(widget, prop, v);
+    if (t0) ShApiNote(SH_API_WSET, t0);
+    return ok;
 }
 
 SH_API int ShWidgetSetU(uint64_t widget, uint32_t prop, uint32_t v) {
+    uint64_t t0 = ShApiStatsOn ? ShTickNow() : 0;
+    int ok;
+
     if (!Sane(widget) || !WritableU(prop)) {
         ShSetError(SH_ERR_BAD_ARG);
-        return 0;
+        ok = 0;
+    } else if (!LiveWidget(widget)) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        if (t0) ShApiNote(SH_API_WSET_REJ, t0);
+        LogFirst("widget-write-stale",
+                 "widget write refused: %llx is no longer attached to a tree "
+                 "(the HUD was rebuilt and the handle is stale) - every later "
+                 "one is refused the same way and not logged",
+                 (unsigned long long)widget);
+        ok = 0;
+    } else {
+        ok = ShPropSetU(widget, prop, v);
     }
-    return ShPropSetU(widget, prop, v);
+    if (t0) ShApiNote(SH_API_WSET, t0);
+    return ok;
 }
 
 SH_API int ShWidgetSetV(uint64_t widget, uint32_t prop, const float *v,
                         int n) {
+    uint64_t t0 = ShApiStatsOn ? ShTickNow() : 0;
+    int ok;
+
     if (!Sane(widget) || !v || !WritableV(prop) || n != 3) {
         ShSetError(SH_ERR_BAD_ARG);
-        return 0;
+        ok = 0;
+    } else if (!LiveWidget(widget)) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        if (t0) ShApiNote(SH_API_WSET_REJ, t0);
+        LogFirst("widget-write-stale",
+                 "widget write refused: %llx is no longer attached to a tree "
+                 "(the HUD was rebuilt and the handle is stale) - every later "
+                 "one is refused the same way and not logged",
+                 (unsigned long long)widget);
+        ok = 0;
+    } else {
+        ok = ShPropSetV(widget, prop, v, n);
     }
-    return ShPropSetV(widget, prop, v, n);
+    if (t0) ShApiNote(SH_API_WSET, t0);
+    return ok;
 }
 
 /* The engine handle behind one of our own ids, so the two
