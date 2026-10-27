@@ -577,6 +577,17 @@ static void LogAt(int level, const char *fmt, ...) {
 static void LogFirstNow(const char *logName, const char *fmt, ...) {
     va_list ap;
     char line[300];
+    char prev[MAX_PATH];
+
+    /* LogInit repoints this unit's log at a file named after the key, and
+     * nothing used to point it back: every later Log() from the same file
+     * went to that key file. Measured 2026-10-27 - scripthook_ui.log had
+     * "state change: gen 0 to 1" and "1 to 2" and then stopped, while
+     * "gen 2 to 3" and "3 to 4" turned up inside widget-write-stale. The
+     * state-change lines are exactly what a HUD-rebuild diagnosis reads.
+     * So: remember where this unit was writing, and put it back. */
+    strncpy(prev, g_logName, sizeof(prev) - 1);
+    prev[sizeof(prev) - 1] = 0;
 
     LogInit(logName);
     va_start(ap, fmt);
@@ -585,6 +596,7 @@ static void LogFirstNow(const char *logName, const char *fmt, ...) {
     /* Through LogAt with the text as an argument: the line is data here,
      * and a '%' in it must not be read as a conversion. */
     LogAt(g_logFloor ? LOG_ALWAYS : LOG_INFO, "%s", line);
+    if (prev[0]) LogInit(prev);
 }
 
 /* Once per CALL SITE, not once per translation unit.

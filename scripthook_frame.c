@@ -36,7 +36,10 @@
 /* TU25 Ai::SpawningManagerUpdate. */
 #define FRAME_RVA  0x0BF42B60u
 #define STOLEN     6
-#define CB_MAX     16
+/* 64, not 16: a full table answered ShRegisterFrameCallback with a silent 0,
+ * so the plugin that came last simply never ran and nothing said why. The
+ * slots are 16 bytes each, so the whole table is 1 KB. */
+#define CB_MAX     64
 
 extern void *ShAllocNear(uint64_t target);
 extern int   ShReadableAddr(uint64_t addr, size_t len);
