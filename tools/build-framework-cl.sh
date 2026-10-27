@@ -119,11 +119,15 @@ cl.exe -nologo -O2 -W3 -LD -MT -std:c17 -utf-8 -I. -D_CRT_SECURE_NO_WARNINGS \
 dumpbin -nologo -exports out/dinput8.dll \
   | awk '$0 ~ /^ +[0-9]+ +[0-9A-F]+ +[0-9A-F]+ +/ {print $4}' \
   | sort > out/exports-now.txt
-if diff -q tools/exports-baseline.txt out/exports-now.txt >/dev/null 2>&1; then
+# Line endings, not names: a Windows checkout with autocrlf hands us the
+# baseline with CRLF while a generated list has LF, and comparing those two
+# reports all 448 lines as changed. Normalise one side, never the file.
+sed 's/\r$//' tools/exports-baseline.txt > out/exports-baseline.lf.txt
+if diff -q out/exports-baseline.lf.txt out/exports-now.txt >/dev/null 2>&1; then
     echo "exports: $(wc -l < out/exports-now.txt | tr -d ' ') unchanged"
 else
     echo "EXPORTS CHANGED - tools/exports-baseline.txt vs this build:"
-    diff tools/exports-baseline.txt out/exports-now.txt | sed 's/^/  /'
+    diff out/exports-baseline.lf.txt out/exports-now.txt | sed 's/^/  /'
 fi
 
 echo "FW_BUILD_OK out/dinput8.dll"
