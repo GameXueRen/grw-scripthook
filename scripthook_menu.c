@@ -653,10 +653,39 @@ static void Navigate(void) {
             float was = it->num;
             /* Quantised to the step, not accumulated: `num += step` drifts,
              * and a row that lands on 0.30000001 renders as "< 0.30 >" one
-             * press and "< 0.3 >" the next because of it. */
-            it->num = it->lo + (float)((int)(((it->num - it->lo) / it->step)
-                                             + (valDir > 0 ? 0.5f : -0.5f)))
-                              * it->step;
+             * press and "< 0.3 >" the next because of it.
+             *
+             * The quantisation itself was wrong in two ways, both found in
+             * the regression session of 2026-10-28, both from the same
+             * cause: `(int)` truncates toward zero, it does not round.
+             *
+             *   1 `(int)(q + 0.5)` is q again whenever q is a whole number,
+             *     so a row sitting on a step boundary could never step UP.
+             *     fov_changer's fov_fp refused every right press at 63 while
+             *     the left one walked it to 59; firstperson's 0.0 went to
+             *     -2.0 the same way. Every value a row STARTS on is a
+             *     boundary, so this was the normal case, not an edge one.
+             *   2 the same truncation leans the wrong way for a negative q,
+             *     which firstperson's lo of -100 reaches as soon as the
+             *     player crosses zero.
+             *
+             * So: snap to the nearest boundary with a symmetric round, then
+             * walk a whole step. The snap is done in double because
+             * `n * 0.1f` is not exact - three steps off a lo of 30 came back
+             * as 30.300001, invisible on screen ("%.2f") but not in what the
+             * callback is handed.
+             *
+             * Stepping DOWN is unchanged: (int)(q - 0.5) was already q - 1,
+             * and round(q) - 1 is the same number for a q on a boundary. */
+            {
+                double q = ((double)it->num - (double)it->lo) /
+                           (double)it->step;
+                int    n = (int)(q + (q >= 0.0 ? 0.5 : -0.5));
+
+                n += (valDir > 0) ? 1 : -1;
+                it->num = (float)((double)it->lo +
+                                  (double)n * (double)it->step);
+            }
             if (it->num < it->lo) it->num = it->lo;
             if (it->num > it->hi) it->num = it->hi;
             /* Nothing moved: sitting against a limit is no reason to
