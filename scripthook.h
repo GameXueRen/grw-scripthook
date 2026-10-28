@@ -53,6 +53,12 @@ extern "C" {
  *
  *  1  1.0-beta3 and before: everything up to and including ShGetAmmoRounds.
  *  2  ShGetAmmoObject: the weapon a rounds reading is about.
+ *     ShGetAmmo / ShSetAmmo: the upstream's slot pair, restored for plugins
+ *     written against the upstream framework - slot 0 only, which is the one
+ *     slot this build can answer (see the entry itself). Not new surface of
+ *     ours - those callers already exist - and it stays under 2 by the
+ *     exception above, so a caller naming 2 has to read a NULL export as
+ *     "built before they came back", never as an error.
  *     ShNpcSpawnSetLayout / ShNpcSpawnGetLayout: how a batch is turned and
  *     which way it looks (see the exception above).
  *     The ShHook* group (ShHookAdd / ShHookAddAt / ShHookAddLate /
@@ -2896,6 +2902,56 @@ SH_API void ShGetAmmoScale(int *num, int *den);
 /** 1 while a scale other than 1/1 is in force. */
 SH_API int  ShAmmoScaleActive(void);
 
+/** Rounds in weapon slot `slot` - slot 0 only, the weapon in hand, and the
+ *  MAGAZINE rather than the reserve.
+ *
+ *  This is the upstream framework's slot API, restored for the plugins that
+ *  were written against it: the same arguments, the same error codes, and for
+ *  slot 0 the same number. Those plugins resolve it by name out of this
+ *  module, which is the only reason it is exported again - the rounds of the
+ *  weapon in hand have ShGetAmmoRounds, which is the same answer.
+ *
+ *  Slot 0 is that weapon: exactly the protected int ShGetAmmoRounds reports,
+ *  at exactly the address it is read from. Slots 1..7 answer 0 with
+ *  SH_ERR_NO_CANDIDATE, and that is not a stub - the eight-slot table the
+ *  upstream indexed does not exist in this build. Read-only forensics against
+ *  the running process (2026-10-28) found nothing shaped like it: no owner
+ *  handle at +0x250 on anything whose +0x180/+0x130 decode as numbers, and no
+ *  0x28-strided table in the player's component array or in the region the
+ *  hand weapon lives in. Those eight magazines are not stored anywhere this
+ *  framework can point at, so a caller is told that instead of being handed a
+ *  plausible integer from unrelated memory. See the slot pair in
+ *  scripthook_ammocap.c.
+ *
+ *  A caller that loops 0..7 expecting eight magazines is therefore not served
+ *  here; one that asks for slot 0 - what an ammo readout does - is. Nothing
+ *  is scanned to answer: the cost is one protected-int read on top of the
+ *  same lookup ShGetAmmoRounds does, and nothing runs on the frame.
+ *
+ *  Not from a frame callback or the game thread: the answer there is 0 with
+ *  SH_ERR_NO_CANDIDATE, without looking. Slot out of range or a NULL out is
+ *  SH_ERR_BAD_ARG; no weapon in hand (before the capacity function has been
+ *  asked once, or outside live play) is SH_ERR_NO_CANDIDATE, which is what
+ *  the upstream answered in the same situation.
+ *
+ *  The version number did not move for this (see the note above it), so a
+ *  caller must treat a NULL export as "this build predates the restoration".
+ */
+SH_API int  ShGetAmmo(int slot, uint32_t *out);
+
+/** Write one number into weapon slot `slot` - slot 0 only, the weapon in
+ *  hand.
+ *
+ *  The write lands on the int the ShGetAmmo(0) reading comes from, so the two
+ *  entry points cannot disagree about which magazine they mean. The engine
+ *  recomputes a magazine's contents on its own schedule, so a value written
+ *  here can be overwritten - the upstream entry point behaves the same way and
+ *  this is deliberately not "improved" into something with different
+ *  semantics. Same range, same thread rule and the same error codes as
+ *  ShGetAmmo, plus SH_ERR_UNWRITABLE when the store itself fails.
+ */
+SH_API int  ShSetAmmo(int slot, uint32_t value);
+
 /** One capacity look the hook saw, for a probe.
  *
  *  This exists because the engine function's ARGUMENTS are the only place the
@@ -2925,8 +2981,9 @@ SH_API int  ShGetAmmoLook(ShAmmoLook *out);
  *  weapon to the one function that computes a magazine's capacity (the one
  *  ShSetAmmoScale hooks), ShGetAmmoLook reports which object that was, and the
  *  rounds are a protected int 0x180 into it - 0x130 for the weapons that keep
- *  them there, which is the fallback the removed ShGetAmmo already used. No
- *  heap scan, no class constant, nothing cached.
+ *  them there. No heap scan, no class constant, nothing cached. ShGetAmmo and
+ *  ShSetAmmo reach the same int through this one, so slot 0 of that pair and
+ *  this function cannot disagree.
  *
  *  0 with SH_ERR_NO_CANDIDATE until the engine has asked once, which firing a
  *  round or switching a weapon makes it do - so the capacity hook has to be

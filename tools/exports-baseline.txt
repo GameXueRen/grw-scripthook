@@ -139,6 +139,7 @@ ShGameSceneAt
 ShGameSceneCount
 ShGameSceneName
 ShGameScenes
+ShGetAmmo
 ShGetAmmoCalls
 ShGetAmmoLook
 ShGetAmmoObject
@@ -333,6 +334,7 @@ ShSceneRoot
 ShScriptsDir
 ShSelectedPlayMode
 ShSetAllResources
+ShSetAmmo
 ShSetAmmoScale
 ShSetAngularVelocity
 ShSetCamera

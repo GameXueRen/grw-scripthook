@@ -63,6 +63,12 @@ static CapFn_t g_orig;
 extern void ShSetError(int err);
 extern int  ShReadableAddr(uint64_t addr, size_t len);
 extern int  ShReadBytes(uint64_t addr, void *out, uint32_t len);
+/* The slot pair's two guards, which were externs in scripthook_ammoslot.c
+ * while that file existed: live play decides whether there is a world to read
+ * at all (scripthook_state.c) and the engine's callback thread decides whether
+ * a reading would be a frame stale (scripthook_physics.c). */
+extern int  ShInLivePlay(void);
+extern int  ShInGameThread(void);
 
 /* ---- the scale ------------------------------------------------------- */
 
@@ -478,17 +484,31 @@ static int RoundsAt130(uint64_t obj, uint32_t *out) {
 }
 
 /* The rounds off one object: +0x180, or +0x130 when that answers nothing
- * while this one carries a number - the rule the removed module applied. */
-static int RoundsAt(uint64_t obj, uint32_t *out) {
+ * while this one carries a number - the rule the removed module applied.
+ *
+ * `addr` is the address the value was read from. It is what makes the slot
+ * pair below possible: ShSetAmmo has to write to the place ShGetAmmo read, and
+ * re-deriving which of the two offsets answered would be a second guess at the
+ * same question. Both come out of the same read, so they always agree. */
+static int RoundsAddr(uint64_t obj, uint64_t *addr, uint32_t *out) {
     uint32_t main = 0, alt = 0;
     int haveMain, haveAlt;
 
     haveMain = RoundsAt180(obj, &main);
     haveAlt  = RoundsAt130(obj, &alt);
     if (!haveMain && !haveAlt) return 0;
-    if (haveMain && (!haveAlt || main || !alt)) *out = main;
-    else *out = alt;
+    if (haveMain && (!haveAlt || main || !alt)) {
+        if (out)  *out  = main;
+        if (addr) *addr = obj + OFF_ROUNDS;
+    } else {
+        if (out)  *out  = alt;
+        if (addr) *addr = obj + OFF_ROUNDS_ALT;
+    }
     return 1;
+}
+
+static int RoundsAt(uint64_t obj, uint32_t *out) {
+    return RoundsAddr(obj, NULL, out);
 }
 
 /* ---- whose weapon is it ---------------------------------------------- */
@@ -839,6 +859,154 @@ SH_API int ShGetAmmoObject(uint64_t *obj) {
     *obj = g_roundsObj;
     ShSetError(SH_OK);
     return 1;
+}
+
+/* ---- the slot pair: ShGetAmmo / ShSetAmmo ----------------------------- */
+
+/* The upstream framework's slot API, restored for the plugins written against
+ * it: those resolve both names out of this DLL, which is the only reason they
+ * are exported at all - the rounds of the weapon in hand have ShGetAmmoRounds.
+ * Same arguments, same error codes, and for slot 0 the same number.
+ *
+ * Only slot 0 has an answer, because slot 0 is the only slot this build can
+ * reach:
+ *
+ *   slot 0    the weapon in hand: exactly the int ShGetAmmoRounds reports, at
+ *             exactly the address it reads it from - RoundsAddr above, called
+ *             once from one resolved weapon, so the pair cannot disagree with
+ *             the reading the HUD and every ammo plugin already agree with.
+ *   slot 1-7  NO_CANDIDATE. The eight-slot table upstream indexed does not
+ *             exist in this build. Read-only forensics against the running
+ *             process (2026-10-28, CE bridge) found nothing shaped like it: no
+ *             owner handle at +0x250 on anything whose +0x180/+0x130 decode as
+ *             numbers, and no 0x28-strided table in the player's component
+ *             array or in the region the hand weapon lives in. The components
+ *             decode as their own classes and the weapons are separate
+ *             objects, which is why the engine hands one over at a time
+ *             instead of holding eight in a row. Answering whatever sits at
+ *             base + k*0x28 would be inventing a number, and a plugin that
+ *             wrote it would be corrupting something else.
+ *
+ * So a caller that loops 0..7 expecting eight magazines is not served here,
+ * and is served by nothing in this build: those eight magazines are not stored
+ * anywhere this framework can point at. It is told that - 0 with
+ * SH_ERR_NO_CANDIDATE - rather than handed a plausible integer from unrelated
+ * memory. A caller that asks for slot 0, which is what an ammo readout does,
+ * gets the right number.
+ *
+ * Nothing is scanned. Upstream swept the address space with ReadProcessMemory
+ * looking for a class constant on whichever thread called, which is the exact
+ * shape of cost this fork spent several rounds removing elsewhere and which
+ * buys nothing here: the engine already hands its own capacity function the
+ * weapon it is asking about, and the tiers above work out which of those is
+ * the player's own.
+ *
+ * Not from the engine's callback thread: the frame is being drawn, and the
+ * answer would be a reading of whatever was in hand one frame ago. That is 0
+ * with SH_ERR_NO_CANDIDATE without looking - the same rule ShSpawnNpc follows.
+ *
+ * This lived in scripthook_ammoslot.c until 2026-10-28, when it stopped having
+ * anything of its own: the discovery table, the cache and the fingerprints all
+ * went with the slot-0 answer, leaving argument checks that had to reach back
+ * into this file through a non-exported helper. One file now, because the
+ * check "slot 0 is the rounds reading" is a fact about this file's own tiers.
+ */
+#define AMMO_SLOTS 8
+#define HAND_SLOT  0
+
+static int g_slotToldOk;    /* one line per process, when it first answers */
+static int g_slotToldNone;  /* one line per process, when it cannot        */
+
+/* The hand weapon's magazine, or 0 when there is none to read.
+ *
+ * No cache and no fallback on purpose: this is the same lookup ShGetAmmoRounds
+ * does, so a call costs what a rounds call costs and a stale number can never
+ * be handed out. The two log lines are the acceptance evidence for the pair -
+ * there is no probe plugin in this build, so one line naming the address is
+ * what a session can be checked against. They go to this module's log, which
+ * LogOnce has already opened by the time either can fire. */
+static int SlotHand(uint64_t *addr, uint32_t *val) {
+    uint64_t obj = 0, a = 0;
+    uint32_t v = 0;
+    int r = 0;
+
+    if (!ShInLivePlay()) return 0;
+    if (!ShGetAmmoRounds(&r) || !ShGetAmmoObject(&obj) ||
+        !RoundsAddr(obj, &a, &v)) {
+        if (!g_slotToldNone) {
+            g_slotToldNone = 1;
+            Log("ammo: no weapon in hand to answer the slot pair from - the "
+                "capacity hook has to have been asked about one at least once "
+                "(fire a round or switch a weapon); ShGetAmmo(0) answers 0 "
+                "until then");
+        }
+        return 0;
+    }
+    if (!g_slotToldOk) {
+        g_slotToldOk = 1;
+        Log("ammo: slot pair answering from the weapon in hand, %u rounds at "
+            "%llX (slots 1..%d answer NO_CANDIDATE - this build has no slot "
+            "table)", v, (unsigned long long)a, AMMO_SLOTS - 1);
+    }
+    if (addr) *addr = a;
+    if (val)  *val  = v;
+    return 1;
+}
+
+SH_API int ShGetAmmo(int slot, uint32_t *out) {
+    uint32_t v = 0;
+
+    if (slot < 0 || slot >= AMMO_SLOTS || !out) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    if (ShInGameThread()) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
+    /* slot != HAND_SLOT is "no such slot in this build", and it shares the
+     * code with "nothing in hand" on purpose: both mean the same thing to a
+     * caller - there is no number to give you right now. */
+    if (slot != HAND_SLOT || !SlotHand(NULL, &v)) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
+    *out = v;
+    ShSetError(SH_OK);
+    return 1;
+}
+
+SH_API int ShSetAmmo(int slot, uint32_t value) {
+    uint64_t addr = 0;
+
+    if (slot < 0 || slot >= AMMO_SLOTS) {
+        ShSetError(SH_ERR_BAD_ARG);
+        return 0;
+    }
+    if (ShInGameThread()) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
+    /* The write lands on the int SlotHand just read, so the two entry points
+     * cannot disagree about which magazine they mean - the reason RoundsAddr
+     * returns the address at all. */
+    if (slot != HAND_SLOT || !SlotHand(&addr, NULL)) {
+        ShSetError(SH_ERR_NO_CANDIDATE);
+        return 0;
+    }
+    /* ShStatWrite and not a private store: it is what ShStatRead decodes
+     * against (a page check and a plain write do not close over a free), it is
+     * the path a caller writing any other protected int takes, and it sets
+     * SH_ERR_UNWRITABLE itself when the store fails.
+     *
+     * The engine recomputes a magazine on its own schedule, so a value written
+     * here can be overwritten later - the upstream entry point behaves the
+     * same way, and this is deliberately not "improved" into something with
+     * different semantics. A value above what RoundsAt accepts (>0x800) reads
+     * back as nothing on the next call; that limit belongs to the reading side
+     * (see ROUNDS_MAX) and is not enforced here, so a write is never refused
+     * for a number a caller meant. */
+    return ShStatWrite(addr, value);
 }
 
 SH_API int ShGetAmmoCalls(ShAmmoCall *out, int max) {
