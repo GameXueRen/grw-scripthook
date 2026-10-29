@@ -69,7 +69,6 @@ typedef int (*FnNumber)(uint32_t, const char *, float, float, float, float,
                         ShMenuFn, void *);
 typedef int (*FnList)(uint32_t, const char *, const char *const *, int, int,
                       ShMenuFn, void *);
-typedef int (*FnInGame)(void);
 typedef int (*FnLogPath)(const char *, char *, int);
 typedef uint32_t (*FnMenuSub)(uint32_t, const char *);
 typedef int (*FnSceneCount)(void);
@@ -117,7 +116,6 @@ static FnAction     pMenuAction;
 static FnHint       pMenuHint;
 static FnNumber     pMenuNumber;
 static FnList       pMenuList;
-static FnInGame     pInGame;
 static FnLogPath    pLogPath;
 static FnMenuSub    pMenuSub;
 static FnSceneCount pSceneCount;
@@ -4550,8 +4548,11 @@ static const ShText kMhcEn[] = {
 };
 
 static void EnsureMenu(void) {
+    /* Made on the first poll, on whatever screen the player is on. It used to
+     * wait for ShIsInGame, on the reasoning that the HUD layers only exist
+     * inside the world - but the scene list arrives in the main menu too (72
+     * rows measured there), so there was nothing to wait for. */
     if (g_menu || !pMenuCreate) return;
-    if (pInGame && !pInGame()) return;
 
     g_menu = pMenuCreate("@mhc.page");
     if (!g_menu) return;
@@ -4667,7 +4668,6 @@ static void Resolve(void) {
     *(FARPROC *)&pMenuHint   = GetProcAddress(di, "ShMenuHint");
     *(FARPROC *)&pMenuNumber = GetProcAddress(di, "ShMenuNumber");
     *(FARPROC *)&pMenuList   = GetProcAddress(di, "ShMenuList");
-    *(FARPROC *)&pInGame     = GetProcAddress(di, "ShIsInGame");
     *(FARPROC *)&pLogPath    = GetProcAddress(di, "ShLogPath");
     *(FARPROC *)&pMenuSub    = GetProcAddress(di, "ShMenuSub");
     *(FARPROC *)&pSceneCount = GetProcAddress(di, "ShGameSceneCount");
