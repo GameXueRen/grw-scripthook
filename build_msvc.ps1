@@ -92,7 +92,7 @@ $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxil
 $betaSet = @(
     'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat', 'micfix',
     'AllLanguages', 'CameraPresets', 'AmmoControl', 'TimeWeatherControl',
-    'PredatorMelee'
+    'PredatorMelee', 'MoreHudControl', 'NoCorruptionPopup', 'NvFilter'
 )
 $script:BetaOnly  = if ($Beta -or $Release) { $betaSet }
                     elseif ($Deploy.Count)   { if ($Deploy -contains 'none') { @('none') } else { $Deploy } }

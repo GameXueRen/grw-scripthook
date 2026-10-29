@@ -43,7 +43,8 @@ param(
     [string[]]$Plugins = @(
         'skipintro', 'spawner', 'firstperson', 'fov_changer', 'cnchat',
         'micfix', 'AllLanguages', 'CameraPresets', 'AmmoControl',
-        'TimeWeatherControl', 'PredatorMelee'
+        'TimeWeatherControl', 'PredatorMelee', 'MoreHudControl',
+        'NoCorruptionPopup', 'NvFilter'
     ),
 
     # Also produce a .zip beside the tree.
