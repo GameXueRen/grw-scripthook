@@ -1046,6 +1046,98 @@ int ShMenuRootOrderRows(ShMenuOrderRow *out, int cap) {
     return n;
 }
 
+/* ---- every piece of plugin text on screen, for the language exporter ----
+ *
+ * A plugin's own text reaches the menu as a key it passes in - "@mhc.page" for
+ * one that translates, "Body limit" for one that does not - and the row, the
+ * page title, the hint and every list option each carry one. The exporter in
+ * scripthook_config.c cannot walk g_menus itself (it is private to this file),
+ * so it asks by index.
+ *
+ * Indexed rather than a callback on purpose: a callback would run inside the
+ * menu lock, and the exporter takes the text lock for every row it records.
+ * Two locks in one order here and the other way round somewhere else is how a
+ * deadlock gets written. One entry per call means the two are never nested.
+ *
+ * Cost is the walk repeated per index - a few hundred rows, once, on a menu
+ * click. Not worth a cached table that would then need invalidating.
+ *
+ * Built-in pages (owner "") are skipped: their text is already in the
+ * framework's own baseline table, and it is not a plugin's to export.
+ */
+static int TextEntryAt(int want, char *owner, int osz, char *key, int ksz) {
+    int i, j, k, n = 0;
+
+    for (i = 0; i < MENUS; i++) {
+        Menu *m = &g_menus[i];
+
+        if (!m->used || !m->owner[0]) continue;
+        if (m->title[0]) {
+            if (n == want) {
+                SafeCopy(owner, (size_t)osz, m->owner);
+                SafeCopy(key, (size_t)ksz, m->title);
+                return 1;
+            }
+            n++;
+        }
+        if (m->hint[0]) {
+            if (n == want) {
+                SafeCopy(owner, (size_t)osz, m->owner);
+                SafeCopy(key, (size_t)ksz, m->hint);
+                return 1;
+            }
+            n++;
+        }
+        for (j = 0; j < m->count; j++) {
+            Item *it = &m->items[j];
+
+            if (it->label[0]) {
+                if (n == want) {
+                    SafeCopy(owner, (size_t)osz, m->owner);
+                    SafeCopy(key, (size_t)ksz, it->label);
+                    return 1;
+                }
+                n++;
+            }
+            /* List options only. A toggle's on/off words are the framework's
+             * "@menu.on"/"@menu.off", already in the baseline. */
+            for (k = 0; k < it->nopts && k < OPTS; k++) {
+                if (!it->opts[k] || !it->opts[k][0]) continue;
+                if (n == want) {
+                    SafeCopy(owner, (size_t)osz, m->owner);
+                    SafeCopy(key, (size_t)ksz, it->opts[k]);
+                    return 1;
+                }
+                n++;
+            }
+        }
+    }
+    return 0;
+}
+
+int ShMenuTextCount(void) {
+    char owner[48], key[8];
+    int i, total;
+
+    Lock();
+    for (i = 0, total = 0; ; i++) {
+        if (!TextEntryAt(i, owner, sizeof owner, key, sizeof key)) break;
+        total++;
+    }
+    Unlock();
+    return total;
+}
+
+int ShMenuTextAt(int i, char *owner, int osz, char *key, int ksz) {
+    int ok;
+
+    if (i < 0 || !owner || osz < 1 || !key || ksz < 1) return 0;
+    Lock();
+    ok = TextEntryAt(i, owner, osz, key, ksz);
+    Unlock();
+    return ok;
+}
+
 /* Put the cursor on a named row of one menu and scroll it into view.
  * A page that rebuilds its own rows - the ordering page does, on every
  * move - needs to put the highlight back where the player left it. */
@@ -1165,9 +1257,16 @@ void ShMenuCaptureView(ShMenuView *v) {
             const char *en = ShTextEnUS(NULL, "@menu.root.hint");
             const char *tr = ShLangText(NULL, "@menu.root.hint");
 
-            if (!en) en = "%s back";
+            /* Five values, not five words baked into the line: the back keys
+             * are a setting, and a translation that needs another word order
+             * can reach for "%2$s" without having to invent a key name. The
+             * first two are fixed - g_key is VK_F4 and confirm is VK_RETURN -
+             * and if either ever becomes a setting this call grows with it. */
+            if (!en) en = "%s menu, %s confirm; %s back; %s select, %s adjust";
             ShTextFormat(v->hint, sizeof(v->hint), en, tr ? tr : en,
-                         BackKeysText());
+                         "F4", "Enter", BackKeysText(),
+                         "\xE2\x86\x91 \xE2\x86\x93",
+                         "\xE2\x86\x90 \xE2\x86\x92");
         }
         else if (m->hint[0])
             SafeCopy(v->hint, sizeof(v->hint),

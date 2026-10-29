@@ -895,9 +895,9 @@ static void BuildAboutMenu(void) {
     if (known >= 0)
         AboutRow(g_aboutMenu,
                  known ? "@about.build.ok" : "@about.build.new", build);
-    AboutRow(g_aboutMenu, "@about.author", NULL);
-    AboutRow(g_aboutMenu, "@about.modder", NULL);
-    AboutRow(g_aboutMenu, "@about.qq", NULL);
+    AboutRow(g_aboutMenu, "@about.author", SH_CREDIT_AUTHOR);
+    AboutRow(g_aboutMenu, "@about.modder", SH_CREDIT_MODDER);
+    AboutRow(g_aboutMenu, "@about.qq", SH_CREDIT_QQ);
     /* The address itself is the row's text, not a label in front of one:
      * there is nothing to translate, so this one row is not keyed - it is
      * SH_REPO, the same string the header defines. */
@@ -910,6 +910,7 @@ static void BuildAboutMenu(void) {
  * switch, and from the poll thread, so a switch made anywhere else lands
  * within a tick. */
 static char g_langSeen[16];
+static void BuildTranslateMenu(void);   /* rebuilt when the language changes */
 
 static void RefreshOwnText(void) {
     const char *cur = ShLangGet();
@@ -918,6 +919,11 @@ static void RefreshOwnText(void) {
     BuildHints();
     SetCpuLine();
     BuildAboutMenu();
+    /* The export rows name the language they are about, and a row's name is
+     * fixed when it is made - so this page is made again here, where the
+     * language is known to have just changed. Thread detection would never
+     * fire: this function is what moved g_langSeen on. */
+    BuildTranslateMenu();
     /* The order page's row labels are the pages' own titles, resolved
      * when the list was taken, so they need reading again in the new
      * language - OrderTick does that on its next pass. */
@@ -935,6 +941,7 @@ static DWORD WINAPI CpuLineThread(LPVOID p) {
         if (cur && strcmp(cur, g_langSeen)) {
             snprintf(g_langSeen, sizeof(g_langSeen), "%s", cur);
             BuildHints();
+            BuildTranslateMenu();   /* the row names carry the language */
         }
         SetCpuLine();
         OrderTick();
@@ -945,6 +952,65 @@ static DWORD WINAPI CpuLineThread(LPVOID p) {
 /* Register the whole tree. Called from the loader thread after the
  * config has been parsed, so the values and the scan see the real
  * ini. Safe to call once; the guard keeps rebuilds from stacking. */
+/* ---- the language export page -------------------------------------------
+ *
+ * Two rows write a lang.ini out: one for the framework's own text, one for
+ * every installed plugin. Each carries the path it writes under itself, as a
+ * disabled row - a path is there to be read and copied, not changed, and
+ * ShLangText is never asked about it because a path is not prose.
+ *
+ * The row names carry the language they are about, so the page is cleared and
+ * made again when the language changes: a row's name is fixed when it is made,
+ * and there is no API to rename one.
+ */
+
+static uint32_t g_translateMenu;
+
+static void ExportStatus(uint32_t menu, int n) {
+    if (n <= 0) ShMenuStatus(menu, "@settings.export.none");
+    else        ShMenuStatusF(menu, "@settings.export.done", n);
+}
+
+static void OnExportFramework(uint32_t menu, uint32_t item, int value, void *user) {
+    (void)item; (void)value; (void)user;
+    ExportStatus(menu, ShLangExportFramework());
+}
+
+static void OnExportPlugins(uint32_t menu, uint32_t item, int value, void *user) {
+    (void)item; (void)value; (void)user;
+    ExportStatus(menu, ShLangExportPlugins());
+}
+
+static void AddPathRow(uint32_t menu, const char *path) {
+    ShMenuAction(menu, path, NULL, NULL);
+    ShMenuDisable(menu, path, 1);
+}
+
+static void BuildTranslateMenu(void) {
+    char label[192];
+    const char *code = ShLangGet();
+    const char *bracket;    /* full-width reads right in Chinese, not in English */
+
+    if (!g_translateMenu) return;
+    if (!code || !code[0]) code = "en-US";
+    bracket = _strnicmp(code, "zh", 2) ? "%s (%s)" : "%s（%s）";
+    ShMenuClear(g_translateMenu);
+
+    /* The plugins first: that is what most people come here for, and the two
+     * rows read in the order the hint above them lists them. */
+    snprintf(label, sizeof label, bracket,
+             ShLangText(NULL, "@settings.export.pl"), code);
+    ShMenuAction(g_translateMenu, label, OnExportPlugins, NULL);
+    AddPathRow(g_translateMenu, "<GameDir>\\plugins\\*\\lang.ini");
+
+    snprintf(label, sizeof label, bracket,
+             ShLangText(NULL, "@settings.export.fw"), code);
+    ShMenuAction(g_translateMenu, label, OnExportFramework, NULL);
+    AddPathRow(g_translateMenu, "<GameDir>\\lang.ini");
+
+    ShMenuHint(g_translateMenu, "@settings.translate.hint");
+}
+
 void ShModSettingsStartup(void) {
     if (g_built) return;
     g_built = 1;
@@ -979,6 +1045,10 @@ void ShModSettingsStartup(void) {
     OrderReload();
     BuildOrderMenu();
     BuildLanguageRow(g_modMenu);
+    /* Under the language row: both are about the menu's own text. A player who
+     * wants a language nobody has done yet starts from these files. */
+    g_translateMenu = ShMenuSub(g_modMenu, "@settings.translate");
+    BuildTranslateMenu();
     /* Made after the language row on purpose: a row keeps the place it was
      * made in, and About belongs under everything else on the page. */
     g_aboutMenu = ShMenuSub(g_modMenu, "@about.page");

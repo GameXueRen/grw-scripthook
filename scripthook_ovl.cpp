@@ -1264,21 +1264,31 @@ void RenderMenu(const ShMenuView* v)
     ImVec2 s1, s2;
     // The two credit lines are framework text, one row per language, so
     // they follow the menu language like every other line of the panel
-    // (a language with no row of its own falls back to English). The
-    // build line takes the version as a value: the template is checked
-    // and formatted the same way a page's status line is, and the version
-    // it formats is SH_VERSION, so this line cannot name a build other
-    // than the one drawing it.
+    // (a language with no row of its own falls back to English).
+    //
+    // Both take their values rather than carrying them: the names come from
+    // SH_CREDIT_* and the version from SH_VERSION, and the template is
+    // checked and formatted the way a page's status line is. So this line
+    // cannot credit somebody else or name a build other than the one drawing
+    // it - and a translation can put the name where its own grammar wants it.
+    // Reading the author row straight out of the table, as this did before,
+    // would show a template's "%s" verbatim.
     const char* c1 = "";
     const char* c2 = "";
+    char c1buf[192];
     char c2buf[192];
+    c1buf[0] = 0;
     c2buf[0] = 0;
     if (v->isRoot) {
-        const char* en = ShTextEnUS(nullptr, "@ui.credit.build");
-        const char* tr = ShLang("@ui.credit.build");
+        const char* enA = ShTextEnUS(nullptr, "@menu.credit.author");
+        const char* trA = ShLang("@menu.credit.author");
+        const char* enB = ShTextEnUS(nullptr, "@menu.credit.version");
+        const char* trB = ShLang("@menu.credit.version");
 
-        c1 = ShLang("@ui.credit.author");
-        ShTextFormat(c2buf, sizeof(c2buf), en ? en : tr, tr, SH_VERSION);
+        ShTextFormat(c1buf, sizeof(c1buf), enA ? enA : trA, trA,
+                     SH_CREDIT_AUTHOR, SH_CREDIT_MODDER);
+        c1 = c1buf;
+        ShTextFormat(c2buf, sizeof(c2buf), enB ? enB : trB, trB, SH_VERSION);
         c2 = c2buf;
         s1 = font->CalcTextSizeA(cFs, FLT_MAX, 0.0f, c1);
         s2 = font->CalcTextSizeA(cFs, FLT_MAX, 0.0f, c2);

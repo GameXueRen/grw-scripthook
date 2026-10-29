@@ -185,6 +185,14 @@ extern "C" {
  *  move costs one line here. */
 #define SH_REPO "https://github.com/GameXueRen/grw-scripthook"
 
+/** Who wrote it, and where to ask about it. Values, not text: the rows carry a
+ *  template and these fill it in, so a translation can put the name where its
+ *  own grammar wants it but cannot change whose name it is. Both the root
+ *  menu's top-right line and the About page read them from here. */
+#define SH_CREDIT_AUTHOR "Phiality"
+#define SH_CREDIT_MODDER "GameXueRen"
+#define SH_CREDIT_QQ     "299177445"
+
 #ifdef SH_BUILD
 #define SH_API __declspec(dllexport)
 #else
@@ -1447,6 +1455,13 @@ typedef struct ShMenuOrderRow {
  *  play mode has taken away is never listed and never renumbered. Writes
  *  at most `cap` rows and returns how many there are in total. */
 int  ShMenuRootOrderRows(ShMenuOrderRow *out, int cap);
+/** Internal, for the language exporter: every piece of text a plugin puts on
+ *  screen - page title, hint, row label, list option - as the key it is looked
+ *  up by. Built-in pages are excluded. Walk it by index: each call takes the
+ *  menu lock and releases it, so the exporter can take the text lock per row
+ *  without the two ever being held together. */
+int  ShMenuTextCount(void);
+int  ShMenuTextAt(int i, char *owner, int osz, char *key, int ksz);
 /** Internal: put the cursor on the row named `key` and scroll it into
  *  view: a page that rebuilds its own rows needs this afterwards. */
 int  ShMenuSelectRow(uint32_t menu, const char *key);
@@ -3632,6 +3647,30 @@ SH_API int ShLangDeclare(const char *owner, const char *lang,
  *  order. Fills the tab-separated pair "code<TAB>label" and returns
  *  1; 0 when i is out of range or buf is too small. */
 SH_API int ShLangBuiltin(int i, char *buf, int size);
+/** Write the framework's own menu text out as lang.ini in the game folder,
+ *  in the language in force.
+ *
+ *  Filled in, never rewritten. A key already in that section keeps whatever
+ *  value it has - that row is the player's translation, and pressing this a
+ *  second time must not cost it. Only what is missing is appended, so a file
+ *  that is complete is not touched at all: no write, no changed timestamp.
+ *  Every other language section is left alone.
+ *
+ *  The write lands through lang.ini.tmp and a rename, so a failure part way
+ *  leaves the file as it was. There is no .bak, because there is no state in
+ *  which the original is half-written.
+ *
+ *  A key with no text in this language falls back to en-US, then to the key
+ *  itself - for a plugin with no compiled-in table at all the key IS the
+ *  English word, so that last step is what fills its rows.
+ *
+ *  Returns the number of files written; 0 when everything was already
+ *  complete, or when there is nothing to write. */
+SH_API int ShLangExportFramework(void);
+/** The same, for every installed plugin's own lang.ini, beside its .asi.
+ *  Plugins that share a folder share one file, which is how the loader
+ *  reads them anyway. */
+SH_API int ShLangExportPlugins(void);
 /** The label to show for a language code: its [LanguageNames] entry
  *  when a lang.ini carries one, else the code itself. Never NULL. */
 SH_API const char *ShLangLabel(const char *code);

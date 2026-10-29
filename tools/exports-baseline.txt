@@ -230,6 +230,8 @@ ShKindName
 ShLang
 ShLangBuiltin
 ShLangDeclare
+ShLangExportFramework
+ShLangExportPlugins
 ShLangFor
 ShLangForOwned
 ShLangGet

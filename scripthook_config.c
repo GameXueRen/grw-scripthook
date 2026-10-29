@@ -25,6 +25,7 @@
  * ShPluginIniPath).
  */
 #include <windows.h>
+#include <io.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -480,7 +481,7 @@ static void ParseConfig(const char *text) {
 #define LANG_KEY_MAX    512     /* a literal key can be a whole hint */
 #define LANG_VAL_MAX    768     /* and its translation can be longer */
 #define LROW_MAX        2048
-#define BASE_MAX        2048
+#define BASE_MAX        4096
 #define PLOAD_MAX       128
 
 typedef struct {
@@ -1139,6 +1140,544 @@ SH_API int ShLangBuiltin(int i, char *buf, int size) {
     n = snprintf(buf, size, "%s\t%s", g_builtin[i], ShLangLabel(g_builtin[i]));
     ShSetError(n < 0 ? SH_ERR_BAD_ARG : SH_OK);
     return n >= 0 && n < size;
+}
+
+/* ---- exporting a lang.ini for each menu ---------------------------------
+ *
+ * Two rows on the settings page write these out: one for the framework's own
+ * text, one for every installed plugin's.
+ *
+ * Filled in, never replaced. A key already in the section for the language in
+ * force is left exactly as it stands - that row is the player's translation,
+ * and pressing the button a second time must not cost it. Only what is missing
+ * is appended, at the end of that same section. A file with nothing missing is
+ * not opened for writing at all, so its mtime does not even move.
+ *
+ * That is what makes a plugin installed later harmless: it gets a file of its
+ * own, and every file already translated is skipped on its own merit rather
+ * than by a list of names that would go stale.
+ *
+ * The write is the other half. The bytes go to lang.ini.tmp, the handle is
+ * flushed through to the disk, the result is measured back, and only then is
+ * it renamed over lang.ini. Anything that goes wrong before the rename leaves
+ * lang.ini as it was - which is why there is no .bak: a half-written original
+ * cannot be produced, so a copy would protect against nothing the rename does
+ * not already.
+ *
+ * Three sources for a value, in this order: the text this language declares,
+ * the en-US text, then the key itself. That last step is what fills the rows
+ * of a plugin with no compiled-in table at all - its keys ARE the English
+ * words, and a row is looked up by exactly that string.
+ */
+
+#define LF_OWNERS     96
+#define LF_PATHS      48
+#define LF_PER_PATH   8        /* plugins one folder may serve */
+#define LF_ROWS       1024     /* distinct keys one export looks at */
+#define LF_MENU_MAX   384      /* menu literals, for the plugins without tables */
+#define LF_BUF        65536    /* a lang.ini is read and rebuilt in this */
+
+typedef struct {
+    const char *owner;         /* points into lfOwn */
+    const char *key;
+} LfKey;
+
+typedef struct {
+    char path[MAX_PATH];
+    int  own[LF_PER_PATH];
+    int  nOwn;
+    int  fw;                   /* 1 = the framework's own lang.ini */
+} LfPath;
+
+static LfKey   lfKey[LF_ROWS];
+static int     lfNKey;
+static char    lfOwn[LF_OWNERS][48];
+static int     lfNOwn;
+static LfPath  lfPath[LF_PATHS];
+static int     lfNPath;
+static char    lfBuf[LF_BUF];  /* the file as it was found */
+static char    lfOut[LF_BUF];  /* the file as it will be written */
+static int     lfCrlf;         /* the file uses CRLF, so new rows must too */
+static int     lfAdded;        /* rows this file gained */
+static size_t  lfSegB, lfSegE; /* the section that is there, when one is */
+static int     lfSkipped;      /* text this file could not hold in one line */
+
+typedef struct {
+    char owner[48];
+    char key[128];
+} LfMenuEnt;
+
+static LfMenuEnt lfMenu[LF_MENU_MAX];
+static int       lfNMenu;
+
+/* A plugin name, remembered once. "" is not one: the framework's own text is
+ * collected on its own pass and never goes through this table. */
+static int LfOwnIndex(const char *name) {
+    int i;
+
+    if (!name || !name[0]) return -1;
+    for (i = 0; i < lfNOwn; i++)
+        if (!_stricmp(lfOwn[i], name)) return i;
+    if (lfNOwn >= LF_OWNERS) return -1;
+    CopyN(lfOwn[lfNOwn], sizeof(lfOwn[0]), name);
+    return lfNOwn++;
+}
+
+/* The file this owner's text goes in, grouped by path rather than by owner -
+ * several plugins in one folder share one file, as the loader reads them. */
+static int LfPathIndex(const char *path, int owner) {
+    int i, j;
+
+    for (i = 0; i < lfNPath; i++) {
+        if (_stricmp(lfPath[i].path, path)) continue;
+        for (j = 0; j < lfPath[i].nOwn; j++)
+            if (lfPath[i].own[j] == owner) return i;
+        if (lfPath[i].nOwn >= LF_PER_PATH) {
+            TextLog("langexport: %s already serves %d plugins; \"%s\" left out",
+                    path, LF_PER_PATH, lfOwn[owner]);
+            return i;
+        }
+        lfPath[i].own[lfPath[i].nOwn++] = owner;
+        return i;
+    }
+    if (lfNPath >= LF_PATHS) return -1;
+    CopyN(lfPath[lfNPath].path, sizeof(lfPath[0].path), path);
+    lfPath[lfNPath].fw = 0;
+    lfPath[lfNPath].nOwn = 1;
+    lfPath[lfNPath].own[0] = owner;
+    return lfNPath++;
+}
+
+/* CRLF when the file mostly uses it. A file a player edited in an editor set
+ * to LF is a file whose new rows must be LF too - mixing the two puts a stray
+ * carriage return at the end of every value this writes, and the value is what
+ * gets handed to the game. */
+static int LfDetectCrlf(const char *buf, size_t len) {
+    size_t i, crlf = 0, nl = 0;
+
+    for (i = 0; i < len; i++) {
+        if (buf[i] != '\n') continue;
+        nl++;
+        if (i && buf[i - 1] == '\r') crlf++;
+    }
+    return nl && crlf * 2 >= nl;
+}
+
+/* The whole section named `lang`, header line included: [start, end). 0 when
+ * the file has none. `end` is the next section's '[' or the terminator, so a
+ * section can be addressed as one range without walking it twice. */
+static int LfSection(const char *text, const char *lang, const char **start,
+                     const char **end) {
+    const char *p = text;
+
+    while (p && *p) {
+        const char *line = p;
+
+        while (*p && *p != '\n') p++;
+        while (line < p && (*line == ' ' || *line == '\t')) line++;
+        if (line < p && *line == '[') {
+            const char *close = line + 1;
+
+            while (close < p && *close != ']') close++;
+            if (close < p) {
+                char name[64];
+                size_t n = (size_t)(close - line - 1);
+
+                if (n >= sizeof name) n = sizeof name - 1;
+                memcpy(name, line + 1, n);
+                name[n] = 0;
+                if (LangEq(name, lang)) {
+                    const char *e = *p ? p + 1 : p;
+
+                    while (e && *e) {
+                        const char *l2 = e;
+
+                        while (*e && *e != '\n') e++;
+                        while (l2 < e && (*l2 == ' ' || *l2 == '\t')) l2++;
+                        if (*l2 == '[') { e = l2; break; }
+                        if (*e) e++;
+                    }
+                    *start = line;
+                    *end = e;
+                    return 1;
+                }
+            }
+        }
+        if (*p) p++;
+    }
+    *start = *end = NULL;
+    return 0;
+}
+
+/* The key on one line, or 0 when it is blank, a comment, or has no
+ * "key = value" shape. Both quoted and bare keys count: a player editing by
+ * hand is as likely to leave the quotes off as not, and a row this fails to
+ * see is a row that gets appended a second time. */
+static int LfLineKey(const char *p, const char *end, char *out, size_t cap) {
+    const char *s = p, *k;
+    size_t n;
+
+    while (s < end && (*s == ' ' || *s == '\t')) s++;
+    if (s >= end) return 0;
+    if (*s == ';' || *s == '#' || *s == '\r' || *s == '\n') return 0;
+
+    if (*s == '"') {
+        k = ++s;
+        while (s < end && *s != '"') s++;
+        if (s >= end) return 0;             /* an unclosed quote: not a row */
+        n = (size_t)(s - k);
+        s++;
+        while (s < end && (*s == ' ' || *s == '\t')) s++;
+        if (s >= end || *s != '=') return 0;
+    } else {
+        k = s;
+        while (s < end && *s != '=' && *s != '\r' && *s != '\n') s++;
+        if (s >= end || *s != '=') return 0;
+        n = (size_t)(s - k);
+        while (n && (k[n - 1] == ' ' || k[n - 1] == '\t')) n--;
+    }
+    if (!n || n >= cap) return 0;
+    memcpy(out, k, n);
+    out[n] = 0;
+    return 1;
+}
+
+/* A row is one line. A key or a value carrying a quote would end the value
+ * early; one carrying a newline would break the row in two, leaving the key
+ * unreadable and the rest as loose text. Text like that cannot be expressed
+ * in this file at all - the parser reads a line at a time - so it is left out
+ * rather than written broken, and counted so the log says how many. */
+static int LfLineSafe(const char *s) {
+    if (!s || !s[0]) return 0;
+    for (; *s; s++)
+        if (*s == '"' || *s == '\n' || *s == '\r') return 0;
+    return 1;
+}
+
+/* Is `key` already a row of the section at [b, e)? Scanning the section each
+ * time costs a few hundred comparisons per key and saves a table that would
+ * need its own storage and its own way of going wrong. */
+static int LfHasKey(size_t b, size_t e, const char *key) {
+    size_t p = b;
+    char line[160];
+
+    while (p < e) {
+        size_t q = p;
+
+        while (q < e && lfBuf[q] != '\n') q++;
+        if (LfLineKey(lfBuf + p, lfBuf + q, line, sizeof line) &&
+            !strcmp(line, key))
+            return 1;
+        p = q < e ? q + 1 : e;
+    }
+    return 0;
+}
+
+/* Build the file into lfOut and return its length, or 0 when this path has
+ * nothing missing and the file should not be touched at all. */
+static size_t LfRender(const LfPath *g, size_t len, int had, int found) {
+    size_t at, b = lfSegB, e = lfSegE;
+    int i, j;
+
+    lfAdded = 0;
+    lfSkipped = 0;
+
+    if (found) {
+        memcpy(lfOut, lfBuf, e);
+        at = e;
+        /* A file whose last row carries no newline would otherwise get the
+         * first added row glued onto it. */
+        if (at && lfOut[at - 1] != '\n') {
+            if (at + 2 >= LF_BUF) return 0;
+            if (lfCrlf) lfOut[at++] = '\r';
+            lfOut[at++] = '\n';
+        }
+    } else {
+        if (len) {
+            memcpy(lfOut, lfBuf, len);
+            at = len;
+        } else {
+            at = 0;
+        }
+        if (at + 32 >= LF_BUF) return 0;
+        at += (size_t)snprintf(lfOut + at, LF_BUF - at, "%s[%s]%s\n",
+                               at ? (lfCrlf ? "\r\n" : "\n") : "", g_langName,
+                               lfCrlf ? "\r" : "");
+    }
+
+    for (i = 0; i < lfNKey; i++) {
+        const char *val;
+        int mine = g->fw;
+
+        if (!mine) {
+            for (j = 0; j < g->nOwn; j++)
+                if (!_stricmp(lfOwn[g->own[j]], lfKey[i].owner)) { mine = 1; break; }
+        }
+        if (!mine) continue;
+        if (found && LfHasKey(b, e, lfKey[i].key)) continue;   /* theirs, keep it */
+        val = BaseFind(lfKey[i].owner, g_langName, lfKey[i].key);
+        if (!val || !val[0]) val = BaseFind(lfKey[i].owner, "en-US", lfKey[i].key);
+        if (!val || !val[0]) val = lfKey[i].key;
+        if (!LfLineSafe(lfKey[i].key) || !LfLineSafe(val)) { lfSkipped++; continue; }
+        if (at + strlen(lfKey[i].key) + strlen(val) + 8 >= LF_BUF) {
+            TextLog("langexport: %s full, %d key(s) left for a later run",
+                    g->path, lfNKey - i);
+            break;
+        }
+        at += (size_t)snprintf(lfOut + at, LF_BUF - at, "\"%s\" = \"%s\"%s\n",
+                               lfKey[i].key, val, lfCrlf ? "\r" : "");
+        lfAdded++;
+    }
+
+    /* The literals a plugin put on screen. They only ever go into the language
+     * in force: they are English words, and there is no other language to file
+     * them under. */
+    if (!g->fw) {
+        for (i = 0; i < lfNMenu; i++) {
+            int mine = 0;
+
+            for (j = 0; j < g->nOwn; j++)
+                if (!_stricmp(lfOwn[g->own[j]], lfMenu[i].owner)) { mine = 1; break; }
+            if (!mine) continue;
+            if (found && LfHasKey(b, e, lfMenu[i].key)) continue;
+            if (!LfLineSafe(lfMenu[i].key)) { lfSkipped++; continue; }
+            if (at + strlen(lfMenu[i].key) * 2 + 8 >= LF_BUF) break;
+            at += (size_t)snprintf(lfOut + at, LF_BUF - at, "\"%s\" = \"%s\"%s\n",
+                                   lfMenu[i].key, lfMenu[i].key,
+                                   lfCrlf ? "\r" : "");
+            lfAdded++;
+        }
+    }
+
+    if (lfSkipped)
+        TextLog("langexport: %s - %d row(s) left out, their text spans lines "
+                "and cannot be held in one", g->path, lfSkipped);
+
+    if (!lfAdded) return 0;                 /* complete: nothing to write */
+
+    if (found) {
+        if (at + (len - e) + 1 > LF_BUF) return 0;
+        memcpy(lfOut + at, lfBuf + e, len - e);
+        at += len - e;
+    }
+    lfOut[at] = 0;
+
+    if (!had) {
+        /* A new file gets one line saying which build made it and how many
+         * rows it holds - the only thing a translator needs to know is that
+         * the count should match the menu. */
+        SYSTEMTIME st;
+        char head[192];
+        size_t hn;
+
+        GetLocalTime(&st);
+        hn = (size_t)snprintf(head, sizeof head,
+                              "; ScriptHook %s · %04d-%02d-%02d %02d:%02d"
+                              " · Export %d\r\n",
+                              SH_VERSION, st.wYear, st.wMonth, st.wDay,
+                              st.wHour, st.wMinute, lfAdded);
+        if (at + hn + 1 <= LF_BUF) {
+            memmove(lfOut + hn, lfOut, at + 1);
+            memcpy(lfOut, head, hn);
+            at += hn;
+        }
+    }
+    return at;
+}
+
+/* Put `len` bytes where `path` is, without ever leaving a half-written file
+ * where a whole one used to be. Failure before the rename leaves the original
+ * untouched; failure at the rename leaves the new file beside it, named .tmp,
+ * for a player whose lang.ini is held open by an editor to move himself. */
+static int LfAtomicWrite(const char *path, const char *buf, size_t len) {
+    char tmp[MAX_PATH];
+    FILE *f;
+    HANDLE h;
+    size_t back = 0;
+    int ok;
+
+    if (snprintf(tmp, sizeof tmp, "%s.tmp", path) < 0) return 0;
+    /* A .tmp left by a crash is no evidence of anything - it is overwritten,
+     * never restored from. */
+    if (GetFileAttributesA(tmp) != INVALID_FILE_ATTRIBUTES) DeleteFileA(tmp);
+
+    f = fopen(tmp, "wb");
+    if (!f) return 0;
+    ok = fwrite(buf, 1, len, f) == len && fflush(f) == 0;
+    if (ok) {
+        h = (HANDLE)_get_osfhandle(_fileno(f));
+        /* fclose only hands the bytes to the file system; without this the
+         * rename can land before the data does, and a power cut then leaves a
+         * correctly named empty file. */
+        ok = h != INVALID_HANDLE_VALUE && FlushFileBuffers(h) != 0;
+    }
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) { DeleteFileA(tmp); return 0; }
+
+    /* Measure it back: a short file is not one to put where a good one was,
+     * and fwrite's own count does not prove the bytes reached the disk. */
+    f = fopen(tmp, "rb");
+    if (!f) { DeleteFileA(tmp); return 0; }
+    for (;;) {
+        char chunk[4096];
+        size_t n = fread(chunk, 1, sizeof chunk, f);
+
+        back += n;
+        if (n < sizeof chunk) break;
+    }
+    fclose(f);
+    if (back != len) { DeleteFileA(tmp); return 0; }
+
+    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+        /* ReplaceFile keeps the original's attributes and ACLs, and promises
+         * to leave the target exactly as it was if it cannot finish. */
+        ok = ReplaceFileA(path, tmp, NULL, REPLACEFILE_IGNORE_MERGE_ERRORS,
+                          NULL, NULL) != 0;
+    } else {
+        ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) != 0;
+    }
+    if (!ok) {
+        TextLog("langexport: %s could not be put in place; the new file is %s",
+                path, tmp);
+        return 0;
+    }
+    return 1;
+}
+
+/* Everything one export will write, gathered before a file is touched: a
+ * plugin with nothing to say should not cost an empty file. */
+static void LfCollect(int framework) {
+    int i, j;
+
+    lfNKey = lfNOwn = lfNPath = lfNMenu = 0;
+
+    TextLock();
+    for (i = 0; i < g_nbase && lfNKey < LF_ROWS; i++) {
+        int isFw = !g_base[i].owner[0];
+        int oi;
+
+        if (isFw != framework) continue;
+        /* The names of the languages themselves are not a translation: a row
+         * here would let a player rename zh-CN in the picker that offers it,
+         * which is a way to lose the language rather than add one. */
+        if (!_strnicmp(g_base[i].key, "@lang.name.", 11)) continue;
+        if (isFw) {
+            if (lfNOwn == 0) { lfNOwn = 1; lfOwn[0][0] = 0; }
+            oi = 0;
+        } else {
+            oi = LfOwnIndex(g_base[i].owner);
+            if (oi < 0) continue;
+        }
+        for (j = 0; j < lfNKey; j++)
+            if (!_stricmp(lfKey[j].owner, lfOwn[oi]) &&
+                !strcmp(lfKey[j].key, g_base[i].key)) break;
+        if (j < lfNKey) continue;           /* the same key declared twice */
+        lfKey[lfNKey].owner = lfOwn[oi];
+        lfKey[lfNKey].key = g_base[i].key;
+        lfNKey++;
+    }
+    TextUnlock();
+
+    /* The literals a plugin put on screen: no text lock is held across this,
+     * and ShMenuTextAt takes and releases the menu lock itself, so the two are
+     * never nested. Only plugins need them - the framework's own text is all
+     * in its baseline. */
+    if (!framework) {
+        int n = ShMenuTextCount();
+
+        for (i = 0; i < n && lfNMenu < LF_MENU_MAX; i++) {
+            char owner[48], key[128];
+
+            if (!ShMenuTextAt(i, owner, sizeof owner, key, sizeof key)) continue;
+            if (!owner[0] || !key[0]) continue;      /* a built-in page */
+            if (key[0] == '@') continue;             /* an id: has a baseline */
+            /* A number, a size or a multiplier is the same word in every
+             * language, and a key like "1" is claimed by whichever plugin is
+             * walked first. One character is a key name or a symbol. */
+            if (key[0] >= '0' && key[0] <= '9') continue;
+            if (key[1] == 0) continue;
+            if (LfOwnIndex(owner) < 0) continue;
+            for (j = 0; j < lfNMenu; j++)
+                if (!_stricmp(lfMenu[j].owner, owner) &&
+                    !strcmp(lfMenu[j].key, key)) break;
+            if (j < lfNMenu) continue;
+            CopyN(lfMenu[lfNMenu].owner, sizeof lfMenu[0].owner, owner);
+            CopyN(lfMenu[lfNMenu].key, sizeof lfMenu[0].key, key);
+            lfNMenu++;
+        }
+    }
+
+    if (framework) {
+        lfPath[0].fw = 1;
+        lfPath[0].nOwn = 0;
+        if (snprintf(lfPath[0].path, sizeof lfPath[0].path, "%slang.ini",
+                     GameDir()) < 0) return;
+        lfNPath = 1;
+        return;
+    }
+    for (i = 1; i < lfNOwn; i++) {          /* 0 is the framework's, unused here */
+        char path[MAX_PATH];
+
+        if (!ShPluginLangPath(lfOwn[i], path, sizeof path)) continue;
+        LfPathIndex(path, i);
+    }
+}
+
+/* Fill one file's section for the language in force in, leaving every row that
+ * is already there alone.
+ * Returns 1 when it was written, 0 when nothing was missing, -1 on failure. */
+static int LfWriteOne(LfPath *g) {
+    FILE *f;
+    size_t len = 0, built;
+    const char *b, *e;
+    int had = 0, found;
+
+    lfBuf[0] = 0;
+    f = fopen(g->path, "rb");
+    if (f) {
+        len = fread(lfBuf, 1, LF_BUF - 1, f);
+        fclose(f);
+        lfBuf[len] = 0;
+        lfCrlf = LfDetectCrlf(lfBuf, len);
+        had = 1;
+    } else {
+        lfCrlf = 1;                         /* a new file: CRLF, ships on Windows */
+    }
+
+    found = LfSection(lfBuf, g_langName, &b, &e);
+    if (found) { lfSegB = (size_t)(b - lfBuf); lfSegE = (size_t)(e - lfBuf); }
+    else       { lfSegB = lfSegE = 0; }
+    if (found && lfSegE < lfSegB) found = 0;
+
+    built = LfRender(g, len, had, found);
+    if (!built) return 0;                   /* complete already, left untouched */
+
+    return LfAtomicWrite(g->path, lfOut, built) ? 1 : -1;
+}
+
+static int LfExport(int framework) {
+    int i, written = 0;
+
+    LoadConfig();
+    LfCollect(framework);
+    if (!lfNPath) { ShSetError(SH_ERR_NO_PLUGIN); return 0; }
+    for (i = 0; i < lfNPath; i++) {
+        int r = LfWriteOne(&lfPath[i]);
+
+        if (r > 0) written++;
+        else if (r < 0)
+            TextLog("langexport: %s could not be written", lfPath[i].path);
+    }
+    ShSetError(SH_OK);
+    return written;
+}
+
+SH_API int ShLangExportFramework(void) {
+    return LfExport(1);
+}
+
+SH_API int ShLangExportPlugins(void) {
+    return LfExport(0);
 }
 
 /** The label to show for a language code: a [LanguageNames] row in a

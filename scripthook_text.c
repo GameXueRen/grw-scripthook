@@ -35,21 +35,21 @@ static const ShText kEnUS[] = {
     /* menu furniture */
     /* One line, kept as short as the Chinese it mirrors: the panel does not
      * wrap, so a line that runs past it is a line read in halves. */
+    /* Every key is a value, not a word: the row below passes the five of
+     * them in, so a translation can move them around with "%n$" but cannot
+     * rename a key that does not exist. */
     { "@menu.root.hint",
-      "F4 menu, Enter confirm; %s back; "
-      "\xE2\x86\x91 \xE2\x86\x93 select, \xE2\x86\x90 \xE2\x86\x92 adjust" },
+      "%s menu, %s confirm; %s back; %s select, %s adjust" },
     { "@menu.on",             "on" },
     { "@menu.off",            "off" },
     { "@menu.footer.pos",     "%d / %d" },
 
-    /* the root menu's top-right credits. Framework text like the rest, so
-     * a lang.ini can override either line; the build line formats the
-     * version in (%s), which is SH_VERSION and not a number typed here.
-     * The group is on the About page only: the corner is two short lines
-     * and the second one is the build, which is what a report names. */
-    { "@ui.credit.author",    "Original: Phiality \xC2\xB7 "
-                              "modded by GameXueRen" },
-    { "@ui.credit.build",     "Version: %s" },
+    /* The root menu's top-right block: who wrote it, and which build this is.
+     * Both take their values - the names from SH_CREDIT_*, the version from
+     * SH_VERSION - so this line cannot credit somebody else or name a build
+     * other than the one drawing it. */
+    { "@menu.credit.author",    "Original: %s \xC2\xB7 modded by %s" },
+    { "@menu.credit.version",     "Version: %s" },
 
     /* the settings tree */
     { "@settings.page",       "ScriptHook settings" },
@@ -61,6 +61,15 @@ static const ShText kEnUS[] = {
       "Plugin switches and CPU scheduling take effect on the next start." },
     { "@settings.order",      "Menu order" },
     { "@settings.backkey",    "Back key" },
+    { "@settings.translate",  "Menu translation" },
+    { "@settings.export.fw",  "Export framework menu" },
+    { "@settings.export.pl",  "Export plugin menus" },
+    { "@settings.export.done",   "Filled in %d file(s)" },
+    { "@settings.export.none",   "Every file is already complete" },
+    { "@settings.translate.hint",
+      "How to translate the plugins and the framework:\n"
+      "1. Export the plugin or framework menu\n"
+      "2. Open the lang.ini it wrote and edit the text" },
     /* One line, and about the length of the Chinese it translates. The
      * English this replaces explained when a move is saved and what happens
      * to a plugin that is switched off - useful, but it ran to four lines
@@ -78,9 +87,9 @@ static const ShText kEnUS[] = {
     { "@about.api",           "API: %s" },
     { "@about.build.ok",      "Game build: %s (verified)" },
     { "@about.build.new",     "Game build: %s (not verified - see the log)" },
-    { "@about.author",        "Original author: Phiality" },
-    { "@about.modder",        "Modded by: GameXueRen" },
-    { "@about.qq",            "QQ group: 299177445" },
+    { "@about.author",        "Original author: %s" },
+    { "@about.modder",        "Modded by: %s" },
+    { "@about.qq",            "QQ group: %s" },
 
     /* A plugin that asks for an API newer than this framework (SH_REQUIRES_API)
      * is refused and this is what says so on screen; loader.c holds the line
@@ -205,13 +214,13 @@ static const ShText kEnUS[] = {
 
 static const ShText kZhCN[] = {
     { "@menu.root.hint",
-      "F4 菜单，Enter 确认；%s 返回；↑ ↓ 上下选择，← → 左右调整" },
+      "%s 菜单，%s 确认；%s 返回；%s 上下选择，%s 左右调整" },
     { "@menu.on",             "开" },
     { "@menu.off",            "关" },
     { "@menu.footer.pos",     "第 %d / %d 行" },
 
-    { "@ui.credit.author",    "原作者：Phiality · 魔改：GameXueRen" },
-    { "@ui.credit.build",     "版本：%s" },
+    { "@menu.credit.author",    "原作者：%s · 魔改：%s" },
+    { "@menu.credit.version",     "版本：%s" },
 
     { "@settings.page",       "ScriptHook 设置" },
     { "@settings.load",       "加载插件（总开关）" },
@@ -222,6 +231,15 @@ static const ShText kZhCN[] = {
       "插件开关、CPU调度改变需下次启动生效。" },
     { "@settings.order",      "菜单排序" },
     { "@settings.backkey",    "返回按键" },
+    { "@settings.translate",  "菜单翻译" },
+    { "@settings.export.fw",  "导出框架菜单" },
+    { "@settings.export.pl",  "导出插件菜单" },
+    { "@settings.export.done",   "已补齐 %d 个文件" },
+    { "@settings.export.none",   "所有文件都已完整" },
+    { "@settings.translate.hint",
+      "如何给插件/框架添加当前语言翻译：\n"
+      "1. 选择导出插件/框架菜单\n"
+      "2. 打开导出的 lang.ini 语言文件编辑翻译" },
     { "@settings.order.hint",
       "改变菜单显示顺序。← → 把当前行上移 / 下移。" },
     { "@settings.order.empty", "还没有可排序的插件菜单。" },
@@ -232,9 +250,9 @@ static const ShText kZhCN[] = {
     { "@about.api",           "API版本：%s" },
     { "@about.build.ok",      "游戏构建：%s（已验证）" },
     { "@about.build.new",     "游戏构建：%s（未验证 —— 见日志）" },
-    { "@about.author",        "原作者：Phiality" },
-    { "@about.modder",        "魔改版：GameXueRen" },
-    { "@about.qq",            "QQ群：299177445" },
+    { "@about.author",        "原作者：%s" },
+    { "@about.modder",        "魔改版：%s" },
+    { "@about.qq",            "QQ群：%s" },
 
     { "@toast.api.refused",
       "插件未加载：%s 需要 API %d，当前框架是 %d" },
